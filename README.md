@@ -14,6 +14,9 @@ Conductor is a native macOS app that visualizes Claude Code agentic workflows as
 - **Session management** — sidebar groups sessions by project with bookmark support and live refresh (⌘R)
 - **Detail panel** — click any node to inspect its full content, tool inputs/outputs, and timestamps
 - **Command history** — timeline of all tool calls and executed commands for a session
+- **Full-text search** — filter sessions by name, prompt, project, or notes; search history persisted via SwiftData
+- **Analytics** — token usage, tool performance, and cross-session trends with configurable date ranges
+- **Session replay** — step through a session's tool calls in chronological playback order
 
 ## Quick Start
 
@@ -41,11 +44,12 @@ Build and run. Conductor auto-discovers Claude Code sessions from `~/.claude/pro
 | UI | SwiftUI |
 | Graph | Custom force-directed physics simulation |
 | Data | JSONL log parsing via `Codable` |
+| Persistence | SwiftData |
 | Target | macOS 14.0+ |
 
 ## Architecture
 
-Sessions are loaded from `~/.claude/projects/` by a `SessionDiscovery` actor that watches the directory for changes. Each JSONL file is parsed into a typed message graph. The force-directed layout runs on a `@MainActor`-isolated `PhysicsEngine` that applies spring forces on edges and repulsion between nodes, settling in under a second for typical session sizes. Node selection publishes to a `SelectionStore` that both the detail panel and the graph view observe.
+Sessions are discovered from `~/.claude/projects/` by a static `SessionDiscovery` scanner. A background polling loop in `ConductorApp` uses `LogMonitor` to watch for live file changes. Each JSONL file is parsed into a typed message graph. The force-directed layout runs on a `@MainActor`-isolated `ForceSimulation` that applies spring forces on edges and repulsion between nodes, settling in under a second for typical session sizes. Node selection state is held in `AppState`, which both the detail panel and the graph view observe.
 
 ## License
 

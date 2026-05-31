@@ -7,7 +7,7 @@ Conductor is a native macOS workflow-visualization app for Claude Code sessions.
 
 ## Current State
 
-The README describes a complete product concept and architecture. The recovered context exists so future sessions can resume from that app intent without rediscovering the JSONL/session graph model.
+Phase 2 (real JSONL log parsing) is complete. Implemented features include: force-directed graph (`ForceSimulation`), JSONL parsing, session browser with bookmark support and live polling via `LogMonitor`, node detail inspection, full-text search with SwiftData-backed history, a multi-tab analytics view (Tokens / Tools / Performance / Trends), and session replay. Persistence uses SwiftData (`ModelContainer`) for sessions, nodes, tool calls, search history, analytics, and replay events. Nine test files live under `ConductorTests/`. No release-readiness doc exists yet; see `docs/PORTFOLIO-DISPOSITION.md` for disposition options.
 
 ## Stack
 
@@ -17,6 +17,7 @@ The README describes a complete product concept and architecture. The recovered 
 | UI | SwiftUI |
 | Graph | Custom force-directed physics simulation |
 | Data | JSONL log parsing via `Codable` |
+| Persistence | SwiftData |
 | Target | macOS 14.0+ |
 
 ## How To Run
