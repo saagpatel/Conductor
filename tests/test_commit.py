@@ -68,7 +68,7 @@ def test_dispatch_commits_what_a_sandboxed_fleet_could_not(repo, tmp_path, monke
         home=tmp_path / "home",
     )
     assert result.commit["committed"] is True
-    assert result.verdict["commits_added"] == 1
+    assert result.git_verdict["commits_added"] == 1
     assert result.ok is True
 
 
@@ -93,5 +93,5 @@ def test_no_commit_requested_leaves_the_tree_alone(repo, tmp_path, monkeypatch):
         home=tmp_path / "home",
     )
     assert result.commit is None
-    assert result.verdict["dirty_delta"] == 1
-    assert result.verdict["commits_added"] == 0
+    assert result.git_verdict["dirty_delta"] == 1
+    assert result.git_verdict["commits_added"] == 0

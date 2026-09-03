@@ -41,9 +41,9 @@ def test_exit_zero_with_no_bytes_moved_is_not_success(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo 'Done! All tests pass.'; exit 0"])
     result = dispatch(spec_for(repo, mode="write"), home=home)
     assert result.exit_code == 0
-    assert result.verdict["no_op"] is True
+    assert result.git_verdict["no_op"] is True
     assert result.ok is False
-    assert any("moved no bytes" in n for n in result.verdict["notes"])
+    assert any("moved no bytes" in n for n in result.git_verdict["notes"])
 
 
 def test_a_write_that_lands_a_commit_is_success(repo, home, fake_fleet):
@@ -52,17 +52,17 @@ def test_a_write_that_lands_a_commit_is_success(repo, home, fake_fleet):
     )
     result = dispatch(spec_for(repo, mode="write"), home=home)
     assert result.exit_code == 0
-    assert result.verdict["commits_added"] == 1
-    assert result.verdict["files_changed"] == 1
-    assert result.verdict["no_op"] is False
+    assert result.git_verdict["commits_added"] == 1
+    assert result.git_verdict["files_changed"] == 1
+    assert result.git_verdict["no_op"] is False
     assert result.ok is True
 
 
 def test_a_dirty_tree_counts_as_work_even_without_a_commit(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo uncommitted > scratch.txt"])
     result = dispatch(spec_for(repo, mode="write"), home=home)
-    assert result.verdict["dirty_delta"] == 1
-    assert result.verdict["no_op"] is False
+    assert result.git_verdict["dirty_delta"] == 1
+    assert result.git_verdict["no_op"] is False
     assert result.ok is True
 
 
@@ -70,8 +70,8 @@ def test_editing_an_already_dirty_file_is_not_a_no_op(repo, home, fake_fleet):
     (repo / "seed.txt").write_text("dirty before\n")
     fake_fleet(["sh", "-c", "printf 'dirty after\\n' > seed.txt"])
     result = dispatch(spec_for(repo, mode="write"), home=home)
-    assert result.verdict["dirty_delta"] == 0
-    assert result.verdict["no_op"] is False
+    assert result.git_verdict["dirty_delta"] == 0
+    assert result.git_verdict["no_op"] is False
     assert result.ok is True
 
 
@@ -79,7 +79,7 @@ def test_read_mode_does_not_require_bytes_to_move(repo, home, fake_fleet):
     """Research dispatches are supposed to change nothing."""
     fake_fleet(["sh", "-c", "echo 'here is my analysis'; exit 0"])
     result = dispatch(spec_for(repo, mode="read"), home=home)
-    assert result.verdict["no_op"] is True
+    assert result.git_verdict["no_op"] is True
     assert result.ok is True
 
 
@@ -90,7 +90,7 @@ def test_a_read_dispatch_that_edited_the_tree_is_not_ok(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo leaked > leak.txt; echo 'analysis done'"])
     result = dispatch(spec_for(repo, mode="read"), home=home)
     assert result.exit_code == 0
-    assert result.verdict["dirty_delta"] == 1
+    assert result.git_verdict["dirty_delta"] == 1
     assert result.ok is False
     assert result.summary()["failure"] == "read dispatch moved bytes"
 
@@ -99,7 +99,7 @@ def test_a_read_dispatch_that_changes_an_already_dirty_file_moves_bytes(repo, ho
     (repo / "seed.txt").write_text("dirty before\n")
     fake_fleet(["sh", "-c", "printf 'dirty after\\n' > seed.txt; echo analysis"])
     result = dispatch(spec_for(repo, mode="read"), home=home)
-    assert result.verdict["dirty_delta"] == 0
+    assert result.git_verdict["dirty_delta"] == 0
     assert result.summary()["failure"] == "read dispatch moved bytes"
 
 
@@ -227,7 +227,7 @@ def test_a_missing_binary_is_reported_not_raised(repo, home, fake_fleet):
 def test_failing_gate_sinks_an_otherwise_successful_run(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo x > f.txt"])
     result = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 1")
-    assert result.verdict["no_op"] is False
+    assert result.git_verdict["no_op"] is False
     assert result.tests["exit_code"] == 1
     assert result.ok is False
 
@@ -280,7 +280,7 @@ def test_an_invalid_reported_cost_is_noted_and_only_valid_tokens_are_estimated(
     fake_fleet(["sh", "-c", f"echo '{envelope}'"])
     result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
     assert result.usage["cost_basis"] == "estimated"
-    assert any("reported cost must be" in note for note in result.verdict["notes"])
+    assert any("reported cost must be" in note for note in result.git_verdict["notes"])
 
 
 def test_codex_answer_falls_back_to_its_last_message_file(repo, home, monkeypatch):

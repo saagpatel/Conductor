@@ -157,7 +157,7 @@ def test_a_codex_watcher_with_no_rollout_falls_back_to_a_post_run_verdict(
     assert result.exit_code == 0 and result.ok is False
     assert result.budget["exceeded"] is True
     assert result.summary()["failure"].startswith("over budget: $12.0")
-    assert any("saw no running usage" in n for n in result.verdict["notes"])
+    assert any("saw no running usage" in n for n in result.git_verdict["notes"])
 
 
 # --- antigravity: conductor tails the stream-json steps ---------------------

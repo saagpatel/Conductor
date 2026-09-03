@@ -245,14 +245,15 @@ Fields cascade mission → lane → fallback, so the common case is one prompt,
 one cwd, one mode, and a list of fleets. A fallback that switches fleet drops
 the inherited `model`, because model names are fleet-local (caught live: an
 Antigravity fallback inheriting `luna` from its Codex primary). `require` is
-`all` (default) or `any`. TOML files load too. Two dollar fields, two
+`all` (default), `any`, or `{"pass": n, "of": [...]}` for a verdict quorum.
+TOML files load too. Two dollar fields, two
 meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
 ceiling (see below). A key the loader does not know is refused, so `need`
 cannot quietly turn a dependent lane into a root.
 
 Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
 `timeout`, `test`, `test_policy`, `test_surface`, `commit`, `isolate`,
-`cap_usd`, `no_op_ok`, and `schema`. `test_policy` is `clean` (the default),
+`cap_usd`, `no_op_ok`, `schema`, and `verdict`. `test_policy` is `clean` (the default),
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
 
@@ -298,8 +299,9 @@ pipeline; everything else is unchanged.
   still fails. A clean no-op lane can itself be a base.
 
 Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`,
-`{{lanes.<name>.test_touched}}` (`yes (n files: ...)` or `no`), and
-`{{mission.prompt}}` (the mission-level prompt, verbatim). A referenced lane
+`{{lanes.<name>.test_touched}}` (`yes (n files: ...)` or `no`),
+`{{lanes.<name>.verdict}}`, and `{{mission.prompt}}` (the mission-level prompt,
+verbatim). A referenced lane
 must be in `needs`; anything else between double braces is refused at load,
 so a misspelt name cannot render as `(none)`. Rendering is a single pass, so
 braces inside an upstream answer never become new substitutions; each pasted
@@ -307,6 +309,61 @@ lane value is fenced with a per-render random nonce and labelled as another
 agent's output, not instructions. The trusted mission prompt is substituted
 unfenced and outside `template_max_chars`; only lane data shares that budget
 (default 40000). In a dry run lane placeholders render as `(dry run: ...)`.
+
+### Structured review and a 2-of-3 quorum
+
+A verdict lane declares one fixed checklist. Conductor generates the fleet's
+output schema, appends the checklist contract to the prompt, validates the
+answer, and computes the pass bit from the criterion booleans. A model-reported
+headline never overrides those booleans. Invalid output makes the lane not ok;
+a valid fail verdict does not, because the reviewer completed its job and its
+data is safe to tally or paste.
+
+```json
+{
+  "name": "three-reviewer-fix",
+  "cwd": "~/Projects/thing",
+  "prompt_file": "spec.md",
+  "concurrency": 3,
+  "require": {"pass": 2, "of": ["review-claude", "review-codex", "review-gemini"]},
+  "lanes": [
+    {"name": "build", "fleet": "codex", "model": "sol", "mode": "write",
+     "test": "pytest -q", "commit": "feat: implement the spec"},
+    {"name": "review-claude", "fleet": "claude", "model": "opus", "base": "build",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "verdict": [
+       {"id": "correct", "question": "Does the change implement every requirement?"},
+       {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
+     ]},
+    {"name": "review-codex", "fleet": "codex", "model": "sol", "base": "build",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "verdict": [
+       {"id": "correct", "question": "Does the change implement every requirement?"},
+       {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
+     ]},
+    {"name": "review-gemini", "fleet": "antigravity", "model": "gemini-3.8-flash",
+     "base": "build",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "verdict": [
+       {"id": "correct", "question": "Does the change implement every requirement?"},
+       {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
+     ]},
+    {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
+     "base": "build", "needs": ["review-claude", "review-codex", "review-gemini"],
+     "no_op_ok": true, "test": "pytest -q", "commit": "fix: address review verdicts",
+     "prompt": "Fix the supported failures in these review verdicts:\n"
+       "{{lanes.review-claude.verdict}}\n{{lanes.review-codex.verdict}}\n"
+       "{{lanes.review-gemini.verdict}}"}
+  ]
+}
+```
+
+`needs` still waits for lanes to be **ok**, which for a verdict lane means the
+judgment is valid and tallyable, not that it passed. Thus the fix lane runs
+after a valid dissent and reads exactly which criteria failed through the
+fenced, budgeted verdict templates. An invalid reviewer blocks a dependent
+lane; when there is no such dependency it simply counts as not passing the
+quorum. The quorum also requires every sink outside its `of` list to be ok.
 
 A pipeline is judged on its outputs: `require` applies to the lanes nothing
 else depends on, so `build ok, fix failed` is a failed pipeline whatever
@@ -435,7 +492,8 @@ instead of reading as within budget.
 
 - `conductor fleets`: the routing policy, and whether each binary is installed
 - `conductor dispatch`: run one prompt on one fleet (`--dry-run` prints the argv,
-  `--schema` requests structured output, `--test` runs a gate afterward,
+  `--schema` requests caller-defined structured output; repeatable `--verdict`
+  ids and `--verdict-file` request conductor's checklist schema. `--test` runs a gate afterward,
   `--test-policy {clean,allow,forbid}` chooses how test-surface edits count,
   repeatable `--test-surface PATTERN` replaces the default surface,
   `--commit` lands the work, `--isolate` runs in a fresh worktree,

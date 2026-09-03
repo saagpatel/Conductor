@@ -227,8 +227,8 @@ def test_a_failed_gate_takes_its_commit_back_off_the_branch(repo, home, fake_fle
     assert result.summary()["committed"] is None
     assert git_out(repo, "log", "--oneline").count("\n") == 0  # only the seed commit
     assert git_out(repo, "status", "--porcelain") == "A  f.txt"  # the work stays, staged
-    assert result.verdict["commits_added"] == 0 and result.verdict["dirty_delta"] == 1
-    assert any("undone" in n for n in result.verdict["notes"])
+    assert result.git_verdict["commits_added"] == 0 and result.git_verdict["dirty_delta"] == 1
+    assert any("undone" in n for n in result.git_verdict["notes"])
 
 
 def test_a_fleets_self_commit_is_undone_when_the_gate_fails(repo, home, fake_fleet, git_out):

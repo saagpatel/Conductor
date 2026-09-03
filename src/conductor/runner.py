@@ -34,11 +34,11 @@ from .outputs import FleetOutput
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
+from .verdicts import checklist_contract, checklist_schema, parse_verdict
 from .verify import (
     CommitOutcome,
     GitState,
     TestOutcome,
-    Verdict,
     commit_work,
     compare,
     diff_since,
@@ -46,6 +46,9 @@ from .verify import (
     killpg,
     run_tests,
     uncommit,
+)
+from .verify import (
+    Verdict as GitVerdict,
 )
 
 TAIL_LINES = 20
@@ -77,7 +80,8 @@ class Result:
     stderr_path: str
     tail: str
     spawned: bool = False  # True only after Popen returned a live process group.
-    verdict: dict = field(default_factory=dict)
+    git_verdict: dict = field(default_factory=dict)
+    verdict: dict | None = None
     tests: dict | None = None
     test_surface: dict | None = None
     commit: dict | None = None
@@ -131,14 +135,18 @@ class Result:
             if counted.get("timed_out"):
                 return f"{label} timed out"
             return f"{label} exited {counted.get('exit_code')}"
-        no_op = self.verdict.get("checked") and self.verdict.get("no_op")
+        no_op = self.git_verdict.get("checked") and self.git_verdict.get("no_op")
         if self.mode == "write" and no_op and not self.no_op_ok:
             return "write dispatch moved no bytes"
         # The mirror image: a research dispatch that edited the tree ignored
         # its read-only setting (agy's read mode did exactly that live,
         # 2026-09-03), and in a shared checkout that is the collision
         # isolation exists to prevent. The bytes are the evidence.
-        if self.mode == "read" and self.verdict.get("checked") and not self.verdict.get("no_op"):
+        if (
+            self.mode == "read"
+            and self.git_verdict.get("checked")
+            and not self.git_verdict.get("no_op")
+        ):
             return "read dispatch moved bytes"
         # A read dispatch's answer IS its work. Exit 0 with nothing said is
         # the read-mode twin of the exit-0 no-op: a cursor lane once spent
@@ -176,10 +184,17 @@ class Result:
             "exit_code": self.exit_code,
             "timed_out": self.timed_out,
             "duration_s": round(self.duration_s, 1),
-            "commits": self.verdict.get("commits_added", 0),
-            "files_changed": self.verdict.get("files_changed", 0),
-            "dirty_delta": self.verdict.get("dirty_delta", 0),
-            "no_op": self.verdict.get("no_op", False),
+            "commits": self.git_verdict.get("commits_added", 0),
+            "files_changed": self.git_verdict.get("files_changed", 0),
+            "dirty_delta": self.git_verdict.get("dirty_delta", 0),
+            "no_op": self.git_verdict.get("no_op", False),
+            "verdict": (
+                "invalid"
+                if self.verdict and self.verdict.get("invalid")
+                else ("pass" if self.verdict and self.verdict.get("passed") else "fail")
+                if self.verdict
+                else None
+            ),
             "tests": (self.tests or {}).get("exit_code"),
             "test_touched": bool((self.test_surface or {}).get("touched")),
             "committed": (self.commit or {}).get("sha", "")[:8] or None,
@@ -447,6 +462,7 @@ def dispatch(
     refused in either mode, because running against HEAD would be running
     against the wrong code.
     """
+    criteria = spec.verdict
     spec.validate()
     isolate = isolate or base_ref is not None
     fleet = FLEETS[spec.fleet]
@@ -456,6 +472,18 @@ def dispatch(
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     base = home or conductor_home()
     run_id, run_dir = claim_dir(base / "runs", f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}")
+
+    if criteria is not None:
+        # A caller cannot accidentally drift the schema away from the
+        # checklist: conductor writes both from the same Criterion objects.
+        schema_path = run_dir / "verdict.schema.json"
+        schema_path.write_text(json.dumps(checklist_schema(criteria), indent=2))
+        spec = _replace(
+            spec,
+            prompt=spec.prompt + checklist_contract(criteria),
+            schema=str(schema_path),
+            verdict=None,
+        )
 
     # Refusals need repository identity and dirty-file presence, not a hash
     # of every operator-owned untracked byte in the shared checkout.
@@ -523,7 +551,7 @@ def dispatch(
             stderr_path=str(stderr_path),
             tail="(dry run: nothing spawned)",
             spawned=False,
-            verdict=Verdict(checked=False, notes=["dry run"]).to_dict(),
+            git_verdict=GitVerdict(checked=False, notes=["dry run"]).to_dict(),
             dry_run=True,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -591,6 +619,21 @@ def dispatch(
     # The fleet's own envelope first: a fleet that says it failed (on any
     # exit code) must not have its work committed as if it had succeeded.
     output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+    answer = output.answer
+    if not answer and spec_with_paths.last_message:
+        # Codex writes its final message to the -o file; if the event stream
+        # gave nothing (an older binary, a crash mid-stream) that file is the
+        # next best evidence.
+        answer = _read(Path(spec_with_paths.last_message)).strip()
+    checklist_verdict = parse_verdict(answer, criteria) if criteria is not None else None
+    if checklist_verdict is not None:
+        (run_dir / "verdict.json").write_text(json.dumps(checklist_verdict.to_dict(), indent=2))
+        if (
+            checklist_verdict.invalid
+            and error is None
+            and not (spec.mode == "read" and not answer)
+        ):
+            error = f"verdict invalid: {checklist_verdict.invalid}"
 
     surface_state: dict | None = None
     if surface_before is not None:
@@ -611,7 +654,7 @@ def dispatch(
             + ", ".join(surface_state["changed"])
         )
 
-    # Commit before the verdict is taken, so the verdict describes the state
+    # Commit before the Git verdict is taken, so it describes the state
     # the caller is actually left with.
     commit: CommitOutcome | None = None
     if (
@@ -692,23 +735,23 @@ def dispatch(
         error = forbid_error
 
     after = GitState.capture(spec.cwd)
-    verdict = compare(spec.cwd, before, after)
-    verdict.notes.extend(output.notes)
+    git_verdict = compare(spec.cwd, before, after)
+    git_verdict.notes.extend(output.notes)
     if surface_state and surface_state["touched"]:
         changed = surface_state["changed"]
-        verdict.notes.append(
+        git_verdict.notes.append(
             f"test surface changed: {len(changed)} file(s): {', '.join(changed[:10])}"
         )
         if spec.test_policy == "clean" and not test_command:
-            verdict.notes.append("test surface changed with no gate to re-run")
+            git_verdict.notes.append("test surface changed with no gate to re-run")
     if commit and commit.deletions:
-        verdict.notes.append(
+        git_verdict.notes.append(
             f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
         )
     if commit and not commit.committed and commit.reason.startswith("gate failed"):
-        verdict.notes.append(commit.reason)
+        git_verdict.notes.append(commit.reason)
     diff_path: str | None = None
-    if verdict.checked and not verdict.no_op and before.head:
+    if git_verdict.checked and not git_verdict.no_op and before.head:
         # The patch is the evidence a judge should see; the answer is a claim.
         patch = diff_since(spec.cwd, before.head)
         if patch:
@@ -718,12 +761,6 @@ def dispatch(
     # The answer goes to its own file so a caller can read it without wading
     # through a transcript, and usage is recorded now, while the evidence is
     # still on disk.
-    answer = output.answer
-    if not answer and spec_with_paths.last_message:
-        # Codex writes its final message to the -o file; if the event stream
-        # gave nothing (an older binary, a crash mid-stream) that file is the
-        # next best evidence.
-        answer = _read(Path(spec_with_paths.last_message)).strip()
     answer_path: str | None = None
     if answer:
         answer_file = run_dir / "answer.txt"
@@ -756,14 +793,16 @@ def dispatch(
             fleet_status=output.status,
         )
         if watcher is not None and watcher.usage is None:
-            verdict.notes.append("budget watcher saw no running usage; cap checked after the run")
+            git_verdict.notes.append(
+                "budget watcher saw no running usage; cap checked after the run"
+            )
 
     if iso is not None:
         worktrees.release(iso)
         if iso.active:
-            verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")
+            git_verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")
         else:
-            verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
+            git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
 
     result = Result(
         run_id=run_id,
@@ -781,7 +820,8 @@ def dispatch(
         stderr_path=str(stderr_path),
         tail=_tail(stderr_path) if (exit_code not in (0, None)) else _tail(stdout_path),
         spawned=proc is not None,
-        verdict=verdict.to_dict(),
+        git_verdict=git_verdict.to_dict(),
+        verdict=checklist_verdict.to_dict() if checklist_verdict is not None else None,
         tests=tests.to_dict() if tests else None,
         test_surface=surface_state,
         commit=commit.to_dict() if commit else None,
@@ -901,7 +941,7 @@ def _refused_result(
         stderr_path=str(run_dir / "stderr.log"),
         tail="(not spawned)",
         spawned=False,
-        verdict=Verdict(checked=False, notes=[error]).to_dict(),
+        git_verdict=GitVerdict(checked=False, notes=[error]).to_dict(),
         isolation=iso.to_dict() if iso is not None else None,
         error=error,
     )

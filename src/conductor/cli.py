@@ -18,6 +18,7 @@ from .mission import MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
+from .verdicts import parse_checklist
 from .verify import GitState, run_tests
 
 
@@ -69,20 +70,40 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         print("error: give a prompt argument or --prompt-file", file=sys.stderr)
         return 2
 
-    spec = Spec(
-        fleet=args.fleet,
-        prompt=prompt,
-        cwd=str(Path(args.cwd).resolve()),
-        model=args.model,
-        effort=args.effort,
-        mode=args.mode,
-        timeout=args.timeout,
-        schema=args.schema,
-        cap_usd=args.cap_usd,
-        test_policy=args.test_policy,
-        test_surface=args.test_surface,
-    )
     try:
+        raw_verdict: list[object] = list(args.verdict)
+        if args.verdict_file:
+            try:
+                from_file = json.loads(Path(args.verdict_file).read_text())
+            except OSError as exc:
+                raise DispatchRefused(f"verdict file unreadable: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise DispatchRefused(f"verdict file is not valid JSON: {exc}") from exc
+            if not isinstance(from_file, list):
+                raise DispatchRefused("verdict file must contain a JSON list")
+            raw_verdict.extend(from_file)
+        try:
+            criteria = (
+                parse_checklist(raw_verdict)
+                if args.verdict or args.verdict_file is not None
+                else None
+            )
+        except ValueError as exc:
+            raise DispatchRefused(str(exc)) from exc
+        spec = Spec(
+            fleet=args.fleet,
+            prompt=prompt,
+            cwd=str(Path(args.cwd).resolve()),
+            model=args.model,
+            effort=args.effort,
+            mode=args.mode,
+            timeout=args.timeout,
+            schema=args.schema,
+            verdict=criteria,
+            cap_usd=args.cap_usd,
+            test_policy=args.test_policy,
+            test_surface=args.test_surface,
+        )
         result = dispatch(
             spec,
             dry_run=args.dry_run,
@@ -199,6 +220,10 @@ def cmd_runs(args: argparse.Namespace) -> int:
             rows.append({"run_id": path.name, "status": "incomplete"})
             continue
         data = json.loads(result_file.read_text())
+        git_verdict = data.get("git_verdict")
+        if not isinstance(git_verdict, dict):
+            legacy = data.get("verdict")
+            git_verdict = legacy if isinstance(legacy, dict) and "checked" in legacy else {}
         rows.append(
             {
                 "run_id": data["run_id"],
@@ -206,7 +231,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "fleet": data["fleet"],
                 "model": data["model"],
                 "exit_code": data["exit_code"],
-                "no_op": data.get("verdict", {}).get("no_op"),
+                "no_op": git_verdict.get("no_op"),
                 "duration_s": round(data.get("duration_s", 0), 1),
             }
         )
@@ -236,6 +261,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument("--cwd", default=".", help="the fleet's working directory")
     p_dispatch.add_argument("--timeout", type=int, help="seconds; per-mode default otherwise")
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
+    p_dispatch.add_argument(
+        "--verdict",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="repeatable checklist id; the question defaults to 'Is <id> satisfied?'",
+    )
+    p_dispatch.add_argument(
+        "--verdict-file",
+        metavar="PATH",
+        help="JSON checklist appended after any --verdict ids",
+    )
     p_dispatch.add_argument(
         "--cap-usd",
         type=float,

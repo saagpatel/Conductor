@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import prices
+from .verdicts import Criterion
 
 EFFORTS = ("cheap", "standard", "hard", "max")
 MODES = ("read", "write")
@@ -213,6 +214,7 @@ class Spec:
     mode: str = "read"
     timeout: int | None = None
     schema: str | None = None  # path to a JSON Schema for the final message
+    verdict: list[Criterion] | None = None  # checklist; runner generates its schema
     last_message: str | None = None  # path the fleet should write its answer to
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
@@ -246,6 +248,22 @@ class Spec:
         if not self.prompt.strip():
             raise DispatchRefused("empty prompt")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy
+        if self.verdict is not None and (
+            not isinstance(self.verdict, list)
+            or not all(isinstance(criterion, Criterion) for criterion in self.verdict)
+        ):
+            raise DispatchRefused("verdict must be a parsed checklist of Criterion values")
+        if self.verdict is not None:
+            ids = [criterion.id for criterion in self.verdict]
+            if len(ids) != len(set(ids)):
+                raise DispatchRefused("verdict criterion ids must be unique")
+        if self.verdict is not None and self.schema:
+            raise DispatchRefused("verdict generates its own schema; drop --schema")
+        if self.verdict is not None and self.fleet == "cursor":
+            raise DispatchRefused(
+                "fleet 'cursor' has no structured-output flag; drop --verdict or route the "
+                "dispatch to claude, codex, or antigravity"
+            )
         if self.schema:
             self._validate_schema()
         if self.cap_usd is not None:

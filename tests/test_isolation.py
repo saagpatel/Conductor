@@ -55,7 +55,7 @@ def test_a_dirty_worktree_is_kept_and_reported(repo, home, fake_fleet, git_out):
         home=home,
     )
     iso = result.isolation
-    assert result.verdict["dirty_delta"] == 1
+    assert result.git_verdict["dirty_delta"] == 1
     assert iso["kept"] is True
     assert (Path(iso["worktree"]) / "draft.txt").read_text() == "draft\n"
     assert result.summary()["worktree"] == iso["worktree"]

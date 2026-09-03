@@ -216,7 +216,7 @@ def test_clean_policy_records_test_edits_when_there_is_no_gate(repo, home, fake_
 
     assert result.ok is True and result.summary()["test_touched"] is True
     assert result.test_surface["clean_gate"] == {"ran": False, "reason": "no gate set"}
-    assert "test surface changed with no gate to re-run" in result.verdict["notes"]
+    assert "test surface changed with no gate to re-run" in result.git_verdict["notes"]
 
 
 def test_clean_policy_does_not_run_clean_gate_after_lane_gate_failure(
