@@ -74,10 +74,12 @@ DEFAULT_PRICES: dict[str, Price] = {
     "claude-opus-5": _std(5.00, 25.00),
     "claude-sonnet-5": _std(2.00, 10.00),
     "claude-haiku-4-5": _std(1.00, 5.00),
-    # OpenAI GPT-5.6 family, post 2026-07-30 cuts. Sol is listed at its
-    # standing rate; a promotional cut ($4/$20) was reported on 2026-08-21 by a
-    # single source and is not assumed here, so Sol estimates err high.
-    "gpt-5.6-sol": _std(5.00, 30.00, "standing list rate; promo may be lower"),
+    # OpenAI GPT-5.6 family, short-context standard tier as shown on the
+    # OpenAI pricing page 2026-09-02 (operator screenshot): Sol $4 / $0.40
+    # cached / $5 cache write / $20, Terra $2 / $0.20 / $2.50 / $12, Luna
+    # $0.20 / $0.02 / $0.25 / $1.20. Long context (>~272K input) doubles the
+    # input meters and adds 50% to output; not modeled here.
+    "gpt-5.6-sol": _std(4.00, 20.00, "promotional rate, floor through 2026-11-21"),
     "gpt-5.6-terra": _std(2.00, 12.00),
     "gpt-5.6-luna": _std(0.20, 1.20),
     # Google Gemini Flash, introductory pricing through 2026-12-31; standard
