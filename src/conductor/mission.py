@@ -49,6 +49,7 @@ _INHERITED = (
     "test",
     "commit",
     "isolate",
+    "cap_usd",
 )
 
 DEFAULT_COLLATE_INSTRUCTIONS = (
@@ -77,8 +78,11 @@ class Attempt:
     commit: str | None = None
     schema: str | None = None
     isolate: bool | None = None
+    cap_usd: float | None = None
 
-    def spec(self, cwd: str) -> Spec:
+    def spec(self, cwd: str, *, cap_usd: float | None = None) -> Spec:
+        """The dispatch; `cap_usd` overrides the attempt's own (the mission
+        ledger passes what it has left)."""
         return Spec(
             fleet=self.fleet,
             prompt=self.prompt,
@@ -88,6 +92,7 @@ class Attempt:
             mode=self.mode,
             timeout=self.timeout,
             schema=self.schema,
+            cap_usd=self.cap_usd if cap_usd is None else cap_usd,
         )
 
     def isolated(self) -> bool:
@@ -113,8 +118,9 @@ class Collate:
     schema: str | None = None
     instructions: str = DEFAULT_COLLATE_INSTRUCTIONS
     max_chars: int = COLLATE_MAX_CHARS
+    cap_usd: float | None = None
 
-    def spec(self, cwd: str, prompt: str) -> Spec:
+    def spec(self, cwd: str, prompt: str, *, cap_usd: float | None = None) -> Spec:
         return Spec(
             fleet=self.fleet,
             prompt=prompt,
@@ -124,6 +130,7 @@ class Collate:
             mode="read",
             timeout=self.timeout,
             schema=self.schema,
+            cap_usd=self.cap_usd if cap_usd is None else cap_usd,
         )
 
 
@@ -236,15 +243,20 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         if "fleet" not in raw_collate:
             raise MissionInvalid("collate needs a fleet")
         schema = raw_collate.get("schema")
-        collate = Collate(
-            fleet=str(raw_collate["fleet"]),
-            model=raw_collate.get("model"),
-            effort=str(raw_collate.get("effort", "standard")),
-            timeout=raw_collate.get("timeout"),
-            schema=str((base_dir / str(schema)).expanduser().resolve()) if schema else None,
-            instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
-            max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
-        )
+        cap = raw_collate.get("cap_usd", defaults.get("cap_usd"))
+        try:
+            collate = Collate(
+                fleet=str(raw_collate["fleet"]),
+                model=raw_collate.get("model"),
+                effort=str(raw_collate.get("effort", "standard")),
+                timeout=raw_collate.get("timeout"),
+                schema=str((base_dir / str(schema)).expanduser().resolve()) if schema else None,
+                instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
+                max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
+                cap_usd=float(cap) if cap is not None else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise MissionInvalid(f"collate: {exc}") from exc
 
     try:
         concurrency = int(raw.get("concurrency", 2))
@@ -311,6 +323,7 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             commit=fields.get("commit"),
             schema=fields.get("schema"),
             isolate=fields.get("isolate"),
+            cap_usd=float(fields["cap_usd"]) if fields.get("cap_usd") is not None else None,
         )
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"{where}: {exc}") from exc
@@ -331,13 +344,15 @@ def _default_lane_name(primary: Attempt, existing: list[Lane]) -> str:
 
 
 class Ledger:
-    """Dollars spent so far, shared across lanes, checked before every spend.
+    """Dollars spent so far, shared across lanes.
 
-    The budget is a stop line, not a hard ceiling: a dispatch's cost is only
-    known after it finishes, so up to `concurrency` dispatches that all passed
-    the check at the same instant can still land. The overshoot is bounded by
-    one dispatch per lane in flight. A hard per-dispatch cap is a fleet
-    feature (claude has --max-budget-usd; the others have none).
+    Checked before every spend, and its remainder becomes each dispatch's
+    cap (tightening any cap the lane set itself). The budget is still a stop
+    line rather than a ceiling, because a dispatch's spend is only exact once
+    it ends, but the overshoot is bounded: at most `concurrency` dispatches
+    are in flight, each capped at what remained when it started, and each
+    enforced the way its fleet allows (budget.py; Cursor's cap is a verdict
+    after the run, not a stop).
     """
 
     def __init__(self, max_cost_usd: float | None) -> None:
@@ -349,6 +364,10 @@ class Ledger:
     def can_spend(self) -> bool:
         with self._lock:
             return self.max is None or self.spent < self.max
+
+    def remaining(self) -> float | None:
+        with self._lock:
+            return None if self.max is None else max(self.max - self.spent, 0.0)
 
     def add(self, result: Result) -> None:
         cost = (result.usage or {}).get("cost_usd")
@@ -436,6 +455,12 @@ def _usd(value: float | None) -> str:
     return "" if value is None else f"{value:.4f}"
 
 
+def _tighter(*caps: float | None) -> float | None:
+    """The smallest of the caps that are set, or None when none is."""
+    known = [c for c in caps if c is not None]
+    return min(known) if known else None
+
+
 def run_mission(
     mission: Mission, *, home: Path | None = None, dry_run: bool = False
 ) -> MissionResult:
@@ -473,7 +498,7 @@ def run_mission(
                 )
                 break
             result = dispatch(
-                attempt.spec(mission.cwd),
+                attempt.spec(mission.cwd, cap_usd=_tighter(attempt.cap_usd, ledger.remaining())),
                 dry_run=dry_run,
                 test_command=attempt.test,
                 commit_message=attempt.commit,
@@ -574,7 +599,7 @@ def _run_collate(
     (mission_dir / "collate-prompt.txt").write_text(prompt)
 
     result = dispatch(
-        col.spec(mission.cwd, prompt),
+        col.spec(mission.cwd, prompt, cap_usd=_tighter(col.cap_usd, ledger.remaining())),
         home=base,
     )
     ledger.add(result)

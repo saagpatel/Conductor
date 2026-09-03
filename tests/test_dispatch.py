@@ -74,6 +74,18 @@ def test_read_mode_does_not_require_bytes_to_move(repo, home, fake_fleet):
     assert result.ok is True
 
 
+def test_a_read_dispatch_that_edited_the_tree_is_not_ok(repo, home, fake_fleet):
+    """Caught live 2026-09-03: agy created a file in read mode, because its
+    plan mode is silently ignored alongside --disable-slash-commands. Whatever
+    a fleet's flags promise, the bytes decide."""
+    fake_fleet(["sh", "-c", "echo leaked > leak.txt; echo 'analysis done'"])
+    result = dispatch(spec_for(repo, mode="read"), home=home)
+    assert result.exit_code == 0
+    assert result.verdict["dirty_delta"] == 1
+    assert result.ok is False
+    assert result.summary()["failure"] == "read dispatch moved bytes"
+
+
 def test_nonzero_exit_is_failure_and_the_tail_comes_from_stderr(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo 'boom' >&2; exit 7"])
     result = dispatch(spec_for(repo), home=home)
@@ -173,9 +185,7 @@ def test_failing_gate_sinks_an_otherwise_successful_run(repo, home, fake_fleet):
     assert result.ok is False
 
 
-def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(
-    repo, home, fake_fleet
-):
+def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(repo, home, fake_fleet):
     """agy exits 1 on its print timeout today; if a future version exits 0
     with status ERROR, the status must still sink the run."""
     envelope = '{"status":"ERROR","response":"","error":"timeout waiting for response"}'

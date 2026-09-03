@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices, worktrees
+from .budget import POLL_S, Budget, Watcher
 from .fleets import FLEETS, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
@@ -71,6 +72,7 @@ class Result:
     tests: dict | None = None
     commit: dict | None = None
     usage: dict | None = None
+    budget: dict | None = None
     answer_path: str | None = None
     isolation: dict | None = None
     fleet_status: str | None = None
@@ -86,6 +88,8 @@ class Result:
         """
         if self.error:
             return self.error
+        if self.budget and self.budget.get("exceeded"):
+            return _over_budget(self.budget)
         if self.timed_out:
             return f"timed out after {self.timeout}s"
         if self.exit_code != 0:
@@ -102,6 +106,12 @@ class Result:
                 return f"gate exited {self.tests.get('exit_code')}"
         if self.mode == "write" and self.verdict.get("checked") and self.verdict.get("no_op"):
             return "write dispatch moved no bytes"
+        # The mirror image: a research dispatch that edited the tree ignored
+        # its read-only setting (agy's read mode did exactly that live,
+        # 2026-09-03), and in a shared checkout that is the collision
+        # isolation exists to prevent. The bytes are the evidence.
+        if self.mode == "read" and self.verdict.get("checked") and not self.verdict.get("no_op"):
+            return "read dispatch moved bytes"
         # A requested commit that did not happen is a failure even when the
         # dispatch itself went fine: the caller asked for landed work.
         if self.commit and not self.commit.get("committed"):
@@ -141,11 +151,19 @@ class Result:
             "cost_usd": (self.usage or {}).get("cost_usd"),
             "cost_basis": (self.usage or {}).get("cost_basis"),
             "tokens": (self.usage or {}).get("total_tokens"),
+            "cap_usd": (self.budget or {}).get("cap_usd"),
+            "over_cap": bool((self.budget or {}).get("exceeded")),
             "answer_path": self.answer_path,
             "run_dir": self.run_dir,
             "error": self.error or self.fleet_error,
             "failure": self.failure(),
         }
+
+
+def _over_budget(budget: dict) -> str:
+    seen = budget.get("observed_usd")
+    spent = f"${seen:.4f}" if seen is not None else "an unpriced spend"
+    return f"over budget: {spent} against a ${budget['cap_usd']:.4f} cap"
 
 
 def _read(path: Path) -> str:
@@ -241,7 +259,16 @@ def dispatch(
     started = time.monotonic()
     error: str | None = None
     timed_out = False
+    capped = False
     exit_code: int | None = None
+    budget = (
+        Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap) if spec.cap_usd is not None else None
+    )
+    # The watcher follows the fleet's running usage whether or not there is a
+    # cap: it is also the only price a run that conductor kills can get.
+    watcher = (
+        Watcher(spec.fleet, model_id, stdout_path, spec.cap_usd) if fleet.cap == "watcher" else None
+    )
 
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
         try:
@@ -257,20 +284,15 @@ def dispatch(
             error = f"cannot spawn {fleet.binary}: {exc}"
             proc = None
         if proc is not None:
-            try:
-                exit_code = proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _killpg(proc.pid)
-                proc.wait()
-                exit_code = proc.returncode
+            exit_code, timed_out, capped = _wait(proc, timeout, watcher)
+            if timed_out:
                 error = f"timed out after {timeout}s; process group killed"
-            else:
-                # The fleet exited on its own, but a tool it started may not
-                # have: agy's print timeout, for one, returns while its shell
-                # child keeps running and keeps editing the tree. The group
-                # is conductor's own (start_new_session), so clear it.
-                _killpg(proc.pid)
+            elif capped:
+                assert watcher is not None and watcher.usage is not None  # over_cap saw a figure
+                error = (
+                    f"budget cap hit: ${watcher.usage.cost_usd:.4f} estimated against a "
+                    f"${spec.cap_usd:.4f} cap; process group killed"
+                )
 
     duration = time.monotonic() - started
 
@@ -307,20 +329,28 @@ def dispatch(
         answer_file.write_text(answer)
         answer_path = str(answer_file)
 
-    usage_dict = None
-    if output.usage:
-        if output.usage.cost_usd is None:
-            estimated = prices.estimate(
-                model_id,
-                input_tokens=output.usage.input_tokens,
-                output_tokens=output.usage.output_tokens,
-                cache_read_tokens=output.usage.cache_read_tokens,
-                cache_write_tokens=output.usage.cache_write_tokens,
-            )
-            if estimated is not None:
-                output.usage.cost_usd = estimated
-                output.usage.cost_basis = "estimated"
-        usage_dict = output.usage.to_dict()
+    usage = output.usage
+    if usage is None and watcher is not None:
+        # The stream ended without a final figure (conductor killed the run,
+        # or the fleet crashed); the watcher's last reading is the only
+        # price this run will get.
+        usage = watcher.poll()
+    if usage is not None and usage.cost_usd is None:
+        estimated = prices.estimate(
+            model_id,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
+        if estimated is not None:
+            usage.cost_usd = estimated
+            usage.cost_basis = "estimated"
+    usage_dict = usage.to_dict() if usage is not None else None
+    if budget is not None:
+        budget.settle(usage.cost_usd if usage else None, killed=capped, fleet_status=output.status)
+        if watcher is not None and watcher.usage is None:
+            verdict.notes.append("budget watcher saw no running usage; cap checked after the run")
 
     if iso is not None:
         worktrees.release(iso)
@@ -348,6 +378,7 @@ def dispatch(
         tests=tests.to_dict() if tests else None,
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
+        budget=budget.to_dict() if budget is not None else None,
         answer_path=answer_path,
         isolation=iso.to_dict() if iso is not None else None,
         fleet_status=output.status,
@@ -356,6 +387,38 @@ def dispatch(
     )
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
+
+
+def _wait(
+    proc: subprocess.Popen, timeout: int, watcher: Watcher | None
+) -> tuple[int | None, bool, bool]:
+    """Wait for the fleet, in short polls so the budget watcher gets a look
+    in. Returns (exit_code, timed_out, over_cap).
+
+    Whatever ended the wait, the process group is killed afterwards. On a
+    timeout or a cap that is the point; after a clean exit it clears any
+    tool the fleet left running: agy's print timeout, for one, returns
+    while its shell child keeps running and keeps editing the tree. The
+    group is conductor's own (start_new_session), so nothing else is hit.
+    """
+    deadline = time.monotonic() + timeout
+    timed_out = over_cap = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(POLL_S, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if watcher is not None and watcher.over_cap():
+            over_cap = True
+            break
+    _killpg(proc.pid)
+    proc.wait()
+    return proc.returncode, timed_out, over_cap
 
 
 def _killpg(pid: int) -> None:

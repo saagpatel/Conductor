@@ -6,7 +6,7 @@ from .prices import estimate, load_prices
 from .runner import Result, dispatch
 from .verify import GitState, Verdict, compare, run_tests
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "EFFORTS",

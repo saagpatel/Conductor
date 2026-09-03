@@ -99,10 +99,53 @@ def parse(fleet: str, stdout: str) -> FleetOutput:
         return FleetOutput()
     if fleet == "codex":
         return _parse_codex(text)
+    if fleet == "antigravity":
+        return _parse_antigravity(text)
     payload = _last_json_object(text)
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
     return _parse_envelope(fleet, payload, text)
+
+
+def _parse_antigravity(text: str) -> FleetOutput:
+    """agy runs in stream-json mode (one event per line) so its per-step
+    usage is visible while it works; the final envelope arrives wrapped as
+    `{"event": "result", "result": {...}}`. A transcript with no result
+    event was cut short, by conductor's kill or agy's own crash: there is no
+    answer, but what the steps reported so far is still priced."""
+    payload = _last_json_object(text)
+    if payload is None:
+        return FleetOutput(answer=text, parsed=False)
+    event = payload.get("event")
+    if event == "result" and isinstance(payload.get("result"), dict):
+        payload = payload["result"]
+    elif event is not None:
+        # The last thing printed was a step, not the result: cut short.
+        return FleetOutput(answer="", usage=agy_step_usage(text), parsed=True)
+    return _parse_envelope("antigravity", payload, text)
+
+
+def agy_step_usage(text: str) -> Usage | None:
+    """Running usage from an agy stream-json transcript: the last figure each
+    step reported, summed. Steps report their own usage, not a running
+    total (three steps of 14.5K, 14.7K, and 15.1K input summed to exactly
+    the 44.4K the final result reported; measured 2026-09-03)."""
+    per_step: dict[object, dict] = {}
+    for line in text.splitlines():
+        ev = json_line(line)
+        if ev is None or ev.get("event") != "step_update":
+            continue
+        step = ev.get("step_update")
+        if isinstance(step, dict) and isinstance(step.get("usage"), dict):
+            per_step[step.get("step_index")] = step["usage"]
+    if not per_step:
+        return None
+    total: dict[str, int] = {}
+    for raw in per_step.values():
+        for key, value in raw.items():
+            if isinstance(value, (int, float)):
+                total[key] = total.get(key, 0) + int(value)
+    return usage_from_raw("antigravity", total)
 
 
 # --- single-envelope fleets: claude, cursor, antigravity --------------------
@@ -133,7 +176,12 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
         subtype = payload.get("subtype")
         status = str(subtype) if subtype is not None else None
         if payload.get("is_error") is True:
-            error = answer or str(payload.get("error") or subtype or "fleet reported is_error")
+            # Claude Code puts the reason in an `errors` list and, on a budget
+            # stop, sends no `result` text at all (measured 2026-09-03).
+            errors = payload.get("errors")
+            listed = "; ".join(str(e) for e in errors) if isinstance(errors, list) else ""
+            fallback = str(payload.get("error") or subtype or "fleet reported is_error")
+            error = answer or listed or fallback
 
     usage = _usage_from_envelope(fleet, payload)
     # On a fleet-reported failure the text is the error, not an answer; it
@@ -151,6 +199,16 @@ def _usage_from_envelope(fleet: str, payload: dict) -> Usage | None:
     raw = payload.get("usage")
     if not isinstance(raw, dict):
         return None
+    usage = usage_from_raw(fleet, raw)
+    reported = payload.get("total_cost_usd")
+    if isinstance(reported, (int, float)):
+        usage.cost_usd = float(reported)
+        usage.cost_basis = "reported"
+    return usage
+
+
+def usage_from_raw(fleet: str, raw: dict) -> Usage:
+    """One fleet's raw usage object, normalized to the convention above."""
     input_tokens = _int(raw, "input_tokens", "inputTokens")
     output_tokens = _int(raw, "output_tokens", "outputTokens")
     cache_read = _int(raw, "cache_read_input_tokens", "cache_read_tokens", "cacheReadTokens")
@@ -164,17 +222,12 @@ def _usage_from_envelope(fleet: str, payload: dict) -> Usage | None:
         output_tokens += thinking
     elif fleet == "cursor":
         input_tokens = max(0, input_tokens - cache_read)
-
-    reported = payload.get("total_cost_usd")
-    cost = float(reported) if isinstance(reported, (int, float)) else None
     return Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         thinking_tokens=thinking,
-        cost_usd=cost,
-        cost_basis="reported" if cost is not None else None,
     )
 
 
@@ -186,17 +239,7 @@ def _parse_codex(text: str) -> FleetOutput:
     agent_message item; usage arrives on turn.completed; failures arrive as
     `error` or `turn.failed` events. With no parseable event at all (an older
     binary, or --json dropped), the raw text is the answer."""
-    events = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            events.append(obj)
+    events = [ev for ev in map(json_line, text.splitlines()) if ev is not None]
     if not events:
         return FleetOutput(answer=text, parsed=False)
 
@@ -218,7 +261,7 @@ def _parse_codex(text: str) -> FleetOutput:
             error = None
             raw = ev.get("usage")
             if isinstance(raw, dict):
-                usage = _usage_from_codex(raw)
+                usage = usage_from_codex(raw)
         elif kind in ("turn.failed", "error"):
             status = kind
             err = ev.get("error")
@@ -229,7 +272,7 @@ def _parse_codex(text: str) -> FleetOutput:
     return FleetOutput(answer=answer, usage=usage, parsed=True, status=status, error=error)
 
 
-def _usage_from_codex(raw: dict) -> Usage:
+def usage_from_codex(raw: dict) -> Usage:
     total_input = _int(raw, "input_tokens")
     cached = _int(raw, "cached_input_tokens")
     return Usage(
@@ -251,13 +294,19 @@ def _last_json_object(text: str) -> dict | None:
     except json.JSONDecodeError:
         pass
     for line in reversed(text.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
+        obj = json_line(line)
+        if obj is not None:
             return obj
     return None
+
+
+def json_line(line: str) -> dict | None:
+    """One line of a JSONL stream as a dict, or None for anything else."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None

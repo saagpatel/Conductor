@@ -273,7 +273,10 @@ def test_budget_stops_further_spend_and_says_so(repo, home, monkeypatch, tmp_pat
     }
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
     first, second = result.lanes
-    assert first["ok"] is True and first["cost_usd"] == 0.05
+    # The whole $0.04 was lane one's cap; a fleet that spent $0.05 anyway is
+    # over budget, and nothing more starts.
+    assert first["ok"] is False and first["cost_usd"] == 0.05
+    assert first["attempts"][0]["failure"] == "over budget: $0.0500 against a $0.0400 cap"
     assert second["ok"] is False and second["attempts"] == []
     assert "budget exhausted" in second["skipped"]
     assert result.budget["exceeded"] is True
@@ -383,6 +386,60 @@ def test_a_crashing_lane_does_not_take_the_mission_down(repo, home, monkeypatch,
     assert result.ok is False
     assert (Path(result.mission_dir) / "result.json").is_file()
     assert "lane crashed" in Path(result.report_path).read_text()
+
+
+def test_cap_usd_cascades_and_a_lane_can_tighten_it(tmp_path: Path):
+    raw = {
+        "prompt": "x",
+        "cwd": str(tmp_path),
+        "cap_usd": 2.0,
+        "lanes": [
+            {"fleet": "codex"},
+            {"fleet": "cursor", "cap_usd": 0.5, "fallback": [{"fleet": "antigravity"}]},
+        ],
+        "collate": {"fleet": "claude"},
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert mission.lanes[0].attempts[0].cap_usd == 2.0
+    assert [a.cap_usd for a in mission.lanes[1].attempts] == [0.5, 0.5]
+    assert mission.collate.cap_usd == 2.0
+    with pytest.raises(MissionInvalid, match="positive"):
+        mission_from_dict({**raw, "cap_usd": -1}, base_dir=tmp_path)
+    with pytest.raises(MissionInvalid):
+        mission_from_dict({**raw, "cap_usd": "lots"}, base_dir=tmp_path)
+
+
+def test_what_remains_of_the_mission_budget_caps_the_next_dispatch(
+    repo, home, monkeypatch, tmp_path
+):
+    """The ledger's remainder is each dispatch's cap, so the budget's
+    overshoot is bounded in dollars, not just in dispatch count."""
+    from conductor import mission as mission_mod
+
+    fake_fleets(monkeypatch, {"claude": say("pricey", cost=0.6)})
+    caps: list[float | None] = []
+    real = mission_mod.dispatch
+
+    def spy(spec, **kw):
+        caps.append(spec.cap_usd)
+        return real(spec, **kw)
+
+    monkeypatch.setattr(mission_mod, "dispatch", spy)
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "concurrency": 1,
+        "max_cost_usd": 1.0,
+        "lanes": [{"fleet": "claude"}, {"fleet": "claude", "cap_usd": 0.3}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    # Lane one had the whole budget; lane two got the $0.40 left, tightened
+    # further by its own $0.30, and its $0.60 spend is judged against that.
+    assert caps == [1.0, 0.3]
+    first, second = result.lanes
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["attempts"][0]["failure"] == "over budget: $0.6000 against a $0.3000 cap"
 
 
 def test_dry_run_records_argv_and_spawns_nothing(repo, home, tmp_path):

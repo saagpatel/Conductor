@@ -28,6 +28,7 @@ def cmd_fleets(args: argparse.Namespace) -> int:
                 "installed": bool(path),
                 "path": path or "",
                 "vendor": fleet.vendor,
+                "cap": fleet.cap,
                 "default_model": fleet.default_model,
                 "models": [
                     {
@@ -44,7 +45,7 @@ def cmd_fleets(args: argparse.Namespace) -> int:
         return 0
     for row in rows:
         mark = "ok " if row["installed"] else "MISSING"
-        print(f"[{mark}] {row['fleet']:<12} {row['binary']:<13} {row['vendor']}")
+        print(f"[{mark}] {row['fleet']:<12} {row['binary']:<13} {row['vendor']}  cap: {row['cap']}")
         for m in row["models"]:
             default = " (default)" if m["name"] == row["default_model"] else ""
             note = f"  # {m['note']}" if m["note"] else ""
@@ -72,6 +73,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         mode=args.mode,
         timeout=args.timeout,
         schema=args.schema,
+        cap_usd=args.cap_usd,
     )
     try:
         result = dispatch(
@@ -227,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument("--cwd", default=".", help="the fleet's working directory")
     p_dispatch.add_argument("--timeout", type=int, help="seconds; per-mode default otherwise")
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
+    p_dispatch.add_argument(
+        "--cap-usd",
+        type=float,
+        help="per-dispatch dollar cap: claude stops itself, codex and antigravity are killed "
+        "when their running usage prices over it, cursor is judged after the run",
+    )
     p_dispatch.add_argument("--test", help="gate to run after the dispatch, in --cwd")
     p_dispatch.add_argument(
         "--commit",

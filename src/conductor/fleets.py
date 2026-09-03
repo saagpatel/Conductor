@@ -19,8 +19,11 @@ discipline, because the callers are unattended agent runs at 3am.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import prices
 
 EFFORTS = ("cheap", "standard", "hard", "max")
 MODES = ("read", "write")
@@ -64,6 +67,11 @@ class Fleet:
     models: tuple[Model, ...]
     default_model: str
     vendor: str
+    # How a per-dispatch dollar cap is enforced on this fleet (see budget.py):
+    # "native" (the CLI stops itself), "watcher" (conductor prices the
+    # fleet's running usage and kills it), or "post-hoc" (usage arrives only
+    # at the end, so the cap is a verdict rather than a stop).
+    cap: str
 
     def model(self, name: str | None) -> Model:
         wanted = name or self.default_model
@@ -109,6 +117,7 @@ FLEETS: dict[str, Fleet] = {
         binary="claude",
         vendor="Anthropic (first-party)",
         default_model="sonnet",
+        cap="native",
         models=(
             _flat("opus", "claude-opus-5"),
             _flat("sonnet", "claude-sonnet-5"),
@@ -120,6 +129,7 @@ FLEETS: dict[str, Fleet] = {
         binary="codex",
         vendor="OpenAI (first-party)",
         default_model="terra",
+        cap="watcher",
         models=(
             _flat("terra", "gpt-5.6-terra"),
             _flat("sol", "gpt-5.6-sol"),
@@ -131,6 +141,7 @@ FLEETS: dict[str, Fleet] = {
         binary="agy",
         vendor="Google (first-party)",
         default_model="gemini-3.8-flash",
+        cap="watcher",
         models=(
             Model(
                 "gemini-3.8-flash",
@@ -159,6 +170,7 @@ FLEETS: dict[str, Fleet] = {
         binary="cursor-agent",
         vendor="Cursor first-party pool",
         default_model="grok-4.6",
+        cap="post-hoc",
         models=(
             Model(
                 "grok-4.6",
@@ -201,6 +213,7 @@ class Spec:
     timeout: int | None = None
     schema: str | None = None  # path to a JSON Schema for the final message
     last_message: str | None = None  # path the fleet should write its answer to
+    cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -216,6 +229,30 @@ class Spec:
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy
         if self.schema:
             self._validate_schema()
+        if self.cap_usd is not None:
+            self._validate_cap()
+
+    def _validate_cap(self) -> None:
+        """A cap conductor cannot enforce is refused, not silently ignored.
+
+        Claude Code caps itself. Every other fleet is capped by conductor
+        pricing its running usage, which needs a price for the model; an
+        operator override that dropped the model from the table would
+        otherwise leave the dispatch uncapped without a word.
+        """
+        # inf passes a plain "> 0" and no finite spend ever exceeds it, which
+        # would leave a watcher fleet uncapped with the flag still set.
+        if not (math.isfinite(self.cap_usd) and self.cap_usd > 0):
+            raise DispatchRefused("cap_usd must be a positive finite number")
+        fleet = FLEETS[self.fleet]
+        if fleet.cap == "native":
+            return
+        model_id = fleet.model(self.model).id_for(self.effort)
+        if prices.lookup(model_id) is None:
+            raise DispatchRefused(
+                f"model '{model_id}' is unpriced, so a ${self.cap_usd} cap cannot be enforced on "
+                f"fleet '{self.fleet}'; price it in prices.json or drop the cap"
+            )
 
     def _validate_schema(self) -> None:
         """A structured-output request must fail here, not after the spend.
@@ -279,7 +316,18 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # Claude Code wants the schema text, not a path: a path is rejected
         # with "--json-schema is not valid JSON". Verified live 2026-09-03.
         argv += ["--json-schema", Path(spec.schema).read_text()]
+    if spec.cap_usd is not None:
+        # Claude Code stops itself: exit 1, is_error, subtype
+        # error_max_budget_usd, and "Reached maximum budget ($N)" under
+        # `errors`, with the spend so far still reported. Verified live
+        # 2026-09-03.
+        argv += ["--max-budget-usd", _usd_arg(spec.cap_usd)]
     return argv
+
+
+def _usd_arg(value: float) -> str:
+    """A dollar figure as a flag value: 0.25 -> "0.25", 5.0 -> "5"."""
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 def _build_codex(spec: Spec, model: str) -> list[str]:
@@ -329,9 +377,12 @@ def _build_antigravity(spec: Spec, model: str) -> list[str]:
         model,
         "--effort",
         _AGY_EFFORT[spec.effort],
+        # stream-json prints a step_update carrying that step's usage after
+        # every model response, which is what lets conductor cap the spend
+        # mid-run; the final envelope still arrives, wrapped as
+        # {"event": "result", "result": {...}}.
         "--output-format",
-        "json",
-        "--disable-slash-commands",
+        "stream-json",
         # agy's own print-mode cap defaults to 5m0s regardless of anything
         # conductor does with the process. Left alone, a 20-minute write
         # dispatch dies at five minutes with status ERROR ("timeout waiting
@@ -346,8 +397,19 @@ def _build_antigravity(spec: Spec, model: str) -> list[str]:
     if spec.schema:
         argv += ["--json-schema", str(Path(spec.schema).resolve())]
     if spec.mode == "write":
-        argv += ["--mode", "accept-edits", "--dangerously-skip-permissions"]
+        argv += [
+            "--mode",
+            "accept-edits",
+            "--dangerously-skip-permissions",
+            "--disable-slash-commands",
+        ]
     else:
+        # --mode plan is silently ignored whenever --disable-slash-commands is
+        # set (agy warns on stderr, and then creates the file anyway; caught
+        # live 2026-09-03 by conductor's byte check). --sandbox alone only
+        # restricts the terminal. Read mode therefore keeps slash-command
+        # expansion on so plan mode actually holds: asked to write a file it
+        # writes an implementation plan in its own brain directory instead.
         argv += ["--mode", "plan", "--sandbox"]
     return argv
 

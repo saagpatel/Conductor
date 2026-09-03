@@ -57,7 +57,9 @@ entirely.
 
 Mode is `read` or `write`. Read gets each fleet's strongest read-only setting
 (`--mode plan`, `--sandbox read-only`, `--sandbox`); write gets its auto-approve,
-because there is nobody present to answer a permission prompt.
+because there is nobody present to answer a permission prompt. The flags are
+a request, the bytes are the check: a read dispatch that changed the tree is
+not `ok`, whatever its fleet promised.
 
 ## What a result looks like
 
@@ -115,6 +117,11 @@ Each is now pinned by a test.
 | `claude` | `--json-schema` takes the schema **text**, not a path (a path fails with "not valid JSON"). The validated object comes back under `structured_output`. Codex (`--output-schema`) and Antigravity (`--json-schema`) take a path. |
 | `cursor` | Has no structured-output flag at all. A `--schema` dispatch to Cursor is refused before spawn rather than silently handed prose. |
 | all | `--schema` verified live on claude, codex, and antigravity; effort `max` verified on claude; sol, luna, composer-2.5, and gemini-3.7-flash each answered a live dispatch. Every fleet's failure signal (`is_error`, `status: ERROR`, a Codex `error` event) is read and sinks `ok` even on exit 0. |
+| `claude` | `--max-budget-usd` is the only native dollar cap on any fleet. When it trips: exit 1, `is_error`, `subtype: error_max_budget_usd`, the reason under `errors` ("Reached maximum budget ($0.01)"), no `result` text, and the spend so far still reported. |
+| `codex` | Prints usage on stdout exactly once, at `turn.completed`. But it appends a `token_count` event with cumulative totals to its session rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread_id>.jsonl`) after every model response: 52 of them in one 12-minute run. That file, found by the `thread_id` in the first stdout event, is how conductor caps Codex mid-run. |
+| `antigravity` | `--output-format stream-json` prints a `step_update` carrying that step's own usage after every model response (three steps summed exactly to the final figure). conductor now always runs agy this way. |
+| `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes on any fleet is no longer `ok`. |
+| `cursor` | Reports usage once, in its final `result`, in both `json` and `stream-json` modes. A cap on Cursor is a verdict after the run, never a stop. |
 
 ## Three lessons borrowed from `peer-agent-tools`
 
@@ -145,6 +152,7 @@ summary and a report path.
   "commit": "feat: refactor parser per spec",
   "concurrency": 2,
   "max_cost_usd": 5.0,
+  "cap_usd": 2.0,
   "lanes": [
     {"fleet": "codex", "model": "sol", "fallback": [{"fleet": "claude", "model": "opus"}]},
     {"fleet": "antigravity"},
@@ -163,7 +171,10 @@ summary and a report path.
 - escalates down a lane's `fallback` list when an attempt is not `ok`, which
   includes the exit-0-no-op case, a failed gate, and a fleet's own error;
 - keeps a shared dollar ledger and skips any attempt that would start after
-  `max_cost_usd` is spent, saying so in the lane's `skipped` field;
+  `max_cost_usd` is spent, saying so in the lane's `skipped` field; what
+  remains of the budget also caps every dispatch it starts (tightening any
+  `cap_usd` the lane set), so the overshoot is bounded in dollars, not just
+  in dispatches;
 - copies each lane's answer to `answers/<lane>.txt`, and, if `collate` is
   set, hands all of them to one read-mode dispatch for a synthesis;
 - writes `report.md` (one table, each answer, the collated verdict) and
@@ -173,7 +184,9 @@ Fields cascade mission → lane → fallback, so the common case is one prompt,
 one cwd, one mode, and a list of fleets. A fallback that switches fleet drops
 the inherited `model`, because model names are fleet-local (caught live: an
 Antigravity fallback inheriting `luna` from its Codex primary). `require` is
-`all` (default) or `any`. TOML files load too.
+`all` (default) or `any`. TOML files load too. Two dollar fields, two
+meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
+ceiling (see below).
 
 ## Isolation: a branch is not a worktree
 
@@ -210,12 +223,35 @@ Measured on 2026-09-03, a one-line answer to "what is this README for":
 codex/luna $0.0037, antigravity $0.0228, cursor/composer-2.5 $0.0131, and
 the claude/haiku collate $0.0599. Startup, not the work, still dominates.
 
+### Per-dispatch caps
+
+`--cap-usd` (or `cap_usd` in a mission) bounds one dispatch in dollars, the
+unit the wall-clock timeout only approximates. Each fleet is capped the way
+it allows, and the result's `budget` field says which:
+
+| Fleet | `enforcement` | What happens |
+|---|---|---|
+| `claude` | `native` | `--max-budget-usd`; Claude Code stops itself and reports the spend. |
+| `codex` | `watcher` | conductor tails the session rollout's running totals, prices them, and kills the process group the poll after the estimate crosses the cap. |
+| `antigravity` | `watcher` | the same, over the per-step usage in agy's `stream-json` output. |
+| `cursor` | `post-hoc` | usage arrives once, at the end; the cap is checked then. |
+
+A watched fleet overshoots by at most one model response plus one two-second
+poll. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
+a $1.0000 cap"`), whether it was killed or merely judged afterwards; work it
+landed is still on its branch. The watcher runs on every codex and
+antigravity dispatch, cap or not, because it is also the only price a run
+that conductor killed can get: a timed-out Codex dispatch used to land in
+the ledger as `cost_usd: null`. A cap on an unpriced model is refused before
+spawn rather than silently unenforced.
+
 ## Commands
 
 - `conductor fleets`: the routing policy, and whether each binary is installed
 - `conductor dispatch`: run one prompt on one fleet (`--dry-run` prints the argv,
   `--schema` requests structured output, `--test` runs a gate afterward,
-  `--commit` lands the work, `--isolate` runs in a fresh worktree)
+  `--commit` lands the work, `--isolate` runs in a fresh worktree,
+  `--cap-usd` bounds the spend)
 - `conductor mission FILE`: run a mission file (`--dry-run` validates and
   records every argv without spawning)
 - `conductor verify`: inspect repo state, optionally run a gate

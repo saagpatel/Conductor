@@ -102,6 +102,11 @@ def test_read_mode_is_read_only_on_every_fleet():
     assert "read-only" in build_argv(spec(fleet="codex", mode="read"))
     agy = build_argv(spec(fleet="antigravity", mode="read"))
     assert "--sandbox" in agy and "plan" in agy
+    # agy ignores --mode plan whenever --disable-slash-commands is set and
+    # then edits the tree anyway (caught live 2026-09-03); read mode must
+    # not carry that flag. Write mode keeps it.
+    assert "--disable-slash-commands" not in agy
+    assert "--disable-slash-commands" in build_argv(spec(fleet="antigravity", mode="write"))
     cursor = build_argv(spec(fleet="cursor", mode="read"))
     assert "plan" in cursor
     # Without --trust, Cursor stops on an interactive trust prompt and exits 1
