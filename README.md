@@ -79,7 +79,10 @@ Small enough to read, never the transcript:
 ```
 
 That run exited 0 and is still a failure. `ok` means the process succeeded
-**and** bytes moved (for write dispatches) **and** the gate passed. Full
+**and** bytes moved (for write dispatches) **and** the gate passed **and**
+any requested commit landed; `failure` names which of those did not hold
+(here, `"write dispatch moved no bytes"`), so the caller never has to
+reconstruct the reason from the raw fields. Full
 stdout, stderr, the exact argv, and the prompt are on disk in `run_dir`; the
 caller reads them only if it decides to.
 

@@ -183,6 +183,9 @@ def test_routing_policy_is_enforced_at_load_before_any_spend(tmp_path: Path):
         ({"prompt": "x", "max_cost_usd": "5 dollars", "lanes": [{"fleet": "codex"}]}, "numbers"),
         ({"prompt": "x", "lanes": [{"fleet": "codex", "name": "a/b"}]}, "names a file"),
         ({"prompt": "x", "lanes": [{"fleet": "codex", "name": "../up"}]}, "names a file"),
+        ({"prompt": "x", "test": ["pytest"], "lanes": [{"fleet": "codex"}]}, "must be a string"),
+        ({"prompt": "x", "commit": 7, "lanes": [{"fleet": "codex"}]}, "must be a string"),
+        ({"prompt": "x", "isolate": "yes", "lanes": [{"fleet": "codex"}]}, "true or false"),
     ],
 )
 def test_invalid_missions_are_refused_with_a_reason(tmp_path: Path, raw, message):
@@ -381,6 +384,30 @@ def test_same_second_same_name_missions_get_distinct_directories(repo, home, tmp
     assert a.mission_id != b.mission_id
     assert b.mission_id == f"{a.mission_id}-2"
     assert Path(a.report_path).is_file() and Path(b.report_path).is_file()
+
+
+def test_a_crashing_lane_does_not_take_the_mission_down(repo, home, monkeypatch, tmp_path):
+    """One lane's exception becomes that lane's failure; the other lane still
+    runs and the mission still writes its receipt."""
+    from conductor import mission as mission_mod
+
+    fake_fleets(monkeypatch, {"codex": codex_say("fine"), "cursor": say("fine")})
+    real_copy = mission_mod.shutil.copyfile
+
+    def explode(src, dst):
+        if "codex" in str(dst):
+            raise OSError("disk on fire")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(mission_mod.shutil, "copyfile", explode)
+    raw = {"prompt": "x", "cwd": str(repo), "lanes": [{"fleet": "codex"}, {"fleet": "cursor"}]}
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    codex, cursor = result.lanes
+    assert codex["ok"] is False and "lane crashed: OSError: disk on fire" in codex["skipped"]
+    assert cursor["ok"] is True
+    assert result.ok is False
+    assert (Path(result.mission_dir) / "result.json").is_file()
+    assert "lane crashed" in Path(result.report_path).read_text()
 
 
 def test_dry_run_records_argv_and_spawns_nothing(repo, home, tmp_path):

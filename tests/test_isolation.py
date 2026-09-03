@@ -187,9 +187,28 @@ def test_a_worktree_the_fleet_deleted_is_pruned_not_a_crash(repo, home, monkeypa
     assert result.ok is False  # a write that left no tree behind moved no bytes
 
 
-def test_release_keeps_the_branch_either_way(repo, tmp_path):
+def test_a_branch_with_commits_survives_release(repo, tmp_path):
     iso = worktrees.create(str(repo), "probe", tmp_path / "wt")
     assert iso.active
+    (Path(iso.worktree) / "w.txt").write_text("w\n")
+    subprocess.run(["git", "add", "-A"], cwd=iso.worktree, check=True)
+    subprocess.run(["git", "commit", "-qm", "w"], cwd=iso.worktree, check=True)
     worktrees.release(iso)
-    assert iso.kept is False
+    assert iso.kept is False and iso.branch == "conductor/probe"
     assert "conductor/probe" in _git(repo, "branch", "--list", "conductor/probe")
+
+
+def test_a_no_op_isolated_write_leaves_no_branch_behind(repo, home, monkeypatch):
+    """A lane that landed nothing should not litter the repo with an empty
+    branch; its run directory is the only trace."""
+    fake_fleet(monkeypatch, ["sh", "-c", "echo 'nothing to do'"])
+    result = dispatch(
+        Spec(fleet="codex", prompt="no-op", cwd=str(repo), mode="write"),
+        isolate=True,
+        home=home,
+    )
+    assert result.ok is False
+    assert result.isolation["kept"] is False
+    assert result.isolation["branch"] == ""
+    assert result.summary()["branch"] is None
+    assert _git(repo, "branch", "--list", "conductor/*") == ""

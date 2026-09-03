@@ -131,11 +131,19 @@ def release(iso: Isolation) -> Isolation:
         iso.kept = True
         iso.reason = "worktree kept: it holds uncommitted changes"
         return iso
+    head = _git(iso.worktree, "rev-parse", "HEAD").stdout.strip()
     removed = _git(iso.repo, "worktree", "remove", iso.worktree)
     if removed.returncode != 0:
         iso.kept = True
         iso.reason = f"worktree kept: remove failed: {removed.stderr.strip()}"
         return iso
     iso.kept = False
+    if head == iso.base_sha:
+        # Clean and still at the base: nothing landed, so a branch would only
+        # be litter. A no-op lane leaves no trace but its run directory.
+        _git(iso.repo, "branch", "-D", iso.branch)
+        iso.branch = ""
+        iso.reason = "worktree removed; no commits landed, branch deleted"
+        return iso
     iso.reason = "worktree removed; commits remain on the branch"
     return iso

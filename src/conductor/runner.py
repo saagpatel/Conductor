@@ -80,27 +80,40 @@ class Result:
     fleet_error: str | None = None
     error: str | None = None
 
-    @property
-    def ok(self) -> bool:
-        """Success means the process succeeded AND bytes moved (when the
-        target was a repo and the mode was write). Exit 0 alone is not it."""
-        if self.timed_out or self.exit_code != 0 or self.error:
-            return False
+    def failure(self) -> str | None:
+        """Why the run is not ok, in one line, or None when it is.
+
+        Success means the process succeeded AND bytes moved (when the target
+        was a repo and the mode was write) AND the gate passed AND any
+        requested commit landed. Exit 0 alone is not it.
+        """
+        if self.error:
+            return self.error
+        if self.timed_out:
+            return f"timed out after {self.timeout}s"
+        if self.exit_code != 0:
+            return f"exit code {self.exit_code}"
         # A fleet that says it failed is believed, whatever its exit code.
         if self.fleet_error:
-            return False
+            return f"fleet reported: {self.fleet_error}"
         # A gate that ran and did not exit 0 sinks the run; that includes a
         # gate that hung, which has no exit code at all.
         if self.tests and self.tests.get("ran"):
-            if self.tests.get("timed_out") or self.tests.get("exit_code") != 0:
-                return False
+            if self.tests.get("timed_out"):
+                return "gate timed out"
+            if self.tests.get("exit_code") != 0:
+                return f"gate exited {self.tests.get('exit_code')}"
         if self.mode == "write" and self.verdict.get("checked") and self.verdict.get("no_op"):
-            return False
+            return "write dispatch moved no bytes"
         # A requested commit that did not happen is a failure even when the
         # dispatch itself went fine: the caller asked for landed work.
         if self.commit and not self.commit.get("committed"):
-            return False
-        return True
+            return f"commit did not land: {self.commit.get('reason') or 'unknown'}"
+        return None
+
+    @property
+    def ok(self) -> bool:
+        return self.failure() is None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -134,6 +147,7 @@ class Result:
             "answer_path": self.answer_path,
             "run_dir": self.run_dir,
             "error": self.error or self.fleet_error,
+            "failure": self.failure(),
         }
 
 
@@ -353,7 +367,11 @@ def _killpg(pid: int) -> None:
     start_new_session makes the child a session and group leader, so the
     group id is its pid. That matters after the child has exited: the pid is
     reaped by then and a getpgid lookup would fail, but the group lives on
-    while any straggler does, and killpg by id still reaches them.
+    while any straggler does, and killpg by id still reaches them. The kernel
+    will not hand that pid to a new process while the group has members, so
+    the only misfire would be a brand-new process that both took the freed
+    pid and made itself a group leader inside the microseconds between the
+    reap and this call; that window is accepted.
     """
     try:
         os.killpg(pid, signal.SIGKILL)

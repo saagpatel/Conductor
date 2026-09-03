@@ -136,8 +136,10 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
             error = answer or str(payload.get("error") or subtype or "fleet reported is_error")
 
     usage = _usage_from_envelope(fleet, payload)
+    # On a fleet-reported failure the text is the error, not an answer; it
+    # belongs in `error`, not in answer.txt beside a result that is not ok.
     return FleetOutput(
-        answer=answer or ("" if error else text),
+        answer="" if error else (answer or text),
         usage=usage,
         parsed=True,
         status=status,
@@ -209,7 +211,11 @@ def _parse_codex(text: str) -> FleetOutput:
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                 answer = item["text"].strip()
         elif kind == "turn.completed":
+            # A completed turn supersedes any earlier error event: Codex
+            # reports retryable stream failures as `error` and then carries
+            # on, and a run that recovered is not a failed run.
             status = "turn.completed"
+            error = None
             raw = ev.get("usage")
             if isinstance(raw, dict):
                 usage = _usage_from_codex(raw)

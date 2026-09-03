@@ -260,6 +260,21 @@ def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, monkeypatch):
     assert result.ok is False
 
 
+def test_the_summary_says_why_a_run_is_not_ok(repo, home, monkeypatch):
+    """Seven things can sink a run; the orchestrator should not have to
+    reconstruct which one from the raw fields."""
+    fake_fleet(monkeypatch, ["sh", "-c", "echo 'Done!'; exit 0"])
+    no_op = dispatch(spec_for(repo, mode="write"), home=home)
+    assert no_op.summary()["failure"] == "write dispatch moved no bytes"
+    fake_fleet(monkeypatch, ["sh", "-c", "exit 7"])
+    assert dispatch(spec_for(repo), home=home).summary()["failure"] == "exit code 7"
+    fake_fleet(monkeypatch, ["sh", "-c", "echo x > f.txt"])
+    gate = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 3")
+    assert gate.summary()["failure"] == "gate exited 3"
+    fake_fleet(monkeypatch, ["sh", "-c", "echo fine"])
+    assert dispatch(spec_for(repo), home=home).summary()["failure"] is None
+
+
 def test_every_run_leaves_an_audit_trail(repo, home, monkeypatch):
     fake_fleet(monkeypatch, ["sh", "-c", "echo hi"])
     result = dispatch(spec_for(repo), home=home)

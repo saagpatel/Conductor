@@ -21,11 +21,13 @@ Conventions the estimate relies on:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 AS_OF = "2026-09-03"
+log = logging.getLogger("conductor.prices")
 
 
 @dataclass(frozen=True)
@@ -101,14 +103,16 @@ def _override_path() -> Path:
     return home / "prices.json"
 
 
-def load_prices(override: Path | None = None) -> dict[str, Price]:
+def load_prices(override: Path | None = None, errors: list[str] | None = None) -> dict[str, Price]:
     """Defaults, with the operator's override file merged on top.
 
     The override is a JSON object keyed like DEFAULT_PRICES; each value is
     either an object with `input`, `output`, and optional `cache_read`,
     `cache_write`, `note`, or null to drop a model from the table. A malformed
-    file is reported as an error entry rather than raised, so a typo in
-    prices.json cannot stop a 3am run; the estimate falls back to defaults.
+    file or entry never raises, so a typo in prices.json cannot stop a 3am
+    run; it is logged as a warning, appended to `errors` when the caller
+    passes a list (`conductor prices` prints them), and the affected entry
+    falls back to its default.
     """
     table = dict(DEFAULT_PRICES)
     path = override or _override_path()
@@ -116,21 +120,23 @@ def load_prices(override: Path | None = None) -> dict[str, Price]:
         return table
     try:
         raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        _problem(errors, f"{path}: unreadable or not JSON ({exc}); using default prices")
         return table
     if not isinstance(raw, dict):
+        _problem(errors, f"{path}: top level must be an object; using default prices")
         return table
     for key, value in raw.items():
         if value is None:
             table.pop(key, None)
             continue
         if not isinstance(value, dict):
+            _problem(errors, f"{path}: '{key}' must be an object or null; entry ignored")
             continue
         try:
             inp = float(value["input"])
             out = float(value["output"])
-            # A missing or null cache rate takes the vendor-standard default;
-            # anything else unparseable skips the entry rather than raising.
+            # A missing or null cache rate takes the vendor-standard default.
             cache_read = value.get("cache_read")
             cache_write = value.get("cache_write")
             table[key] = Price(
@@ -140,9 +146,15 @@ def load_prices(override: Path | None = None) -> dict[str, Price]:
                 cache_write=float(cache_write) if cache_write is not None else inp * 1.25,
                 note=str(value.get("note", "override")),
             )
-        except (KeyError, TypeError, ValueError):
-            continue
+        except (KeyError, TypeError, ValueError) as exc:
+            _problem(errors, f"{path}: '{key}' needs numeric input/output ({exc}); entry ignored")
     return table
+
+
+def _problem(errors: list[str] | None, message: str) -> None:
+    log.warning(message)
+    if errors is not None:
+        errors.append(message)
 
 
 def lookup(model_id: str, table: dict[str, Price] | None = None) -> tuple[str, Price] | None:

@@ -237,7 +237,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             model=raw_collate.get("model"),
             effort=str(raw_collate.get("effort", "standard")),
             timeout=raw_collate.get("timeout"),
-            schema=str((base_dir / schema).resolve()) if schema else None,
+            schema=str((base_dir / str(schema)).expanduser().resolve()) if schema else None,
             instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
             max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
         )
@@ -290,6 +290,11 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
         raise MissionInvalid(f"{where}: fleet is required")
     if not str(fields.get("prompt", "")).strip():
         raise MissionInvalid(f"{where}: no prompt (set prompt or prompt_file on the mission)")
+    for key in ("model", "test", "commit", "schema"):
+        if fields.get(key) is not None and not isinstance(fields[key], str):
+            raise MissionInvalid(f"{where}: {key} must be a string")
+    if fields.get("isolate") is not None and not isinstance(fields["isolate"], bool):
+        raise MissionInvalid(f"{where}: isolate must be true or false")
     try:
         return Attempt(
             fleet=str(fields["fleet"]),
@@ -322,7 +327,14 @@ def _default_lane_name(primary: Attempt, existing: list[Lane]) -> str:
 
 
 class Ledger:
-    """Dollars spent so far, shared across lanes, checked before every spend."""
+    """Dollars spent so far, shared across lanes, checked before every spend.
+
+    The budget is a stop line, not a hard ceiling: a dispatch's cost is only
+    known after it finishes, so up to `concurrency` dispatches that all passed
+    the check at the same instant can still land. The overshoot is bounded by
+    one dispatch per lane in flight. A hard per-dispatch cap is a fleet
+    feature (claude has --max-budget-usd; the others have none).
+    """
 
     def __init__(self, max_cost_usd: float | None) -> None:
         self.max = max_cost_usd
@@ -436,7 +448,18 @@ def run_mission(
     started = time.monotonic()
 
     def run_lane(lane: Lane) -> LaneResult:
+        # One lane's crash must not take the mission's other lanes, its
+        # ledger, or its report down with it: the failure becomes that
+        # lane's result and the mission still writes result.json.
         out = LaneResult(name=lane.name, ok=False)
+        try:
+            _run_attempts(lane, out)
+        except Exception as exc:  # noqa: BLE001 - boundary for an unattended run
+            out.ok = False
+            out.skipped = f"lane crashed: {type(exc).__name__}: {exc}"
+        return out
+
+    def _run_attempts(lane: Lane, out: LaneResult) -> None:
         for attempt in lane.attempts:
             if not dry_run and not ledger.can_spend():
                 out.skipped = (
@@ -466,7 +489,6 @@ def run_mission(
             if dry_run or result.ok:
                 out.ok = True
                 break
-        return out
 
     with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
         lane_results = list(pool.map(run_lane, mission.lanes))

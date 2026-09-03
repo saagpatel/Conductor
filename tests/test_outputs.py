@@ -106,6 +106,21 @@ def test_codex_failure_events_are_surfaced():
     assert out.status == "error"
 
 
+def test_a_codex_error_followed_by_a_completed_turn_is_a_recovery():
+    """Codex reports retryable stream failures as `error` events and then
+    carries on; a run that recovered is not a failed run."""
+    stream = "\n".join(
+        [
+            '{"type":"turn.started"}',
+            '{"type":"error","message":"stream disconnected, retrying"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"PONG"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}',
+        ]
+    )
+    out = parse("codex", stream)
+    assert out.error is None and out.status == "turn.completed" and out.answer == "PONG"
+
+
 def test_codex_bare_text_still_degrades_to_an_answer():
     """An older binary without --json, or a crash before any event."""
     out = parse("codex", CODEX_BARE)
@@ -144,6 +159,8 @@ def test_cursor_is_error_is_surfaced():
     out = parse("cursor", env)
     assert out.error == "Workspace trust required"
     assert out.status == "error_during_execution"
+    # The error text is not an answer; it must not land in answer.txt.
+    assert out.answer == ""
 
 
 def test_claude_structured_output_becomes_the_answer():

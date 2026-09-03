@@ -90,13 +90,20 @@ def test_override_file_replaces_adds_and_removes(tmp_path: Path):
     assert "gpt-5.6-terra" in table  # untouched defaults survive
 
 
-def test_a_broken_override_file_falls_back_to_defaults(tmp_path: Path):
-    """A typo in prices.json must not stop a 3am run."""
+def test_a_broken_override_file_falls_back_to_defaults_and_says_so(tmp_path: Path):
+    """A typo in prices.json must not stop a 3am run, and must not be
+    swallowed either: the problem is logged and handed back to the caller."""
     override = tmp_path / "prices.json"
     override.write_text("{not json")
-    assert load_prices(override) == DEFAULT_PRICES
-    override.write_text(json.dumps({"gpt-5.6-terra": {"input": "lots"}}))
-    assert load_prices(override)["gpt-5.6-terra"] == DEFAULT_PRICES["gpt-5.6-terra"]
+    errors: list[str] = []
+    assert load_prices(override, errors) == DEFAULT_PRICES
+    assert len(errors) == 1 and "not JSON" in errors[0]
+    override.write_text(json.dumps({"gpt-5.6-terra": {"input": "lots"}, "x": 5}))
+    errors.clear()
+    table = load_prices(override, errors)
+    assert table["gpt-5.6-terra"] == DEFAULT_PRICES["gpt-5.6-terra"]
+    assert len(errors) == 2
+    assert any("gpt-5.6-terra" in e for e in errors) and any("'x'" in e for e in errors)
 
 
 def test_a_null_cache_rate_in_an_override_takes_the_default(tmp_path: Path):

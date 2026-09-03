@@ -116,10 +116,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_prices(args: argparse.Namespace) -> int:
     """Print the price table conductor will estimate with, after overrides."""
-    table = prices.load_prices()
+    errors: list[str] = []
+    table = prices.load_prices(errors=errors)
     out = {
         "as_of": prices.AS_OF,
         "override_file": str(conductor_home() / "prices.json"),
+        "override_errors": errors,
         "usd_per_million_tokens": {
             key: {
                 "input": p.input,
