@@ -5,6 +5,7 @@ merges, and it is checked before any fleet spends a dollar.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -142,3 +143,40 @@ def test_a_name_held_only_by_a_remote_is_refused_too(repo, home, monkeypatch, tm
     mission = mission_from_dict(named(PIPELINE, repo), base_dir=tmp_path)
     with pytest.raises(MissionInvalid, match="refs/remotes/origin/refactor/timestamps"):
         run_mission(mission, home=home)
+
+
+def test_a_failed_deliverable_rename_marks_the_attempt_and_every_receipt_failed(
+    repo, home, fake_fleet, tmp_path
+):
+    # The branch is free at mission admission, then a real Git operation wins
+    # the name while the fleet runs; the final rename must fail consistently.
+    fake_fleet(
+        ["sh", "-c", "echo work > work.txt; git branch deliverable/build HEAD"]
+    )
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "codex",
+                    "mode": "write",
+                    "prompt": "build",
+                    "commit": "build",
+                    "branch": "deliverable/build",
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    lane = result.lanes[0]
+    error = lane["attempts"][-1]["error"]
+    assert result.ok is False and lane["ok"] is False
+    assert "branch 'deliverable/build' not claimed" in error
+    assert lane["attempts"][-1]["ok"] is False
+    assert lane["attempts"][-1]["error"] == lane["attempts"][-1]["failure"] == error
+    lane_receipt = json.loads((Path(result.mission_dir) / "lanes" / "build.json").read_text())
+    final_receipt = json.loads((Path(result.mission_dir) / "result.json").read_text())
+    assert lane_receipt["attempts"][-1]["ok"] is False
+    assert final_receipt["lanes"][0]["attempts"][-1]["failure"] == error

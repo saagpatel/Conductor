@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from . import prices
@@ -15,7 +16,7 @@ from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
 from .gc import cmd_gc
 from .mission import MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
-from .runner import Result, dispatch, request_stop, stop_requested
+from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
 from .verify import GitState, run_tests
 
@@ -300,30 +301,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _install_stop_handlers() -> None:
+def _stop_handler(exit_hook: Callable[[int], object] = os._exit) -> Callable[[int, object], None]:
+    """Build the two-stage handler; the hook keeps the hard-exit path testable."""
+
+    def on_signal(signum: int, frame: object) -> None:
+        if stop_requested():
+            kill_live_groups()
+            exit_hook(130 if signum == signal.SIGINT else 143)
+            return
+        request_stop()
+
+    return on_signal
+
+
+def _install_stop_handlers(exit_hook: Callable[[int], object] = os._exit) -> None:
     """Ctrl-C or a `kill` ends the run cleanly instead of orphaning the fleet.
 
     The first signal asks every running dispatch to stop: each one kills
     its fleet's process group at its next poll, is priced and receipted,
     and releases its worktree; a mission skips what has not started and
-    still writes its report. A second signal is the operator insisting, and
-    falls through to Python's default (an immediate exit).
+    still writes its report. A second signal is the operator insisting: live
+    groups are killed synchronously before the conventional exit status.
     """
-
-    def on_signal(signum: int, frame: object) -> None:
-        if stop_requested():
-            signal.signal(signum, signal.SIG_DFL)
-            os.kill(os.getpid(), signum)
-            return
-        request_stop()
-
+    on_signal = _stop_handler(exit_hook)
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, on_signal)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.func in (cmd_dispatch, cmd_mission):
+    if args.func in (cmd_dispatch, cmd_mission, cmd_verify):
         _install_stop_handlers()
     return args.func(args)
 

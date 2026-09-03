@@ -66,6 +66,15 @@ def test_a_dirty_tree_counts_as_work_even_without_a_commit(repo, home, fake_flee
     assert result.ok is True
 
 
+def test_editing_an_already_dirty_file_is_not_a_no_op(repo, home, fake_fleet):
+    (repo / "seed.txt").write_text("dirty before\n")
+    fake_fleet(["sh", "-c", "printf 'dirty after\\n' > seed.txt"])
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+    assert result.verdict["dirty_delta"] == 0
+    assert result.verdict["no_op"] is False
+    assert result.ok is True
+
+
 def test_read_mode_does_not_require_bytes_to_move(repo, home, fake_fleet):
     """Research dispatches are supposed to change nothing."""
     fake_fleet(["sh", "-c", "echo 'here is my analysis'; exit 0"])
@@ -84,6 +93,44 @@ def test_a_read_dispatch_that_edited_the_tree_is_not_ok(repo, home, fake_fleet):
     assert result.verdict["dirty_delta"] == 1
     assert result.ok is False
     assert result.summary()["failure"] == "read dispatch moved bytes"
+
+
+def test_a_read_dispatch_that_changes_an_already_dirty_file_moves_bytes(repo, home, fake_fleet):
+    (repo / "seed.txt").write_text("dirty before\n")
+    fake_fleet(["sh", "-c", "printf 'dirty after\\n' > seed.txt; echo analysis"])
+    result = dispatch(spec_for(repo, mode="read"), home=home)
+    assert result.verdict["dirty_delta"] == 0
+    assert result.summary()["failure"] == "read dispatch moved bytes"
+
+
+def test_commit_on_a_dirty_nonisolated_checkout_is_refused_before_spawn(
+    repo, home, fake_fleet, git_out
+):
+    (repo / "seed.txt").write_text("operator edit\n")
+    (repo / "operator.txt").write_text("untracked\n")
+    before = git_out(repo, "status", "--porcelain")
+    fake_fleet(["sh", "-c", "echo spawned > spawned.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, commit_message="feat: unsafe sweep"
+    )
+    assert result.spawned is False and result.exit_code is None
+    assert result.error == "commit refused: the checkout has uncommitted changes; use --isolate"
+    assert git_out(repo, "status", "--porcelain") == before
+    assert not (repo / "spawned.txt").exists()
+
+
+def test_commit_from_a_dirty_checkout_proceeds_when_isolated(repo, home, fake_fleet):
+    (repo / "seed.txt").write_text("operator edit\n")
+    fake_fleet(["sh", "-c", "echo isolated > isolated.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write"),
+        home=home,
+        commit_message="feat: isolated",
+        isolate=True,
+    )
+    assert result.spawned is True and result.ok is True
+    assert (repo / "seed.txt").read_text() == "operator edit\n"
+    assert not (repo / "isolated.txt").exists()
 
 
 def test_nonzero_exit_is_failure_and_the_tail_comes_from_stderr(repo, home, fake_fleet):
@@ -221,6 +268,19 @@ def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, fake_fl
     result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
     assert result.usage["cost_basis"] == "reported"
     assert result.usage["cost_usd"] == 0.231398
+
+
+def test_an_invalid_reported_cost_is_noted_and_only_valid_tokens_are_estimated(
+    repo, home, fake_fleet
+):
+    envelope = (
+        '{"result":"PONG","total_cost_usd":-1,'
+        '"usage":{"input_tokens":1000,"output_tokens":1000}}'
+    )
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
+    result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
+    assert result.usage["cost_basis"] == "estimated"
+    assert any("reported cost must be" in note for note in result.verdict["notes"])
 
 
 def test_codex_answer_falls_back_to_its_last_message_file(repo, home, monkeypatch):

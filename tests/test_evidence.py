@@ -117,6 +117,7 @@ def test_cursor_answer_is_the_whole_transcript_not_the_last_message():
 
     cut_short = parse("cursor", "\n".join(lines[:2]))
     assert cut_short.answer.startswith("## Findings") and cut_short.usage is None
+    assert cut_short.error == "cursor stream ended without a result event"
 
     err = json.dumps({"type": "result", "subtype": "error", "is_error": True, "result": "boom"})
     failed = parse("cursor", "\n".join(lines[:2] + [err]))
@@ -149,6 +150,15 @@ def test_diff_since_shows_committed_uncommitted_and_untracked_work(repo, git_out
     patch = diff_since(str(repo), base)
     assert "+more" in patch and "+even more" in patch and "+fresh" in patch
     assert diff_since(str(repo), base, limit=20).endswith("truncated at 20 chars]\n")
+
+
+def test_diff_since_includes_an_untracked_quoted_name(repo, git_out):
+    base = git_out(repo, "rev-parse", "HEAD")
+    name = "résumé draft.txt"
+    (repo / name).write_text("quoted path\n")
+    patch = diff_since(str(repo), base)
+    assert "quoted path" in patch
+    assert name in patch
 
 
 def test_a_dispatch_records_its_diff_and_the_collate_sees_it(repo, home, monkeypatch, tmp_path):
@@ -218,6 +228,17 @@ def test_a_failed_gate_takes_its_commit_back_off_the_branch(repo, home, fake_fle
     assert git_out(repo, "status", "--porcelain") == "A  f.txt"  # the work stays, staged
     assert result.verdict["commits_added"] == 0 and result.verdict["dirty_delta"] == 1
     assert any("undone" in n for n in result.verdict["notes"])
+
+
+def test_a_fleets_self_commit_is_undone_when_the_gate_fails(repo, home, fake_fleet, git_out):
+    fake_fleet(
+        ["sh", "-c", "echo work > self.txt && git add -A && git commit -qm 'fleet commit'"]
+    )
+    result = dispatch(spec_for(repo, mode="write"), test_command="exit 1", home=home)
+    assert result.ok is False and result.summary()["failure"] == "gate exited 1"
+    assert result.commit["committed"] is False and "undone" in result.commit["reason"]
+    assert git_out(repo, "log", "--oneline").count("\n") == 0
+    assert "self.txt" in git_out(repo, "diff", "--cached", "--name-only")
 
 
 def test_a_fleet_that_reports_failure_is_never_committed(repo, home, fake_fleet, git_out):

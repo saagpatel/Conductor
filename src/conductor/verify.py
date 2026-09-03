@@ -19,6 +19,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
+from hashlib import sha256
 from pathlib import Path
 
 GIT_TIMEOUT = 30
@@ -68,6 +69,7 @@ class GitState:
     head: str = ""
     branch: str = ""
     dirty_files: int = 0
+    manifest: str = ""
 
     @classmethod
     def capture(cls, cwd: str) -> GitState:
@@ -76,14 +78,53 @@ class GitState:
             return cls(is_repo=False)
         head = _git(cwd, "rev-parse", "HEAD")
         branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
-        status = _git(cwd, "status", "--porcelain")
+        root = Path(top.stdout.strip())
+        status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        entries = _status_entries(status.stdout) if status.returncode == 0 else []
         return cls(
             is_repo=True,
             # An unborn HEAD is not an error here; it just means no commits yet.
             head=head.stdout.strip() if head.returncode == 0 else "",
             branch=branch.stdout.strip() if branch.returncode == 0 else "",
-            dirty_files=len([ln for ln in status.stdout.splitlines() if ln.strip()]),
+            dirty_files=len(entries),
+            manifest=_manifest(root, status.stdout, entries),
         )
+
+
+def _status_entries(status: str) -> list[tuple[str, str]]:
+    """Porcelain-v1 -z entries without Git's path quoting ambiguity."""
+    fields = status.split("\0")
+    entries: list[tuple[str, str]] = []
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if not field:
+            continue
+        code = field[:2]
+        entries.append((code, field[3:]))
+        if "R" in code or "C" in code:
+            index += 1  # rename/copy source path follows as its own NUL field
+    return entries
+
+
+def _manifest(root: Path, status: str, entries: list[tuple[str, str]]) -> str:
+    """Hash dirty path identities and bytes, not merely their count."""
+    digest = sha256(status.encode(errors="surrogateescape"))
+    for _, name in sorted(entries, key=lambda entry: entry[1]):
+        path = root / name
+        try:
+            if path.is_symlink():
+                content = os.readlink(path).encode(errors="surrogateescape")
+            else:
+                content = path.read_bytes()
+            size = len(content)
+            content_hash = sha256(content).hexdigest()
+        except OSError:
+            size = -1
+            content_hash = "missing"
+        digest.update(f"\0{name}\0{size}\0{content_hash}".encode(errors="surrogateescape"))
+    return digest.hexdigest()
 
 
 @dataclass
@@ -143,7 +184,11 @@ def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
     if branch_moved:
         notes.append(f"branch changed: {before.branch or '(none)'} -> {after.branch or '(none)'}")
 
-    no_op = commits == 0 and dirty_delta == 0 and not branch_moved
+    no_op = (
+        before.head == after.head
+        and before.branch == after.branch
+        and before.manifest == after.manifest
+    )
     if no_op:
         notes.append(
             "no commits, no working-tree change: the run reported an outcome but moved no bytes"
@@ -176,12 +221,25 @@ def diff_since(cwd: str, base_sha: str, limit: int = DIFF_LIMIT) -> str:
     tracked = _git(cwd, "diff", base_sha, "--")
     if tracked.returncode == 0:
         parts.append(tracked.stdout)
-    status = _git(cwd, "status", "--porcelain", "--untracked-files=all")
-    for line in status.stdout.splitlines():
-        if line.startswith("??"):
+    status = _git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    for code, path in _status_entries(status.stdout):
+        if code == "??":
             # --no-index exits 1 whenever the files differ, which they do.
-            new = _git(cwd, "diff", "--no-index", "--", "/dev/null", line[3:].strip())
-            parts.append(new.stdout)
+            new = _git(
+                cwd,
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                path,
+            )
+            if new.returncode in {0, 1}:
+                parts.append(new.stdout)
+            else:
+                detail = new.stderr.strip() or new.stdout.strip() or f"exit {new.returncode}"
+                parts.append(f"\n[conductor note: could not diff untracked {path!r}: {detail}]\n")
     text = "".join(parts)
     if len(text) > limit:
         text = text[:limit] + f"\n[... diff truncated at {limit} chars]\n"
@@ -317,23 +375,30 @@ def run_tests(
             )
         except OSError as exc:
             return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
-        deadline = time.monotonic() + timeout
-        timed_out = interrupted = False
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            try:
-                proc.wait(timeout=min(GATE_POLL_S, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if stop is not None and stop():
-                interrupted = True
-                break
-        killpg(proc.pid)  # on a timeout that is the point; after a clean exit, stragglers
-        proc.wait()
+        # Import here to avoid runner -> verify -> runner at module load.
+        from .runner import _kill_live_group, _register_live_group
+
+        _register_live_group(proc.pid)
+        try:
+            deadline = time.monotonic() + timeout
+            timed_out = interrupted = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    proc.wait(timeout=min(GATE_POLL_S, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop is not None and stop():
+                    interrupted = True
+                    break
+        finally:
+            # Every exit path kills stragglers and unregisters before pid reuse.
+            _kill_live_group(proc.pid)
+            proc.wait()
         if timed_out:
             return TestOutcome(
                 ran=True, timed_out=True, tail=f"timed out after {timeout}s; process group killed"

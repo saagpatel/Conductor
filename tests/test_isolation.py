@@ -116,7 +116,7 @@ def test_a_write_dispatch_that_cannot_be_isolated_is_refused_not_run_in_place(
     )
     assert result.ok is False
     assert result.exit_code is None
-    assert "isolation failed" in result.error
+    assert "not a git repository" in result.error and "only read mode" in result.error
     assert not (plain / "leaked.txt").exists()
     assert not Path(result.stdout_path).exists()
     assert (Path(result.run_dir) / "result.json").is_file()

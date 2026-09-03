@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -233,6 +234,8 @@ class Mission:
                     raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
                 branches.add(lane.branch)
             for attempt in lane.attempts:
+                if attempt.mode == "write" and not attempt.isolated():
+                    raise MissionInvalid(f"lane '{lane.name}': write lanes must isolate")
                 try:
                     attempt.spec(self.cwd).validate()
                 except DispatchRefused as exc:
@@ -560,7 +563,7 @@ class Ledger:
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)
-            elif not result.interrupted:
+            elif result.spawned and not result.interrupted:
                 # A run conductor stopped (before or after spawn) and could
                 # not price is not evidence about the budget; it cannot have
                 # spent past what its own cap allowed before the stop.
@@ -585,6 +588,7 @@ class LaneResult:
     answer_path: str | None = None
     diff_path: str | None = None
     cost_usd: float = 0.0
+    unpriced_attempts: int = 0
     tokens: int = 0
     skipped: str | None = None
     needs: list[str] = field(default_factory=list)
@@ -740,6 +744,8 @@ def run_mission(
             summary["attempt"] = attempt.label()
             out.attempts.append(summary)
             out.cost_usd += float(summary.get("cost_usd") or 0.0)
+            if result.spawned and summary.get("cost_usd") is None:
+                out.unpriced_attempts += 1
             out.tokens += int(summary.get("tokens") or 0)
             # A lane's answer, diff, and tree are its final attempt's. A failed
             # primary's answer left in place would be what the collate reads
@@ -764,9 +770,8 @@ def run_mission(
                 made = git_run(mission.cwd, "branch", "--", lane.branch, out.tip_sha)
                 if made.returncode != 0:
                     out.ok = False
-                    out.attempts[-1]["error"] = (
-                        f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
-                    )
+                    error = f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
+                    out.attempts[-1].update(ok=False, error=error, failure=error)
                 else:
                     out.branch = lane.branch
                     out.attempts[-1]["branch"] = lane.branch
@@ -780,7 +785,8 @@ def run_mission(
                 why = _rename_branch(mission.cwd, out.branch, lane.branch)
                 if why:
                     out.ok = False
-                    out.attempts[-1]["error"] = f"branch '{lane.branch}' not claimed: {why}"
+                    error = f"branch '{lane.branch}' not claimed: {why}"
+                    out.attempts[-1].update(ok=False, error=error, failure=error)
                 else:
                     out.branch = lane.branch
                     out.attempts[-1]["branch"] = lane.branch
@@ -855,6 +861,9 @@ def run_mission(
     ok = all(sinks_ok) if mission.require == "all" else any(sinks_ok)
     if collate_out is not None and not collate_out.get("ok"):
         ok = False
+    budget_state = ledger.to_dict()
+    if budget_state["exceeded"] or budget_state["unverifiable"]:
+        ok = False
     interrupted = stop_requested()
     if interrupted:
         ok = False  # whatever landed, the mission did not run to its end
@@ -872,7 +881,7 @@ def run_mission(
         tokens=sum(lane.tokens for lane in lane_results)
         + int((collate_out or {}).get("tokens") or 0),
         duration_s=duration,
-        budget=ledger.to_dict(),
+        budget=budget_state,
         collate=collate_out,
         mission_dir=str(mission_dir),
         report_path=str(report_path),
@@ -922,6 +931,7 @@ def _render(template: str, mission: Mission, done: dict[str, LaneResult], *, dry
     text is bounded by the mission's `template_max_chars`.
     """
     budget = [mission.template_max_chars]
+    nonce = secrets.token_hex(3)
 
     def paste(label: str, value: str, note: str) -> str:
         if not value:
@@ -931,11 +941,16 @@ def _render(template: str, mission: Mission, done: dict[str, LaneResult], *, dry
         if len(value) > budget[0]:
             value = value[: budget[0]] + f"\n[... {label} truncated]"
         budget[0] -= len(value)
-        return f"\n--- begin {label}{note} ---\n{value}\n--- end {label} ---\n"
+        return (
+            f"\n--- begin {label} [{nonce}]{note} ---\n"
+            f"{value}\n--- end {label} [{nonce}] ---\n"
+        )
 
     def sub(m: re.Match) -> str:
         if m.group(3):
-            return paste("mission.prompt", (mission.prompt or "").strip(), "")
+            # The mission prompt is trusted instructions, not upstream data:
+            # starving or fencing it lets a huge pasted diff change the task.
+            return mission.prompt or ""
         lane_name, which = m.group(1), m.group(2)
         label = f"lanes.{lane_name}.{which}"
         if dry_run:
@@ -1061,10 +1076,13 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         if not lane.attempts and lane.skipped:
             lines.append(f"| {lane.name} | (skipped) | False | | | | | | | |")
         for a in lane.attempts:
+            cost = _usd(a.get("cost_usd"))
+            if a is lane.attempts[-1] and lane.unpriced_attempts:
+                cost += f" ({lane.unpriced_attempts} unpriced)"
             lines.append(
                 f"| {lane.name} | {a['attempt']} | {a['ok']} | {a['exit_code']} | "
                 f"{a['no_op']} | {a['commits']} | {a.get('branch') or ''} | "
-                f"{_usd(a.get('cost_usd'))} | "
+                f"{cost} | "
                 f"{a.get('tokens') or ''} | {a['duration_s']} |"
             )
     if result.interrupted:

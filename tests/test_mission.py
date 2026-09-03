@@ -177,15 +177,42 @@ def test_same_fleet_twice_gets_distinct_lane_names(tmp_path: Path):
     assert [lane.name for lane in m.lanes] == ["codex", "codex-2", "codex-sol"]
 
 
+def test_write_lanes_and_fallbacks_must_isolate_but_reads_may_opt_out(tmp_path: Path):
+    with pytest.raises(MissionInvalid, match="write lanes must isolate"):
+        mission_from_dict(
+            {"prompt": "x", "mode": "write", "isolate": False, "lanes": [{"fleet": "codex"}]},
+            base_dir=tmp_path,
+        )
+    with pytest.raises(MissionInvalid, match="write lanes must isolate"):
+        mission_from_dict(
+            {
+                "prompt": "x",
+                "lanes": [
+                    {
+                        "fleet": "codex",
+                        "fallback": [{"fleet": "claude", "mode": "write", "isolate": False}],
+                    }
+                ],
+            },
+            base_dir=tmp_path,
+        )
+    read = mission_from_dict(
+        {"prompt": "x", "mode": "read", "isolate": False, "lanes": [{"fleet": "codex"}]},
+        base_dir=tmp_path,
+    )
+    assert read.lanes[0].attempts[0].isolated() is False
+
+
 # --- running ---------------------------------------------------------------
 
 
 def test_fan_out_respects_the_concurrency_cap(repo, home, monkeypatch, tmp_path):
     item = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}})
+    done = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}})
     fake_fleets(
         monkeypatch,
         {
-            "codex": ["sh", "-c", f"sleep 0.6; echo '{item}'"],
+            "codex": ["sh", "-c", f"sleep 0.6; echo '{item}'; echo '{done}'"],
             "cursor": ["sh", "-c", f"sleep 0.6; echo '{envelope('ok')}'"],
             "antigravity": ["sh", "-c", f"sleep 0.6; echo '{envelope('ok')}'"],
         },
@@ -284,6 +311,68 @@ def test_budget_stops_further_spend_and_says_so(repo, home, monkeypatch, tmp_pat
     assert result.budget["exceeded"] is True
     assert result.ok is False
     assert "Budget exceeded" in Path(result.report_path).read_text()
+
+
+def test_concurrent_overspend_sinks_the_mission_even_when_each_lane_is_ok(
+    repo, home, monkeypatch, tmp_path
+):
+    fake_fleets(monkeypatch, {"claude": say("done", cost=0.75)})
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "cwd": str(repo),
+            "concurrency": 2,
+            "max_cost_usd": 1.0,
+            "lanes": [{"fleet": "claude"}, {"fleet": "claude"}],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    assert all(lane["ok"] for lane in result.lanes)
+    assert result.budget["exceeded"] is True
+    assert result.ok is False
+
+
+def test_a_never_spawned_attempt_does_not_poison_the_budget_or_stop_collate(
+    tmp_path, home, monkeypatch
+):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    fake_fleets(monkeypatch, {"claude": say("done", cost=0.1)})
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "cwd": str(plain),
+            "concurrency": 1,
+            "require": "any",
+            "max_cost_usd": 1.0,
+            "lanes": [
+                {"name": "refused", "fleet": "claude", "mode": "write"},
+                {"name": "ran", "fleet": "claude", "mode": "read", "isolate": False},
+            ],
+            "collate": {"fleet": "claude"},
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    assert result.lanes[0]["attempts"][0]["spawned"] is False
+    assert result.lanes[1]["attempts"][0]["spawned"] is True
+    assert result.collate and result.collate["ok"] is True
+    assert result.budget["unverifiable"] is False
+
+
+def test_report_marks_unpriced_attempts_instead_of_rendering_them_as_zero(
+    repo, home, monkeypatch, tmp_path
+):
+    fake_fleets(monkeypatch, {"claude": ["sh", "-c", "echo '{\"result\":\"done\"}'"]})
+    mission = mission_from_dict(
+        {"prompt": "x", "cwd": str(repo), "lanes": [{"fleet": "claude"}]},
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    assert result.lanes[0]["cost_usd"] == 0.0
+    assert result.lanes[0]["unpriced_attempts"] == 1
+    assert "(1 unpriced)" in Path(result.report_path).read_text()
 
 
 def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(

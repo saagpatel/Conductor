@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conductor.outputs import parse
 
 CLAUDE = (
@@ -123,6 +125,18 @@ def test_a_codex_error_followed_by_a_completed_turn_is_a_recovery():
     assert out.error is None and out.status == "turn.completed" and out.answer == "PONG"
 
 
+def test_a_codex_stream_without_turn_completed_fails_closed_but_keeps_the_answer():
+    stream = '\n'.join(
+        [
+            '{"type":"turn.started"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}',
+        ]
+    )
+    out = parse("codex", stream)
+    assert out.answer == "partial"
+    assert out.error == "codex stream ended without turn.completed"
+
+
 def test_codex_bare_text_still_degrades_to_an_answer():
     """An older binary without --json, or a crash before any event."""
     out = parse("codex", CODEX_BARE)
@@ -223,3 +237,19 @@ def test_claude_event_list_envelope_is_read_from_its_result_event():
     assert out.answer == "OK" and out.status == "success" and out.error is None
     assert out.usage is not None and out.usage.cost_usd == 0.0513
     assert out.usage.cache_read_tokens == 24096
+
+
+@pytest.mark.parametrize("cost", [float("nan"), float("inf"), -0.1, True, "1.25"])
+def test_reported_costs_must_be_finite_non_negative_numbers(cost):
+    text = json.dumps(
+        {
+            "result": "PONG",
+            "total_cost_usd": cost,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    out = parse("claude", text)
+    assert out.usage is not None and out.usage.cost_usd is None
+    assert out.notes == [
+        "ignored total_cost_usd: reported cost must be a finite non-negative number"
+    ]

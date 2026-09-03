@@ -61,6 +61,10 @@ because there is nobody present to answer a permission prompt. The flags are
 a request, the bytes are the check: a read dispatch that changed the tree is
 not `ok`, whatever its fleet promised, and neither is one that came back
 with no answer, since the answer is a read dispatch's only work product.
+The verdict hashes porcelain status plus every dirty and untracked file's
+contents, so editing an already-dirty file cannot hide behind an unchanged count.
+Structured Codex and Cursor streams must end in `turn.completed` and `result`
+respectively; a cut-short stream may retain its answer, but fails closed.
 
 ## What a result looks like
 
@@ -106,6 +110,9 @@ staged in the kept worktree: a branch must never carry a commit that failed
 its gate, because the commit outlives the receipt that says it did. The gate
 itself runs in its own process group, like a fleet, so a killed suite leaves
 no workers behind.
+
+A non-isolated `--commit` is refused when the checkout already has tracked or
+untracked changes; use `--isolate` so conductor cannot sweep up operator work.
 
 Deletions are staged like anything else and named explicitly in the receipt. A
 bulk stage that quietly swallows removed source files is the failure that
@@ -178,6 +185,8 @@ summary and a report path.
 
 - checks every lane and fallback against the routing policy **at load time**,
   before a token is spent, and refuses the whole file with the lane named;
+- refuses write lanes and write fallbacks with `isolate: false`; read lanes may
+  still opt out explicitly;
 - runs lanes under the concurrency cap, each lane (read or write, and the
   collate) in its own git worktree on branch `conductor/<run_id>` (see
   below), so a fleet that ignores its read-only flag edits a throwaway
@@ -253,9 +262,10 @@ Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`, and
 must be in `needs`; anything else between double braces is refused at load,
 so a misspelt name cannot render as `(none)`. Rendering is a single pass, so
 braces inside an upstream answer never become new substitutions; each pasted
-value is fenced and labelled as another agent's output, not instructions;
-and the total pasted text per prompt is bounded by `template_max_chars`
-(default 40000). In a dry run the placeholders render as `(dry run: ...)`.
+lane value is fenced with a per-render random nonce and labelled as another
+agent's output, not instructions. The trusted mission prompt is substituted
+unfenced and outside `template_max_chars`; only lane data shares that budget
+(default 40000). In a dry run lane placeholders render as `(dry run: ...)`.
 
 A pipeline is judged on its outputs: `require` applies to the lanes nothing
 else depends on, so `build ok, fix failed` is a failed pipeline whatever
@@ -289,7 +299,8 @@ commits, ready to merge) and kept, with its path reported, if it holds
 uncommitted work. Deleting an agent's uncommitted edits to tidy up is the
 wrong trade. If a worktree cannot be created (not a repo, no commits yet, a
 git error), a write dispatch is refused before anything spawns rather than
-run in the shared checkout; a read dispatch proceeds in place and says so.
+run in the shared checkout. Any write dispatch on a non-repository cwd is
+likewise refused; a read dispatch may proceed in place and says so.
 
 Ctrl-C or `kill` on `conductor dispatch` or `conductor mission` ends the run
 the same way a timeout does. Every running dispatch kills its fleet's
@@ -297,7 +308,9 @@ process group at its next poll (within `POLL_S`, 2s), is priced from the
 watcher's last reading and receipted with `interrupted: true`, and releases
 its worktree; a mission skips the lanes that had not started, does not
 spend the collate, and still writes its report, marked **Interrupted**. A
-second signal is the operator insisting and exits at once. Before this,
+second signal synchronously kills every registered fleet and gate group, then
+exits 130 for SIGINT or 143 for SIGTERM; `conductor verify --test` installs the
+same handlers. Before this,
 killing conductor left the fleet running in a worktree nothing would
 release (found live 2026-09-03, on the first production pipeline). An
 interrupted run is not over its cap and not "unpriced": the stop is the
@@ -317,7 +330,9 @@ limits actions to older run ids.
 GC never removes a dirty worktree, a worktree outside
 `$CONDUCTOR_HOME/worktrees`, a branch outside `conductor/`, an unmerged
 conductor branch, or any run or mission directory. Directories without a
-`result.json` are reported as possible in-progress or crashed work and kept.
+`result.json` are reported as possible in-progress or crashed work and kept;
+their worktrees and branches are also kept, with liveness checked again
+immediately before every applied remove or branch delete.
 
 ## Cost accounting
 

@@ -6,16 +6,20 @@ Sol running in a worktree that nothing would ever release.
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from conductor import cli as cli_mod
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict, run_mission
-from conductor.runner import clear_stop, dispatch, request_stop
+from conductor.runner import clear_stop, dispatch, kill_live_groups, request_stop
+from conductor.verify import run_tests
 
 
 @pytest.fixture(autouse=True)
@@ -112,8 +116,6 @@ def test_a_stopped_mission_skips_what_has_not_started_and_still_reports(
 
 def test_wait_polls_the_stop_flag(monkeypatch):
     """The stop lands within one poll, whatever the run's timeout."""
-    import subprocess
-
     proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
     monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
     threading.Timer(0.3, request_stop).start()
@@ -122,6 +124,43 @@ def test_wait_polls_the_stop_flag(monkeypatch):
     assert time.monotonic() - started < 5
     assert interrupted and not timed_out and not over_cap
     assert code != 0
+
+
+def test_run_tests_registers_and_unregisters_its_process_group(repo, monkeypatch):
+    events: list[tuple[str, int]] = []
+    real_kill = runner_mod._kill_live_group
+    monkeypatch.setattr(
+        runner_mod, "_register_live_group", lambda pgid: events.append(("registered", pgid))
+    )
+
+    def kill(pgid: int) -> None:
+        events.append(("killed", pgid))
+        real_kill(pgid)
+
+    monkeypatch.setattr(runner_mod, "_kill_live_group", kill)
+    assert run_tests(str(repo), "true").passed
+    assert [event for event, _ in events] == ["registered", "killed"]
+    assert events[0][1] == events[1][1]
+
+
+def test_kill_live_groups_kills_a_registered_sleeping_group():
+    proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    runner_mod._register_live_group(proc.pid)
+    kill_live_groups()
+    proc.wait(timeout=5)
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)
+
+
+def test_a_second_signal_kills_live_groups_and_uses_the_signal_exit_status(monkeypatch):
+    exits: list[int] = []
+    killed: list[bool] = []
+    monkeypatch.setattr(cli_mod, "kill_live_groups", lambda: killed.append(True))
+    handler = cli_mod._stop_handler(exits.append)
+    handler(signal.SIGINT, None)
+    assert runner_mod.stop_requested() and not killed and not exits
+    handler(signal.SIGINT, None)
+    assert killed == [True] and exits == [130]
 
 
 def test_a_stop_during_the_gate_kills_the_suite_and_takes_the_commit_back(

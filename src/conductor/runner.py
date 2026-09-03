@@ -70,6 +70,7 @@ class Result:
     stdout_path: str
     stderr_path: str
     tail: str
+    spawned: bool = False  # True only after Popen returned a live process group.
     verdict: dict = field(default_factory=dict)
     tests: dict | None = None
     commit: dict | None = None
@@ -155,6 +156,7 @@ class Result:
             "model": self.model,
             "effort": self.effort,
             "mode": self.mode,
+            "spawned": self.spawned,
             "exit_code": self.exit_code,
             "timed_out": self.timed_out,
             "duration_s": round(self.duration_s, 1),
@@ -207,6 +209,28 @@ def _tail(path: Path, lines: int = TAIL_LINES) -> str:
 # fleet's process group is killed, the run is priced from the watcher and
 # receipted, and its worktree is released. Nothing is orphaned.
 _STOP = threading.Event()
+_LIVE_GROUPS: set[int] = set()
+_LIVE_GROUPS_LOCK = threading.Lock()
+
+
+def _register_live_group(pgid: int) -> None:
+    with _LIVE_GROUPS_LOCK:
+        _LIVE_GROUPS.add(pgid)
+
+
+def _kill_live_group(pgid: int) -> None:
+    """Kill and forget one group before its pid can be reused."""
+    killpg(pgid)
+    with _LIVE_GROUPS_LOCK:
+        _LIVE_GROUPS.discard(pgid)
+
+
+def kill_live_groups() -> None:
+    """Synchronously kill every fleet or gate process group still registered."""
+    with _LIVE_GROUPS_LOCK:
+        groups = tuple(_LIVE_GROUPS)
+    for pgid in groups:
+        _kill_live_group(pgid)
 
 
 def request_stop() -> None:
@@ -250,6 +274,18 @@ def dispatch(
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     base = home or conductor_home()
     run_id, run_dir = claim_dir(base / "runs", f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}")
+
+    checkout_before = GitState.capture(spec.cwd)
+    if spec.mode == "write" and not checkout_before.is_repo and not dry_run:
+        error = "write dispatch refused: cwd is not a git repository; only read mode may run there"
+        result = _refused_result(run_id, spec, model_id, timeout, run_dir, None, error)
+        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        return result
+    if commit_message and not isolate and checkout_before.dirty_files and not dry_run:
+        error = "commit refused: the checkout has uncommitted changes; use --isolate"
+        result = _refused_result(run_id, spec, model_id, timeout, run_dir, None, error)
+        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        return result
 
     # Isolation first, because everything after this line (argv, snapshots,
     # commit, tests) must see the worktree as the working directory, not the
@@ -302,6 +338,7 @@ def dispatch(
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
             tail="(dry run: nothing spawned)",
+            spawned=False,
             verdict=Verdict(checked=False, notes=["dry run"]).to_dict(),
             dry_run=True,
         )
@@ -337,6 +374,7 @@ def dispatch(
                 stderr=err,
                 start_new_session=True,
             )
+            _register_live_group(proc.pid)
         except OSError as exc:
             error = f"cannot spawn {fleet.binary}: {exc}"
         except Interrupted as exc:
@@ -378,6 +416,18 @@ def dispatch(
                     reason="the fleet committed its own work",
                 )
 
+    # A fleet's self-commit is landed work even when conductor was not asked
+    # to commit it. Recording it here makes the gate's rollback rule apply to
+    # every commit that would otherwise outlive a failed receipt.
+    moved = GitState.capture(spec.cwd)
+    if commit is None and moved.is_repo and moved.head and moved.head != before.head:
+        commit = CommitOutcome(
+            attempted=False,
+            committed=True,
+            sha=moved.head,
+            reason="the fleet committed its own work",
+        )
+
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
         tests = run_tests(spec.cwd, test_command, stop=stop_requested)
@@ -391,6 +441,7 @@ def dispatch(
 
     after = GitState.capture(spec.cwd)
     verdict = compare(spec.cwd, before, after)
+    verdict.notes.extend(output.notes)
     if commit and commit.deletions:
         verdict.notes.append(
             f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
@@ -470,6 +521,7 @@ def dispatch(
         stdout_path=str(stdout_path),
         stderr_path=str(stderr_path),
         tail=_tail(stderr_path) if (exit_code not in (0, None)) else _tail(stdout_path),
+        spawned=proc is not None,
         verdict=verdict.to_dict(),
         tests=tests.to_dict() if tests else None,
         commit=commit.to_dict() if commit else None,
@@ -523,7 +575,7 @@ def _wait(
         if watcher is not None and watcher.over_cap():
             over_cap = True
             break
-    killpg(proc.pid)
+    _kill_live_group(proc.pid)
     proc.wait()
     return proc.returncode, timed_out, over_cap, interrupted
 
@@ -554,7 +606,7 @@ def _refused_result(
     model_id: str,
     timeout: int,
     run_dir: Path,
-    iso: worktrees.Isolation,
+    iso: worktrees.Isolation | None,
     error: str,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
@@ -573,8 +625,9 @@ def _refused_result(
         stdout_path=str(run_dir / "stdout.log"),
         stderr_path=str(run_dir / "stderr.log"),
         tail="(not spawned)",
+        spawned=False,
         verdict=Verdict(checked=False, notes=[error]).to_dict(),
-        isolation=iso.to_dict(),
+        isolation=iso.to_dict() if iso is not None else None,
         error=error,
     )
 

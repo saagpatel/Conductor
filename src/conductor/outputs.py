@@ -32,7 +32,8 @@ Token convention after normalization, which prices.py relies on:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -72,6 +73,7 @@ class FleetOutput:
     parsed: bool = False
     status: str | None = None  # the fleet's own status word, when it has one
     error: str | None = None  # the fleet's own failure message, when it has one
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -79,6 +81,7 @@ class FleetOutput:
             "parsed": self.parsed,
             "status": self.status,
             "error": self.error,
+            "notes": self.notes,
             "usage": self.usage.to_dict() if self.usage else None,
         }
 
@@ -143,7 +146,23 @@ def _parse_cursor(text: str) -> FleetOutput:
         if said and not out.error:
             out.answer = said
         return out
-    return FleetOutput(answer=said, parsed=True)
+    for ev in reversed(events):
+        if ev.get("is_error") is True or ev.get("type") == "error":
+            if ev.get("type") == "error" and ev.get("is_error") is not True:
+                return FleetOutput(
+                    answer=said,
+                    parsed=True,
+                    status="error",
+                    error=str(ev.get("error") or ev.get("message") or "cursor reported error"),
+                )
+            out = _parse_envelope("cursor", ev, text)
+            out.answer = said
+            return out
+    return FleetOutput(
+        answer=said,
+        parsed=True,
+        error="cursor stream ended without a result event",
+    )
 
 
 def cursor_said(events: list[dict]) -> str:
@@ -231,7 +250,8 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
             fallback = str(payload.get("error") or subtype or "fleet reported is_error")
             error = answer or listed or fallback
 
-    usage = _usage_from_envelope(fleet, payload)
+    notes: list[str] = []
+    usage = _usage_from_envelope(fleet, payload, notes)
     # On a fleet-reported failure the text is the error, not an answer; it
     # belongs in `error`, not in answer.txt beside a result that is not ok.
     # An envelope with none of the known answer keys degrades to its raw
@@ -246,22 +266,35 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
         parsed=True,
         status=status,
         error=error,
+        notes=notes,
     )
 
 
-def _usage_from_envelope(fleet: str, payload: dict) -> Usage | None:
-    raw = payload.get("usage")
-    if not isinstance(raw, dict):
+def _reported_cost(value: object, notes: list[str], field: str) -> float | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+    ):
+        notes.append(f"ignored {field}: reported cost must be a finite non-negative number")
         return None
-    usage = usage_from_raw(fleet, raw)
-    reported = payload.get("total_cost_usd")
-    if isinstance(reported, (int, float)):
-        usage.cost_usd = float(reported)
-        usage.cost_basis = "reported"
+    return float(value)
+
+
+def _usage_from_envelope(fleet: str, payload: dict, notes: list[str]) -> Usage | None:
+    raw = payload.get("usage")
+    usage = usage_from_raw(fleet, raw, notes=notes) if isinstance(raw, dict) else None
+    if "total_cost_usd" in payload:
+        reported = _reported_cost(payload["total_cost_usd"], notes, "total_cost_usd")
+        if reported is not None:
+            usage = usage or Usage()
+            usage.cost_usd = reported
+            usage.cost_basis = "reported"
     return usage
 
 
-def usage_from_raw(fleet: str, raw: dict) -> Usage:
+def usage_from_raw(fleet: str, raw: dict, *, notes: list[str] | None = None) -> Usage:
     """One fleet's raw usage object, normalized to the convention above."""
     input_tokens = _int(raw, "input_tokens", "inputTokens")
     output_tokens = _int(raw, "output_tokens", "outputTokens")
@@ -276,13 +309,23 @@ def usage_from_raw(fleet: str, raw: dict) -> Usage:
         output_tokens += thinking
     elif fleet == "cursor":
         input_tokens = max(0, input_tokens - cache_read)
-    return Usage(
+    usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         thinking_tokens=thinking,
     )
+    note_list = notes if notes is not None else []
+    for field_name in ("cost_usd", "total_cost_usd"):
+        if field_name not in raw:
+            continue
+        reported = _reported_cost(raw[field_name], note_list, field_name)
+        if reported is not None:
+            usage.cost_usd = reported
+            usage.cost_basis = "reported"
+        break
+    return usage
 
 
 # --- codex: one JSON event per line -----------------------------------------
@@ -323,6 +366,8 @@ def _parse_codex(text: str) -> FleetOutput:
                 error = str(err.get("message") or err)
             else:
                 error = str(err or ev.get("message") or kind)
+    if status != "turn.completed" and error is None:
+        error = "codex stream ended without turn.completed"
     return FleetOutput(answer=answer, usage=usage, parsed=True, status=status, error=error)
 
 

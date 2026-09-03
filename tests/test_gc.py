@@ -10,6 +10,7 @@ from pathlib import Path
 
 from conductor import worktrees
 from conductor.cli import main
+from conductor.gc import apply_plan, build_plan
 
 
 def _git(cwd: Path | str, *args: str) -> str:
@@ -170,3 +171,54 @@ def test_gc_reports_a_missing_explicit_repo(home: Path, monkeypatch, capsys):
             "repo": str(missing),
         }
     ]
+
+
+def test_gc_apply_keeps_an_in_progress_runs_worktree_and_branch(
+    repo: Path, home: Path, monkeypatch, capsys
+):
+    run_id = "20200101T000000Z-live"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    (home / "runs" / run_id).mkdir(parents=True)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+
+    assert main(["gc", "--repo", str(repo), "--apply"]) == 0
+    rows = _rows(capsys.readouterr().out)
+    worktree = next(row for row in rows if row.get("path") == isolation.worktree)
+    branch = next(row for row in rows if row.get("name") == isolation.branch)
+    assert worktree["action"] == branch["action"] == "keep"
+    assert worktree["reason"] == branch["reason"] == "run in progress (no result.json)"
+    assert Path(isolation.worktree).is_dir()
+    assert isolation.branch in _git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
+def test_gc_rechecks_run_liveness_immediately_before_remove_and_delete(repo: Path, home: Path):
+    run_id = "20200101T000000Z-became-live"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    plans, notices = build_plan(home, [str(repo)], 0)
+    assert any(item.action == "remove" for item in plans[0].items)
+
+    (home / "runs" / run_id).mkdir(parents=True)
+    assert apply_plan(plans, notices, home) is False
+    worktree = next(item for item in plans[0].items if item.path == isolation.worktree)
+    branch = next(item for item in plans[0].items if item.name == isolation.branch)
+    assert worktree.action == branch.action == "keep"
+    assert Path(isolation.worktree).is_dir()
+    assert isolation.branch in _git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
+def test_gc_keeps_a_completed_lane_worktree_while_its_mission_is_running(
+    repo: Path, home: Path, monkeypatch, capsys
+):
+    run_id = "20200101T000000Z-mission-lane"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    _receipt(home, run_id, repo)
+    lane_dir = home / "missions" / "20200101T000000Z-live" / "lanes"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "build.json").write_text(json.dumps({"attempts": [{"run_id": run_id}]}))
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+
+    assert main(["gc", "--apply"]) == 0
+    rows = _rows(capsys.readouterr().out)
+    worktree = next(row for row in rows if row.get("path") == isolation.worktree)
+    assert worktree["reason"] == "run in progress (no result.json)"
+    assert Path(isolation.worktree).is_dir()

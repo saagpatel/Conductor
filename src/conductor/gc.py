@@ -156,7 +156,41 @@ def _branch_disposition(repo: Path, name: str, tip: str) -> tuple[str, str, int 
     return "keep", "unmerged commits", count
 
 
-def _plan_repo(repo: Path, worktree_root: Path, older_than: float, now: datetime) -> RepoPlan:
+def _in_progress_run_ids(home: Path) -> set[str]:
+    """Runs whose only worktree/branch copy may still be in use."""
+    protected: set[str] = set()
+    runs = home / "runs"
+    if runs.is_dir():
+        protected.update(
+            directory.name
+            for directory in runs.iterdir()
+            if directory.is_dir() and not (directory / "result.json").is_file()
+        )
+    missions = home / "missions"
+    if not missions.is_dir():
+        return protected
+    for mission_dir in missions.iterdir():
+        if not mission_dir.is_dir() or (mission_dir / "result.json").is_file():
+            continue
+        lanes_dir = mission_dir / "lanes"
+        for receipt in lanes_dir.glob("*.json") if lanes_dir.is_dir() else ():
+            data = _json_object(receipt)
+            attempts = data.get("attempts") if data is not None else None
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
+                    protected.add(attempt["run_id"])
+    return protected
+
+
+def _plan_repo(
+    repo: Path,
+    worktree_root: Path,
+    older_than: float,
+    now: datetime,
+    protected_runs: set[str],
+) -> RepoPlan:
     items: list[Item] = []
     worktrees, error = _parse_worktrees(repo)
     if error:
@@ -170,6 +204,13 @@ def _plan_repo(repo: Path, worktree_root: Path, older_than: float, now: datetime
         path = worktree.path
         if not _inside(path, worktree_root):
             reason = "outside CONDUCTOR_HOME/worktrees"
+            items.append(Item(str(repo), "worktree", "keep", reason, path=str(path)))
+            if worktree.branch:
+                kept_branches[worktree.branch] = reason
+            continue
+
+        if path.name in protected_runs:
+            reason = "run in progress (no result.json)"
             items.append(Item(str(repo), "worktree", "keep", reason, path=str(path)))
             if worktree.branch:
                 kept_branches[worktree.branch] = reason
@@ -222,6 +263,8 @@ def _plan_repo(repo: Path, worktree_root: Path, older_than: float, now: datetime
             continue
         if name in kept_branches:
             action, reason, ahead = "keep", kept_branches[name], None
+        elif name.removeprefix("conductor/") in protected_runs:
+            action, reason, ahead = "keep", "run in progress (no result.json)", None
         else:
             age_reason = _age_reason(name.removeprefix("conductor/"), older_than, now)
             if age_reason:
@@ -262,6 +305,7 @@ def build_plan(
     plans: list[RepoPlan] = []
     notices: list[Item] = []
     seen: set[Path] = set()
+    protected_runs = _in_progress_run_ids(home)
     for candidate in _candidate_repos(home, explicit_repos):
         if not candidate.exists():
             notices.append(
@@ -284,7 +328,9 @@ def build_plan(
         if repo in seen:
             continue
         seen.add(repo)
-        plans.append(_plan_repo(repo, (home / "worktrees").resolve(), older_than, now))
+        plans.append(
+            _plan_repo(repo, (home / "worktrees").resolve(), older_than, now, protected_runs)
+        )
     notices.extend(_audit_items(home))
     return plans, notices
 
@@ -333,10 +379,15 @@ def _apply_prunes(plan: RepoPlan, worktree_root: Path) -> bool:
     return any(item.done is not True for item in targets)
 
 
-def _apply_removes(plan: RepoPlan, worktree_root: Path) -> bool:
+def _apply_removes(plan: RepoPlan, worktree_root: Path, home: Path) -> bool:
     failed = False
     for item in (entry for entry in plan.items if entry.action == "remove"):
         path = Path(item.path)
+        if path.name in _in_progress_run_ids(home):
+            item.action = "keep"
+            item.reason = "run in progress (no result.json)"
+            item.done = True
+            continue
         if not _inside(path, worktree_root):
             item.done = False
             item.error = "worktree is outside CONDUCTOR_HOME/worktrees"
@@ -347,6 +398,13 @@ def _apply_removes(plan: RepoPlan, worktree_root: Path) -> bool:
             item.done = False
             item.error = "worktree is no longer clean"
             failed = True
+            continue
+        # Planning and the earlier checks can both go stale; this read is
+        # deliberately adjacent to the destructive command it guards.
+        if path.name in _in_progress_run_ids(home):
+            item.action = "keep"
+            item.reason = "run in progress (no result.json)"
+            item.done = True
             continue
         removed = git_run(plan.repo, "worktree", "remove", str(path))
         remaining, error = _parse_worktrees(plan.repo)
@@ -363,9 +421,14 @@ def _apply_removes(plan: RepoPlan, worktree_root: Path) -> bool:
     return failed
 
 
-def _apply_branches(plan: RepoPlan) -> bool:
+def _apply_branches(plan: RepoPlan, home: Path) -> bool:
     failed = False
     for item in (entry for entry in plan.items if entry.action == "delete-branch"):
+        if item.name.removeprefix("conductor/") in _in_progress_run_ids(home):
+            item.action = "keep"
+            item.reason = "run in progress (no result.json)"
+            item.done = True
+            continue
         if not item.name.startswith("conductor/"):
             item.done = False
             item.error = "refusing a branch outside conductor/"
@@ -392,6 +455,13 @@ def _apply_branches(plan: RepoPlan) -> bool:
             item.error = "branch is no longer safely contained"
             failed = True
             continue
+        # Reachability is not liveness. Re-read the run immediately before
+        # deleting the ref so a newly started run wins the race with gc.
+        if item.name.removeprefix("conductor/") in _in_progress_run_ids(home):
+            item.action = "keep"
+            item.reason = "run in progress (no result.json)"
+            item.done = True
+            continue
         deleted = git_run(plan.repo, "branch", "-D", "--", item.name)
         item.done = deleted.returncode == 0 and not _current_tip(plan.repo, item.name)
         if not item.done:
@@ -408,8 +478,8 @@ def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
     worktree_root = (home / "worktrees").resolve()
     for plan in plans:
         failed = _apply_prunes(plan, worktree_root) or failed
-        failed = _apply_removes(plan, worktree_root) or failed
-        failed = _apply_branches(plan) or failed
+        failed = _apply_removes(plan, worktree_root, home) or failed
+        failed = _apply_branches(plan, home) or failed
         for item in plan.items:
             if item.action == "keep":
                 item.done = True
