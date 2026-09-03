@@ -115,7 +115,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     state = GitState.capture(cwd)
     out: dict = {"cwd": cwd, "git": state.__dict__}
     if args.test:
-        out["tests"] = run_tests(cwd, args.test).to_dict()
+        out["tests"] = run_tests(cwd, args.test, stop=stop_requested).to_dict()
     print(json.dumps(out, indent=2))
     if args.test and out["tests"]["exit_code"] != 0:
         return 1

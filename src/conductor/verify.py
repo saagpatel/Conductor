@@ -49,6 +49,7 @@ def git_run(
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            errors="surrogateescape",
             timeout=timeout,
             check=False,
         )
@@ -72,7 +73,7 @@ class GitState:
     manifest: str = ""
 
     @classmethod
-    def capture(cls, cwd: str) -> GitState:
+    def capture(cls, cwd: str, *, content: bool = True) -> GitState:
         top = _git(cwd, "rev-parse", "--show-toplevel")
         if top.returncode != 0:
             return cls(is_repo=False)
@@ -87,7 +88,7 @@ class GitState:
             head=head.stdout.strip() if head.returncode == 0 else "",
             branch=branch.stdout.strip() if branch.returncode == 0 else "",
             dirty_files=len(entries),
-            manifest=_manifest(root, status.stdout, entries),
+            manifest=_manifest(root, status.stdout, entries) if content else "",
         )
 
 
@@ -116,10 +117,18 @@ def _manifest(root: Path, status: str, entries: list[tuple[str, str]]) -> str:
         try:
             if path.is_symlink():
                 content = os.readlink(path).encode(errors="surrogateescape")
+                size = len(content)
+                content_hash = sha256(content).hexdigest()
             else:
-                content = path.read_bytes()
-            size = len(content)
-            content_hash = sha256(content).hexdigest()
+                # A large untracked tree must not be duplicated in RSS merely
+                # to prove its bytes moved; stream the same complete hash.
+                content_digest = sha256()
+                size = 0
+                with path.open("rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        size += len(chunk)
+                        content_digest.update(chunk)
+                content_hash = content_digest.hexdigest()
         except OSError:
             size = -1
             content_hash = "missing"

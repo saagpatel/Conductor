@@ -5,6 +5,7 @@ Sol running in a worktree that nothing would ever release.
 
 from __future__ import annotations
 
+import argparse
 import os
 import signal
 import subprocess
@@ -19,6 +20,7 @@ from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import clear_stop, dispatch, kill_live_groups, request_stop
+from conductor.verify import TestOutcome as GateOutcome
 from conductor.verify import run_tests
 
 
@@ -102,6 +104,7 @@ def test_a_stopped_mission_skips_what_has_not_started_and_still_reports(
     assert result.interrupted is True and result.ok is False
     # A stopped, unpriced run is not "unverifiable" spend: it was cut, not lost.
     assert result.budget["unverifiable"] is False and result.budget["unpriced_dispatches"] == 0
+    assert first["unpriced_attempts"] == 0
     assert first["attempts"][0]["error"].startswith("interrupted")
     # `second` was queued behind the pool slot and refused at its own start;
     # `third` never left pending. Both say why and neither spawned a fleet.
@@ -111,6 +114,7 @@ def test_a_stopped_mission_skips_what_has_not_started_and_still_reports(
     assert result.collate is None  # the judge is not spent on a run that was cut short
     report = Path(result.report_path).read_text()
     assert "**Interrupted**" in report
+    assert "unpriced)" not in report
     assert (Path(result.mission_dir) / "lanes" / "third.json").is_file()
 
 
@@ -161,6 +165,29 @@ def test_a_second_signal_kills_live_groups_and_uses_the_signal_exit_status(monke
     assert runner_mod.stop_requested() and not killed and not exits
     handler(signal.SIGINT, None)
     assert killed == [True] and exits == [130]
+
+
+def test_live_group_registry_lock_is_reentrant_for_a_signal_handler():
+    lock = runner_mod._LIVE_GROUPS_LOCK
+    assert lock.acquire()
+    try:
+        assert lock.acquire(blocking=False)
+        lock.release()
+    finally:
+        lock.release()
+
+
+def test_verify_passes_the_stop_request_to_its_gate(repo, monkeypatch, capsys):
+    seen: dict[str, object] = {}
+
+    def gate(cwd: str, command: str, *, stop):
+        seen.update(cwd=cwd, command=command, stop=stop)
+        return GateOutcome(ran=True, exit_code=0)
+
+    monkeypatch.setattr(cli_mod, "run_tests", gate)
+    assert cli_mod.cmd_verify(argparse.Namespace(cwd=str(repo), test="true")) == 0
+    capsys.readouterr()
+    assert seen == {"cwd": str(repo), "command": "true", "stop": runner_mod.stop_requested}
 
 
 def test_a_stop_during_the_gate_kills_the_suite_and_takes_the_commit_back(

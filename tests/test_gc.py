@@ -8,6 +8,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from conductor import gc as gc_mod
 from conductor import worktrees
 from conductor.cli import main
 from conductor.gc import apply_plan, build_plan
@@ -204,6 +205,24 @@ def test_gc_rechecks_run_liveness_immediately_before_remove_and_delete(repo: Pat
     assert worktree.action == branch.action == "keep"
     assert Path(isolation.worktree).is_dir()
     assert isolation.branch in _git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
+def test_gc_apply_scans_in_progress_receipts_once(repo: Path, home: Path, monkeypatch):
+    for suffix in ("one", "two"):
+        worktrees.create(str(repo), f"20200101T000000Z-{suffix}", home / "worktrees")
+    plans, notices = build_plan(home, [str(repo)], 0)
+
+    calls = 0
+    real_scan = gc_mod._in_progress_run_ids
+
+    def scan(scan_home: Path) -> set[str]:
+        nonlocal calls
+        calls += 1
+        return real_scan(scan_home)
+
+    monkeypatch.setattr(gc_mod, "_in_progress_run_ids", scan)
+    assert apply_plan(plans, notices, home) is False
+    assert calls == 1
 
 
 def test_gc_keeps_a_completed_lane_worktree_while_its_mission_is_running(

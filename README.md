@@ -113,6 +113,9 @@ no workers behind.
 
 A non-isolated `--commit` is refused when the checkout already has tracked or
 untracked changes; use `--isolate` so conductor cannot sweep up operator work.
+Only a descendant commit on the dispatch's original branch is treated as a
+fleet self-commit; switching to an existing branch never makes that history
+eligible for gate rollback.
 
 Deletions are staged like anything else and named explicitly in the receipt. A
 bulk stage that quietly swallows removed source files is the failure that

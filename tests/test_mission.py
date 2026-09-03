@@ -375,6 +375,40 @@ def test_report_marks_unpriced_attempts_instead_of_rendering_them_as_zero(
     assert "(1 unpriced)" in Path(result.report_path).read_text()
 
 
+def test_report_marks_the_attempt_that_was_unpriced(repo, home, monkeypatch, tmp_path):
+    unpriced = json.dumps({"result": "try one"})
+    fake_fleets(
+        monkeypatch,
+        {
+            "claude": ["sh", "-c", f"echo '{unpriced}'; exit 1"],
+            "cursor": say("fallback", cost=0.42),
+        },
+    )
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "cwd": str(repo),
+            "lanes": [
+                {
+                    "name": "report",
+                    "fleet": "claude",
+                    "fallback": [{"fleet": "cursor"}],
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    rows = [
+        line
+        for line in Path(result.report_path).read_text().splitlines()
+        if line.startswith("| report |")
+    ]
+    primary, fallback = rows
+    assert "(1 unpriced)" in primary
+    assert "0.4200" in fallback and "unpriced" not in fallback
+
+
 def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(
     repo, home, monkeypatch, tmp_path, git_out
 ):

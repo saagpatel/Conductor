@@ -18,11 +18,12 @@ from pathlib import Path
 import pytest
 
 from conductor import runner as runner_mod
+from conductor import verify as verify_mod
 from conductor.fleets import Spec, build_argv
 from conductor.mission import mission_from_dict, run_mission
 from conductor.outputs import parse
 from conductor.runner import dispatch
-from conductor.verify import diff_since, run_tests
+from conductor.verify import GitState, diff_since, git_run, run_tests
 
 
 def spec_for(repo: Path, **kw) -> Spec:
@@ -239,6 +240,57 @@ def test_a_fleets_self_commit_is_undone_when_the_gate_fails(repo, home, fake_fle
     assert result.commit["committed"] is False and "undone" in result.commit["reason"]
     assert git_out(repo, "log", "--oneline").count("\n") == 0
     assert "self.txt" in git_out(repo, "diff", "--cached", "--name-only")
+
+
+def test_switching_branches_is_not_mistaken_for_a_self_commit(
+    repo, home, fake_fleet, git_out
+):
+    subprocess.run(["git", "switch", "-qc", "side"], cwd=repo, check=True)
+    (repo / "side.txt").write_text("important side work\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "important side work"], cwd=repo, check=True)
+    side_tip = git_out(repo, "rev-parse", "HEAD")
+    subprocess.run(["git", "switch", "-q", "main"], cwd=repo, check=True)
+
+    fake_fleet(["git", "switch", "-q", "side"])
+    result = dispatch(spec_for(repo, mode="write"), test_command="exit 1", home=home)
+
+    assert result.summary()["failure"] == "gate exited 1"
+    assert result.commit is None
+    assert git_out(repo, "rev-parse", "side") == side_tip
+    assert "important side work" in git_out(repo, "log", "--all", "--format=%s")
+
+
+def test_dispatch_takes_only_two_content_manifests(repo, home, fake_fleet, monkeypatch):
+    calls = 0
+    real_manifest = verify_mod._manifest
+
+    def manifest(*args):
+        nonlocal calls
+        calls += 1
+        return real_manifest(*args)
+
+    monkeypatch.setattr(verify_mod, "_manifest", manifest)
+    fake_fleet(["sh", "-c", "echo work > work.txt"])
+    dispatch(spec_for(repo, mode="write"), home=home)
+    assert calls == 2
+
+
+def test_manifest_streams_file_content_instead_of_reading_it_whole(repo, monkeypatch):
+    (repo / "large.bin").write_bytes(b"x" * 1024 * 1024)
+
+    def whole_file_read(_path):
+        raise AssertionError("manifest loaded a dirty file whole")
+
+    monkeypatch.setattr(Path, "read_bytes", whole_file_read)
+    state = GitState.capture(str(repo))
+    assert state.manifest
+
+
+def test_git_run_surrogateescapes_non_utf8_output(repo):
+    result = git_run(repo, "-c", r'alias.raw=!printf "\\377"', "raw")
+    assert result.returncode == 0
+    assert result.stdout.encode("utf-8", errors="surrogateescape") == b"\xff"
 
 
 def test_a_fleet_that_reports_failure_is_never_committed(repo, home, fake_fleet, git_out):

@@ -38,6 +38,7 @@ from .verify import (
     commit_work,
     compare,
     diff_since,
+    git_run,
     killpg,
     run_tests,
     uncommit,
@@ -210,7 +211,7 @@ def _tail(path: Path, lines: int = TAIL_LINES) -> str:
 # receipted, and its worktree is released. Nothing is orphaned.
 _STOP = threading.Event()
 _LIVE_GROUPS: set[int] = set()
-_LIVE_GROUPS_LOCK = threading.Lock()
+_LIVE_GROUPS_LOCK = threading.RLock()
 
 
 def _register_live_group(pgid: int) -> None:
@@ -275,7 +276,9 @@ def dispatch(
     base = home or conductor_home()
     run_id, run_dir = claim_dir(base / "runs", f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}")
 
-    checkout_before = GitState.capture(spec.cwd)
+    # Refusals need repository identity and dirty-file presence, not a hash
+    # of every operator-owned untracked byte in the shared checkout.
+    checkout_before = GitState.capture(spec.cwd, content=False)
     if spec.mode == "write" and not checkout_before.is_repo and not dry_run:
         error = "write dispatch refused: cwd is not a git repository; only read mode may run there"
         result = _refused_result(run_id, spec, model_id, timeout, run_dir, None, error)
@@ -404,27 +407,18 @@ def dispatch(
     commit: CommitOutcome | None = None
     if commit_message and not timed_out and error is None and exit_code == 0 and not output.error:
         commit = commit_work(spec.cwd, commit_message)
-        if not commit.committed and commit.reason == "nothing to commit":
-            # Claude Code, Cursor, and Antigravity may commit on their own;
-            # a clean tree with a moved HEAD is landed work, not a no-show.
-            moved = GitState.capture(spec.cwd)
-            if moved.is_repo and moved.head and moved.head != before.head:
-                commit = CommitOutcome(
-                    attempted=True,
-                    committed=True,
-                    sha=moved.head,
-                    reason="the fleet committed its own work",
-                )
-
     # A fleet's self-commit is landed work even when conductor was not asked
-    # to commit it. Recording it here makes the gate's rollback rule apply to
-    # every commit that would otherwise outlive a failed receipt.
-    moved = GitState.capture(spec.cwd)
-    if commit is None and moved.is_repo and moved.head and moved.head != before.head:
+    # to commit it. Only a descendant on the same branch belongs to this run:
+    # treating a checkout of an existing branch as a commit would reset that
+    # branch's unrelated history when the gate fails.
+    self_commit = None
+    if commit is None or (not commit.committed and commit.reason == "nothing to commit"):
+        self_commit = _self_commit_sha(spec.cwd, before)
+    if self_commit:
         commit = CommitOutcome(
-            attempted=False,
+            attempted=commit is not None,
             committed=True,
-            sha=moved.head,
+            sha=self_commit,
             reason="the fleet committed its own work",
         )
 
@@ -542,6 +536,21 @@ def dispatch(
 
 class Interrupted(Exception):
     """A stop was requested before this dispatch could spawn its fleet."""
+
+
+def _self_commit_sha(cwd: str, before: GitState) -> str | None:
+    """A new descendant on the same branch, never an unrelated checkout."""
+    head = git_run(cwd, "rev-parse", "HEAD")
+    branch = git_run(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    if head.returncode != 0 or branch.returncode != 0:
+        return None
+    sha = head.stdout.strip()
+    if not sha or sha == before.head or branch.stdout.strip() != before.branch:
+        return None
+    if not before.head:  # the fleet made the repository's first commit
+        return sha
+    ancestor = git_run(cwd, "merge-base", "--is-ancestor", before.head, sha)
+    return sha if ancestor.returncode == 0 else None
 
 
 def _wait(

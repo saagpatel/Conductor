@@ -742,9 +742,12 @@ def run_mission(
             summary = result.summary()
             summary["lane"] = lane.name
             summary["attempt"] = attempt.label()
+            summary["unpriced"] = (
+                result.spawned and not result.interrupted and summary.get("cost_usd") is None
+            )
             out.attempts.append(summary)
             out.cost_usd += float(summary.get("cost_usd") or 0.0)
-            if result.spawned and summary.get("cost_usd") is None:
+            if summary["unpriced"]:
                 out.unpriced_attempts += 1
             out.tokens += int(summary.get("tokens") or 0)
             # A lane's answer, diff, and tree are its final attempt's. A failed
@@ -1077,8 +1080,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             lines.append(f"| {lane.name} | (skipped) | False | | | | | | | |")
         for a in lane.attempts:
             cost = _usd(a.get("cost_usd"))
-            if a is lane.attempts[-1] and lane.unpriced_attempts:
-                cost += f" ({lane.unpriced_attempts} unpriced)"
+            if a.get("unpriced"):
+                cost += " (1 unpriced)"
             lines.append(
                 f"| {lane.name} | {a['attempt']} | {a['ok']} | {a['exit_code']} | "
                 f"{a['no_op']} | {a['commits']} | {a.get('branch') or ''} | "

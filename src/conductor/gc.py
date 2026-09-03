@@ -184,6 +184,14 @@ def _in_progress_run_ids(home: Path) -> set[str]:
     return protected
 
 
+def _run_in_progress(home: Path, run_id: str, protected_runs: set[str]) -> bool:
+    """The cached mission set plus an adjacent stat of this one run."""
+    run_dir = home / "runs" / run_id
+    return run_id in protected_runs or (
+        run_dir.is_dir() and not (run_dir / "result.json").is_file()
+    )
+
+
 def _plan_repo(
     repo: Path,
     worktree_root: Path,
@@ -379,11 +387,13 @@ def _apply_prunes(plan: RepoPlan, worktree_root: Path) -> bool:
     return any(item.done is not True for item in targets)
 
 
-def _apply_removes(plan: RepoPlan, worktree_root: Path, home: Path) -> bool:
+def _apply_removes(
+    plan: RepoPlan, worktree_root: Path, home: Path, protected_runs: set[str]
+) -> bool:
     failed = False
     for item in (entry for entry in plan.items if entry.action == "remove"):
         path = Path(item.path)
-        if path.name in _in_progress_run_ids(home):
+        if _run_in_progress(home, path.name, protected_runs):
             item.action = "keep"
             item.reason = "run in progress (no result.json)"
             item.done = True
@@ -401,7 +411,7 @@ def _apply_removes(plan: RepoPlan, worktree_root: Path, home: Path) -> bool:
             continue
         # Planning and the earlier checks can both go stale; this read is
         # deliberately adjacent to the destructive command it guards.
-        if path.name in _in_progress_run_ids(home):
+        if _run_in_progress(home, path.name, protected_runs):
             item.action = "keep"
             item.reason = "run in progress (no result.json)"
             item.done = True
@@ -421,10 +431,11 @@ def _apply_removes(plan: RepoPlan, worktree_root: Path, home: Path) -> bool:
     return failed
 
 
-def _apply_branches(plan: RepoPlan, home: Path) -> bool:
+def _apply_branches(plan: RepoPlan, home: Path, protected_runs: set[str]) -> bool:
     failed = False
     for item in (entry for entry in plan.items if entry.action == "delete-branch"):
-        if item.name.removeprefix("conductor/") in _in_progress_run_ids(home):
+        run_id = item.name.removeprefix("conductor/")
+        if _run_in_progress(home, run_id, protected_runs):
             item.action = "keep"
             item.reason = "run in progress (no result.json)"
             item.done = True
@@ -457,7 +468,7 @@ def _apply_branches(plan: RepoPlan, home: Path) -> bool:
             continue
         # Reachability is not liveness. Re-read the run immediately before
         # deleting the ref so a newly started run wins the race with gc.
-        if item.name.removeprefix("conductor/") in _in_progress_run_ids(home):
+        if _run_in_progress(home, run_id, protected_runs):
             item.action = "keep"
             item.reason = "run in progress (no result.json)"
             item.done = True
@@ -476,10 +487,14 @@ def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
     """Apply the planned order and read back every destructive action."""
     failed = False
     worktree_root = (home / "worktrees").resolve()
+    # Mission receipts cannot begin referring to an existing run id after
+    # this scan; each attempt claims a fresh run. Cache that expensive walk,
+    # then stat the one run beside every remove/delete so new runs still win.
+    protected_runs = _in_progress_run_ids(home)
     for plan in plans:
         failed = _apply_prunes(plan, worktree_root) or failed
-        failed = _apply_removes(plan, worktree_root, home) or failed
-        failed = _apply_branches(plan, home) or failed
+        failed = _apply_removes(plan, worktree_root, home, protected_runs) or failed
+        failed = _apply_branches(plan, home, protected_runs) or failed
         for item in plan.items:
             if item.action == "keep":
                 item.done = True
