@@ -10,15 +10,19 @@ patches sat unread on disk.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 from conductor import runner as runner_mod
 from conductor.fleets import Spec, build_argv
 from conductor.mission import mission_from_dict, run_mission
 from conductor.outputs import parse
 from conductor.runner import dispatch
-from conductor.verify import diff_since
+from conductor.verify import diff_since, run_tests
 
 
 def spec_for(repo: Path, **kw) -> Spec:
@@ -177,3 +181,109 @@ def test_a_no_op_dispatch_records_no_diff(repo, home, fake_fleet):
     fake_fleet(["sh", "-c", "echo 'looked around'"])
     result = dispatch(spec_for(repo), home=home)
     assert result.diff_path is None and result.summary()["diff_path"] is None
+
+
+# --- cursor's plan mode files its answer as a plan ---------------------------
+
+
+def test_cursor_plan_is_read_as_the_answer():
+    """Composer wrote a full four-finding audit into a createPlan tool call
+    and said only "auditing..." out loud (live, 2026-09-03)."""
+    plan_call = {"createPlanToolCall": {"args": {"plan": "# Audit\n\n## Finding 1\n\nreal."}}}
+    lines = [
+        _assistant("Auditing the codebase."),
+        json.dumps({"type": "tool_call", "subtype": "started", "tool_call": plan_call}),
+        json.dumps({"type": "tool_call", "subtype": "completed", "tool_call": plan_call}),
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": ""}),
+    ]
+    out = parse("cursor", "\n".join(lines))
+    assert out.answer.count("## Finding 1") == 1
+    assert out.answer.startswith("Auditing the codebase.")
+
+
+# --- the four-fleet trust audit's confirmed findings -------------------------
+
+
+def test_a_failed_gate_takes_its_commit_back_off_the_branch(repo, home, fake_fleet, git_out):
+    """A branch must never carry a commit that failed its gate; the receipt
+    says not ok, but the commit would outlive the receipt."""
+    fake_fleet(["sh", "-c", "echo work > f.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write"), commit_message="feat: x", test_command="exit 1", home=home
+    )
+    assert result.summary()["failure"] == "gate exited 1"
+    assert result.commit["committed"] is False and "undone" in result.commit["reason"]
+    assert result.summary()["committed"] is None
+    assert git_out(repo, "log", "--oneline").count("\n") == 0  # only the seed commit
+    assert git_out(repo, "status", "--porcelain") == "A  f.txt"  # the work stays, staged
+    assert result.verdict["commits_added"] == 0 and result.verdict["dirty_delta"] == 1
+    assert any("undone" in n for n in result.verdict["notes"])
+
+
+def test_a_fleet_that_reports_failure_is_never_committed(repo, home, fake_fleet, git_out):
+    envelope = '{"status":"ERROR","response":"","error":"boom"}'
+    fake_fleet(["sh", "-c", f"echo work > f.txt; echo '{envelope}'"])
+    result = dispatch(
+        spec_for(repo, fleet="antigravity", mode="write"), commit_message="feat: x", home=home
+    )
+    assert result.commit is None
+    assert git_out(repo, "log", "--oneline").count("\n") == 0
+    assert result.summary()["failure"] == "fleet reported: boom"
+
+
+def test_a_timed_out_gate_leaves_no_grandchild(repo):
+    """The gate gets a process group like a fleet: a killed suite must not
+    leave workers behind to keep editing the tree after the verdict."""
+    marker = repo / "gate-child.pid"
+    outcome = run_tests(str(repo), f"sleep 60 & echo $! > {marker}; sleep 60", timeout=2)
+    assert outcome.timed_out is True
+    pid = int(marker.read_text().strip())
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_an_unpriced_dispatch_makes_the_mission_budget_unverifiable(
+    repo, home, monkeypatch, tmp_path
+):
+    silent = json.dumps({"result": "done, trust me"})  # no usage, no cost
+    by_fleet = {
+        "claude": ["sh", "-c", f"echo '{silent}'"],
+        "cursor": ["sh", "-c", f"echo '{silent}'"],
+    }
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: by_fleet[spec.fleet])
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "concurrency": 1,
+        "max_cost_usd": 5.0,
+        "lanes": [{"fleet": "claude"}, {"fleet": "cursor"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    first, second = result.lanes
+    # Two layers agree: the budget's remainder capped lane one, so its silent
+    # run failed closed at dispatch level; the ledger then stops lane two.
+    assert first["attempts"][0]["failure"] == "cap unenforced: the run came back unpriced"
+    assert second["attempts"] == [] and "budget unverifiable" in second["skipped"]
+    assert result.budget["unverifiable"] is True and result.budget["spent_usd"] == 0.0
+
+
+def test_read_lanes_are_isolated_so_a_misbehaving_fleet_cannot_touch_the_checkout(
+    repo, home, monkeypatch, tmp_path, git_out
+):
+    said = json.dumps({"result": "looked around", "usage": {"input_tokens": 1, "output_tokens": 1}})
+    by_fleet = {"claude": ["sh", "-c", f"echo leak > leak.txt; echo '{said}'"]}
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: by_fleet[spec.fleet])
+    raw = {"prompt": "x", "cwd": str(repo), "lanes": [{"fleet": "claude"}]}
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    attempt = result.lanes[0]["attempts"][0]
+    assert attempt["failure"] == "read dispatch moved bytes"
+    assert attempt["branch"] and attempt["worktree"]  # kept, with the leak in it
+    assert git_out(repo, "status", "--porcelain") == ""
+    assert not (repo / "leak.txt").exists()

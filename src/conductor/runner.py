@@ -16,9 +16,7 @@ the obvious implementation fails in an unattended run:
 from __future__ import annotations
 
 import json
-import os
 import re
-import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -39,7 +37,9 @@ from .verify import (
     commit_work,
     compare,
     diff_since,
+    killpg,
     run_tests,
+    uncommit,
 )
 
 TAIL_LINES = 20
@@ -310,11 +310,23 @@ def dispatch(
 
     duration = time.monotonic() - started
 
+    # The fleet's own envelope first: a fleet that says it failed (on any
+    # exit code) must not have its work committed as if it had succeeded.
+    output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+
     # Commit before the verdict is taken, so the verdict describes the state
     # the caller is actually left with.
     commit: CommitOutcome | None = None
-    if commit_message and not timed_out and error is None and exit_code == 0:
+    if commit_message and not timed_out and error is None and exit_code == 0 and not output.error:
         commit = commit_work(spec.cwd, commit_message)
+
+    tests: TestOutcome | None = None
+    if test_command and not timed_out and error is None:
+        tests = run_tests(spec.cwd, test_command)
+        if commit and commit.committed and (tests.timed_out or tests.exit_code != 0):
+            # A branch must never carry a commit that failed its gate; the
+            # work stays staged in the tree for the kept worktree.
+            commit = uncommit(spec.cwd, commit, before.head)
 
     after = GitState.capture(spec.cwd)
     verdict = compare(spec.cwd, before, after)
@@ -322,6 +334,8 @@ def dispatch(
         verdict.notes.append(
             f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
         )
+    if commit and not commit.committed and commit.reason.startswith("gate failed"):
+        verdict.notes.append(commit.reason)
     diff_path: str | None = None
     if verdict.checked and not verdict.no_op and before.head:
         # The patch is the evidence a judge should see; the answer is a claim.
@@ -330,14 +344,9 @@ def dispatch(
             (run_dir / "diff.patch").write_text(patch)
             diff_path = str(run_dir / "diff.patch")
 
-    tests: TestOutcome | None = None
-    if test_command and not timed_out and error is None:
-        tests = run_tests(spec.cwd, test_command)
-
-    # Normalize the fleet's own envelope: the answer goes to its own file so a
-    # caller can read it without wading through a transcript, and usage is
-    # recorded now, while the evidence is still on disk.
-    output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+    # The answer goes to its own file so a caller can read it without wading
+    # through a transcript, and usage is recorded now, while the evidence is
+    # still on disk.
     answer = output.answer
     if not answer and spec_with_paths.last_message:
         # Codex writes its final message to the -o file; if the event stream
@@ -438,27 +447,9 @@ def _wait(
         if watcher is not None and watcher.over_cap():
             over_cap = True
             break
-    _killpg(proc.pid)
+    killpg(proc.pid)
     proc.wait()
     return proc.returncode, timed_out, over_cap
-
-
-def _killpg(pid: int) -> None:
-    """SIGKILL the process group the child leads.
-
-    start_new_session makes the child a session and group leader, so the
-    group id is its pid. That matters after the child has exited: the pid is
-    reaped by then and a getpgid lookup would fail, but the group lives on
-    while any straggler does, and killpg by id still reaches them. The kernel
-    will not hand that pid to a new process while the group has members, so
-    the only misfire would be a brand-new process that both took the freed
-    pid and made itself a group leader inside the microseconds between the
-    reap and this call; that window is accepted.
-    """
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def claim_dir(parent: Path, name: str) -> tuple[str, Path]:

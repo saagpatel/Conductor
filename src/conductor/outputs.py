@@ -147,9 +147,18 @@ def _parse_cursor(text: str) -> FleetOutput:
 
 
 def cursor_said(events: list[dict]) -> str:
-    """Every text block from every assistant event, in order."""
+    """Every text block from every assistant event, in order, plus any plan
+    the agent filed: in plan mode Cursor delivers its real answer through a
+    `createPlan` tool call and says only "auditing..." out loud (a full
+    four-finding audit went unread that way, live 2026-09-03)."""
     parts: list[str] = []
     for ev in events:
+        if ev.get("type") == "tool_call" and ev.get("subtype") == "completed":
+            call = (ev.get("tool_call") or {}).get("createPlanToolCall") or {}
+            plan = (call.get("args") or {}).get("plan")
+            if isinstance(plan, str) and plan.strip():
+                parts.append(plan.strip())
+            continue
         if ev.get("type") != "assistant":
             continue
         content = (ev.get("message") or {}).get("content")

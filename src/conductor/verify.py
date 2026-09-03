@@ -12,11 +12,28 @@ with an empty diff, which reads as success in every log and every summary.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 GIT_TIMEOUT = 30
+
+
+def killpg(pid: int) -> None:
+    """SIGKILL the process group a child started with start_new_session leads.
+
+    The group id is the child's pid. That still holds after the child has
+    exited and been reaped: the group lives on while any straggler does, and
+    killpg by id reaches them. The only misfire would be a brand-new process
+    that took the freed pid and made itself a group leader in the
+    microseconds between the reap and this call; that window is accepted.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def git_run(
@@ -226,6 +243,28 @@ def commit_work(cwd: str, message: str) -> CommitOutcome:
     )
 
 
+def uncommit(cwd: str, outcome: CommitOutcome, base_sha: str) -> CommitOutcome:
+    """Take a commit back off the branch, leaving its changes staged.
+
+    A branch must never carry a commit that failed its gate: the receipt
+    says not ok, but a clean-looking commit outlives the receipt. The work
+    itself is kept in the tree (and so in a kept worktree) for whoever wants
+    to look.
+    """
+    if not base_sha:
+        return replace(outcome, reason="gate failed; commit kept: no base to reset to")
+    undo = _git(cwd, "reset", "--soft", base_sha)
+    if undo.returncode != 0:
+        return replace(outcome, reason=f"gate failed; could not undo commit: {undo.stderr.strip()}")
+    return CommitOutcome(
+        attempted=True,
+        committed=False,
+        files=outcome.files,
+        deletions=outcome.deletions,
+        reason=f"gate failed; commit {outcome.sha[:8]} undone, work left staged in the tree",
+    )
+
+
 @dataclass
 class TestOutcome:
     ran: bool
@@ -240,22 +279,33 @@ class TestOutcome:
 def run_tests(cwd: str, command: str, timeout: int = 900) -> TestOutcome:
     """Run the caller's own gate. Never piped: a pipeline's exit code is the
     last stage's, so a piped gate reports the pager's success, not the suite's.
+
+    The gate gets its own process group, exactly like a fleet: a suite that
+    hangs and is killed must not leave xdist workers, a dev server, or a
+    cargo test runner behind to keep editing the tree after the verdict.
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             cwd=cwd,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
-            check=False,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return TestOutcome(ran=True, timed_out=True, tail=f"timed out after {timeout}s")
     except OSError as exc:
         return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
-    combined = (proc.stdout + proc.stderr).strip().splitlines()
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        killpg(proc.pid)
+        proc.communicate()
+        return TestOutcome(
+            ran=True, timed_out=True, tail=f"timed out after {timeout}s; process group killed"
+        )
+    killpg(proc.pid)  # stragglers after a clean exit, same as a fleet
+    combined = out.strip().splitlines()
     return TestOutcome(
         ran=True,
         exit_code=proc.returncode,

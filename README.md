@@ -99,6 +99,14 @@ to each vendor makes "did it commit?" a property of the vendor rather than of
 the work, and mixes four author identities and four message conventions into
 one history.
 
+The commit is conditional on the evidence. A fleet that reports its own
+failure is never committed, whatever its exit code. A commit whose gate then
+fails is taken back off the branch (`git reset --soft`), with the work left
+staged in the kept worktree: a branch must never carry a commit that failed
+its gate, because the commit outlives the receipt that says it did. The gate
+itself runs in its own process group, like a fleet, so a killed suite leaves
+no workers behind.
+
 Deletions are staged like anything else and named explicitly in the receipt. A
 bulk stage that quietly swallows removed source files is the failure that
 reporting exists to prevent.
@@ -124,6 +132,7 @@ Each is now pinned by a test.
 | `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes on any fleet is no longer `ok`. |
 | `cursor` | Reports usage once, in its final `result`, in both `json` and `stream-json` modes. A cap on Cursor is a verdict after the run, never a stop. |
 | `cursor` | The `json` envelope's `result` is only the **last** assistant message. On a four-fleet brainstorm, grok-4.6 spent 15K output tokens and its envelope held 680 characters of "writing the answer now". conductor runs Cursor in `stream-json` and keeps every assistant message, and a read dispatch that returns no answer is no longer `ok` on any fleet. |
+| `cursor` | In plan mode (conductor's read mode) Cursor files its real answer through a `createPlan` tool call and says only "auditing..." out loud. Composer wrote a full four-finding audit that way and it was invisible until the tool call was read. conductor now takes the plan text as part of the answer. |
 
 ## Three lessons borrowed from `peer-agent-tools`
 
@@ -168,15 +177,18 @@ summary and a report path.
 
 - checks every lane and fallback against the routing policy **at load time**,
   before a token is spent, and refuses the whole file with the lane named;
-- runs lanes under the concurrency cap, each write lane in its own git
-  worktree on branch `conductor/<run_id>` (see below);
+- runs lanes under the concurrency cap, each lane (read or write, and the
+  collate) in its own git worktree on branch `conductor/<run_id>` (see
+  below), so a fleet that ignores its read-only flag edits a throwaway
+  tree rather than the orchestrator's checkout;
 - escalates down a lane's `fallback` list when an attempt is not `ok`, which
   includes the exit-0-no-op case, a failed gate, and a fleet's own error;
 - keeps a shared dollar ledger and skips any attempt that would start after
   `max_cost_usd` is spent, saying so in the lane's `skipped` field; what
   remains of the budget also caps every dispatch it starts (tightening any
   `cap_usd` the lane set), so the overshoot is bounded in dollars, not just
-  in dispatches;
+  in dispatches; a dispatch that lands unpriced makes the total unknowable,
+  and an unknowable budget is treated as spent (`budget unverifiable`);
 - copies each lane's final attempt's answer to `answers/<lane>.txt` and its
   patch (committed, uncommitted, and untracked work against the base) to
   `diffs/<lane>.patch`; if `collate` is set, hands all of them to one

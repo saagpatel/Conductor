@@ -96,8 +96,11 @@ class Attempt:
         )
 
     def isolated(self) -> bool:
-        """Write lanes isolate by default: two fleets must never share a tree."""
-        return self.isolate if self.isolate is not None else self.mode == "write"
+        """Every lane isolates unless told otherwise. Write lanes must never
+        share a tree; read lanes sharing the checkout only confound each
+        other's byte check, and one fleet ignoring its read-only flag (agy
+        did, live) would be editing the orchestrator's own tree."""
+        return self.isolate if self.isolate is not None else True
 
     def label(self) -> str:
         return f"{self.fleet}/{self.model}" if self.model else self.fleet
@@ -354,7 +357,9 @@ class Ledger:
     it ends, but the overshoot is bounded: at most `concurrency` dispatches
     are in flight, each capped at what remained when it started, and each
     enforced the way its fleet allows (budget.py; Cursor's cap is a verdict
-    after the run, not a stop).
+    after the run, not a stop). A dispatch that lands unpriced makes the
+    total unknowable, and a budget that cannot be accounted for is treated
+    as spent: nothing more starts, and the skip says why.
     """
 
     def __init__(self, max_cost_usd: float | None) -> None:
@@ -363,9 +368,22 @@ class Ledger:
         self.unpriced = 0  # dispatches that reported no cost at all
         self._lock = threading.Lock()
 
-    def can_spend(self) -> bool:
+    def blocker(self) -> str | None:
+        """Why nothing more may start, or None while spending is allowed."""
         with self._lock:
-            return self.max is None or self.spent < self.max
+            if self.max is None:
+                return None
+            if self.unpriced:
+                return (
+                    f"budget unverifiable: {self.unpriced} dispatch(es) landed unpriced "
+                    f"against a ${self.max:.4f} budget"
+                )
+            if self.spent >= self.max:
+                return f"budget exhausted: ${self.spent:.4f} of ${self.max:.4f}"
+            return None
+
+    def can_spend(self) -> bool:
+        return self.blocker() is None
 
     def remaining(self) -> float | None:
         with self._lock:
@@ -385,6 +403,7 @@ class Ledger:
                 "max_cost_usd": self.max,
                 "spent_usd": round(self.spent, 6),
                 "exceeded": self.max is not None and self.spent >= self.max,
+                "unverifiable": self.max is not None and self.unpriced > 0,
                 "unpriced_dispatches": self.unpriced,
             }
 
@@ -496,11 +515,9 @@ def run_mission(
 
     def _run_attempts(lane: Lane, out: LaneResult) -> None:
         for attempt in lane.attempts:
-            if not dry_run and not ledger.can_spend():
-                out.skipped = (
-                    f"budget exhausted before {attempt.label()}: "
-                    f"${_usd(ledger.spent)} of ${_usd(ledger.max)}"
-                )
+            why = None if dry_run else ledger.blocker()
+            if why:
+                out.skipped = f"{why}; {attempt.label()} not started"
                 break
             result = dispatch(
                 attempt.spec(mission.cwd, cap_usd=_tighter(attempt.cap_usd, ledger.remaining())),
@@ -595,8 +612,9 @@ def _run_collate(
 ) -> dict:
     col = mission.collate
     assert col is not None
-    if not ledger.can_spend():
-        return {"ok": False, "error": "budget exhausted before collate", "cost_usd": None}
+    why = ledger.blocker()
+    if why:
+        return {"ok": False, "error": f"{why}; collate not started", "cost_usd": None}
 
     original = mission.lanes[0].attempts[0].prompt
     parts = [
@@ -621,6 +639,7 @@ def _run_collate(
 
     result = dispatch(
         col.spec(mission.cwd, prompt, cap_usd=_tighter(col.cap_usd, ledger.remaining())),
+        isolate=True,
         home=base,
     )
     ledger.add(result)
