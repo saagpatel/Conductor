@@ -181,11 +181,13 @@ def test_same_fleet_twice_gets_distinct_lane_names(tmp_path: Path):
 
 
 def test_fan_out_respects_the_concurrency_cap(repo, home, monkeypatch, tmp_path):
+    item = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}})
     fake_fleets(
         monkeypatch,
         {
-            f: ["sh", "-c", f"sleep 0.6; echo '{envelope('ok')}'"]
-            for f in ("codex", "cursor", "antigravity")
+            "codex": ["sh", "-c", f"sleep 0.6; echo '{item}'"],
+            "cursor": ["sh", "-c", f"sleep 0.6; echo '{envelope('ok')}'"],
+            "antigravity": ["sh", "-c", f"sleep 0.6; echo '{envelope('ok')}'"],
         },
     )
     raw = {

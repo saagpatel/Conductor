@@ -59,7 +59,8 @@ Mode is `read` or `write`. Read gets each fleet's strongest read-only setting
 (`--mode plan`, `--sandbox read-only`, `--sandbox`); write gets its auto-approve,
 because there is nobody present to answer a permission prompt. The flags are
 a request, the bytes are the check: a read dispatch that changed the tree is
-not `ok`, whatever its fleet promised.
+not `ok`, whatever its fleet promised, and neither is one that came back
+with no answer, since the answer is a read dispatch's only work product.
 
 ## What a result looks like
 
@@ -122,6 +123,7 @@ Each is now pinned by a test.
 | `antigravity` | `--output-format stream-json` prints a `step_update` carrying that step's own usage after every model response (three steps summed exactly to the final figure). conductor now always runs agy this way. |
 | `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes on any fleet is no longer `ok`. |
 | `cursor` | Reports usage once, in its final `result`, in both `json` and `stream-json` modes. A cap on Cursor is a verdict after the run, never a stop. |
+| `cursor` | The `json` envelope's `result` is only the **last** assistant message. On a four-fleet brainstorm, grok-4.6 spent 15K output tokens and its envelope held 680 characters of "writing the answer now". conductor runs Cursor in `stream-json` and keeps every assistant message, and a read dispatch that returns no answer is no longer `ok` on any fleet. |
 
 ## Three lessons borrowed from `peer-agent-tools`
 
@@ -175,8 +177,11 @@ summary and a report path.
   remains of the budget also caps every dispatch it starts (tightening any
   `cap_usd` the lane set), so the overshoot is bounded in dollars, not just
   in dispatches;
-- copies each lane's answer to `answers/<lane>.txt`, and, if `collate` is
-  set, hands all of them to one read-mode dispatch for a synthesis;
+- copies each lane's final attempt's answer to `answers/<lane>.txt` and its
+  patch (committed, uncommitted, and untracked work against the base) to
+  `diffs/<lane>.patch`; if `collate` is set, hands all of them to one
+  read-mode dispatch for a synthesis, patches included (`include_diffs`),
+  so the judge grades what each lane changed rather than what it claimed;
 - writes `report.md` (one table, each answer, the collated verdict) and
   `result.json` under `$CONDUCTOR_HOME/missions/<id>/`.
 
@@ -243,7 +248,9 @@ landed is still on its branch. The watcher runs on every codex and
 antigravity dispatch, cap or not, because it is also the only price a run
 that conductor killed can get: a timed-out Codex dispatch used to land in
 the ledger as `cost_usd: null`. A cap on an unpriced model is refused before
-spawn rather than silently unenforced.
+spawn rather than silently unenforced, and a capped run that comes back with
+no usage at all fails closed (`cap unenforced: the run came back unpriced`)
+instead of reading as within budget.
 
 ## Commands
 

@@ -101,6 +101,8 @@ def parse(fleet: str, stdout: str) -> FleetOutput:
         return _parse_codex(text)
     if fleet == "antigravity":
         return _parse_antigravity(text)
+    if fleet == "cursor":
+        return _parse_cursor(text)
     payload = _last_json_object(text)
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
@@ -123,6 +125,40 @@ def _parse_antigravity(text: str) -> FleetOutput:
         # The last thing printed was a step, not the result: cut short.
         return FleetOutput(answer="", usage=agy_step_usage(text), parsed=True)
     return _parse_envelope("antigravity", payload, text)
+
+
+def _parse_cursor(text: str) -> FleetOutput:
+    """cursor-agent in stream-json mode: `assistant` events carry each message
+    the model said, and a final `result` event carries the envelope (usage,
+    is_error, and only the last message as `result`). The answer is every
+    assistant message joined, so nothing said before a closing remark is
+    lost. A lone envelope (the older json format) still parses."""
+    events = [ev for ev in map(json_line, text.splitlines()) if ev is not None]
+    if not events:
+        return FleetOutput(answer=text, parsed=False)
+    said = cursor_said(events)
+    last = events[-1]
+    if last.get("type") == "result" or "result" in last or "is_error" in last:
+        out = _parse_envelope("cursor", last, text)
+        if said and not out.error:
+            out.answer = said
+        return out
+    return FleetOutput(answer=said, parsed=True)
+
+
+def cursor_said(events: list[dict]) -> str:
+    """Every text block from every assistant event, in order."""
+    parts: list[str] = []
+    for ev in events:
+        if ev.get("type") != "assistant":
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"].strip())
+    return "\n\n".join(p for p in parts if p)
 
 
 def agy_step_usage(text: str) -> Usage | None:
@@ -153,16 +189,19 @@ def agy_step_usage(text: str) -> Usage | None:
 
 def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
     answer = ""
+    recognized = False
     structured = payload.get("structured_output")
     if isinstance(structured, (dict, list)):
         # Claude Code with --json-schema: the validated object lives here and
         # `result` may be empty or a prose restatement.
         answer = json.dumps(structured, indent=2)
+        recognized = True
     else:
         for key in ("result", "response", "text", "message"):
             value = payload.get(key)
             if isinstance(value, str):
                 answer = value.strip()
+                recognized = True
                 break
 
     status: str | None = None
@@ -186,8 +225,14 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
     usage = _usage_from_envelope(fleet, payload)
     # On a fleet-reported failure the text is the error, not an answer; it
     # belongs in `error`, not in answer.txt beside a result that is not ok.
+    # An envelope with none of the known answer keys degrades to its raw
+    # text; one whose answer key is empty said nothing, and reads as such.
+    if error:
+        answer = ""
+    elif not recognized:
+        answer = text
     return FleetOutput(
-        answer="" if error else (answer or text),
+        answer=answer,
         usage=usage,
         parsed=True,
         status=status,

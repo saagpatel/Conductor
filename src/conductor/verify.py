@@ -142,6 +142,32 @@ def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
     )
 
 
+DIFF_LIMIT = 400_000
+
+
+def diff_since(cwd: str, base_sha: str, limit: int = DIFF_LIMIT) -> str:
+    """Everything the tree now holds that `base_sha` did not, as one unified
+    diff: committed work, uncommitted edits, and untracked files.
+
+    This is the evidence a judge should see. A lane's prose answer is a
+    claim about what it changed; the patch is what it changed.
+    """
+    parts: list[str] = []
+    tracked = _git(cwd, "diff", base_sha, "--")
+    if tracked.returncode == 0:
+        parts.append(tracked.stdout)
+    status = _git(cwd, "status", "--porcelain", "--untracked-files=all")
+    for line in status.stdout.splitlines():
+        if line.startswith("??"):
+            # --no-index exits 1 whenever the files differ, which they do.
+            new = _git(cwd, "diff", "--no-index", "--", "/dev/null", line[3:].strip())
+            parts.append(new.stdout)
+    text = "".join(parts)
+    if len(text) > limit:
+        text = text[:limit] + f"\n[... diff truncated at {limit} chars]\n"
+    return text
+
+
 @dataclass
 class CommitOutcome:
     """Result of conductor committing a dispatch's work itself."""

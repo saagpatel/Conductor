@@ -38,6 +38,7 @@ from .verify import (
     Verdict,
     commit_work,
     compare,
+    diff_since,
     run_tests,
 )
 
@@ -74,10 +75,12 @@ class Result:
     usage: dict | None = None
     budget: dict | None = None
     answer_path: str | None = None
+    diff_path: str | None = None
     isolation: dict | None = None
     fleet_status: str | None = None
     fleet_error: str | None = None
     error: str | None = None
+    dry_run: bool = False
 
     def failure(self) -> str | None:
         """Why the run is not ok, in one line, or None when it is.
@@ -86,10 +89,14 @@ class Result:
         was a repo and the mode was write) AND the gate passed AND any
         requested commit landed. Exit 0 alone is not it.
         """
+        if self.dry_run:
+            return None
         if self.error:
             return self.error
         if self.budget and self.budget.get("exceeded"):
             return _over_budget(self.budget)
+        if self.budget and self.budget.get("unpriced"):
+            return "cap unenforced: the run came back unpriced"
         if self.timed_out:
             return f"timed out after {self.timeout}s"
         if self.exit_code != 0:
@@ -112,6 +119,11 @@ class Result:
         # isolation exists to prevent. The bytes are the evidence.
         if self.mode == "read" and self.verdict.get("checked") and not self.verdict.get("no_op"):
             return "read dispatch moved bytes"
+        # A read dispatch's answer IS its work. Exit 0 with nothing said is
+        # the read-mode twin of the exit-0 no-op: a cursor lane once spent
+        # 15K output tokens and handed back nothing usable, and read as ok.
+        if self.mode == "read" and self.exit_code is not None and not self.answer_path:
+            return "read dispatch returned no answer"
         # A requested commit that did not happen is a failure even when the
         # dispatch itself went fine: the caller asked for landed work.
         if self.commit and not self.commit.get("committed"):
@@ -154,6 +166,7 @@ class Result:
             "cap_usd": (self.budget or {}).get("cap_usd"),
             "over_cap": bool((self.budget or {}).get("exceeded")),
             "answer_path": self.answer_path,
+            "diff_path": self.diff_path,
             "run_dir": self.run_dir,
             "error": self.error or self.fleet_error,
             "failure": self.failure(),
@@ -251,6 +264,7 @@ def dispatch(
             stderr_path=str(stderr_path),
             tail="(dry run: nothing spawned)",
             verdict=Verdict(checked=False, notes=["dry run"]).to_dict(),
+            dry_run=True,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -308,6 +322,13 @@ def dispatch(
         verdict.notes.append(
             f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
         )
+    diff_path: str | None = None
+    if verdict.checked and not verdict.no_op and before.head:
+        # The patch is the evidence a judge should see; the answer is a claim.
+        patch = diff_since(spec.cwd, before.head)
+        if patch:
+            (run_dir / "diff.patch").write_text(patch)
+            diff_path = str(run_dir / "diff.patch")
 
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
@@ -380,6 +401,7 @@ def dispatch(
         usage=usage_dict,
         budget=budget.to_dict() if budget is not None else None,
         answer_path=answer_path,
+        diff_path=diff_path,
         isolation=iso.to_dict() if iso is not None else None,
         fleet_status=output.status,
         fleet_error=output.error,

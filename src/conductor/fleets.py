@@ -429,8 +429,13 @@ def _build_cursor(spec: Spec, model: str) -> list[str]:
         spec.prompt,
         "--model",
         model,
+        # The single-envelope `json` format keeps only the LAST assistant
+        # message as `result`. A model that writes its answer and then adds a
+        # closing remark loses the answer: grok-4.6 spent 15K output tokens
+        # on a brainstorm and delivered 680 characters of narration (live,
+        # 2026-09-03). stream-json carries every assistant message.
         "--output-format",
-        "json",
+        "stream-json",
     ]
     if spec.mode == "write":
         # --force implies workspace trust as well as command approval.

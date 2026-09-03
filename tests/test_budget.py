@@ -54,6 +54,7 @@ def test_a_claude_budget_stop_is_read_as_over_cap(repo, home, fake_fleet):
         "cap_usd": 0.01,
         "enforcement": "native",
         "exceeded": True,
+        "unpriced": False,
         "observed_usd": 0.23684,
     }
     assert result.fleet_error == "Reached maximum budget ($0.01)"
@@ -227,6 +228,7 @@ def test_cursor_is_judged_after_the_run_because_it_reports_usage_once(repo, home
         "cap_usd": 1.0,
         "enforcement": "post-hoc",
         "exceeded": True,
+        "unpriced": False,
         "observed_usd": 3.0,
     }
     assert over.summary()["failure"] == "over budget: $3.0000 against a $1.0000 cap"

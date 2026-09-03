@@ -119,6 +119,7 @@ class Collate:
     instructions: str = DEFAULT_COLLATE_INSTRUCTIONS
     max_chars: int = COLLATE_MAX_CHARS
     cap_usd: float | None = None
+    include_diffs: bool = True  # the judge sees each lane's patch, not just its prose
 
     def spec(self, cwd: str, prompt: str, *, cap_usd: float | None = None) -> Spec:
         return Spec(
@@ -254,6 +255,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
                 max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
                 cap_usd=float(cap) if cap is not None else None,
+                include_diffs=bool(raw_collate.get("include_diffs", True)),
             )
         except (TypeError, ValueError) as exc:
             raise MissionInvalid(f"collate: {exc}") from exc
@@ -393,6 +395,7 @@ class LaneResult:
     ok: bool
     attempts: list[dict] = field(default_factory=list)
     answer_path: str | None = None
+    diff_path: str | None = None
     cost_usd: float = 0.0
     tokens: int = 0
     skipped: str | None = None
@@ -473,6 +476,8 @@ def run_mission(
     (mission_dir / "mission.json").write_text(json.dumps(mission.to_dict(), indent=2))
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
+    diffs_dir = mission_dir / "diffs"
+    diffs_dir.mkdir(exist_ok=True)
 
     ledger = Ledger(mission.max_cost_usd)
     started = time.monotonic()
@@ -512,10 +517,11 @@ def run_mission(
             out.attempts.append(summary)
             out.cost_usd += float(summary.get("cost_usd") or 0.0)
             out.tokens += int(summary.get("tokens") or 0)
-            if result.answer_path:
-                dest = answers_dir / f"{lane.name}.txt"
-                shutil.copyfile(result.answer_path, dest)
-                out.answer_path = str(dest)
+            # A lane's answer and diff are its final attempt's. A failed
+            # primary's answer left in place would be what the collate reads
+            # when the fallback produced none.
+            out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
+            out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
             if dry_run or result.ok:
                 out.ok = True
                 break
@@ -556,12 +562,24 @@ def run_mission(
     return result
 
 
+def _keep(src: str | None, dest: Path) -> str | None:
+    """Copy a run artifact beside the mission, or None when there is none."""
+    if not src:
+        return None
+    shutil.copyfile(src, dest)
+    return str(dest)
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) > limit:
+        return text[:limit] + f"\n[... truncated, {len(text) - limit} more chars]"
+    return text
+
+
 def _lane_answer(lane: LaneResult, limit: int) -> str:
     if lane.answer_path and Path(lane.answer_path).is_file():
         text = Path(lane.answer_path).read_text(errors="replace").strip()
-        if len(text) > limit:
-            return text[:limit] + f"\n[... truncated, {len(text) - limit} more chars]"
-        return text or "(empty answer)"
+        return _clip(text, limit) or "(empty answer)"
     if lane.skipped:
         return f"(skipped: {lane.skipped})"
     last = lane.attempts[-1] if lane.attempts else {}
@@ -594,6 +612,9 @@ def _run_collate(
             f"\n### Lane `{lane.name}` ({last.get('attempt', '?')}, ok={lane.ok}, "
             f"cost_usd={_usd(lane.cost_usd)})\n\n{_lane_answer(lane, col.max_chars)}\n"
         )
+        if col.include_diffs and lane.diff_path and Path(lane.diff_path).is_file():
+            patch = _clip(Path(lane.diff_path).read_text(errors="replace"), col.max_chars)
+            parts.append(f"\n#### What this lane actually changed\n\n```diff\n{patch}\n```\n")
     parts.append(f"\n## Instructions\n\n{col.instructions.strip()}\n")
     prompt = "".join(parts)
     (mission_dir / "collate-prompt.txt").write_text(prompt)
@@ -662,6 +683,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 lines.append(f"- {a['attempt']}: {a['error']}")
             if a.get("worktree"):
                 lines.append(f"- {a['attempt']}: uncommitted work kept at `{a['worktree']}`")
+        if lane.diff_path:
+            lines.append(f"- diff: `{lane.diff_path}`")
         lines += ["", _lane_answer(lane, REPORT_MAX_CHARS)]
     if result.collate:
         lines += ["", "## Collated", ""]

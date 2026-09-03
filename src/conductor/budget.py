@@ -41,6 +41,7 @@ class Budget:
     cap_usd: float
     enforcement: str  # "native" | "watcher" | "post-hoc", from the fleet registry
     exceeded: bool = False
+    unpriced: bool = False  # a cap was set and no figure ever arrived: unenforced
     observed_usd: float | None = None  # the figure the verdict was based on
 
     def to_dict(self) -> dict:
@@ -51,8 +52,12 @@ class Budget:
 
         A fleet that stopped itself on its own budget flag is over the cap
         whatever its reported figure says; so is a run the watcher killed.
+        A run that comes back with no figure at all was never capped by
+        anything, and must not read as within budget; it is flagged
+        `unpriced` and the runner fails it closed.
         """
         self.observed_usd = cost_usd
+        self.unpriced = cost_usd is None and not killed
         self.exceeded = (
             killed
             or fleet_status == "error_max_budget_usd"
