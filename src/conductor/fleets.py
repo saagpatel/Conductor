@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import prices
 
@@ -236,6 +236,13 @@ class Spec:
             or not all(isinstance(pattern, str) for pattern in self.test_surface)
         ):
             raise DispatchRefused("test_surface must be a list of strings")
+        for pattern in self.test_surface or []:
+            path = PurePosixPath(pattern)
+            if not pattern or "\0" in pattern or path.is_absolute() or ".." in path.parts:
+                raise DispatchRefused(
+                    "test_surface patterns must be non-empty repo-relative Git globs "
+                    f"without '..': {pattern!r}"
+                )
         if not self.prompt.strip():
             raise DispatchRefused("empty prompt")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy

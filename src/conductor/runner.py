@@ -284,6 +284,26 @@ def _clean_gate(
             env = os.environ.copy()
             env["GIT_INDEX_FILE"] = str(index)
             try:
+                seeded = subprocess.run(
+                    ["git", "read-tree", base_sha],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return _git_failure(
+                    f"git read-tree for clean gate failed: {exc}", worktree=worktree
+                )
+            if seeded.returncode != 0:
+                detail = (seeded.stderr or seeded.stdout).decode(errors="replace").strip()
+                return _git_failure(
+                    f"git read-tree for clean gate failed: "
+                    f"{detail or f'exit {seeded.returncode}'}",
+                    worktree=worktree,
+                )
+            try:
                 staged = subprocess.run(
                     ["git", "add", "-A"],
                     cwd=root,
@@ -510,7 +530,15 @@ def dispatch(
         return result
 
     before = GitState.capture(spec.cwd)
-    surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
+    try:
+        surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
+    except ValueError as exc:
+        if iso is not None:
+            worktrees.release(iso)
+        error = f"test surface refused: {exc}"
+        result = _refused_result(run_id, spec, model_id, timeout, run_dir, iso, error)
+        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        return result
     started = time.monotonic()
     error: str | None = None
     timed_out = False
@@ -626,6 +654,11 @@ def dispatch(
             }
         elif not test_command:
             surface_state["clean_gate"] = {"ran": False, "reason": "no gate set"}
+        elif not before.head:
+            surface_state["clean_gate"] = {
+                "ran": False,
+                "reason": "no base commit to re-run against",
+            }
         elif tests is None or not _gate_passed(tests.to_dict(), None):
             surface_state["clean_gate"] = {
                 "ran": False,

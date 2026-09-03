@@ -186,10 +186,14 @@ def _in_progress_run_ids(home: Path) -> set[str]:
 
 def _run_in_progress(home: Path, run_id: str, protected_runs: set[str]) -> bool:
     """The cached mission set plus an adjacent stat of this one run."""
-    run_id = _worktree_run_id(run_id)
-    run_dir = home / "runs" / run_id
-    return run_id in protected_runs or (
-        run_dir.is_dir() and not (run_dir / "result.json").is_file()
+    candidates = (run_id, _worktree_run_id(run_id))
+    return any(
+        candidate in protected_runs
+        or (
+            (home / "runs" / candidate).is_dir()
+            and not (home / "runs" / candidate / "result.json").is_file()
+        )
+        for candidate in dict.fromkeys(candidates)
     )
 
 
@@ -223,7 +227,7 @@ def _plan_repo(
                 kept_branches[worktree.branch] = reason
             continue
 
-        if _worktree_run_id(path.name) in protected_runs:
+        if path.name in protected_runs or _worktree_run_id(path.name) in protected_runs:
             reason = "run in progress (no result.json)"
             items.append(Item(str(repo), "worktree", "keep", reason, path=str(path)))
             if worktree.branch:

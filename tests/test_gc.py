@@ -207,6 +207,37 @@ def test_gc_rechecks_run_liveness_immediately_before_remove_and_delete(repo: Pat
     assert isolation.branch in _git(repo, "branch", "--format=%(refname:short)").splitlines()
 
 
+def test_gc_keeps_an_in_progress_run_whose_real_id_ends_in_clean(repo: Path, home: Path):
+    run_id = "20200101T000000Z-make-repo-clean"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    (home / "runs" / run_id).mkdir(parents=True)
+
+    plans, _ = build_plan(home, [str(repo)], 0)
+    worktree = next(item for item in plans[0].items if item.path == isolation.worktree)
+    branch = next(item for item in plans[0].items if item.name == isolation.branch)
+
+    assert worktree.action == branch.action == "keep"
+    assert worktree.reason == branch.reason == "run in progress (no result.json)"
+
+
+def test_gc_recheck_preserves_a_new_live_run_whose_real_id_ends_in_clean(
+    repo: Path, home: Path
+):
+    run_id = "20200101T000000Z-became-clean"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    plans, notices = build_plan(home, [str(repo)], 0)
+    assert any(item.action == "remove" for item in plans[0].items)
+
+    (home / "runs" / run_id).mkdir(parents=True)
+    assert apply_plan(plans, notices, home) is False
+    worktree = next(item for item in plans[0].items if item.path == isolation.worktree)
+    branch = next(item for item in plans[0].items if item.name == isolation.branch)
+
+    assert worktree.action == branch.action == "keep"
+    assert Path(isolation.worktree).is_dir()
+    assert isolation.branch in _git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
 def test_gc_apply_scans_in_progress_receipts_once(repo: Path, home: Path, monkeypatch):
     for suffix in ("one", "two"):
         worktrees.create(str(repo), f"20200101T000000Z-{suffix}", home / "worktrees")

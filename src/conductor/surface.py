@@ -22,18 +22,18 @@ DEFAULT_TEST_SURFACE = (
     "**/*.test.*",
     "**/*.spec.*",
     "**/conftest.py",
-    "pytest.ini",
-    "tox.ini",
-    "setup.cfg",
-    "pyproject.toml",
-    "Makefile",
-    "noxfile.py",
+    "**/pytest.ini",
+    "**/tox.ini",
+    "**/setup.cfg",
+    "**/pyproject.toml",
+    "**/Makefile",
+    "**/noxfile.py",
     ".github/workflows/**",
     ".gitlab-ci.yml",
-    "package.json",
-    "jest.config.*",
-    "vitest.config.*",
-    ".pre-commit-config.yaml",
+    "**/package.json",
+    "**/jest.config.*",
+    "**/vitest.config.*",
+    "**/.pre-commit-config.yaml",
 )
 
 
@@ -84,23 +84,18 @@ def test_surface(cwd: str | Path, patterns: list[str] | tuple[str, ...] | None =
         raise ValueError(tracked.stderr.strip() or "git ls-files failed for the test surface")
     names = {name for name in tracked.stdout.split("\0") if name}
 
-    # Porcelain is the source of truth for what is untracked. Git applies the
-    # same pathspec engine to that set so Python never grows a second glob
-    # dialect whose edge cases disagree with the transplant exclusions.
+    # Porcelain proves the working tree can be inspected before the second
+    # Git query applies the pathspecs. `ls-files --others` deliberately has no
+    # exclude-standard filter: an ignored conftest still changes pytest, and
+    # hiding it in .gitignore must not hide it from the pinned surface.
     status = git_run(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if status.returncode != 0:
         raise ValueError(status.stderr.strip() or "git status failed for the test surface")
-    untracked = {
-        field[3:]
-        for field in status.stdout.split("\0")
-        if field.startswith("?? ") and field[3:]
-    }
     matching_untracked = git_run(
         root,
         "ls-files",
         "-z",
         "--others",
-        "--exclude-standard",
         "--",
         *pathspecs,
     )
@@ -108,11 +103,7 @@ def test_surface(cwd: str | Path, patterns: list[str] | tuple[str, ...] | None =
         raise ValueError(
             matching_untracked.stderr.strip() or "git ls-files failed for untracked test files"
         )
-    names.update(
-        name
-        for name in matching_untracked.stdout.split("\0")
-        if name and name in untracked
-    )
+    names.update(name for name in matching_untracked.stdout.split("\0") if name)
 
     files: dict[str, str] = {}
     for name in sorted(names):
