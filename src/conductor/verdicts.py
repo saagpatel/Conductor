@@ -155,9 +155,7 @@ def _one_line(value: object) -> str:
     return " ".join(str(value).splitlines())
 
 
-def _invalid_verdict(
-    reason: str, criteria: list[Criterion], raw: dict | None = None
-) -> Verdict:
+def _invalid_verdict(reason: str, criteria: list[Criterion], raw: dict | None = None) -> Verdict:
     source = raw or {}
     raw_items = source.get("criteria")
     by_id: dict[str, dict] = {}
@@ -241,9 +239,7 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
                 f"criterion {criterion_id!r} evidence must be a non-empty string", criteria, raw
             )
         seen.add(criterion_id)
-        items.append(
-            {"id": criterion_id, "ok": item["ok"], "evidence": item["evidence"]}
-        )
+        items.append({"id": criterion_id, "ok": item["ok"], "evidence": item["evidence"]})
 
     missing_ids = [criterion_id for criterion_id in expected_ids if criterion_id not in seen]
     if missing_ids:
@@ -252,13 +248,19 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
         return _invalid_verdict(
             f"expected {len(expected_ids)} criteria, got {len(items)}", criteria, raw
         )
-    actual_ids = [item["id"] for item in items]
-    if actual_ids != expected_ids:
-        return _invalid_verdict("criteria are not in checklist order", criteria, raw)
+    # The schema cannot pin order, so a complete answer in another order is
+    # the contract satisfied, not broken: normalize instead of discarding a
+    # paid judgment. The reorder is noted so the receipt says what happened.
+    reordered = [item["id"] for item in items] != expected_ids
+    by_id = {item["id"]: item for item in items}
+    items = [by_id[criterion_id] for criterion_id in expected_ids]
 
     passed = all(item["ok"] for item in items)
     computed = "pass" if passed else "fail"
     summary = raw["summary"]
+    if reordered:
+        note = "criteria arrived out of checklist order; normalized"
+        summary = f"{summary} [conductor note: {note}]" if summary else note
     if raw["verdict"] != computed:
         note = f"model reported {raw['verdict']}; computed {computed} from the criteria"
         summary = f"{summary} [conductor note: {note}]" if summary else note

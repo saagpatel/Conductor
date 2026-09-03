@@ -42,18 +42,12 @@ def verdict_answer(*oks: bool, reported: str | None = None) -> str:
         for index, (criterion, ok) in enumerate(zip(CRITERIA, oks, strict=True))
     ]
     computed = "pass" if all(oks) else "fail"
-    return json.dumps(
-        {"verdict": reported or computed, "criteria": items, "summary": "reviewed"}
-    )
+    return json.dumps({"verdict": reported or computed, "criteria": items, "summary": "reviewed"})
 
 
 def codex_stream(answer: str) -> str:
-    item = json.dumps(
-        {"type": "item.completed", "item": {"type": "agent_message", "text": answer}}
-    )
-    done = json.dumps(
-        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
-    )
+    item = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
+    done = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
     return f"{item}\n{done}\n"
 
 
@@ -116,15 +110,11 @@ def test_parse_verdict_finds_the_last_object_after_stray_prose_braces():
     [
         (lambda raw: raw["criteria"].pop(), "missing criterion"),
         (
-            lambda raw: raw["criteria"].__setitem__(
-                1, raw["criteria"][1] | {"id": "unknown"}
-            ),
+            lambda raw: raw["criteria"].__setitem__(1, raw["criteria"][1] | {"id": "unknown"}),
             "unknown criterion",
         ),
         (
-            lambda raw: raw["criteria"].__setitem__(
-                1, raw["criteria"][1] | {"id": "correct"}
-            ),
+            lambda raw: raw["criteria"].__setitem__(1, raw["criteria"][1] | {"id": "correct"}),
             "duplicate criterion",
         ),
         (lambda raw: raw["criteria"][0].__setitem__("ok", 1), "must be a boolean"),
@@ -311,9 +301,7 @@ def test_readme_three_reviewer_example_is_valid_json():
     }
 
 
-def test_mission_quorum_templates_reports_and_stores_verdicts(
-    repo, home, tmp_path, monkeypatch
-):
+def test_mission_quorum_templates_reports_and_stores_verdicts(repo, home, tmp_path, monkeypatch):
     seen: list[str] = []
     mission_streams(
         monkeypatch,
@@ -335,8 +323,7 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(
             {
                 "name": "fix",
                 "fleet": "codex",
-                "prompt": "FIX {{lanes.r1.verdict}} {{lanes.r2.verdict}} "
-                "{{lanes.r3.verdict}}",
+                "prompt": "FIX {{lanes.r1.verdict}} {{lanes.r2.verdict}} {{lanes.r3.verdict}}",
                 "needs": ["r1", "r2", "r3"],
             },
         ],
@@ -394,9 +381,7 @@ def test_mission_quorum_counts_only_valid_passing_verdicts(
     assert result.ok is expected and result.quorum["met"] is expected
 
 
-def test_mission_quorum_treats_an_invalid_lane_as_not_passing(
-    repo, home, tmp_path, monkeypatch
-):
+def test_mission_quorum_treats_an_invalid_lane_as_not_passing(repo, home, tmp_path, monkeypatch):
     seen: list[str] = []
     mission_streams(
         monkeypatch,
@@ -420,9 +405,7 @@ def test_quorum_dry_run_validates_without_claiming_votes(repo, home, tmp_path):
         "lanes": [review_lane(name) for name in ("r1", "r2", "r3")],
         "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
     }
-    result = run_mission(
-        mission_from_dict(raw, base_dir=tmp_path), home=home, dry_run=True
-    )
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home, dry_run=True)
     report = Path(result.report_path).read_text()
     assert result.ok is True and result.dry_run is True
     assert result.quorum is None
@@ -464,3 +447,21 @@ def test_verdict_is_inherited_by_fallback_attempts(tmp_path):
     )
     primary, fallback = mission.lanes[0].attempts
     assert primary.verdict == fallback.verdict == [Criterion("correct", "Is correct satisfied?")]
+
+
+def test_out_of_order_criteria_are_normalized_not_refused():
+    criteria = parse_checklist(["alpha", "beta"])
+    answer = json.dumps(
+        {
+            "verdict": "pass",
+            "criteria": [
+                {"id": "beta", "ok": True, "evidence": "b"},
+                {"id": "alpha", "ok": True, "evidence": "a"},
+            ],
+            "summary": "fine",
+        }
+    )
+    verdict = parse_verdict(answer, criteria)
+    assert verdict.invalid is None and verdict.passed
+    assert [item["id"] for item in verdict.criteria] == ["alpha", "beta"]
+    assert "normalized" in verdict.summary

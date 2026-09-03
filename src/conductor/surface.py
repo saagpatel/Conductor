@@ -36,6 +36,19 @@ DEFAULT_TEST_SURFACE = (
     "**/.pre-commit-config.yaml",
 )
 
+# Byte-code and tool caches under a test directory are written by the gate
+# itself, so counting them would make every pytest run "touch" the surface
+# and pay the clean re-run for nothing. Nothing a gate reads lives in them.
+CACHE_DIRS = frozenset(
+    {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".hypothesis"}
+)
+CACHE_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_cache_artifact(name: str) -> bool:
+    parts = name.split("/")
+    return any(part in CACHE_DIRS for part in parts[:-1]) or name.endswith(CACHE_SUFFIXES)
+
 
 @dataclass(frozen=True)
 class Surface:
@@ -107,6 +120,8 @@ def test_surface(cwd: str | Path, patterns: list[str] | tuple[str, ...] | None =
 
     files: dict[str, str] = {}
     for name in sorted(names):
+        if _is_cache_artifact(name):
+            continue
         try:
             path = root / name
             if path.is_symlink():

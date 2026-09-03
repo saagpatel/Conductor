@@ -115,9 +115,7 @@ def test_surface_covers_tracked_and_untracked_matches_and_diffs_changes(repo: Pa
 def test_surface_covers_an_ignored_untracked_gate_file(repo: Path, home, fake_fleet):
     (repo / ".gitignore").write_text("tests/conftest.py\n")
     _commit(repo)
-    fake_fleet(
-        ["sh", "-c", "mkdir -p tests; printf '# hidden override\\n' > tests/conftest.py"]
-    )
+    fake_fleet(["sh", "-c", "mkdir -p tests; printf '# hidden override\\n' > tests/conftest.py"])
 
     result = dispatch(
         _spec(repo),
@@ -219,9 +217,7 @@ def test_clean_policy_records_test_edits_when_there_is_no_gate(repo, home, fake_
     assert "test surface changed with no gate to re-run" in result.git_verdict["notes"]
 
 
-def test_clean_policy_does_not_run_clean_gate_after_lane_gate_failure(
-    repo, home, fake_fleet
-):
+def test_clean_policy_does_not_run_clean_gate_after_lane_gate_failure(repo, home, fake_fleet):
     _seed_conftest(repo)
     fake_fleet(["sh", "-c", "echo changed >> tests/conftest.py"])
     result = dispatch(_spec(repo), home=home, test_command="exit 7")
@@ -233,9 +229,7 @@ def test_clean_policy_does_not_run_clean_gate_after_lane_gate_failure(
     }
 
 
-def test_clean_gate_uses_base_tests_and_removes_its_worktree(
-    repo, home, fake_fleet, git_out
-):
+def test_clean_gate_uses_base_tests_and_removes_its_worktree(repo, home, fake_fleet, git_out):
     (repo / "app.txt").write_text("bad\n")
     (repo / "tests").mkdir()
     (repo / "tests" / "check.py").write_text(
@@ -278,7 +272,7 @@ def test_clean_transplant_carries_added_and_deleted_source_but_excludes_new_test
     )
     gate = (
         "test -f fresh.py && test ! -e old.py && { "
-        "if test \"$(git rev-parse --abbrev-ref HEAD)\" = HEAD; "
+        'if test "$(git rev-parse --abbrev-ref HEAD)" = HEAD; '
         "then test ! -e tests/new_test.py; else test -e tests/new_test.py; fi; }"
     )
     result = dispatch(_spec(repo), home=home, test_command=gate)
@@ -317,9 +311,7 @@ def test_clean_transplant_preserves_an_unchanged_tracked_ignored_source_file(
     assert result.ok is True
 
 
-def test_mission_reports_and_templates_each_lanes_test_surface(
-    repo, home, monkeypatch, tmp_path
-):
+def test_mission_reports_and_templates_each_lanes_test_surface(repo, home, monkeypatch, tmp_path):
     rendered: list[str] = []
 
     def fleet(spec: Spec) -> list[str]:
@@ -423,9 +415,7 @@ def test_test_surface_patterns_must_be_repo_relative(repo, tmp_path, pattern):
         )
 
 
-def test_clean_policy_skips_the_clean_gate_in_an_unborn_repository(
-    tmp_path, home, fake_fleet
-):
+def test_clean_policy_skips_the_clean_gate_in_an_unborn_repository(tmp_path, home, fake_fleet):
     repo = tmp_path / "unborn"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
@@ -466,9 +456,7 @@ def test_mission_test_policy_and_surface_inherit_through_fallbacks(tmp_path):
             "prompt": "x",
             "test_policy": "forbid",
             "test_surface": ["qa/**", "ci/**"],
-            "lanes": [
-                {"fleet": "codex", "fallback": [{"fleet": "claude", "model": "opus"}]}
-            ],
+            "lanes": [{"fleet": "codex", "fallback": [{"fleet": "claude", "model": "opus"}]}],
         },
         base_dir=tmp_path,
     )
@@ -488,3 +476,16 @@ def test_gc_keeps_a_leftover_clean_gate_tree_while_its_run_is_in_progress(repo, 
     item = next(entry for entry in plans[0].items if entry.path == str(path))
     assert item.action == "keep"
     assert item.reason == "run in progress (no result.json)"
+
+
+def test_surface_ignores_bytecode_and_tool_caches(repo: Path):
+    (repo / "tests").mkdir(exist_ok=True)
+    cache = repo / "tests" / "__pycache__"
+    cache.mkdir()
+    (cache / "test_x.cpython-314.pyc").write_bytes(b"\x00")
+    (repo / "tests" / ".pytest_cache").mkdir()
+    (repo / "tests" / ".pytest_cache" / "v").write_text("x")
+    (repo / "tests" / "test_real.py").write_text("def test_a(): pass\n")
+    surface = capture_surface(repo)
+    assert "tests/test_real.py" in surface.files
+    assert not any("__pycache__" in name or ".pytest_cache" in name for name in surface.files)
