@@ -18,7 +18,9 @@ discipline, because the callers are unattended agent runs at 3am.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 EFFORTS = ("cheap", "standard", "hard", "max")
 MODES = ("read", "write")
@@ -212,6 +214,29 @@ class Spec:
         if not self.prompt.strip():
             raise DispatchRefused("empty prompt")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy
+        if self.schema:
+            self._validate_schema()
+
+    def _validate_schema(self) -> None:
+        """A structured-output request must fail here, not after the spend.
+
+        Cursor has no structured-output flag at all (checked against
+        cursor-agent 2026.09.02 --help); silently dropping the schema would
+        hand the caller prose where it expected JSON. The schema file is also
+        parsed now, because Claude Code takes the schema text inline and a
+        broken file would otherwise surface as a fleet error after spawn.
+        """
+        if self.fleet == "cursor":
+            raise DispatchRefused(
+                "fleet 'cursor' has no structured-output flag; drop --schema or route the "
+                "dispatch to claude, codex, or antigravity"
+            )
+        try:
+            json.loads(Path(self.schema).read_text())
+        except OSError as exc:
+            raise DispatchRefused(f"schema file unreadable: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise DispatchRefused(f"schema file is not valid JSON: {exc}") from exc
 
     def resolved_timeout(self) -> int:
         return self.timeout if self.timeout is not None else DEFAULT_TIMEOUT[self.mode]
@@ -250,6 +275,10 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         "--strict-mcp-config",
     ]
     argv += ["--permission-mode", "acceptEdits" if spec.mode == "write" else "plan"]
+    if spec.schema:
+        # Claude Code wants the schema text, not a path: a path is rejected
+        # with "--json-schema is not valid JSON". Verified live 2026-09-03.
+        argv += ["--json-schema", Path(spec.schema).read_text()]
     return argv
 
 
@@ -270,9 +299,15 @@ def _build_codex(spec: Spec, model: str) -> list[str]:
         "--sandbox",
         "workspace-write" if spec.mode == "write" else "read-only",
         "--skip-git-repo-check",
+        # Codex prints bare text by default and reports usage nowhere. The
+        # event stream is the only place its token counts appear
+        # (turn.completed), and the final answer still lands in the -o file.
+        "--json",
     ]
     if spec.schema:
-        argv += ["--output-schema", spec.schema]
+        # Absolute, because the fleet's working directory is the target repo
+        # (or its worktree), not wherever the caller typed the path.
+        argv += ["--output-schema", str(Path(spec.schema).resolve())]
     if spec.last_message:
         argv += ["-o", spec.last_message]
     argv.append(spec.prompt)
@@ -297,14 +332,32 @@ def _build_antigravity(spec: Spec, model: str) -> list[str]:
         "--output-format",
         "json",
         "--disable-slash-commands",
+        # agy's own print-mode cap defaults to 5m0s regardless of anything
+        # conductor does with the process. Left alone, a 20-minute write
+        # dispatch dies at five minutes with status ERROR ("timeout waiting
+        # for response"), exit 1, and the work cut mid-way. Verified live
+        # 2026-09-03 with an 8s cap on a 25s task. Pin it just under the
+        # spec's cap: when agy stops itself it still prints its usage and its
+        # own error, whereas conductor's process-group kill (the backstop)
+        # leaves nothing to price.
+        "--print-timeout",
+        f"{_agy_print_timeout(spec.resolved_timeout())}s",
     ]
     if spec.schema:
-        argv += ["--json-schema", spec.schema]
+        argv += ["--json-schema", str(Path(spec.schema).resolve())]
     if spec.mode == "write":
         argv += ["--mode", "accept-edits", "--dangerously-skip-permissions"]
     else:
         argv += ["--mode", "plan", "--sandbox"]
     return argv
+
+
+AGY_TIMEOUT_MARGIN = 5
+
+
+def _agy_print_timeout(timeout: int) -> int:
+    """agy's own cap, a few seconds under conductor's hard kill."""
+    return max(timeout - AGY_TIMEOUT_MARGIN, 1)
 
 
 def _build_cursor(spec: Spec, model: str) -> list[str]:

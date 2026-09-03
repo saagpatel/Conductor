@@ -139,6 +139,49 @@ def test_timeout_kills_the_whole_process_group(repo, home, monkeypatch):
         os.kill(pid, signal.SIGKILL if False else 0)
 
 
+def test_a_grandchild_that_outlives_the_fleet_is_reaped(repo, home, monkeypatch):
+    """agy's print timeout returns while its shell child keeps running and
+    keeps editing the tree (seen live 2026-09-03). The fleet exiting cleanly
+    must still leave no process behind."""
+    marker = repo / "straggler.pid"
+    # $! is the background job's own pid; a subshell's $$ would be the parent's.
+    fake_fleet(monkeypatch, ["sh", "-c", f"sleep 60 & echo $! > {marker}; sleep 0.2; exit 0"])
+    result = dispatch(spec_for(repo), home=home)
+    assert result.exit_code == 0
+    pid = int(marker.read_text().strip())
+    # SIGKILL is asynchronous; give it a moment, then the sleeper must be gone
+    # (a killed-but-unreaped child of a dead parent is reparented and reaped
+    # by launchd/init, so signal 0 raises rather than finding a zombie).
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_same_second_same_prompt_same_fleet_get_distinct_run_ids(repo, home, monkeypatch):
+    """Two lanes of one mission can collide on the timestamped id; the run
+    directory (and so the worktree branch) must still be unique."""
+    fake_fleet(monkeypatch, ["sh", "-c", "echo hi"])
+    frozen = runner_mod.datetime.now(runner_mod.UTC)
+
+    class FrozenDatetime:
+        @staticmethod
+        def now(tz=None):
+            return frozen
+
+    monkeypatch.setattr(runner_mod, "datetime", FrozenDatetime)
+    a = dispatch(spec_for(repo), home=home)
+    b = dispatch(spec_for(repo), home=home)
+    assert a.run_id != b.run_id
+    assert b.run_id == f"{a.run_id}-2"
+    assert Path(a.run_dir).is_dir() and Path(b.run_dir).is_dir()
+
+
 def test_a_missing_binary_is_reported_not_raised(repo, home, monkeypatch):
     fake_fleet(monkeypatch, ["conductor-no-such-binary-xyz"])
     result = dispatch(spec_for(repo), home=home)
@@ -151,6 +194,69 @@ def test_failing_gate_sinks_an_otherwise_successful_run(repo, home, monkeypatch)
     result = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 1")
     assert result.verdict["no_op"] is False
     assert result.tests["exit_code"] == 1
+    assert result.ok is False
+
+
+def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(repo, home, monkeypatch):
+    """agy exits 1 on its print timeout today; if a future version exits 0
+    with status ERROR, the status must still sink the run."""
+    envelope = '{"status":"ERROR","response":"","error":"timeout waiting for response"}'
+    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'; exit 0"])
+    result = dispatch(spec_for(repo, fleet="antigravity", mode="read"), home=home)
+    assert result.exit_code == 0
+    assert result.fleet_status == "ERROR"
+    assert result.fleet_error == "timeout waiting for response"
+    assert result.ok is False
+    assert result.summary()["error"] == "timeout waiting for response"
+
+
+def test_tokens_without_dollars_are_priced_from_the_table(repo, home, monkeypatch):
+    """Cursor and Antigravity report tokens but no cost; Codex reports usage
+    only in its event stream. All three must land with a dollar figure."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"usage":{"inputTokens":1000000,"outputTokens":1000000}}'
+    )
+    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'"])
+    result = dispatch(spec_for(repo, fleet="cursor", model="composer-2.5"), home=home)
+    assert result.usage["cost_basis"] == "estimated"
+    assert result.usage["cost_usd"] == 0.5 + 2.5
+    assert result.summary()["cost_usd"] == 3.0
+
+
+def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, monkeypatch):
+    envelope = (
+        '{"result":"PONG","total_cost_usd":0.231398,'
+        '"usage":{"input_tokens":2,"cache_creation_input_tokens":57836,"output_tokens":5}}'
+    )
+    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'"])
+    result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
+    assert result.usage["cost_basis"] == "reported"
+    assert result.usage["cost_usd"] == 0.231398
+
+
+def test_codex_answer_falls_back_to_its_last_message_file(repo, home, monkeypatch):
+    """If the event stream carried nothing, the -o file is the next evidence."""
+
+    def fake_build(spec):
+        return ["sh", "-c", f"printf 'PONG-FROM-FILE' > '{spec.last_message}'"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    result = dispatch(spec_for(repo, fleet="codex"), home=home)
+    assert Path(result.answer_path).read_text() == "PONG-FROM-FILE"
+
+
+def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, monkeypatch):
+    """A timed-out gate has no exit code; 'no exit code' must not read as 0."""
+    fake_fleet(monkeypatch, ["sh", "-c", "echo x > f.txt"])
+    monkeypatch.setattr(
+        runner_mod,
+        "run_tests",
+        lambda cwd, cmd: runner_mod.TestOutcome(ran=True, timed_out=True, tail="timed out"),
+    )
+    result = dispatch(spec_for(repo, mode="write"), home=home, test_command="sleep 999")
+    assert result.tests["timed_out"] is True
+    assert result.tests["exit_code"] is None
     assert result.ok is False
 
 

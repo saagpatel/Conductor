@@ -139,3 +139,72 @@ def test_timeouts_default_by_mode_and_are_never_zero():
     assert spec(mode="read").resolved_timeout() == 600
     assert spec(mode="write").resolved_timeout() == 1200
     assert spec(timeout=45).resolved_timeout() == 45
+
+
+def test_antigravity_print_timeout_follows_the_spec_not_its_5m_default():
+    """agy --print-timeout defaults to 5m0s. Verified live 2026-09-03: an 8s
+    cap on a 25s task exits 1 with status ERROR "timeout waiting for
+    response" and the work cut. A 20-minute write dispatch left on the
+    default would die at five minutes."""
+    argv = build_argv(spec(fleet="antigravity", mode="write"))
+    assert argv[argv.index("--print-timeout") + 1] == "1195s"
+    argv = build_argv(spec(fleet="antigravity", timeout=45))
+    assert argv[argv.index("--print-timeout") + 1] == "40s"
+    # agy stops itself a few seconds before conductor's kill so its usage and
+    # its own error message survive; a tiny cap still yields a positive value.
+    argv = build_argv(spec(fleet="antigravity", timeout=3))
+    assert argv[argv.index("--print-timeout") + 1] == "1s"
+
+
+def test_codex_emits_its_event_stream_so_usage_is_recorded():
+    assert "--json" in build_argv(spec(fleet="codex"))
+
+
+# --- structured output ---------------------------------------------------
+
+
+def _schema_file(tmp_path):
+    path = tmp_path / "schema.json"
+    path.write_text('{"type":"object","properties":{"answer":{"type":"string"}}}')
+    return str(path)
+
+
+def test_claude_takes_the_schema_inline_not_as_a_path(tmp_path):
+    """claude --json-schema <path> fails with "not valid JSON". Verified live
+    2026-09-03; the text must be inlined."""
+    path = _schema_file(tmp_path)
+    argv = build_argv(spec(fleet="claude", schema=path))
+    value = argv[argv.index("--json-schema") + 1]
+    assert value.startswith("{") and '"answer"' in value
+    assert path not in argv
+
+
+def test_codex_and_antigravity_take_the_schema_as_an_absolute_path(tmp_path, monkeypatch):
+    """The fleet runs in the target repo, not where the caller typed the
+    path, so a relative schema must be made absolute before spawn."""
+    path = _schema_file(tmp_path)
+    codex = build_argv(spec(fleet="codex", schema=path))
+    assert codex[codex.index("--output-schema") + 1] == path
+    agy = build_argv(spec(fleet="antigravity", schema=path))
+    assert agy[agy.index("--json-schema") + 1] == path
+    monkeypatch.chdir(tmp_path)
+    codex = build_argv(spec(fleet="codex", schema="schema.json"))
+    assert codex[codex.index("--output-schema") + 1] == path
+    agy = build_argv(spec(fleet="antigravity", schema="schema.json"))
+    assert agy[agy.index("--json-schema") + 1] == path
+
+
+def test_cursor_refuses_a_schema_because_it_has_no_flag_for_one(tmp_path):
+    """Silently dropping the schema would hand the caller prose where it
+    expected JSON. Checked against cursor-agent 2026.09.02 --help."""
+    with pytest.raises(DispatchRefused, match="no structured-output flag"):
+        build_argv(spec(fleet="cursor", schema=_schema_file(tmp_path)))
+
+
+def test_a_broken_schema_file_is_refused_before_spawn(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope")
+    with pytest.raises(DispatchRefused, match="not valid JSON"):
+        build_argv(spec(fleet="claude", schema=str(bad)))
+    with pytest.raises(DispatchRefused, match="unreadable"):
+        build_argv(spec(fleet="codex", schema=str(tmp_path / "missing.json")))

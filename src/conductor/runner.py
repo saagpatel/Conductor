@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import prices, worktrees
 from .fleets import FLEETS, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
@@ -74,16 +75,25 @@ class Result:
     commit: dict | None = None
     usage: dict | None = None
     answer_path: str | None = None
+    isolation: dict | None = None
+    fleet_status: str | None = None
+    fleet_error: str | None = None
     error: str | None = None
 
     @property
     def ok(self) -> bool:
         """Success means the process succeeded AND bytes moved (when the
         target was a repo and the mode was write). Exit 0 alone is not it."""
-        if self.timed_out or self.exit_code != 0:
+        if self.timed_out or self.exit_code != 0 or self.error:
             return False
-        if self.tests and self.tests.get("exit_code") not in (0, None):
+        # A fleet that says it failed is believed, whatever its exit code.
+        if self.fleet_error:
             return False
+        # A gate that ran and did not exit 0 sinks the run; that includes a
+        # gate that hung, which has no exit code at all.
+        if self.tests and self.tests.get("ran"):
+            if self.tests.get("timed_out") or self.tests.get("exit_code") != 0:
+                return False
         if self.mode == "write" and self.verdict.get("checked") and self.verdict.get("no_op"):
             return False
         # A requested commit that did not happen is a failure even when the
@@ -99,6 +109,7 @@ class Result:
 
     def summary(self) -> dict:
         """The few lines an orchestrator actually needs to decide what next."""
+        iso = self.isolation or {}
         return {
             "run_id": self.run_id,
             "ok": self.ok,
@@ -115,11 +126,14 @@ class Result:
             "no_op": self.verdict.get("no_op", False),
             "tests": (self.tests or {}).get("exit_code"),
             "committed": (self.commit or {}).get("sha", "")[:8] or None,
+            "branch": iso.get("branch") or None,
+            "worktree": iso.get("worktree") if iso.get("kept") else None,
             "cost_usd": (self.usage or {}).get("cost_usd"),
+            "cost_basis": (self.usage or {}).get("cost_basis"),
             "tokens": (self.usage or {}).get("total_tokens"),
             "answer_path": self.answer_path,
             "run_dir": self.run_dir,
-            "error": self.error,
+            "error": self.error or self.fleet_error,
         }
 
 
@@ -144,6 +158,7 @@ def dispatch(
     dry_run: bool = False,
     test_command: str | None = None,
     commit_message: str | None = None,
+    isolate: bool = False,
     home: Path | None = None,
 ) -> Result:
     spec.validate()
@@ -152,9 +167,29 @@ def dispatch(
     timeout = spec.resolved_timeout()
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_id = f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}"
-    run_dir = (home or conductor_home()) / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    base = home or conductor_home()
+    run_id, run_dir = claim_dir(base / "runs", f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}")
+
+    # Isolation first, because everything after this line (argv, snapshots,
+    # commit, tests) must see the worktree as the working directory, not the
+    # shared checkout the caller named.
+    iso: worktrees.Isolation | None = None
+    if isolate and not dry_run:
+        iso = worktrees.create(spec.cwd, run_id, base / "worktrees")
+        if iso.active:
+            # A cwd inside the repo stays the same subdirectory inside the
+            # worktree; the fleet was pointed at that directory for a reason.
+            spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
+        elif spec.mode == "write":
+            # The caller asked for a private tree and cannot have one. For a
+            # write, running in the shared checkout instead is the collision
+            # isolation exists to prevent, so it is refused before spawn. A
+            # read dispatch changes nothing and may proceed in place.
+            result = _refused_result(
+                run_id, spec, model_id, timeout, run_dir, iso, f"isolation failed: {iso.reason}"
+            )
+            (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+            return result
 
     # The fleet writes its final answer where the caller asked, or beside the
     # run if it did not ask. Codex is the only fleet that takes this as a flag.
@@ -215,13 +250,16 @@ def dispatch(
                 exit_code = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                _killpg(proc.pid)
                 proc.wait()
                 exit_code = proc.returncode
                 error = f"timed out after {timeout}s; process group killed"
+            else:
+                # The fleet exited on its own, but a tool it started may not
+                # have: agy's print timeout, for one, returns while its shell
+                # child keeps running and keeps editing the tree. The group
+                # is conductor's own (start_new_session), so clear it.
+                _killpg(proc.pid)
 
     duration = time.monotonic() - started
 
@@ -246,16 +284,39 @@ def dispatch(
     # caller can read it without wading through a transcript, and usage is
     # recorded now, while the evidence is still on disk.
     output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+    answer = output.answer
+    if not answer and spec_with_paths.last_message:
+        # Codex writes its final message to the -o file; if the event stream
+        # gave nothing (an older binary, a crash mid-stream) that file is the
+        # next best evidence.
+        answer = _read(Path(spec_with_paths.last_message)).strip()
     answer_path: str | None = None
-    if output.answer:
+    if answer:
         answer_file = run_dir / "answer.txt"
-        answer_file.write_text(output.answer)
+        answer_file.write_text(answer)
         answer_path = str(answer_file)
 
     usage_dict = None
     if output.usage:
+        if output.usage.cost_usd is None:
+            estimated = prices.estimate(
+                model_id,
+                input_tokens=output.usage.input_tokens,
+                output_tokens=output.usage.output_tokens,
+                cache_read_tokens=output.usage.cache_read_tokens,
+                cache_write_tokens=output.usage.cache_write_tokens,
+            )
+            if estimated is not None:
+                output.usage.cost_usd = estimated
+                output.usage.cost_basis = "estimated"
         usage_dict = output.usage.to_dict()
-        usage_dict["total_tokens"] = output.usage.total_tokens
+
+    if iso is not None:
+        worktrees.release(iso)
+        if iso.active:
+            verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")
+        else:
+            verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
 
     result = Result(
         run_id=run_id,
@@ -277,10 +338,78 @@ def dispatch(
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
         answer_path=answer_path,
+        isolation=iso.to_dict() if iso is not None else None,
+        fleet_status=output.status,
+        fleet_error=output.error,
         error=error,
     )
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
+
+
+def _killpg(pid: int) -> None:
+    """SIGKILL the process group the child leads.
+
+    start_new_session makes the child a session and group leader, so the
+    group id is its pid. That matters after the child has exited: the pid is
+    reaped by then and a getpgid lookup would fail, but the group lives on
+    while any straggler does, and killpg by id still reaches them.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def claim_dir(parent: Path, name: str) -> tuple[str, Path]:
+    """Create `parent/name` atomically, suffixing the name on collision.
+
+    Two lanes of one mission can start on the same fleet with the same
+    prompt inside the same second, and two missions can share a name and a
+    second; their ids, and therefore their worktree branches and receipts,
+    must still differ. mkdir is the lock.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    candidate = name
+    n = 1
+    while True:
+        try:
+            (parent / candidate).mkdir(exist_ok=False)
+            return candidate, parent / candidate
+        except FileExistsError:
+            n += 1
+            candidate = f"{name}-{n}"
+
+
+def _refused_result(
+    run_id: str,
+    spec: Spec,
+    model_id: str,
+    timeout: int,
+    run_dir: Path,
+    iso: worktrees.Isolation,
+    error: str,
+) -> Result:
+    """A result for a dispatch conductor declined to spawn."""
+    return Result(
+        run_id=run_id,
+        fleet=spec.fleet,
+        model=model_id,
+        effort=spec.effort,
+        mode=spec.mode,
+        cwd=spec.cwd,
+        timeout=timeout,
+        exit_code=None,
+        timed_out=False,
+        duration_s=0.0,
+        run_dir=str(run_dir),
+        stdout_path=str(run_dir / "stdout.log"),
+        stderr_path=str(run_dir / "stderr.log"),
+        tail="(not spawned)",
+        verdict=Verdict(checked=False, notes=[error]).to_dict(),
+        isolation=iso.to_dict(),
+        error=error,
+    )
 
 
 def _replace(spec: Spec, **changes) -> Spec:

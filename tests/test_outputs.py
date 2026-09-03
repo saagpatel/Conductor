@@ -28,14 +28,33 @@ ANTIGRAVITY = (
     '"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14437}}'
 )
 
-CODEX = "PONG"
+# agy with --print-timeout 8s on a 25s task: exit 1, and this on stdout.
+ANTIGRAVITY_TIMEOUT = (
+    '{"conversation_id":"69a75137","status":"ERROR","response":"",'
+    '"error":"timeout waiting for response","duration_seconds":2.159818,'
+    '"num_turns":1,"usage":{"input_tokens":13826,"output_tokens":310,'
+    '"thinking_tokens":195,"cache_read_tokens":0,"total_tokens":14136}}'
+)
+
+# codex exec --json, one event per line.
+CODEX_JSONL = "\n".join(
+    [
+        '{"type":"thread.started","thread_id":"01a06560-2a84-7522-9f95-6043c032fabd"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"PONG"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":22347,"cached_input_tokens":6912,'
+        '"cache_write_input_tokens":0,"output_tokens":6,"reasoning_output_tokens":0}}',
+    ]
+)
+
+CODEX_BARE = "PONG"
 
 
 def test_every_fleet_yields_the_same_answer():
     assert parse("claude", CLAUDE).answer == "PONG"
     assert parse("cursor", CURSOR).answer == "PONG"
     assert parse("antigravity", ANTIGRAVITY).answer == "PONG"
-    assert parse("codex", CODEX).answer == "PONG"
+    assert parse("codex", CODEX_JSONL).answer == "PONG"
 
 
 def test_claude_cost_and_cache_write_are_captured():
@@ -43,6 +62,7 @@ def test_claude_cost_and_cache_write_are_captured():
     $0.23 because the spawn wrote a fresh 57.8K-token prompt cache."""
     out = parse("claude", CLAUDE)
     assert out.usage.cost_usd == 0.231398
+    assert out.usage.cost_basis == "reported"
     assert out.usage.cache_write_tokens == 57836
     assert out.usage.output_tokens == 5
 
@@ -52,6 +72,7 @@ def test_camel_case_usage_is_normalized():
     assert out.usage.input_tokens == 23189
     assert out.usage.output_tokens == 106
     assert out.usage.cost_usd is None  # Cursor reports no dollar figure
+    assert out.usage.cost_basis is None
 
 
 def test_snake_case_usage_is_normalized():
@@ -60,10 +81,80 @@ def test_snake_case_usage_is_normalized():
     assert out.usage.total_tokens == 14437
 
 
-def test_codex_bare_text_needs_no_envelope():
-    out = parse("codex", CODEX)
+def test_codex_event_stream_yields_answer_and_usage():
+    """Codex reports usage only in its event stream. Cached input is counted
+    inside input_tokens by OpenAI, so it is split out here."""
+    out = parse("codex", CODEX_JSONL)
     assert out.parsed is True
+    assert out.status == "turn.completed"
+    assert out.error is None
+    assert out.usage.input_tokens == 22347 - 6912
+    assert out.usage.cache_read_tokens == 6912
+    assert out.usage.output_tokens == 6
+    assert out.usage.total_tokens == 22347 + 6
+
+
+def test_codex_failure_events_are_surfaced():
+    stream = "\n".join(
+        [
+            '{"type":"turn.started"}',
+            '{"type":"error","message":"stream disconnected before completion"}',
+        ]
+    )
+    out = parse("codex", stream)
+    assert out.error == "stream disconnected before completion"
+    assert out.status == "error"
+
+
+def test_codex_bare_text_still_degrades_to_an_answer():
+    """An older binary without --json, or a crash before any event."""
+    out = parse("codex", CODEX_BARE)
+    assert out.answer == "PONG"
+    assert out.parsed is False
     assert out.usage is None
+
+
+def test_antigravity_timeout_is_an_error_not_an_empty_success():
+    """agy's print timeout exits 1 with status ERROR. The status must reach
+    the result even if a future version exits 0."""
+    out = parse("antigravity", ANTIGRAVITY_TIMEOUT)
+    assert out.status == "ERROR"
+    assert out.error == "timeout waiting for response"
+    assert out.answer == ""
+    # Thinking tokens are billed as output by Google; they fold in.
+    assert out.usage.output_tokens == 310 + 195
+    assert out.usage.thinking_tokens == 195
+
+
+def test_antigravity_cache_reads_are_split_out_of_input():
+    env = (
+        '{"status":"SUCCESS","response":"ok","usage":{"input_tokens":1000,'
+        '"output_tokens":10,"thinking_tokens":0,"cache_read_tokens":400}}'
+    )
+    out = parse("antigravity", env)
+    assert out.usage.input_tokens == 600
+    assert out.usage.cache_read_tokens == 400
+
+
+def test_cursor_is_error_is_surfaced():
+    env = (
+        '{"type":"result","subtype":"error_during_execution","is_error":true,'
+        '"result":"Workspace trust required","usage":{"inputTokens":1,"outputTokens":1}}'
+    )
+    out = parse("cursor", env)
+    assert out.error == "Workspace trust required"
+    assert out.status == "error_during_execution"
+
+
+def test_claude_structured_output_becomes_the_answer():
+    env = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"",'
+        '"structured_output":{"answer":"4","confidence":1},"total_cost_usd":0.01,'
+        '"usage":{"input_tokens":3,"output_tokens":9}}'
+    )
+    out = parse("claude", env)
+    assert '"answer": "4"' in out.answer
+    assert out.error is None
 
 
 def test_streamed_events_take_the_last_object():

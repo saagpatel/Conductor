@@ -8,7 +8,9 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
+from .mission import MissionInvalid, load_mission, run_mission
 from .runner import Result, conductor_home, dispatch
 from .verify import GitState, run_tests
 
@@ -76,6 +78,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             test_command=args.test,
             commit_message=args.commit,
+            isolate=args.isolate,
         )
     except DispatchRefused as exc:
         print(json.dumps({"refused": str(exc)}, indent=2), file=sys.stderr)
@@ -108,6 +111,67 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print(json.dumps(out, indent=2))
     if args.test and out["tests"]["exit_code"] != 0:
         return 1
+    return 0
+
+
+def cmd_prices(args: argparse.Namespace) -> int:
+    """Print the price table conductor will estimate with, after overrides."""
+    table = prices.load_prices()
+    out = {
+        "as_of": prices.AS_OF,
+        "override_file": str(conductor_home() / "prices.json"),
+        "usd_per_million_tokens": {
+            key: {
+                "input": p.input,
+                "output": p.output,
+                "cache_read": p.cache_read,
+                "cache_write": p.cache_write,
+                "note": p.note,
+            }
+            for key, p in sorted(table.items())
+        },
+    }
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def cmd_mission(args: argparse.Namespace) -> int:
+    try:
+        mission = load_mission(args.file)
+    except MissionInvalid as exc:
+        print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
+        return 3
+    result = run_mission(mission, dry_run=args.dry_run)
+    print(json.dumps(result.summary(), indent=2))
+    if args.dry_run:
+        return 0
+    return 0 if result.ok else 1
+
+
+def cmd_missions(args: argparse.Namespace) -> int:
+    missions_dir = conductor_home() / "missions"
+    if not missions_dir.is_dir():
+        print("[]")
+        return 0
+    entries = sorted((p for p in missions_dir.iterdir() if p.is_dir()), reverse=True)
+    rows = []
+    for path in entries[: args.limit]:
+        result_file = path / "result.json"
+        if not result_file.is_file():
+            rows.append({"mission_id": path.name, "status": "incomplete"})
+            continue
+        data = json.loads(result_file.read_text())
+        rows.append(
+            {
+                "mission_id": data["mission_id"],
+                "ok": data.get("ok"),
+                "lanes": [(lane["name"], lane["ok"]) for lane in data.get("lanes", [])],
+                "cost_usd": round(data.get("cost_usd", 0), 4),
+                "duration_s": round(data.get("duration_s", 0), 1),
+                "report": data.get("report_path"),
+            }
+        )
+    print(json.dumps(rows, indent=2))
     return 0
 
 
@@ -169,8 +233,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="conductor commits the dispatch's work itself, uniformly across fleets "
         "(Codex's sandbox cannot write .git, the others commit on their own)",
     )
+    p_dispatch.add_argument(
+        "--isolate",
+        action="store_true",
+        help="run in a fresh git worktree on branch conductor/<run_id>; the worktree is "
+        "removed afterwards if clean, kept and reported if it holds uncommitted work",
+    )
     p_dispatch.add_argument("--dry-run", action="store_true", help="print argv, spawn nothing")
     p_dispatch.set_defaults(func=cmd_dispatch)
+
+    p_prices = sub.add_parser("prices", help="show the effective per-model price table")
+    p_prices.set_defaults(func=cmd_prices)
+
+    p_mission = sub.add_parser(
+        "mission",
+        help="run a mission file: one prompt fanned out to N lanes with fallbacks, "
+        "a concurrency cap, a dollar budget, worktree isolation, and one report",
+    )
+    p_mission.add_argument("file", help="mission .json or .toml")
+    p_mission.add_argument(
+        "--dry-run", action="store_true", help="validate and record argv, spawn nothing"
+    )
+    p_mission.set_defaults(func=cmd_mission)
+
+    p_missions = sub.add_parser("missions", help="list recent missions")
+    p_missions.add_argument("--limit", type=int, default=20)
+    p_missions.set_defaults(func=cmd_missions)
 
     p_verify = sub.add_parser("verify", help="inspect repo state, optionally run a gate")
     p_verify.add_argument("--cwd", default=".")

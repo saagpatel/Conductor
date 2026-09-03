@@ -19,14 +19,19 @@ GIT_TIMEOUT = 30
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=GIT_TIMEOUT,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # A cwd the fleet deleted, or a hung git, must read as a failed
+        # command rather than an exception in the middle of a 3am run.
+        return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
 
 
 @dataclass
@@ -75,6 +80,15 @@ class Verdict:
 
 def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
     """Diff two snapshots into a verdict about whether bytes moved."""
+    if before.is_repo and not after.is_repo:
+        # The tree the fleet was given no longer exists. Whatever it did, no
+        # work landed anywhere the caller can use.
+        return Verdict(
+            checked=True,
+            no_op=True,
+            branch_before=before.branch,
+            notes=["the working tree vanished during the dispatch; no work landed"],
+        )
     if not (before.is_repo and after.is_repo):
         return Verdict(
             checked=False,
@@ -207,6 +221,8 @@ def run_tests(cwd: str, command: str, timeout: int = 900) -> TestOutcome:
         )
     except subprocess.TimeoutExpired:
         return TestOutcome(ran=True, timed_out=True, tail=f"timed out after {timeout}s")
+    except OSError as exc:
+        return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
     combined = (proc.stdout + proc.stderr).strip().splitlines()
     return TestOutcome(
         ran=True,

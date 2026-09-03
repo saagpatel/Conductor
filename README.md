@@ -108,6 +108,10 @@ Each is now pinned by a test.
 | `cursor` | Headless read mode stops on an interactive "do you trust this directory?" prompt and exits 1 having done nothing. Needs `--trust` (`--force` implies it, but read mode has no `--force`). |
 | `codex` | Can edit files but never commit under `workspace-write`. |
 | `claude` | A one-word reply cost **$0.2314**, because each headless spawn writes a fresh ~57.8K-token prompt cache. Antigravity's equivalent moved ~14K input tokens, Cursor's ~23K. Startup overhead, not the work, dominates short dispatches: do not send small jobs to this fleet. |
+| `antigravity` | `--print-timeout` defaults to **5m0s** whatever conductor does with the process. An 8s cap on a 25s task exits 1 with `status: ERROR`, `error: "timeout waiting for response"`, and the work cut. conductor pins it to the spec's timeout minus 5s, so agy stops itself (and still prints its usage and its own error) just before conductor's process-group kill would leave nothing to price. |
+| `claude` | `--json-schema` takes the schema **text**, not a path (a path fails with "not valid JSON"). The validated object comes back under `structured_output`. Codex (`--output-schema`) and Antigravity (`--json-schema`) take a path. |
+| `cursor` | Has no structured-output flag at all. A `--schema` dispatch to Cursor is refused before spawn rather than silently handed prose. |
+| all | `--schema` verified live on claude, codex, and antigravity; effort `max` verified on claude; sol, luna, composer-2.5, and gemini-3.7-flash each answered a live dispatch. Every fleet's failure signal (`is_error`, `status: ERROR`, a Codex `error` event) is read and sinks `ok` even on exit 0. |
 
 ## Three lessons borrowed from `peer-agent-tools`
 
@@ -121,20 +125,106 @@ Proven the hard way there, reused here:
    orphaned grandchild still mutating the repo races whatever runs next.
 3. **Verify on bytes.** Exit code and final message are both claims.
 
+## Missions: unattended runs as data, not shell
+
+A mission file names one prompt and the lanes it fans out to. This is the
+interface an orchestrating model drives: it writes the file and reads back a
+summary and a report path.
+
+```json
+{
+  "name": "parser-refactor",
+  "prompt_file": "spec.md",
+  "cwd": "~/Projects/thing",
+  "mode": "write",
+  "effort": "hard",
+  "test": "pytest -q",
+  "commit": "feat: refactor parser per spec",
+  "concurrency": 2,
+  "max_cost_usd": 5.0,
+  "lanes": [
+    {"fleet": "codex", "model": "sol", "fallback": [{"fleet": "claude", "model": "opus"}]},
+    {"fleet": "antigravity"},
+    {"fleet": "cursor", "model": "composer-2.5", "effort": "standard"}
+  ],
+  "collate": {"fleet": "claude", "model": "sonnet", "effort": "cheap"}
+}
+```
+
+`conductor mission parser-refactor.json` then:
+
+- checks every lane and fallback against the routing policy **at load time**,
+  before a token is spent, and refuses the whole file with the lane named;
+- runs lanes under the concurrency cap, each write lane in its own git
+  worktree on branch `conductor/<run_id>` (see below);
+- escalates down a lane's `fallback` list when an attempt is not `ok`, which
+  includes the exit-0-no-op case, a failed gate, and a fleet's own error;
+- keeps a shared dollar ledger and skips any attempt that would start after
+  `max_cost_usd` is spent, saying so in the lane's `skipped` field;
+- copies each lane's answer to `answers/<lane>.txt`, and, if `collate` is
+  set, hands all of them to one read-mode dispatch for a synthesis;
+- writes `report.md` (one table, each answer, the collated verdict) and
+  `result.json` under `$CONDUCTOR_HOME/missions/<id>/`.
+
+Fields cascade mission → lane → fallback, so the common case is one prompt,
+one cwd, one mode, and a list of fleets. A fallback that switches fleet drops
+the inherited `model`, because model names are fleet-local (caught live: an
+Antigravity fallback inheriting `luna` from its Codex primary). `require` is
+`all` (default) or `any`. TOML files load too.
+
+## Isolation: a branch is not a worktree
+
+HEAD and the index are shared mutable state, so two fleets editing one
+checkout race each other whatever branches they think they are on. Every
+write lane in a mission, and any dispatch given `--isolate`, runs in a fresh
+worktree under `$CONDUCTOR_HOME/worktrees/` on branch `conductor/<run_id>`,
+created from the target's HEAD. Verification and `--commit` happen there.
+Afterwards the worktree is removed if it is clean (the branch keeps the
+commits, ready to merge) and kept, with its path reported, if it holds
+uncommitted work. Deleting an agent's uncommitted edits to tidy up is the
+wrong trade. If a worktree cannot be created (not a repo, no commits yet, a
+git error), a write dispatch is refused before anything spawns rather than
+run in the shared checkout; a read dispatch proceeds in place and says so.
+
+## Cost accounting
+
+Only the claude fleet reports dollars. Codex reports usage only in its
+`--json` event stream (now always on; the answer still lands in the `-o`
+file), and Cursor and Antigravity report tokens with no price. conductor
+prices those from a dated list-price table (`conductor prices`) and marks the
+result `cost_basis: "estimated"`; a fleet's own figure is `"reported"` and is
+never overwritten. An unpriced model yields `null`, not `$0.00`, so a gap
+shows as a gap. Override or extend the table without a code change in
+`$CONDUCTOR_HOME/prices.json` (a null entry drops a model; a malformed file
+falls back to defaults rather than stopping a run).
+
+Token conventions are normalized first: `input_tokens` excludes cache reads
+on every fleet (OpenAI and Google count them inside the input figure and are
+split out), and `output_tokens` includes reasoning (Antigravity's separate
+`thinking_tokens` are folded in, as Google bills them).
+
+Measured on 2026-09-03, a one-line answer to "what is this README for":
+codex/luna $0.0037, antigravity $0.0228, cursor/composer-2.5 $0.0131, and
+the claude/haiku collate $0.0599. Startup, not the work, still dominates.
+
 ## Commands
 
 - `conductor fleets` — the routing policy, and whether each binary is installed
 - `conductor dispatch` — run one prompt on one fleet (`--dry-run` prints the argv,
-  `--test` runs a gate afterward, `--commit` lands the work)
+  `--schema` requests structured output, `--test` runs a gate afterward,
+  `--commit` lands the work, `--isolate` runs in a fresh worktree)
+- `conductor mission FILE` — run a mission file (`--dry-run` validates and
+  records every argv without spawning)
 - `conductor verify` — inspect repo state, optionally run a gate
-- `conductor runs` — recent dispatches and their verdicts
+- `conductor runs` / `conductor missions` — recent dispatches and missions
+- `conductor prices` — the effective price table after overrides
 
 Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 
 ## Development
 
 ```
-uv venv && uv pip install -e . && uv pip install pytest ruff
+uv venv && uv sync --frozen --group dev
 .venv/bin/pytest
 .venv/bin/ruff check .
 ```
