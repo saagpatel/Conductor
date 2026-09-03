@@ -43,7 +43,10 @@ def test_the_fix_lanes_branch_is_renamed_to_the_deliverable(
     assert "refactor/timestamps" in Path(result.report_path).read_text()
 
 
-def test_a_lane_that_landed_nothing_creates_no_branch(repo, home, monkeypatch, tmp_path, git_out):
+def test_a_no_op_fix_lane_names_the_tip_it_was_built_on(repo, home, monkeypatch, tmp_path, git_out):
+    """NO_DEFECTS → NO_CHANGES is the happy path of a pipeline, and the
+    deliverable is then the build; found live 2026-09-03 when a clean
+    review left no branch to merge."""
     by_prompt(
         monkeypatch,
         {
@@ -54,9 +57,36 @@ def test_a_lane_that_landed_nothing_creates_no_branch(repo, home, monkeypatch, t
     )
     mission = mission_from_dict(named(PIPELINE, repo, no_op_ok=True), base_dir=tmp_path)
     result = run_mission(mission, home=home)
-    fix = result.lanes[2]
-    assert result.ok and fix["ok"] and fix["branch"] == ""
-    assert git_out(repo, "branch", "--list", "refactor/*") == ""
+    build, _, fix = result.lanes
+    assert result.ok and fix["ok"] and fix["branch"] == "refactor/timestamps"
+    assert git_out(repo, "rev-parse", "refactor/timestamps") == build["tip_sha"]
+    assert "nothing landed on top of the base" in Path(result.report_path).read_text()
+
+
+def test_a_flat_lane_that_landed_nothing_creates_no_branch(
+    repo, home, fake_fleet, tmp_path, git_out
+):
+    fake_fleet(["sh", "-c", "true"])
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "lanes": [
+                {
+                    "name": "a",
+                    "fleet": "codex",
+                    "mode": "write",
+                    "prompt": "x",
+                    "no_op_ok": True,
+                    "branch": "feat/nothing",
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    lane = result.lanes[0]
+    assert result.ok and lane["ok"] and lane["branch"] == ""
+    assert git_out(repo, "branch", "--list", "feat/*") == ""
     assert "not created: no commits landed" in Path(result.report_path).read_text()
 
 

@@ -756,9 +756,25 @@ def run_mission(
                 break
         if out.ok and lane.branch and not dry_run:
             # The lane's commits are the deliverable; give them the name the
-            # mission asked for. A lane that landed nothing has no branch
-            # (release deleted it) and nothing to name.
-            if not out.branch:
+            # mission asked for. A lane that landed nothing has no branch of
+            # its own (release deleted it), but a no-op fix step is still the
+            # pipeline's output: its deliverable is the tip it was built on,
+            # so the name goes there. Only a clean tip qualifies.
+            if not out.branch and lane.base is not None and out.tip_sha and out.clean:
+                made = git_run(mission.cwd, "branch", "--", lane.branch, out.tip_sha)
+                if made.returncode != 0:
+                    out.ok = False
+                    out.attempts[-1]["error"] = (
+                        f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
+                    )
+                else:
+                    out.branch = lane.branch
+                    out.attempts[-1]["branch"] = lane.branch
+                    out.attempts[-1]["note"] = (
+                        f"branch '{lane.branch}' created at {out.tip_sha[:8]}: "
+                        "nothing landed on top of the base"
+                    )
+            elif not out.branch:
                 out.attempts[-1]["note"] = f"branch '{lane.branch}' not created: no commits landed"
             else:
                 why = _rename_branch(mission.cwd, out.branch, lane.branch)

@@ -20,6 +20,7 @@ def _run(
     basis: str | None,
     tokens: int,
     ok: bool = True,
+    dry_run: bool = False,
 ) -> None:
     directory = home / "runs" / run_id
     directory.mkdir(parents=True)
@@ -37,6 +38,7 @@ def _run(
                 "duration_s": 1.0,
                 "ok": ok,
                 "interrupted": False,
+                "dry_run": dry_run,
             }
         )
     )
@@ -98,12 +100,11 @@ def test_spend_groups_every_supported_run_dimension(
         "unpriced_runs": 1,
         "tokens": 600,
         "skipped": 0,
+        "dry_runs": 0,
     }
 
 
-def test_spend_associates_attempts_with_their_mission(
-    home: Path, monkeypatch, capsys
-):
+def test_spend_associates_attempts_with_their_mission(home: Path, monkeypatch, capsys):
     first, _, _ = _sample(home)
     mission = home / "missions" / "20260104T000000Z-mission"
     mission.mkdir(parents=True)
@@ -124,9 +125,7 @@ def test_spend_associates_attempts_with_their_mission(
     }
 
 
-def test_spend_window_is_since_inclusive_and_until_exclusive(
-    home: Path, monkeypatch, capsys
-):
+def test_spend_window_is_since_inclusive_and_until_exclusive(home: Path, monkeypatch, capsys):
     _sample(home)
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     assert (
@@ -148,9 +147,7 @@ def test_spend_window_is_since_inclusive_and_until_exclusive(
     assert rows[-1]["cost_usd"] == 2.5
 
 
-def test_spend_counts_malformed_receipts_on_only_the_total_row(
-    home: Path, monkeypatch, capsys
-):
+def test_spend_counts_malformed_receipts_on_only_the_total_row(home: Path, monkeypatch, capsys):
     _sample(home)
     malformed = home / "runs" / "20260104T000000Z-broken"
     malformed.mkdir(parents=True)
@@ -172,11 +169,30 @@ def test_spend_text_calls_out_unpriced_runs(home: Path, monkeypatch, capsys):
     assert "1 unpriced" in lines[-1]
 
 
-def test_spend_rejects_a_bad_since_with_one_line_and_exit_two(
-    home: Path, monkeypatch, capsys
-):
+def test_spend_rejects_a_bad_since_with_one_line_and_exit_two(home: Path, monkeypatch, capsys):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     assert main(["spend", "--since", "last-tuesday"]) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "error: invalid --since: last-tuesday\n"
+
+
+def test_spend_excludes_dry_runs_instead_of_calling_them_unpriced(home: Path, monkeypatch, capsys):
+    """Seen live 2026-09-03: 25 'unpriced' runs, most of them rehearsals."""
+    _sample(home)
+    _run(
+        home,
+        "20260903T010000Z-codex-x",
+        fleet="codex",
+        model="m",
+        cost=None,
+        basis=None,
+        tokens=0,
+        dry_run=True,
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    total = _json_output(capsys)[-1]
+    assert total["unpriced_runs"] == 1 and total["dry_runs"] == 1
+    assert main(["spend"]) == 0
+    assert "1 dry run(s) excluded" in capsys.readouterr().out.splitlines()[-1]

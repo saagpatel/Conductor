@@ -30,6 +30,7 @@ class Run:
     cost_usd: Decimal | None
     estimated: bool
     tokens: int
+    dry_run: bool = False  # spawned nothing and spent nothing; not an unpriced run
 
 
 @dataclass
@@ -43,6 +44,7 @@ class Row:
     estimated_runs: int = 0
     unpriced_runs: int = 0
     tokens: int = 0
+    dry_runs: int = 0  # counted on the total row only; never spend, never unpriced
 
     def add(self, run: Run) -> None:
         self.runs += 1
@@ -66,6 +68,7 @@ class Row:
         }
         if skipped is not None:
             row["skipped"] = skipped
+            row["dry_runs"] = self.dry_runs
         return row
 
 
@@ -118,9 +121,10 @@ def _read_run(path: Path) -> Run | None:
         if created is None:
             return None
 
+        dry_run = raw.get("dry_run") is True
         usage = raw.get("usage")
         if usage is None:
-            return Run(run_id, created, fleet, model, ok, None, False, 0)
+            return Run(run_id, created, fleet, model, ok, None, False, 0, dry_run)
         if not isinstance(usage, dict):
             return None
         cost = _number(usage.get("cost_usd"))
@@ -134,7 +138,7 @@ def _read_run(path: Path) -> Run | None:
             return None
         else:
             tokens = raw_tokens
-        return Run(run_id, created, fleet, model, ok, cost, basis == "estimated", tokens)
+        return Run(run_id, created, fleet, model, ok, cost, basis == "estimated", tokens, dry_run)
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
 
@@ -212,6 +216,11 @@ def summarize(
             continue
         if until is not None and run.created >= until:
             continue
+        if run.dry_run:
+            # A dry run wrote a receipt with no usage; folding it into
+            # "unpriced" would make every rehearsal read as unverified spend.
+            total.dry_runs += 1
+            continue
         group = _group(run, by, missions)
         groups.setdefault(group, Row(group)).add(run)
         total.add(run)
@@ -248,6 +257,8 @@ def _print_table(rows: list[Row], total: Row, skipped: int) -> None:
                 line += f"  {total.unpriced_runs} unpriced"
             if skipped:
                 line += f"  {skipped} skipped"
+            if total.dry_runs:
+                line += f"  {total.dry_runs} dry run(s) excluded"
         print(line)
 
 

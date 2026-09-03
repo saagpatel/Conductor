@@ -269,8 +269,10 @@ A lane's `branch` names its deliverable: once the lane's commits land, its
 the operator merges is not a timestamp. The name is checked before any
 fleet spawns: an invalid name, a name already in the repo, a `conductor/`
 prefix, or two lanes claiming one name are refused at mission start, not
-after a $5 build. A lane that landed nothing has no branch to name and says
-so. Upstream lanes keep their run-id branches; the first production
+after a $5 build. A based lane that landed nothing (the fix step after a
+clean review) names the tip it was built on, because that tip is then the
+pipeline's deliverable; a flat lane that landed nothing has no branch to
+name and says so. Upstream lanes keep their run-id branches; the first production
 pipeline (2026-09-03) needed a hand rename, which is how this field earned
 its place.
 
@@ -344,7 +346,9 @@ grouped by fleet by default or by day, model, mission, or run. `--since` is
 inclusive, `--until` is exclusive, and both accept a UTC date or ISO datetime;
 `--json` emits machine-readable rows. Estimated and unpriced runs are counted
 separately, so a missing price can never make a run look free. Malformed or
-unreadable receipts are counted as skipped on the total row.
+unreadable receipts are counted as skipped on the total row, and dry runs
+are excluded and counted there too: a rehearsal spends nothing, and folding
+it into "unpriced" made 25 of the first 43 receipts read as unverified spend.
 
 ### Per-dispatch caps
 
