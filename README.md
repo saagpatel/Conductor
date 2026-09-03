@@ -121,6 +121,37 @@ Deletions are staged like anything else and named explicitly in the receipt. A
 bulk stage that quietly swallows removed source files is the failure that
 reporting exists to prevent.
 
+### The gate a fleet cannot edit
+
+A fleet passes its own gate most cheaply by editing the gate: a `conftest.py`
+that skips the failing test, a `pyproject.toml` that narrows `addopts`, a
+Makefile the gate calls. So every dispatch pins its **test surface** before
+spawn: the content hash of every test file and gate configuration file
+(`tests/**`, `**/conftest.py`, `**/pyproject.toml`, `**/Makefile`,
+`.github/workflows/**`, and the rest of `surface.DEFAULT_TEST_SURFACE`,
+ignored files included), and hashes it again after the fleet exits. The
+receipt carries `test_surface.touched` and the changed paths, and missions
+render `{{lanes.X.test_touched}}` for downstream lanes.
+
+What a touched surface means is the dispatch's `test_policy`:
+
+- `clean` (default): the fleet's own gate run is not the verdict. Conductor
+  adds a detached worktree at the base commit, transplants only the
+  non-surface changes into it (through a temporary index, never the
+  fleet's), runs the gate there, and counts only that run. A commit whose
+  clean gate fails is uncommitted like any other gate failure. When the
+  surface did not move the fleet's own run counts and nothing is repeated,
+  so the common case pays nothing extra.
+- `allow`: the surface may change and the fleet's own gate counts. This is
+  the per-stage allowlist for a lane whose job is to write tests.
+- `forbid`: any surface change fails the dispatch outright.
+
+The clean worktree is pristine: it has no installed dependencies, so the
+gate command must bring its own toolchain (an absolute interpreter path, a
+`uv run --project`, a `make` target that installs). The worktree is removed
+when the gate ends, on every path; `gc` recognises a leftover
+`<run_id>-clean` tree and keeps it while its run is live.
+
 ## What the live matrix taught
 
 Every row below was found by running the thing, not by reading help output.
