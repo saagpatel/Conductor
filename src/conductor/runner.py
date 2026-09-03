@@ -92,6 +92,8 @@ class Result:
     isolation: dict | None = None
     fleet_status: str | None = None
     fleet_error: str | None = None
+    session_id: str | None = None
+    resumed: dict | None = None
     error: str | None = None
     dry_run: bool = False
     no_op_ok: bool = False  # a write that may legitimately change nothing
@@ -205,11 +207,15 @@ class Result:
             "cost_usd": (self.usage or {}).get("cost_usd"),
             "cost_basis": (self.usage or {}).get("cost_basis"),
             "tokens": (self.usage or {}).get("total_tokens"),
+            "input_tokens": (self.usage or {}).get("input_tokens"),
+            "cache_read_tokens": (self.usage or {}).get("cache_read_tokens"),
             "cap_usd": (self.budget or {}).get("cap_usd"),
             "over_cap": bool((self.budget or {}).get("exceeded")),
             "answer_path": self.answer_path,
             "diff_path": self.diff_path,
             "run_dir": self.run_dir,
+            "session_id": self.session_id,
+            "resumed": self.resumed,
             "error": self.error or self.fleet_error,
             "failure": self.failure(),
         }
@@ -619,6 +625,21 @@ def dispatch(
     # The fleet's own envelope first: a fleet that says it failed (on any
     # exit code) must not have its work committed as if it had succeeded.
     output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+    resumed: dict | None = None
+    resume_note: str | None = None
+    if spec.resume is not None:
+        resume_ok = output.session_id == spec.resume
+        resumed = {
+            "requested": spec.resume,
+            "ok": resume_ok,
+            "session_id": output.session_id,
+        }
+        if resume_ok:
+            resume_note = f"resumed session {spec.resume}"
+        else:
+            got = output.session_id or "none"
+            resume_note = f"resume failed: fleet reported session {got}, requested {spec.resume}"
+            error = resume_note
     answer = output.answer
     if not answer and spec_with_paths.last_message:
         # Codex writes its final message to the -o file; if the event stream
@@ -737,6 +758,8 @@ def dispatch(
     after = GitState.capture(spec.cwd)
     git_verdict = compare(spec.cwd, before, after)
     git_verdict.notes.extend(output.notes)
+    if resume_note:
+        git_verdict.notes.append(resume_note)
     if surface_state and surface_state["touched"]:
         changed = surface_state["changed"]
         git_verdict.notes.append(
@@ -832,6 +855,8 @@ def dispatch(
         isolation=iso.to_dict() if iso is not None else None,
         fleet_status=output.status,
         fleet_error=output.error,
+        session_id=output.session_id,
+        resumed=resumed,
         error=error,
         no_op_ok=no_op_ok,
         interrupted=interrupted,

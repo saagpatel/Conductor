@@ -71,7 +71,7 @@ _INHERITED = (
 # would otherwise silently turn a dependent lane into a root.
 _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
 _FALLBACK_KEYS = _ATTEMPT_KEYS
-_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "branch"}
+_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "resume", "branch"}
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
     "cwd",
@@ -137,7 +137,14 @@ class Attempt:
     test_policy: str = "clean"
     test_surface: list[str] | None = None
 
-    def spec(self, cwd: str, *, cap_usd: float | None = None, prompt: str | None = None) -> Spec:
+    def spec(
+        self,
+        cwd: str,
+        *,
+        cap_usd: float | None = None,
+        prompt: str | None = None,
+        resume: str | None = None,
+    ) -> Spec:
         """The dispatch; `cap_usd` overrides the attempt's own (the mission
         ledger passes what it has left) and `prompt` the rendered template."""
         return Spec(
@@ -150,6 +157,7 @@ class Attempt:
             timeout=self.timeout,
             schema=self.schema,
             verdict=self.verdict,
+            resume=resume,
             cap_usd=self.cap_usd if cap_usd is None else cap_usd,
             test_policy=self.test_policy,
             test_surface=self.test_surface,
@@ -172,6 +180,7 @@ class Lane:
     attempts: list[Attempt]
     needs: list[str] = field(default_factory=list)  # lanes that must be ok first
     base: str | None = None  # lane whose final commit this lane's worktree starts from
+    resume: str | None = None  # lane whose final fleet session this lane may continue
     # The name the lane's run-id branch is renamed to once its commits
     # land, so a deliverable is `refactor/x`, not a timestamp. Refused at
     # mission start if it already exists in the repo.
@@ -301,6 +310,17 @@ class Mission:
                     raise MissionInvalid(f"lane '{lane.name}' needs itself")
             if lane.base is not None and lane.base not in lane.needs:
                 raise MissionInvalid(f"lane '{lane.name}': base '{lane.base}' must be a need")
+            if lane.resume is not None:
+                if lane.resume not in names:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}' resumes unknown lane '{lane.resume}'"
+                    )
+                if lane.resume == lane.name:
+                    raise MissionInvalid(f"lane '{lane.name}' resumes itself")
+                if lane.resume not in lane.needs and lane.resume != lane.base:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': resume '{lane.resume}' must be in needs or be base"
+                    )
             for attempt in lane.attempts:
                 for ref_lane, ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
                     if is_mission:
@@ -425,12 +445,19 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 )
             )
         lane_name = str(raw_lane.get("name") or _default_lane_name(primary, lanes))
-        needs, lane_base = _lane_graph_fields(raw_lane, where=f"lane {i}")
+        needs, lane_base, lane_resume = _lane_graph_fields(raw_lane, where=f"lane {i}")
         lane_branch = raw_lane.get("branch")
         if lane_branch is not None and not isinstance(lane_branch, str):
             raise MissionInvalid(f"lane {i}: branch must be a string")
         lanes.append(
-            Lane(name=lane_name, attempts=attempts, needs=needs, base=lane_base, branch=lane_branch)
+            Lane(
+                name=lane_name,
+                attempts=attempts,
+                needs=needs,
+                base=lane_base,
+                resume=lane_resume,
+                branch=lane_branch,
+            )
         )
 
     collate = None
@@ -480,18 +507,23 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     return mission
 
 
-def _lane_graph_fields(raw_lane: dict, *, where: str) -> tuple[list[str], str | None]:
+def _lane_graph_fields(
+    raw_lane: dict, *, where: str
+) -> tuple[list[str], str | None, str | None]:
     needs_raw = raw_lane.get("needs") or []
     if not isinstance(needs_raw, list) or not all(isinstance(n, str) for n in needs_raw):
         raise MissionInvalid(f"{where}: needs must be a list of lane names")
     lane_base = raw_lane.get("base")
     if lane_base is not None and not isinstance(lane_base, str):
         raise MissionInvalid(f"{where}: base must be a lane name")
+    lane_resume = raw_lane.get("resume")
+    if lane_resume is not None and not isinstance(lane_resume, str):
+        raise MissionInvalid(f"{where}: resume must be a lane name")
     needs: list[str] = []
     for n in list(needs_raw) + ([lane_base] if lane_base else []):
         if n not in needs:  # a base is a need; duplicates are harmless
             needs.append(n)
-    return needs, lane_base
+    return needs, lane_base, lane_resume
 
 
 def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
@@ -649,6 +681,8 @@ class LaneResult:
     cost_usd: float = 0.0
     unpriced_attempts: int = 0
     tokens: int = 0
+    cache_read_tokens: int = 0
+    input_tokens: int = 0
     skipped: str | None = None
     needs: list[str] = field(default_factory=list)
     base: str | None = None
@@ -658,6 +692,8 @@ class LaneResult:
     branch: str = ""  # the branch its commits ended on, after any rename
     test_touched: str = "no"
     verdict: dict | None = None
+    resume: dict | None = None
+    session_id: str | None = None
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -710,6 +746,10 @@ class MissionResult:
                     "branch": (lane["attempts"][-1].get("branch") if lane["attempts"] else None),
                     "tip": lane.get("tip_sha") or None,
                     "cost_usd": lane["cost_usd"],
+                    "cache_read_tokens": lane.get("cache_read_tokens", 0),
+                    "input_tokens": lane.get("input_tokens", 0),
+                    "resumed": lane.get("resume"),
+                    "session_id": lane.get("session_id"),
                     "skipped": lane.get("skipped"),
                     "test_touched": lane.get("test_touched", "no"),
                     "verdict": _verdict_label(lane.get("verdict")),
@@ -811,6 +851,7 @@ def run_mission(
             if why:
                 out.skipped = f"cannot build on {lane.base}: {why}"
                 return
+        resume_failed = False
         for attempt in lane.attempts:
             blocked = None if dry_run else ledger.blocker()
             if stop_requested():
@@ -818,12 +859,40 @@ def run_mission(
             if blocked:
                 out.skipped = f"{blocked}; {attempt.label()} not started"
                 break
+            resume_id: str | None = None
+            resume_state: dict | None = None
+            resume_note: str | None = None
+            if lane.resume is not None:
+                upstream = done[lane.resume]
+                upstream_fleet = upstream.attempts[-1]["fleet"]
+                if resume_failed:
+                    reason = "previous resume failed"
+                elif attempt.fleet != upstream_fleet:
+                    reason = f"fleet differs: {attempt.fleet} vs {upstream_fleet}"
+                elif upstream.session_id is None:
+                    reason = "upstream recorded no session"
+                else:
+                    reason = "resumed"
+                    resume_id = upstream.session_id
+                resume_state = {
+                    "from": lane.resume,
+                    "session_id": upstream.session_id,
+                    "applied": resume_id is not None,
+                    "reason": reason,
+                }
+                out.resume = resume_state
+                resume_note = (
+                    f"resumed session {resume_id} from lane {lane.resume}"
+                    if resume_id is not None
+                    else f"resume from lane {lane.resume} not applied: {reason}"
+                )
             prompt = _render(attempt.prompt, mission, done, dry_run=dry_run)
             result = dispatch(
                 attempt.spec(
                     mission.cwd,
                     cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
                     prompt=prompt,
+                    resume=resume_id,
                 ),
                 dry_run=dry_run,
                 test_command=attempt.test,
@@ -833,12 +902,20 @@ def run_mission(
                 no_op_ok=attempt.no_op_ok,
                 base_ref=base_ref,
             )
+            if resume_note and resume_id is None:
+                result.git_verdict.setdefault("notes", []).append(resume_note)
+                (Path(result.run_dir) / "result.json").write_text(
+                    json.dumps(result.to_dict(), indent=2)
+                )
             ledger.add(result)
             summary = result.summary()
             summary["test_surface"] = result.test_surface
             summary["verdict_data"] = result.verdict
             summary["lane"] = lane.name
             summary["attempt"] = attempt.label()
+            summary["resume"] = resume_state
+            if resume_note:
+                summary["note"] = resume_note
             summary["unpriced"] = (
                 result.spawned and not result.interrupted and summary.get("cost_usd") is None
             )
@@ -847,6 +924,8 @@ def run_mission(
             if summary["unpriced"]:
                 out.unpriced_attempts += 1
             out.tokens += int(summary.get("tokens") or 0)
+            out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
+            out.input_tokens += int(summary.get("input_tokens") or 0)
             # A lane's answer, diff, and tree are its final attempt's. A failed
             # primary's answer left in place would be what the collate reads
             # when the fallback produced none.
@@ -859,6 +938,9 @@ def run_mission(
             out.branch = iso.get("branch") or ""
             out.test_touched = _test_touched(result.test_surface)
             out.verdict = result.verdict
+            out.session_id = result.session_id
+            if result.resumed is not None and result.resumed.get("ok") is False:
+                resume_failed = True
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
                 break
@@ -1141,6 +1223,27 @@ def _clip(text: str, limit: int) -> str:
     return text
 
 
+def _cached(row: dict) -> str:
+    input_tokens = int(row.get("input_tokens") or 0)
+    if input_tokens <= 0:
+        return "-"
+    cache_read = int(row.get("cache_read_tokens") or 0)
+    percent = cache_read / input_tokens * 100
+    return f"{cache_read}/{input_tokens} ({percent:.0f}%)"
+
+
+def _resumed_label(row: dict) -> str:
+    decision = row.get("resume")
+    if not isinstance(decision, dict):
+        return "no"
+    guard = row.get("resumed")
+    if decision.get("applied") and isinstance(guard, dict) and guard.get("ok") is True:
+        return "yes"
+    reason = row.get("failure") if decision.get("applied") else decision.get("reason")
+    text = f"no: {reason or 'resume failed'}"
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
 def _lane_answer(lane: LaneResult, limit: int) -> str:
     if lane.answer_path and Path(lane.answer_path).is_file():
         text = Path(lane.answer_path).read_text(errors="replace").strip()
@@ -1246,12 +1349,14 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         f"- duration: {result.duration_s:.1f}s",
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
-        "cost_usd | tokens | dur_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "cost_usd | tokens | cached | resumed | dur_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for lane in lanes:
         if not lane.attempts and lane.skipped:
-            lines.append(f"| {lane.name} | (skipped) | False | | | | no | | | | | |")
+            lines.append(
+                f"| {lane.name} | (skipped) | False | | | | no | | | | | - | no | |"
+            )
         for a in lane.attempts:
             cost = _usd(a.get("cost_usd"))
             if a.get("unpriced"):
@@ -1262,7 +1367,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 f"{a['no_op']} | {_test_touched(a.get('test_surface'))} | {a['commits']} | "
                 f"{a.get('branch') or ''} | "
                 f"{cost} | "
-                f"{a.get('tokens') or ''} | {a['duration_s']} |"
+                f"{a.get('tokens') or ''} | {_cached(a)} | {_resumed_label(a)} | "
+                f"{a['duration_s']} |"
             )
     for note in result.notes:
         lines += ["", f"**Note**: {note}"]
@@ -1282,6 +1388,16 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             lines.append(f"- needs: {', '.join(lane.needs)}")
         if lane.base:
             lines.append(f"- built on: lane {lane.base} at `{lane.base_sha[:8]}`")
+        if lane.resume:
+            state = lane.resume
+            lines.append(
+                f"- resume from: lane {state['from']} "
+                f"({'applied' if state['applied'] else state['reason']})"
+            )
+        if lane.input_tokens:
+            lines.append(
+                f"- cache reads: {lane.cache_read_tokens}/{lane.input_tokens} input tokens"
+            )
         if lane.tip_sha:
             state = "clean" if lane.clean else "with uncommitted work"
             lines.append(f"- tip: `{lane.tip_sha[:8]}` ({state})")

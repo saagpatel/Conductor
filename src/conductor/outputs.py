@@ -73,6 +73,7 @@ class FleetOutput:
     parsed: bool = False
     status: str | None = None  # the fleet's own status word, when it has one
     error: str | None = None  # the fleet's own failure message, when it has one
+    session_id: str | None = None
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -81,6 +82,7 @@ class FleetOutput:
             "parsed": self.parsed,
             "status": self.status,
             "error": self.error,
+            "session_id": self.session_id,
             "notes": self.notes,
             "usage": self.usage.to_dict() if self.usage else None,
         }
@@ -118,6 +120,7 @@ def _parse_antigravity(text: str) -> FleetOutput:
     `{"event": "result", "result": {...}}`. A transcript with no result
     event was cut short, by conductor's kill or agy's own crash: there is no
     answer, but what the steps reported so far is still priced."""
+    session_id = _last_stream_id(text, "conversation_id")
     payload = _last_json_object(text)
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
@@ -126,8 +129,12 @@ def _parse_antigravity(text: str) -> FleetOutput:
         payload = payload["result"]
     elif event is not None:
         # The last thing printed was a step, not the result: cut short.
-        return FleetOutput(answer="", usage=agy_step_usage(text), parsed=True)
-    return _parse_envelope("antigravity", payload, text)
+        return FleetOutput(
+            answer="", usage=agy_step_usage(text), parsed=True, session_id=session_id
+        )
+    out = _parse_envelope("antigravity", payload, text)
+    out.session_id = session_id
+    return out
 
 
 def _parse_cursor(text: str) -> FleetOutput:
@@ -140,11 +147,13 @@ def _parse_cursor(text: str) -> FleetOutput:
     if not events:
         return FleetOutput(answer=text, parsed=False)
     said = cursor_said(events)
+    session_id = _last_stream_id(text, "session_id")
     last = events[-1]
     if last.get("type") == "result" or "result" in last or "is_error" in last:
         out = _parse_envelope("cursor", last, text)
         if said and not out.error:
             out.answer = said
+        out.session_id = session_id
         return out
     for ev in reversed(events):
         if ev.get("is_error") is True or ev.get("type") == "error":
@@ -154,15 +163,32 @@ def _parse_cursor(text: str) -> FleetOutput:
                     parsed=True,
                     status="error",
                     error=str(ev.get("error") or ev.get("message") or "cursor reported error"),
+                    session_id=session_id,
                 )
             out = _parse_envelope("cursor", ev, text)
             out.answer = said
+            out.session_id = session_id
             return out
     return FleetOutput(
         answer=said,
         parsed=True,
         error="cursor stream ended without a result event",
+        session_id=session_id,
     )
+
+
+def _last_stream_id(text: str, key: str) -> str | None:
+    """The last non-empty identity in a JSONL stream or wrapped result."""
+    found: str | None = None
+    for event in (ev for ev in map(json_line, text.splitlines()) if ev is not None):
+        candidates = [event]
+        if isinstance(event.get("result"), dict):
+            candidates.append(event["result"])
+        for candidate in candidates:
+            value = candidate.get(key)
+            if isinstance(value, str) and value:
+                found = value
+    return found
 
 
 def cursor_said(events: list[dict]) -> str:
@@ -266,6 +292,13 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
         parsed=True,
         status=status,
         error=error,
+        session_id=(
+            payload.get("session_id")
+            if fleet in {"claude", "cursor"}
+            and isinstance(payload.get("session_id"), str)
+            and payload.get("session_id")
+            else None
+        ),
         notes=notes,
     )
 
@@ -344,9 +377,12 @@ def _parse_codex(text: str) -> FleetOutput:
     usage: Usage | None = None
     status: str | None = None
     error: str | None = None
+    session_id: str | None = None
     for ev in events:
         kind = ev.get("type")
-        if kind == "item.completed":
+        if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
+            session_id = ev["thread_id"] or None
+        elif kind == "item.completed":
             item = ev.get("item") or {}
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                 answer = item["text"].strip()
@@ -368,7 +404,14 @@ def _parse_codex(text: str) -> FleetOutput:
                 error = str(err or ev.get("message") or kind)
     if status != "turn.completed" and error is None:
         error = "codex stream ended without turn.completed"
-    return FleetOutput(answer=answer, usage=usage, parsed=True, status=status, error=error)
+    return FleetOutput(
+        answer=answer,
+        usage=usage,
+        parsed=True,
+        status=status,
+        error=error,
+        session_id=session_id,
+    )
 
 
 def usage_from_codex(raw: dict) -> Usage:

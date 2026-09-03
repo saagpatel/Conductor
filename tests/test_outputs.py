@@ -28,7 +28,8 @@ CURSOR = (
 )
 
 ANTIGRAVITY = (
-    '{"response":"PONG\\n","usage":{"input_tokens":14435,"output_tokens":2,'
+    '{"conversation_id":"69a75137","response":"PONG\\n",'
+    '"usage":{"input_tokens":14435,"output_tokens":2,'
     '"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14437}}'
 )
 
@@ -61,6 +62,19 @@ def test_every_fleet_yields_the_same_answer():
     assert parse("codex", CODEX_JSONL).answer == "PONG"
 
 
+@pytest.mark.parametrize(
+    ("fleet", "stream", "session_id"),
+    [
+        ("claude", CLAUDE, "a8ea8138"),
+        ("codex", CODEX_JSONL, "01a06560-2a84-7522-9f95-6043c032fabd"),
+        ("antigravity", ANTIGRAVITY, "69a75137"),
+        ("cursor", CURSOR, "f510f063"),
+    ],
+)
+def test_every_fleet_parser_yields_its_session_id(fleet, stream, session_id):
+    assert parse(fleet, stream).session_id == session_id
+
+
 def test_claude_cost_and_cache_write_are_captured():
     """The measured surprise worth keeping: a one-word headless reply cost
     $0.23 because the spawn wrote a fresh 57.8K-token prompt cache."""
@@ -77,6 +91,16 @@ def test_camel_case_usage_is_normalized():
     assert out.usage.output_tokens == 106
     assert out.usage.cost_usd is None  # Cursor reports no dollar figure
     assert out.usage.cost_basis is None
+
+
+def test_cursor_cache_reads_are_captured_and_split_out_of_input():
+    env = (
+        '{"type":"result","result":"ok","session_id":"cursor-s",'
+        '"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":400}}'
+    )
+    out = parse("cursor", env)
+    assert out.usage.input_tokens == 600
+    assert out.usage.cache_read_tokens == 400
 
 
 def test_snake_case_usage_is_normalized():
@@ -221,13 +245,14 @@ def test_claude_event_list_envelope_is_read_from_its_result_event():
     array (measured 2026-09-03); the answer and price are in the result event."""
     text = json.dumps(
         [
-            {"type": "system", "subtype": "init"},
+            {"type": "system", "subtype": "init", "session_id": "earlier"},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "OK"}]}},
             {
                 "type": "result",
                 "subtype": "success",
                 "is_error": False,
                 "result": "OK",
+                "session_id": "result-wins",
                 "total_cost_usd": 0.0513,
                 "usage": {"input_tokens": 2, "output_tokens": 4, "cache_read_input_tokens": 24096},
             },
@@ -235,8 +260,39 @@ def test_claude_event_list_envelope_is_read_from_its_result_event():
     )
     out = parse("claude", text)
     assert out.answer == "OK" and out.status == "success" and out.error is None
+    assert out.session_id == "result-wins"
     assert out.usage is not None and out.usage.cost_usd == 0.0513
     assert out.usage.cache_read_tokens == 24096
+
+
+@pytest.mark.parametrize(
+    ("fleet", "key"), [("antigravity", "conversation_id"), ("cursor", "session_id")]
+)
+def test_stream_parsers_take_the_last_non_empty_session_id(fleet, key):
+    stream = "\n".join(
+        [
+            json.dumps({key: "first", "type": "assistant"}),
+            json.dumps({key: "", "type": "assistant"}),
+            json.dumps(
+                {
+                    key: "last",
+                    "type": "result",
+                    "status": "SUCCESS",
+                    "response": "ok",
+                    "result": "ok",
+                }
+            ),
+        ]
+    )
+    assert parse(fleet, stream).session_id == "last"
+
+
+@pytest.mark.parametrize(
+    ("fleet", "key"), [("antigravity", "conversation_id"), ("cursor", "session_id")]
+)
+def test_an_empty_stream_session_id_is_none(fleet, key):
+    payload = {key: "", "type": "result", "status": "SUCCESS", "result": "ok"}
+    assert parse(fleet, json.dumps(payload)).session_id is None
 
 
 @pytest.mark.parametrize("cost", [float("nan"), float("inf"), -0.1, True, "1.25"])

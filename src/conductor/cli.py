@@ -100,6 +100,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             schema=args.schema,
             verdict=criteria,
+            resume=args.resume,
             cap_usd=args.cap_usd,
             test_policy=args.test_policy,
             test_surface=args.test_surface,
@@ -230,6 +231,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "ok": data.get("ok"),
                 "fleet": data["fleet"],
                 "model": data["model"],
+                "session_id": data.get("session_id"),
                 "exit_code": data["exit_code"],
                 "no_op": git_verdict.get("no_op"),
                 "duration_s": round(data.get("duration_s", 0), 1),
@@ -261,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument("--cwd", default=".", help="the fleet's working directory")
     p_dispatch.add_argument("--timeout", type=int, help="seconds; per-mode default otherwise")
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
+    p_dispatch.add_argument("--resume", metavar="SESSION_ID", help="resume a fleet session")
     p_dispatch.add_argument(
         "--verdict",
         action="append",

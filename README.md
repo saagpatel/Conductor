@@ -76,6 +76,7 @@ Small enough to read, never the transcript:
   "ok": false,
   "fleet": "codex",
   "model": "gpt-5.6-sol",
+  "session_id": "01a06560-2a84-7522-9f95-6043c032fabd",
   "exit_code": 0,
   "duration_s": 184.2,
   "commits": 0,
@@ -89,8 +90,8 @@ That run exited 0 and is still a failure. `ok` means the process succeeded
 **and** bytes moved (for write dispatches) **and** the gate passed **and**
 any requested commit landed; `failure` names which of those did not hold
 (here, `"write dispatch moved no bytes"`), so the caller never has to
-reconstruct the reason from the raw fields. Full
-stdout, stderr, the exact argv, and the prompt are on disk in `run_dir`; the
+reconstruct the reason from the raw fields. Full stdout, stderr, the exact
+argv, prompt, and fleet-reported `session_id` are on disk in `run_dir`; the
 caller reads them only if it decides to.
 
 ## Who commits
@@ -275,7 +276,7 @@ pipeline; everything else is unchanged.
      "base": "build",
      "prompt": "Review this change against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nList concrete defects; say NO_DEFECTS if none."},
     {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
-     "base": "build", "needs": ["review"], "no_op_ok": true,
+     "base": "build", "needs": ["review"], "resume": "build", "no_op_ok": true,
      "test": "pytest -q", "commit": "fix: address cross-vendor review",
      "prompt": "A reviewer from another vendor found:\n{{lanes.review.answer}}\nFix every real one; change nothing if there are none."}
   ]
@@ -297,6 +298,26 @@ pipeline; everything else is unchanged.
   step when the review found nothing). It waives only the no-op and the
   "nothing to commit"; a failed gate, a fleet error, or an over-cap run
   still fails. A clean no-op lane can itself be a base.
+
+#### Thread reuse
+
+A lane can set `resume` to a lane in its `needs` list or to its `base`. When
+the upstream lane's final attempt used the same fleet and recorded a session
+id, conductor resumes that session instead of paying for the repository
+context again. The build → review → fix example above resumes `build` on
+the `fix` lane while still waiting for the independent `review` lane:
+
+```json
+{"name": "fix", "fleet": "codex", "base": "build",
+ "needs": ["review"], "resume": "build"}
+```
+
+Session reuse is same-fleet only. A different fleet, or an upstream receipt
+without a session id, runs fresh and records why. Every resumed dispatch also
+asserts that the fleet returned the requested id; a missing or different id
+makes the attempt fail and its fallback starts fresh. This guard is essential
+for Antigravity: `agy --conversation MISSING` warns only on stderr, starts a
+new conversation, and exits 0.
 
 Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`,
 `{{lanes.<name>.test_touched}}` (`yes (n files: ...)` or `no`),
@@ -490,6 +511,7 @@ instead of reading as within budget.
 
 - `conductor fleets`: the routing policy, and whether each binary is installed
 - `conductor dispatch`: run one prompt on one fleet (`--dry-run` prints the argv,
+  `--resume SESSION_ID` continues a fleet session,
   `--schema` requests caller-defined structured output; repeatable `--verdict`
   ids and `--verdict-file` request conductor's checklist schema. `--test` runs a gate afterward,
   `--test-policy {clean,allow,forbid}` chooses how test-surface edits count,

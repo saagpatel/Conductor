@@ -216,6 +216,7 @@ class Spec:
     schema: str | None = None  # path to a JSON Schema for the final message
     verdict: list[Criterion] | None = None  # checklist; runner generates its schema
     last_message: str | None = None  # path the fleet should write its answer to
+    resume: str | None = None  # fleet session id to continue
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
     test_policy: str = "clean"
@@ -247,6 +248,10 @@ class Spec:
                 )
         if not self.prompt.strip():
             raise DispatchRefused("empty prompt")
+        if self.resume is not None and (
+            not isinstance(self.resume, str) or not self.resume.strip()
+        ):
+            raise DispatchRefused("resume must be a non-empty session id")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy
         if self.verdict is not None and (
             not isinstance(self.verdict, list)
@@ -368,6 +373,8 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # `errors`, with the spend so far still reported. Verified live
         # 2026-09-03.
         argv += ["--max-budget-usd", _usd_arg(spec.cap_usd)]
+    if spec.resume is not None:
+        argv += ["--resume", spec.resume]
     return argv
 
 
@@ -377,6 +384,31 @@ def _usd_arg(value: float) -> str:
 
 
 def _build_codex(spec: Spec, model: str) -> list[str]:
+    if spec.resume is not None:
+        argv = [
+            "codex",
+            "-C",
+            spec.cwd,
+            "--sandbox",
+            "workspace-write" if spec.mode == "write" else "read-only",
+            "exec",
+            "resume",
+            spec.resume,
+            "-m",
+            model,
+            "-c",
+            "approval_policy=never",
+            "-c",
+            f"model_reasoning_effort={_CODEX_EFFORT[spec.effort]}",
+            "--skip-git-repo-check",
+            "--json",
+        ]
+        if spec.schema:
+            argv += ["--output-schema", str(Path(spec.schema).resolve())]
+        if spec.last_message:
+            argv += ["-o", spec.last_message]
+        argv.append(spec.prompt)
+        return argv
     argv = [
         "codex",
         "exec",
@@ -457,6 +489,8 @@ def _build_antigravity(spec: Spec, model: str) -> list[str]:
         # expansion on so plan mode actually holds: asked to write a file it
         # writes an implementation plan in its own brain directory instead.
         argv += ["--mode", "plan", "--sandbox"]
+    if spec.resume is not None:
+        argv += ["--conversation", spec.resume]
     return argv
 
 
@@ -493,6 +527,8 @@ def _build_cursor(spec: Spec, model: str) -> list[str]:
         # grants workspace trust without granting command approval, so plan
         # mode stays read-only.
         argv += ["--mode", "plan", "--trust"]
+    if spec.resume is not None:
+        argv += ["--resume", spec.resume]
     return argv
 
 

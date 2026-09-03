@@ -30,6 +30,7 @@ class Run:
     cost_usd: Decimal | None
     estimated: bool
     tokens: int
+    cache_read_tokens: int
     dry_run: bool = False  # spawned nothing and spent nothing; not an unpriced run
 
 
@@ -44,6 +45,7 @@ class Row:
     estimated_runs: int = 0
     unpriced_runs: int = 0
     tokens: int = 0
+    cache_read_tokens: int = 0
     dry_runs: int = 0  # counted on the total row only; never spend, never unpriced
 
     def add(self, run: Run) -> None:
@@ -55,6 +57,7 @@ class Row:
             self.cost_usd += run.cost_usd
         self.estimated_runs += int(run.estimated)
         self.tokens += run.tokens
+        self.cache_read_tokens += run.cache_read_tokens
 
     def to_dict(self, *, skipped: int | None = None) -> dict[str, str | int | float]:
         row: dict[str, str | int | float] = {
@@ -65,6 +68,7 @@ class Row:
             "estimated_runs": self.estimated_runs,
             "unpriced_runs": self.unpriced_runs,
             "tokens": self.tokens,
+            "cache_read_tokens": self.cache_read_tokens,
         }
         if skipped is not None:
             row["skipped"] = skipped
@@ -124,7 +128,7 @@ def _read_run(path: Path) -> Run | None:
         dry_run = raw.get("dry_run") is True
         usage = raw.get("usage")
         if usage is None:
-            return Run(run_id, created, fleet, model, ok, None, False, 0, dry_run)
+            return Run(run_id, created, fleet, model, ok, None, False, 0, 0, dry_run)
         if not isinstance(usage, dict):
             return None
         cost = _number(usage.get("cost_usd"))
@@ -138,7 +142,21 @@ def _read_run(path: Path) -> Run | None:
             return None
         else:
             tokens = raw_tokens
-        return Run(run_id, created, fleet, model, ok, cost, basis == "estimated", tokens, dry_run)
+        raw_cache = usage.get("cache_read_tokens", 0)
+        if isinstance(raw_cache, bool) or not isinstance(raw_cache, int) or raw_cache < 0:
+            return None
+        return Run(
+            run_id,
+            created,
+            fleet,
+            model,
+            ok,
+            cost,
+            basis == "estimated",
+            tokens,
+            raw_cache,
+            dry_run,
+        )
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
 
@@ -229,7 +247,16 @@ def summarize(
 
 
 def _print_table(rows: list[Row], total: Row, skipped: int) -> None:
-    headings = ("group", "runs", "ok", "cost_usd", "estimated", "unpriced", "tokens")
+    headings = (
+        "group",
+        "runs",
+        "ok",
+        "cost_usd",
+        "estimated",
+        "unpriced",
+        "tokens",
+        "cache_read_tokens",
+    )
     values = [
         (
             row.group,
@@ -239,6 +266,7 @@ def _print_table(rows: list[Row], total: Row, skipped: int) -> None:
             str(row.estimated_runs),
             str(row.unpriced_runs),
             str(row.tokens),
+            str(row.cache_read_tokens),
         )
         for row in [*rows, total]
     ]

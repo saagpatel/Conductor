@@ -19,6 +19,7 @@ def _run(
     cost: float | None,
     basis: str | None,
     tokens: int,
+    cache_read_tokens: int = 0,
     ok: bool = True,
     dry_run: bool = False,
 ) -> None:
@@ -34,6 +35,7 @@ def _run(
                     "cost_usd": cost,
                     "cost_basis": basis,
                     "total_tokens": tokens,
+                    "cache_read_tokens": cache_read_tokens,
                 },
                 "duration_s": 1.0,
                 "ok": ok,
@@ -99,6 +101,7 @@ def test_spend_groups_every_supported_run_dimension(
         "estimated_runs": 1,
         "unpriced_runs": 1,
         "tokens": 600,
+        "cache_read_tokens": 0,
         "skipped": 0,
         "dry_runs": 0,
     }
@@ -167,6 +170,46 @@ def test_spend_text_calls_out_unpriced_runs(home: Path, monkeypatch, capsys):
     assert lines[-1].startswith("total")
     assert "3.7500" in lines[-1]
     assert "1 unpriced" in lines[-1]
+
+
+def test_spend_sums_cache_reads_and_exposes_them_in_text_and_json(
+    home: Path, monkeypatch, capsys
+):
+    _run(
+        home,
+        "20260101T000000Z-codex-cached",
+        fleet="codex",
+        model="sol",
+        cost=0.1,
+        basis="estimated",
+        tokens=125,
+        cache_read_tokens=75,
+    )
+    # Old receipts have no cache field and must contribute zero, not disappear.
+    legacy = home / "runs" / "20260102T000000Z-claude-legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": legacy.name,
+                "fleet": "claude",
+                "model": "opus",
+                "ok": True,
+                "usage": {"cost_usd": 0.2, "cost_basis": "reported", "total_tokens": 10},
+            }
+        )
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert {row["group"]: row["cache_read_tokens"] for row in rows[:-1]} == {
+        "claude": 0,
+        "codex": 75,
+    }
+    assert rows[-1]["cache_read_tokens"] == 75
+    assert main(["spend"]) == 0
+    text = capsys.readouterr().out
+    assert "cache_read_tokens" in text and text.splitlines()[-1].split()[-1] == "75"
 
 
 def test_spend_rejects_a_bad_since_with_one_line_and_exit_two(home: Path, monkeypatch, capsys):
