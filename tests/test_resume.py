@@ -143,6 +143,18 @@ def test_resume_dispatch_rejects_a_different_or_missing_session(
     assert expected in result.git_verdict["notes"]
 
 
+def test_resume_guard_preserves_an_earlier_dispatch_error(repo, home, fake_fleet):
+    fake_fleet(argv=["/definitely/missing/fleet"])
+    result = dispatch(
+        Spec(fleet="claude", prompt="x", cwd=str(repo), resume="wanted"), home=home
+    )
+
+    guard = "resume failed: fleet reported session none, requested wanted"
+    assert result.error is not None and result.error.startswith("cannot spawn claude:")
+    assert result.resumed == {"requested": "wanted", "ok": False, "session_id": None}
+    assert guard in result.git_verdict["notes"]
+
+
 def test_runs_lists_the_recorded_session_id(home, monkeypatch, capsys):
     directory = home / "runs" / "20260903T000000Z-codex-x"
     directory.mkdir(parents=True)
@@ -285,6 +297,9 @@ def test_mission_resumes_the_same_fleet_and_records_cache_visibility(
     assert receipt["resume"]["applied"] is True and receipt["session_id"] == "S"
     mission_receipt = json.loads((Path(result.mission_dir) / "result.json").read_text())
     assert mission_receipt["lanes"][1]["attempts"][0]["session_id"] == "S"
+    summary = result.summary()["lanes"][1]
+    assert summary["resume"] == fix["resume"]
+    assert "resumed" not in summary
     report = Path(result.report_path).read_text()
     assert "| cached | resumed |" in report
     assert "40/60 (67%)" in report and "| yes |" in report
@@ -342,7 +357,7 @@ def test_resume_guard_failure_falls_back_fresh(repo, home, monkeypatch, tmp_path
     ("lanes", "message"),
     [
         ([{"name": "a", "fleet": "codex", "resume": "missing"}], "unknown lane"),
-        ([{"name": "a", "fleet": "codex", "resume": "a", "needs": ["a"]}], "itself"),
+        ([{"name": "a", "fleet": "codex", "resume": "a"}], "itself"),
         (
             [
                 {"name": "a", "fleet": "codex"},

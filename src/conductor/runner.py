@@ -639,7 +639,10 @@ def dispatch(
         else:
             got = output.session_id or "none"
             resume_note = f"resume failed: fleet reported session {got}, requested {spec.resume}"
-            error = resume_note
+            # The guard must not hide the timeout, stop, cap, or spawn failure
+            # that explains why the fleet could not report the requested id.
+            if error is None:
+                error = resume_note
     answer = output.answer
     if not answer and spec_with_paths.last_message:
         # Codex writes its final message to the -o file; if the event stream

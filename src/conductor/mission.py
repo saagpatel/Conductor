@@ -748,7 +748,7 @@ class MissionResult:
                     "cost_usd": lane["cost_usd"],
                     "cache_read_tokens": lane.get("cache_read_tokens", 0),
                     "input_tokens": lane.get("input_tokens", 0),
-                    "resumed": lane.get("resume"),
+                    "resume": lane.get("resume"),
                     "session_id": lane.get("session_id"),
                     "skipped": lane.get("skipped"),
                     "test_touched": lane.get("test_touched", "no"),
