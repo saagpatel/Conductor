@@ -73,6 +73,7 @@ def test_parse_checklist_accepts_strings_and_objects_and_refuses_bad_input():
     ]
     for raw, match in [
         ("tested", "must be a list"),
+        ([], "at least one criterion"),
         (["Bad"], "item 0"),
         (["a", "a"], "item 1"),
         ([{"id": "a"}], "item 0"),
@@ -98,6 +99,16 @@ def test_parse_verdict_accepts_whole_json_prose_and_code_fences():
         verdict = parse_verdict(wrapped, CRITERIA)
         assert verdict.invalid is None and verdict.passed is True
         assert [item["id"] for item in verdict.criteria] == ["correct", "tested"]
+
+
+def test_parse_verdict_finds_the_last_object_after_stray_prose_braces():
+    answer = verdict_answer(True, True)
+    for wrapped in (
+        f"The guard `if (x) {{` is missing a close.\n{answer}",
+        f'It printed "{{" first.\n{answer}',
+    ):
+        verdict = parse_verdict(wrapped, CRITERIA)
+        assert verdict.invalid is None and verdict.passed is True
 
 
 @pytest.mark.parametrize(
@@ -289,6 +300,17 @@ def review_lane(name: str) -> dict:
     }
 
 
+def test_readme_three_reviewer_example_is_valid_json():
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Structured review and a 2-of-3 quorum", 1)[1]
+    example = section.split("```json\n", 1)[1].split("\n```", 1)[0]
+    parsed = json.loads(example)
+    assert parsed["require"] == {
+        "pass": 2,
+        "of": ["review-claude", "review-codex", "review-gemini"],
+    }
+
+
 def test_mission_quorum_templates_reports_and_stores_verdicts(
     repo, home, tmp_path, monkeypatch
 ):
@@ -326,7 +348,8 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(
     fix_prompt = next(prompt for prompt in seen if prompt.startswith("FIX"))
     collate_prompt = Path(result.mission_dir, "collate-prompt.txt").read_text()
     assert result.ok is True and result.quorum["met"] is True
-    assert result.require == {"pass": 2, "of": ["r1", "r2", "r3"]}
+    expected_require = json.dumps({"pass": 2, "of": ["r1", "r2", "r3"]})
+    assert result.require == expected_require
     assert result.quorum["passed"] == ["r1", "r2"]
     assert result.quorum["failed"] == ["r3"]
     assert "--- begin lanes.r1.verdict" in fix_prompt
@@ -338,6 +361,7 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(
     assert "quorum lanes all run on codex; heterogeneous judges tally better" in report
     assert "### Verdict" in report
     saved_result = json.loads(Path(result.mission_dir, "result.json").read_text())
+    assert saved_result["require"] == expected_require
     assert saved_result["quorum"] == result.quorum
     assert saved_result["notes"] == result.notes
     for name in ("r1", "r2", "r3"):
@@ -388,6 +412,21 @@ def test_mission_quorum_treats_an_invalid_lane_as_not_passing(
     assert result.ok is True and result.quorum["passed"] == ["r1", "r2"]
     assert result.lanes[2]["ok"] is False
     assert result.lanes[2]["verdict"]["invalid"]
+
+
+def test_quorum_dry_run_validates_without_claiming_votes(repo, home, tmp_path):
+    raw = {
+        "cwd": str(repo),
+        "lanes": [review_lane(name) for name in ("r1", "r2", "r3")],
+        "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dry_run=True
+    )
+    report = Path(result.report_path).read_text()
+    assert result.ok is True and result.dry_run is True
+    assert result.quorum is None
+    assert "Quorum:" not in report
 
 
 @pytest.mark.parametrize(

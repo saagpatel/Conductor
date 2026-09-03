@@ -351,9 +351,7 @@ data is safe to tally or paste.
     {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
      "base": "build", "needs": ["review-claude", "review-codex", "review-gemini"],
      "no_op_ok": true, "test": "pytest -q", "commit": "fix: address review verdicts",
-     "prompt": "Fix the supported failures in these review verdicts:\n"
-       "{{lanes.review-claude.verdict}}\n{{lanes.review-codex.verdict}}\n"
-       "{{lanes.review-gemini.verdict}}"}
+     "prompt": "Fix the supported failures in these review verdicts:\n{{lanes.review-claude.verdict}}\n{{lanes.review-codex.verdict}}\n{{lanes.review-gemini.verdict}}"}
   ]
 }
 ```

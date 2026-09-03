@@ -66,6 +66,8 @@ def parse_checklist(raw: object) -> list[Criterion]:
             raise ValueError(f"{where} duplicates id {criterion_id!r}")
         seen.add(criterion_id)
         criteria.append(Criterion(criterion_id, question))
+    if not criteria:
+        raise ValueError("checklist needs at least one criterion")
     return criteria
 
 
@@ -117,47 +119,32 @@ def checklist_contract(criteria: list[Criterion]) -> str:
     )
 
 
-def _balanced_objects(text: str) -> list[str]:
-    """Balanced top-level brace spans, ignoring braces inside JSON strings."""
-    spans: list[str] = []
-    start: int | None = None
-    depth = 0
-    quoted = False
-    escaped = False
-    for index, char in enumerate(text):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
+def _embedded_objects(text: str) -> list[dict]:
+    """Decode complete objects without letting a stray prose brace hide later JSON."""
+    decoder = json.JSONDecoder()
+    objects: list[dict] = []
+    cursor = 0
+    while (start := text.find("{", cursor)) >= 0:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            cursor = start + 1
             continue
-        if char == '"' and depth:
-            quoted = True
-        elif char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
-            if depth == 0 and start is not None:
-                spans.append(text[start : index + 1])
-                start = None
-    return spans
+        if isinstance(value, dict):
+            objects.append(value)
+        # Jump past a decoded object so its nested dictionaries cannot
+        # displace the top-level verdict as the last answer object.
+        cursor = max(end, start + 1)
+    return objects
 
 
 def _answer_object(text: str) -> tuple[dict | None, str | None]:
     try:
         raw = json.loads(text)
     except json.JSONDecodeError:
-        for candidate in reversed(_balanced_objects(text)):
-            try:
-                raw = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(raw, dict):
-                return raw, None
+        objects = _embedded_objects(text)
+        if objects:
+            return objects[-1], None
         return None, "answer contains no valid JSON object"
     if not isinstance(raw, dict):
         return None, "answer JSON must be an object"

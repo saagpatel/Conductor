@@ -678,7 +678,7 @@ class MissionResult:
     mission_id: str
     name: str
     ok: bool
-    require: str | dict
+    require: str
     lanes: list[dict]
     cost_usd: float
     tokens: int
@@ -967,43 +967,49 @@ def run_mission(
     quorum: dict | None = None
     notes: list[str] = []
     if isinstance(mission.require, dict):
-        selected = list(mission.require["of"])
-        selected_set = set(selected)
-        by_name = {lane.name: lane for lane in lane_results}
-        passed = [
-            name
-            for name in selected
-            if by_name[name].ok
-            and by_name[name].verdict is not None
-            and by_name[name].verdict.get("passed") is True
-        ]
-        failed = [name for name in selected if name not in passed]
-        quorum = {
-            "pass": mission.require["pass"],
-            "of": selected,
-            "passed": passed,
-            "failed": failed,
-            "met": len(passed) >= mission.require["pass"],
-        }
-        other_sinks_ok = all(
-            lane.ok
-            for lane in lane_results
-            if lane.name in sink_names and lane.name not in selected_set
-        )
-        ok = other_sinks_ok and quorum["met"]
-        final_fleets = {
-            lane.attempts[-1].get("fleet")
-            for lane in lane_results
-            if lane.name in selected_set and lane.attempts
-        }
-        if len(final_fleets) == 1 and all(
-            lane.attempts and lane.attempts[-1].get("spawned")
-            for lane in lane_results
-            if lane.name in selected_set
-        ):
-            fleet = next(iter(final_fleets))
-            note = f"quorum lanes all run on {fleet}; heterogeneous judges tally better"
-            notes.append(note)
+        if dry_run:
+            # A rehearsal validates the graph and every dispatch contract but
+            # has no judgments to tally; inventing failed votes makes valid
+            # quorum wiring look like a failed mission.
+            ok = all(lane.ok for lane in lane_results if lane.name in sink_names)
+        else:
+            selected = list(mission.require["of"])
+            selected_set = set(selected)
+            by_name = {lane.name: lane for lane in lane_results}
+            passed = [
+                name
+                for name in selected
+                if by_name[name].ok
+                and by_name[name].verdict is not None
+                and by_name[name].verdict.get("passed") is True
+            ]
+            failed = [name for name in selected if name not in passed]
+            quorum = {
+                "pass": mission.require["pass"],
+                "of": selected,
+                "passed": passed,
+                "failed": failed,
+                "met": len(passed) >= mission.require["pass"],
+            }
+            other_sinks_ok = all(
+                lane.ok
+                for lane in lane_results
+                if lane.name in sink_names and lane.name not in selected_set
+            )
+            ok = other_sinks_ok and quorum["met"]
+            final_fleets = {
+                lane.attempts[-1].get("fleet")
+                for lane in lane_results
+                if lane.name in selected_set and lane.attempts
+            }
+            if len(final_fleets) == 1 and all(
+                lane.attempts and lane.attempts[-1].get("spawned")
+                for lane in lane_results
+                if lane.name in selected_set
+            ):
+                fleet = next(iter(final_fleets))
+                note = f"quorum lanes all run on {fleet}; heterogeneous judges tally better"
+                notes.append(note)
     else:
         sinks_ok = [lane.ok for lane in lane_results if lane.name in sink_names]
         ok = all(sinks_ok) if mission.require == "all" else any(sinks_ok)
@@ -1022,7 +1028,9 @@ def run_mission(
         mission_id=mission_id,
         name=mission.name,
         ok=ok,
-        require=mission.require,
+        require=(
+            json.dumps(mission.require) if isinstance(mission.require, dict) else mission.require
+        ),
         lanes=[lane.to_dict() for lane in lane_results],
         cost_usd=sum(lane.cost_usd for lane in lane_results)
         + float((collate_out or {}).get("cost_usd") or 0.0),
