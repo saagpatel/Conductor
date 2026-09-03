@@ -37,13 +37,20 @@ class Isolation:
     base_sha: str = ""
     kept: bool | None = None
     reason: str = ""
+    # Where the worktree ended up: the commit HEAD pointed at when the
+    # dispatch was over, and whether everything in the tree was in it. A
+    # later lane may build on `tip_sha` only when `clean` is True; a branch
+    # name proves nothing about uncommitted work left in a kept worktree.
+    tip_sha: str = ""
+    clean: bool | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def create(repo: str, name: str, parent: Path) -> Isolation:
-    """Add a worktree for `repo` at `parent/name` on a fresh branch from HEAD.
+def create(repo: str, name: str, parent: Path, base_ref: str | None = None) -> Isolation:
+    """Add a worktree for `repo` at `parent/name` on a fresh branch from
+    `base_ref` (a commit; HEAD when not given).
 
     Returns an inactive Isolation with a reason rather than raising when the
     target cannot be isolated (not a repo, unborn HEAD, git failure), so the
@@ -55,18 +62,21 @@ def create(repo: str, name: str, parent: Path) -> Isolation:
     if top.returncode != 0:
         return Isolation(requested=True, active=False, reason="not a git repository")
     root = top.stdout.strip()
-    head = git_run(root, "rev-parse", "--verify", "HEAD", timeout=GIT_TIMEOUT)
+    head = git_run(
+        root, "rev-parse", "--verify", f"{base_ref or 'HEAD'}^{{commit}}", timeout=GIT_TIMEOUT
+    )
     if head.returncode != 0:
-        return Isolation(
-            requested=True, active=False, repo=root, reason="repository has no commits yet"
+        reason = (
+            "repository has no commits yet"
+            if base_ref is None
+            else f"base {base_ref} is not a commit in this repository"
         )
+        return Isolation(requested=True, active=False, repo=root, reason=reason)
     base = head.stdout.strip()
     branch = f"conductor/{name}"
     path = parent / name
     parent.mkdir(parents=True, exist_ok=True)
-    added = git_run(
-        root, "worktree", "add", "-b", branch, str(path), base, timeout=GIT_TIMEOUT
-    )
+    added = git_run(root, "worktree", "add", "-b", branch, str(path), base, timeout=GIT_TIMEOUT)
     if added.returncode != 0:
         return Isolation(
             requested=True,
@@ -114,14 +124,14 @@ def release(iso: Isolation) -> Isolation:
         return iso
     status = git_run(iso.worktree, "status", "--porcelain", timeout=GIT_TIMEOUT)
     dirty = status.returncode != 0 or bool(status.stdout.strip())
+    head = git_run(iso.worktree, "rev-parse", "HEAD", timeout=GIT_TIMEOUT).stdout.strip()
+    iso.tip_sha = head
+    iso.clean = not dirty
     if dirty:
         iso.kept = True
         iso.reason = "worktree kept: it holds uncommitted changes"
         return iso
-    head = git_run(iso.worktree, "rev-parse", "HEAD", timeout=GIT_TIMEOUT).stdout.strip()
-    removed = git_run(
-        iso.repo, "worktree", "remove", iso.worktree, timeout=GIT_TIMEOUT
-    )
+    removed = git_run(iso.repo, "worktree", "remove", iso.worktree, timeout=GIT_TIMEOUT)
     if removed.returncode != 0:
         iso.kept = True
         iso.reason = f"worktree kept: remove failed: {removed.stderr.strip()}"

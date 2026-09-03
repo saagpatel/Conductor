@@ -203,7 +203,66 @@ the inherited `model`, because model names are fleet-local (caught live: an
 Antigravity fallback inheriting `luna` from its Codex primary). `require` is
 `all` (default) or `any`. TOML files load too. Two dollar fields, two
 meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
-ceiling (see below).
+ceiling (see below). A key the loader does not know is refused, so `need`
+cannot quietly turn a dependent lane into a root.
+
+### Pipelines: build, then independent review, then fix
+
+Lanes can depend on each other. Three lane fields make a flat fan-out a
+pipeline; everything else is unchanged.
+
+```json
+{
+  "name": "parser-refactor",
+  "cwd": "~/Projects/thing",
+  "prompt_file": "spec.md",
+  "max_cost_usd": 10,
+  "lanes": [
+    {"name": "build", "fleet": "codex", "model": "sol", "mode": "write",
+     "test": "pytest -q", "commit": "feat: refactor parser per spec"},
+    {"name": "review", "fleet": "claude", "model": "opus", "mode": "read",
+     "base": "build",
+     "prompt": "Review this change against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nList concrete defects; say NO_DEFECTS if none."},
+    {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
+     "base": "build", "needs": ["review"], "no_op_ok": true,
+     "test": "pytest -q", "commit": "fix: address cross-vendor review",
+     "prompt": "A reviewer from another vendor found:\n{{lanes.review.answer}}\nFix every real one; change nothing if there are none."}
+  ]
+}
+```
+
+- `needs`: lanes that must have ended **ok** before this one starts. If one
+  of them did not, this lane is skipped with the reason, and so is anything
+  behind it, immediately. Cycles, unknown names, and self-needs are refused
+  at load.
+- `base`: the lane whose final **commit** this lane's worktree starts from.
+  `base` implies `needs`. Only committed work can be built on: a lane that
+  left uncommitted edits in a kept worktree, or was not isolated, cannot be
+  a base, and the dependent is skipped saying so. A based dispatch is always
+  isolated and is refused (in read mode too) if its worktree cannot be made,
+  because reviewing HEAD instead of the build would be reviewing the wrong
+  code. Its `diff.patch` is against the base's tip, and the report says so.
+- `no_op_ok`: a write lane that may legitimately change nothing (the fix
+  step when the review found nothing). It waives only the no-op and the
+  "nothing to commit"; a failed gate, a fleet error, or an over-cap run
+  still fails. A clean no-op lane can itself be a base.
+
+Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`, and
+`{{mission.prompt}}` (the mission-level prompt, verbatim). A referenced lane
+must be in `needs`; anything else between double braces is refused at load,
+so a misspelt name cannot render as `(none)`. Rendering is a single pass, so
+braces inside an upstream answer never become new substitutions; each pasted
+value is fenced and labelled as another agent's output, not instructions;
+and the total pasted text per prompt is bounded by `template_max_chars`
+(default 40000). In a dry run the placeholders render as `(dry run: ...)`.
+
+A pipeline is judged on its outputs: `require` applies to the lanes nothing
+else depends on, so `build ok, fix failed` is a failed pipeline whatever
+`any` would say. In a flat mission every lane is an output, as before. Each
+lane's receipt is written to `lanes/<name>.json` the moment it ends, so a
+crash mid-mission does not lose the finished stages. A fleet that commits
+on its own (Claude Code, Cursor, and Antigravity do) is landed work, not
+"nothing to commit".
 
 ## Isolation: a branch is not a worktree
 

@@ -81,6 +81,7 @@ class Result:
     fleet_error: str | None = None
     error: str | None = None
     dry_run: bool = False
+    no_op_ok: bool = False  # a write that may legitimately change nothing
 
     def failure(self) -> str | None:
         """Why the run is not ok, in one line, or None when it is.
@@ -111,7 +112,8 @@ class Result:
                 return "gate timed out"
             if self.tests.get("exit_code") != 0:
                 return f"gate exited {self.tests.get('exit_code')}"
-        if self.mode == "write" and self.verdict.get("checked") and self.verdict.get("no_op"):
+        no_op = self.verdict.get("checked") and self.verdict.get("no_op")
+        if self.mode == "write" and no_op and not self.no_op_ok:
             return "write dispatch moved no bytes"
         # The mirror image: a research dispatch that edited the tree ignored
         # its read-only setting (agy's read mode did exactly that live,
@@ -127,7 +129,9 @@ class Result:
         # A requested commit that did not happen is a failure even when the
         # dispatch itself went fine: the caller asked for landed work.
         if self.commit and not self.commit.get("committed"):
-            return f"commit did not land: {self.commit.get('reason') or 'unknown'}"
+            nothing = self.commit.get("reason") == "nothing to commit"
+            if not (self.no_op_ok and nothing):
+                return f"commit did not land: {self.commit.get('reason') or 'unknown'}"
         return None
 
     @property
@@ -160,6 +164,8 @@ class Result:
             "committed": (self.commit or {}).get("sha", "")[:8] or None,
             "branch": iso.get("branch") or None,
             "worktree": iso.get("worktree") if iso.get("kept") else None,
+            "tip": iso.get("tip_sha") or None,
+            "clean": iso.get("clean"),
             "cost_usd": (self.usage or {}).get("cost_usd"),
             "cost_basis": (self.usage or {}).get("cost_basis"),
             "tokens": (self.usage or {}).get("total_tokens"),
@@ -202,8 +208,19 @@ def dispatch(
     commit_message: str | None = None,
     isolate: bool = False,
     home: Path | None = None,
+    no_op_ok: bool = False,
+    base_ref: str | None = None,
 ) -> Result:
+    """Run one fleet and report honestly.
+
+    `base_ref` starts the isolated worktree from that commit instead of the
+    repo's HEAD (a pipeline stage building on an earlier stage's tip); it
+    forces isolation, and a dispatch that cannot get its worktree is then
+    refused in either mode, because running against HEAD would be running
+    against the wrong code.
+    """
     spec.validate()
+    isolate = isolate or base_ref is not None
     fleet = FLEETS[spec.fleet]
     model_id = fleet.model(spec.model).id_for(spec.effort)
     timeout = spec.resolved_timeout()
@@ -217,12 +234,12 @@ def dispatch(
     # shared checkout the caller named.
     iso: worktrees.Isolation | None = None
     if isolate and not dry_run:
-        iso = worktrees.create(spec.cwd, run_id, base / "worktrees")
+        iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
         if iso.active:
             # A cwd inside the repo stays the same subdirectory inside the
             # worktree; the fleet was pointed at that directory for a reason.
             spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
-        elif spec.mode == "write":
+        elif spec.mode == "write" or base_ref is not None:
             # The caller asked for a private tree and cannot have one. For a
             # write, running in the shared checkout instead is the collision
             # isolation exists to prevent, so it is refused before spawn. A
@@ -319,6 +336,17 @@ def dispatch(
     commit: CommitOutcome | None = None
     if commit_message and not timed_out and error is None and exit_code == 0 and not output.error:
         commit = commit_work(spec.cwd, commit_message)
+        if not commit.committed and commit.reason == "nothing to commit":
+            # Claude Code, Cursor, and Antigravity may commit on their own;
+            # a clean tree with a moved HEAD is landed work, not a no-show.
+            moved = GitState.capture(spec.cwd)
+            if moved.is_repo and moved.head and moved.head != before.head:
+                commit = CommitOutcome(
+                    attempted=True,
+                    committed=True,
+                    sha=moved.head,
+                    reason="the fleet committed its own work",
+                )
 
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
@@ -415,6 +443,7 @@ def dispatch(
         fleet_status=output.status,
         fleet_error=output.error,
         error=error,
+        no_op_ok=no_op_ok,
     )
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
