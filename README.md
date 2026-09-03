@@ -219,6 +219,12 @@ meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
 ceiling (see below). A key the loader does not know is refused, so `need`
 cannot quietly turn a dependent lane into a root.
 
+Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
+`timeout`, `test`, `test_policy`, `test_surface`, `commit`, `isolate`,
+`cap_usd`, `no_op_ok`, and `schema`. `test_policy` is `clean` (the default),
+`allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
+replaces the default test/CI surface for that attempt.
+
 ### Pipelines: build, then independent review, then fix
 
 Lanes can depend on each other. Three lane fields make a flat fan-out a
@@ -260,7 +266,8 @@ pipeline; everything else is unchanged.
   "nothing to commit"; a failed gate, a fleet error, or an over-cap run
   still fails. A clean no-op lane can itself be a base.
 
-Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`, and
+Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`,
+`{{lanes.<name>.test_touched}}` (`yes (n files: ...)` or `no`), and
 `{{mission.prompt}}` (the mission-level prompt, verbatim). A referenced lane
 must be in `needs`; anything else between double braces is refused at load,
 so a misspelt name cannot render as `(none)`. Rendering is a single pass, so
@@ -398,6 +405,8 @@ instead of reading as within budget.
 - `conductor fleets`: the routing policy, and whether each binary is installed
 - `conductor dispatch`: run one prompt on one fleet (`--dry-run` prints the argv,
   `--schema` requests structured output, `--test` runs a gate afterward,
+  `--test-policy {clean,allow,forbid}` chooses how test-surface edits count,
+  repeatable `--test-surface PATTERN` replaces the default surface,
   `--commit` lands the work, `--isolate` runs in a fresh worktree,
   `--cap-usd` bounds the spend)
 - `conductor mission FILE`: run a mission file (`--dry-run` validates and

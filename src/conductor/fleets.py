@@ -27,6 +27,7 @@ from . import prices
 
 EFFORTS = ("cheap", "standard", "hard", "max")
 MODES = ("read", "write")
+TEST_POLICIES = ("clean", "allow", "forbid")
 
 # Per-mode default wall-clock caps. No fleet has a native cap; an agent that
 # loses its way will happily spin until something outside it says stop.
@@ -214,6 +215,8 @@ class Spec:
     schema: str | None = None  # path to a JSON Schema for the final message
     last_message: str | None = None  # path the fleet should write its answer to
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
+    test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
+    test_policy: str = "clean"
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -224,6 +227,15 @@ class Spec:
             raise DispatchRefused(f"unknown effort '{self.effort}'. Known: {', '.join(EFFORTS)}")
         if self.mode not in MODES:
             raise DispatchRefused(f"unknown mode '{self.mode}'. Known: {', '.join(MODES)}")
+        if self.test_policy not in TEST_POLICIES:
+            raise DispatchRefused(
+                f"unknown test policy '{self.test_policy}'. Known: {', '.join(TEST_POLICIES)}"
+            )
+        if self.test_surface is not None and (
+            not isinstance(self.test_surface, list)
+            or not all(isinstance(pattern, str) for pattern in self.test_surface)
+        ):
+            raise DispatchRefused("test_surface must be a list of strings")
         if not self.prompt.strip():
             raise DispatchRefused("empty prompt")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy

@@ -16,10 +16,13 @@ the obvious implementation fails in an unattended run:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +33,7 @@ from .fleets import FLEETS, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
 from .paths import conductor_home
+from .surface import Surface, missing_surface, test_surface
 from .verify import (
     CommitOutcome,
     GitState,
@@ -45,6 +49,7 @@ from .verify import (
 )
 
 TAIL_LINES = 20
+GATE_TIMEOUT = 900
 
 
 def _slug(text: str, limit: int = 32, default: str = "run") -> str:
@@ -74,6 +79,7 @@ class Result:
     spawned: bool = False  # True only after Popen returned a live process group.
     verdict: dict = field(default_factory=dict)
     tests: dict | None = None
+    test_surface: dict | None = None
     commit: dict | None = None
     usage: dict | None = None
     budget: dict | None = None
@@ -86,6 +92,11 @@ class Result:
     dry_run: bool = False
     no_op_ok: bool = False  # a write that may legitimately change nothing
     interrupted: bool = False  # a stop request ended the run
+
+    @property
+    def gate_passed(self) -> bool:
+        """Whether the lane gate or its clean replacement supplied the verdict."""
+        return _gate_passed(self.tests, self.test_surface)
 
     def failure(self) -> str | None:
         """Why the run is not ok, in one line, or None when it is.
@@ -111,11 +122,15 @@ class Result:
             return f"fleet reported: {self.fleet_error}"
         # A gate that ran and did not exit 0 sinks the run; that includes a
         # gate that hung, which has no exit code at all.
-        if self.tests and self.tests.get("ran"):
-            if self.tests.get("timed_out"):
-                return "gate timed out"
-            if self.tests.get("exit_code") != 0:
-                return f"gate exited {self.tests.get('exit_code')}"
+        clean = (self.test_surface or {}).get("clean_gate") or {}
+        counted = clean if clean.get("ran") else self.tests
+        label = "clean gate" if clean.get("ran") else "gate"
+        if counted and counted.get("ran") and not self.gate_passed:
+            if counted.get("interrupted"):
+                return f"{label} interrupted"
+            if counted.get("timed_out"):
+                return f"{label} timed out"
+            return f"{label} exited {counted.get('exit_code')}"
         no_op = self.verdict.get("checked") and self.verdict.get("no_op")
         if self.mode == "write" and no_op and not self.no_op_ok:
             return "write dispatch moved no bytes"
@@ -166,6 +181,7 @@ class Result:
             "dirty_delta": self.verdict.get("dirty_delta", 0),
             "no_op": self.verdict.get("no_op", False),
             "tests": (self.tests or {}).get("exit_code"),
+            "test_touched": bool((self.test_surface or {}).get("touched")),
             "committed": (self.commit or {}).get("sha", "")[:8] or None,
             "branch": iso.get("branch") or None,
             "worktree": iso.get("worktree") if iso.get("kept") else None,
@@ -203,6 +219,151 @@ def _tail(path: Path, lines: int = TAIL_LINES) -> str:
     except OSError:
         return ""
     return "\n".join(content[-lines:])
+
+
+def _surface_result(policy: str, before: Surface, after: Surface) -> dict:
+    changed = before.diff(after)
+    return {
+        "policy": policy,
+        "patterns": before.patterns,
+        "digest_before": before.digest,
+        "digest_after": after.digest,
+        "touched": bool(changed),
+        "changed": changed,
+    }
+
+
+def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
+    clean = (surface or {}).get("clean_gate") or {}
+    counted = clean if clean.get("ran") else tests
+    if not counted or not counted.get("ran"):
+        return True
+    return (
+        counted.get("exit_code") == 0
+        and not counted.get("timed_out")
+        and not counted.get("interrupted")
+    )
+
+
+def _git_failure(detail: str, *, worktree: Path, patch_bytes: int = 0) -> dict:
+    outcome = TestOutcome(ran=True, exit_code=1, tail=detail).to_dict()
+    outcome.update(worktree=str(worktree), patch_bytes=patch_bytes)
+    return outcome
+
+
+def _clean_gate(
+    cwd: str,
+    *,
+    base_sha: str,
+    patterns: list[str],
+    command: str,
+    timeout: int,
+    stop: Callable[[], bool],
+    worktree: Path,
+) -> dict:
+    """Run the gate at the base commit with only non-test changes transplanted."""
+    top = git_run(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return _git_failure("git worktree add failed: repository root vanished", worktree=worktree)
+    root = Path(top.stdout.strip())
+    try:
+        relative_cwd = Path(cwd).resolve().relative_to(root.resolve())
+    except ValueError:
+        relative_cwd = Path()
+
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    added = git_run(root, "worktree", "add", "--detach", str(worktree), base_sha, timeout=60)
+    if added.returncode != 0:
+        detail = added.stderr.strip() or added.stdout.strip() or f"exit {added.returncode}"
+        return _git_failure(f"git worktree add failed: {detail}", worktree=worktree)
+
+    patch = b""
+    try:
+        with tempfile.TemporaryDirectory(prefix="conductor-clean-index-") as temp_dir:
+            index = Path(temp_dir) / "index"
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = str(index)
+            try:
+                staged = subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return _git_failure(f"git add for clean gate failed: {exc}", worktree=worktree)
+            if staged.returncode != 0:
+                detail = (staged.stderr or staged.stdout).decode(errors="replace").strip()
+                return _git_failure(
+                    f"git add for clean gate failed: {detail or f'exit {staged.returncode}'}",
+                    worktree=worktree,
+                )
+
+            exclusions = [f":(exclude,glob){pattern}" for pattern in patterns]
+            try:
+                diff = subprocess.run(
+                    [
+                        "git",
+                        "diff",
+                        "--cached",
+                        "--binary",
+                        "-M",
+                        base_sha,
+                        "--",
+                        ".",
+                        *exclusions,
+                    ],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return _git_failure(f"git diff for clean gate failed: {exc}", worktree=worktree)
+            if diff.returncode != 0:
+                detail = (diff.stderr or diff.stdout).decode(errors="replace").strip()
+                return _git_failure(
+                    f"git diff for clean gate failed: {detail or f'exit {diff.returncode}'}",
+                    worktree=worktree,
+                )
+            patch = diff.stdout
+
+        if patch:
+            try:
+                applied = subprocess.run(
+                    ["git", "apply", "--binary", "--whitespace=nowarn"],
+                    cwd=worktree,
+                    input=patch,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return _git_failure(
+                    f"git apply for clean gate failed: {exc}",
+                    worktree=worktree,
+                    patch_bytes=len(patch),
+                )
+            if applied.returncode != 0:
+                detail = (applied.stderr or applied.stdout).decode(errors="replace").strip()
+                return _git_failure(
+                    f"git apply for clean gate failed: {detail or f'exit {applied.returncode}'}",
+                    worktree=worktree,
+                    patch_bytes=len(patch),
+                )
+
+        outcome = run_tests(
+            str(worktree / relative_cwd), command, timeout=timeout, stop=stop
+        ).to_dict()
+        outcome.update(worktree=str(worktree), patch_bytes=len(patch))
+        return outcome
+    finally:
+        # The clean tree is conductor's scratch evidence, never the fleet's
+        # only copy of work, so even a failed gate cannot leave it for gc.
+        git_run(root, "worktree", "remove", "--force", str(worktree), timeout=60)
 
 
 # Set by the CLI's signal handlers. Every wait loop polls it, so a stop
@@ -349,6 +510,7 @@ def dispatch(
         return result
 
     before = GitState.capture(spec.cwd)
+    surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
     started = time.monotonic()
     error: str | None = None
     timed_out = False
@@ -402,10 +564,36 @@ def dispatch(
     # exit code) must not have its work committed as if it had succeeded.
     output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
 
+    surface_state: dict | None = None
+    if surface_before is not None:
+        try:
+            surface_after = test_surface(spec.cwd, spec.test_surface)
+        except ValueError:
+            # A fleet that deleted its desk must still get a receipt and a
+            # release attempt; the vanished tracked test files are observable.
+            surface_after = missing_surface(surface_before)
+        surface_state = _surface_result(spec.test_policy, surface_before, surface_after)
+    forbid_touched = bool(
+        surface_state and surface_state["touched"] and spec.test_policy == "forbid"
+    )
+    forbid_error = None
+    if forbid_touched:
+        forbid_error = (
+            "test surface changed under policy forbid: "
+            + ", ".join(surface_state["changed"])
+        )
+
     # Commit before the verdict is taken, so the verdict describes the state
     # the caller is actually left with.
     commit: CommitOutcome | None = None
-    if commit_message and not timed_out and error is None and exit_code == 0 and not output.error:
+    if (
+        commit_message
+        and not forbid_touched
+        and not timed_out
+        and error is None
+        and exit_code == 0
+        and not output.error
+    ):
         commit = commit_work(spec.cwd, commit_message)
     # A fleet's self-commit is landed work even when conductor was not asked
     # to commit it. Only a descendant on the same branch belongs to this run:
@@ -424,18 +612,62 @@ def dispatch(
 
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
-        tests = run_tests(spec.cwd, test_command, stop=stop_requested)
+        tests = run_tests(
+            spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested
+        )
         if tests.interrupted:
             interrupted = True
             error = "interrupted: stop requested during the gate; process group killed"
-        if commit and commit.committed and not tests.passed:
-            # A branch must never carry a commit that failed its gate; the
-            # work stays staged in the tree for the kept worktree.
+    if surface_state is not None and spec.test_policy == "clean":
+        if not surface_state["touched"]:
+            surface_state["clean_gate"] = {
+                "ran": False,
+                "reason": "test surface unchanged",
+            }
+        elif not test_command:
+            surface_state["clean_gate"] = {"ran": False, "reason": "no gate set"}
+        elif tests is None or not _gate_passed(tests.to_dict(), None):
+            surface_state["clean_gate"] = {
+                "ran": False,
+                "reason": "lane gate failed",
+            }
+        else:
+            surface_state["clean_gate"] = _clean_gate(
+                spec.cwd,
+                base_sha=before.head,
+                patterns=surface_before.patterns,
+                command=test_command,
+                timeout=GATE_TIMEOUT,
+                stop=stop_requested,
+                worktree=base / "worktrees" / f"{run_id}-clean",
+            )
+            clean_gate = surface_state["clean_gate"]
+            if clean_gate.get("interrupted"):
+                interrupted = True
+                error = "interrupted: stop requested during the clean gate; process group killed"
+
+    if commit and commit.committed and not _gate_passed(
+        tests.to_dict() if tests else None, surface_state
+    ):
+        # A branch must never carry a commit that failed whichever gate
+        # counts; the work stays staged in the tree for the kept worktree.
+        commit = uncommit(spec.cwd, commit, before.head)
+
+    if forbid_touched:
+        if commit and commit.committed:
             commit = uncommit(spec.cwd, commit, before.head)
+        error = forbid_error
 
     after = GitState.capture(spec.cwd)
     verdict = compare(spec.cwd, before, after)
     verdict.notes.extend(output.notes)
+    if surface_state and surface_state["touched"]:
+        changed = surface_state["changed"]
+        verdict.notes.append(
+            f"test surface changed: {len(changed)} file(s): {', '.join(changed[:10])}"
+        )
+        if spec.test_policy == "clean" and not test_command:
+            verdict.notes.append("test surface changed with no gate to re-run")
     if commit and commit.deletions:
         verdict.notes.append(
             f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
@@ -518,6 +750,7 @@ def dispatch(
         spawned=proc is not None,
         verdict=verdict.to_dict(),
         tests=tests.to_dict() if tests else None,
+        test_surface=surface_state,
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
         budget=budget.to_dict() if budget is not None else None,

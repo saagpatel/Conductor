@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import prices
-from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
+from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
 from .mission import MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
@@ -79,6 +79,8 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         schema=args.schema,
         cap_usd=args.cap_usd,
+        test_policy=args.test_policy,
+        test_surface=args.test_surface,
     )
     try:
         result = dispatch(
@@ -241,6 +243,13 @@ def build_parser() -> argparse.ArgumentParser:
         "when their running usage prices over it, cursor is judged after the run",
     )
     p_dispatch.add_argument("--test", help="gate to run after the dispatch, in --cwd")
+    p_dispatch.add_argument("--test-policy", choices=TEST_POLICIES, default="clean")
+    p_dispatch.add_argument(
+        "--test-surface",
+        action="append",
+        metavar="PATTERN",
+        help="replace the default test surface with this repeatable Git pathspec glob",
+    )
     p_dispatch.add_argument(
         "--commit",
         metavar="MSG",
