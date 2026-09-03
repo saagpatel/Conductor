@@ -7,6 +7,8 @@ my assumption about each envelope; these prove it matches the envelope.
 
 from __future__ import annotations
 
+import json
+
 from conductor.outputs import parse
 
 CLAUDE = (
@@ -198,3 +200,26 @@ def test_empty_output_is_not_an_error():
     out = parse("claude", "   ")
     assert out.answer == ""
     assert out.parsed is False
+
+
+def test_claude_event_list_envelope_is_read_from_its_result_event():
+    """Without user settings Claude Code prints the event list as one JSON
+    array (measured 2026-09-03); the answer and price are in the result event."""
+    text = json.dumps(
+        [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "OK"}]}},
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "OK",
+                "total_cost_usd": 0.0513,
+                "usage": {"input_tokens": 2, "output_tokens": 4, "cache_read_input_tokens": 24096},
+            },
+        ]
+    )
+    out = parse("claude", text)
+    assert out.answer == "OK" and out.status == "success" and out.error is None
+    assert out.usage is not None and out.usage.cost_usd == 0.0513
+    assert out.usage.cache_read_tokens == 24096

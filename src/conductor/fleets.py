@@ -310,6 +310,15 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # --mcp-config means an empty server set, which is both leaner and
         # the standing rule for unattended Claude Code.
         "--strict-mcp-config",
+        # And none of the operator's own settings: a lane that loads
+        # ~/.claude/settings.json runs the operator's hooks (46 invocations
+        # on a one-word prompt, measured 2026-09-03, one of which rewrote a
+        # memory file) and pays for the context they inject (a $0.24 reply
+        # that costs $0.05 without them). Project settings still apply: they
+        # are the target repo's own contract. `--bare` would go further but
+        # refuses OAuth, which is how this machine is logged in.
+        "--setting-sources",
+        "project",
     ]
     argv += ["--permission-mode", "acceptEdits" if spec.mode == "write" else "plan"]
     if spec.schema:

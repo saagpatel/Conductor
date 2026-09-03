@@ -344,6 +344,13 @@ def _last_json_object(text: str) -> dict | None:
     that parses, so both shapes work."""
     try:
         obj = json.loads(text)
+        if isinstance(obj, list):
+            # Claude Code without user settings prints the whole event list
+            # as one JSON array (measured 2026-09-03); the result event is
+            # the envelope, wherever it sits.
+            dicts = [item for item in obj if isinstance(item, dict)]
+            results = [item for item in dicts if item.get("type") == "result"]
+            return (results or dicts or [None])[-1]
         return obj if isinstance(obj, dict) else None
     except json.JSONDecodeError:
         pass

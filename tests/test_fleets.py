@@ -140,6 +140,13 @@ def test_claude_headless_loads_no_mcp_servers():
     assert "--strict-mcp-config" in build_argv(spec(fleet="claude"))
 
 
+def test_claude_headless_loads_no_operator_settings():
+    """The operator's hooks ran inside every fleet lane until 2026-09-03,
+    when one rewrote a memory file; project settings are the repo's own."""
+    argv = build_argv(spec(fleet="claude"))
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+
+
 def test_timeouts_default_by_mode_and_are_never_zero():
     assert spec(mode="read").resolved_timeout() == 600
     assert spec(mode="write").resolved_timeout() == 1200
