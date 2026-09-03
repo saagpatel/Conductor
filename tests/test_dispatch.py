@@ -240,7 +240,7 @@ def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, fake_fleet, monke
     monkeypatch.setattr(
         runner_mod,
         "run_tests",
-        lambda cwd, cmd: runner_mod.TestOutcome(ran=True, timed_out=True, tail="timed out"),
+        lambda cwd, cmd, **kw: runner_mod.TestOutcome(ran=True, timed_out=True, tail="timed out"),
     )
     result = dispatch(spec_for(repo, mode="write"), home=home, test_command="sleep 999")
     assert result.tests["timed_out"] is True

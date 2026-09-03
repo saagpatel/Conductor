@@ -39,7 +39,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .fleets import DispatchRefused, Spec
-from .runner import Result, _slug, claim_dir, conductor_home, dispatch
+from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
+from .verify import git_run
 
 REQUIRE = ("all", "any")
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -63,7 +64,7 @@ _INHERITED = (
 # would otherwise silently turn a dependent lane into a root.
 _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file", "schema"}
 _FALLBACK_KEYS = _ATTEMPT_KEYS
-_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base"}
+_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "branch"}
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
     "cwd",
@@ -157,6 +158,10 @@ class Lane:
     attempts: list[Attempt]
     needs: list[str] = field(default_factory=list)  # lanes that must be ok first
     base: str | None = None  # lane whose final commit this lane's worktree starts from
+    # The name the lane's run-id branch is renamed to once its commits
+    # land, so a deliverable is `refactor/x`, not a timestamp. Refused at
+    # mission start if it already exists in the repo.
+    branch: str | None = None
 
 
 @dataclass
@@ -210,6 +215,7 @@ class Mission:
         if self.template_max_chars < 1:
             raise MissionInvalid("template_max_chars must be positive")
         seen: set[str] = set()
+        branches: set[str] = set()
         for lane in self.lanes:
             if not _LANE_NAME.fullmatch(lane.name):
                 raise MissionInvalid(
@@ -218,6 +224,14 @@ class Mission:
             if lane.name in seen:
                 raise MissionInvalid(f"duplicate lane name '{lane.name}'")
             seen.add(lane.name)
+            if lane.branch is not None:
+                if not lane.branch or lane.branch.startswith("conductor/"):
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': branch must be a name outside conductor/"
+                    )
+                if lane.branch in branches:
+                    raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
+                branches.add(lane.branch)
             for attempt in lane.attempts:
                 try:
                     attempt.spec(self.cwd).validate()
@@ -364,7 +378,12 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             )
         lane_name = str(raw_lane.get("name") or _default_lane_name(primary, lanes))
         needs, lane_base = _lane_graph_fields(raw_lane, where=f"lane {i}")
-        lanes.append(Lane(name=lane_name, attempts=attempts, needs=needs, base=lane_base))
+        lane_branch = raw_lane.get("branch")
+        if lane_branch is not None and not isinstance(lane_branch, str):
+            raise MissionInvalid(f"lane {i}: branch must be a string")
+        lanes.append(
+            Lane(name=lane_name, attempts=attempts, needs=needs, base=lane_base, branch=lane_branch)
+        )
 
     collate = None
     raw_collate = raw.get("collate")
@@ -539,10 +558,13 @@ class Ledger:
     def add(self, result: Result) -> None:
         cost = (result.usage or {}).get("cost_usd")
         with self._lock:
-            if cost is None:
-                self.unpriced += 1
-            else:
+            if cost is not None:
                 self.spent += float(cost)
+            elif not result.interrupted:
+                # A run conductor stopped (before or after spawn) and could
+                # not price is not evidence about the budget; it cannot have
+                # spent past what its own cap allowed before the stop.
+                self.unpriced += 1
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -570,6 +592,7 @@ class LaneResult:
     base_sha: str = ""  # the commit this lane's worktree started from
     tip_sha: str = ""  # where its final attempt's worktree ended up
     clean: bool | None = None  # and whether everything there was committed
+    branch: str = ""  # the branch its commits ended on, after any rename
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -600,6 +623,7 @@ class MissionResult:
     mission_dir: str
     report_path: str
     dry_run: bool = False
+    interrupted: bool = False  # a stop request ended the mission early
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -608,6 +632,7 @@ class MissionResult:
         return {
             "mission_id": self.mission_id,
             "ok": self.ok,
+            "interrupted": self.interrupted,
             "require": self.require,
             "lanes": [
                 {
@@ -650,6 +675,7 @@ def run_mission(
     mission: Mission, *, home: Path | None = None, dry_run: bool = False
 ) -> MissionResult:
     mission.validate()
+    _check_branches(mission)
     base = home or conductor_home()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     mission_id, mission_dir = claim_dir(
@@ -688,6 +714,8 @@ def run_mission(
                 return
         for attempt in lane.attempts:
             blocked = None if dry_run else ledger.blocker()
+            if stop_requested():
+                blocked = "interrupted: stop requested"
             if blocked:
                 out.skipped = f"{blocked}; {attempt.label()} not started"
                 break
@@ -722,9 +750,24 @@ def run_mission(
             out.base_sha = iso.get("base_sha") or ""
             out.tip_sha = iso.get("tip_sha") or ""
             out.clean = iso.get("clean")
+            out.branch = iso.get("branch") or ""
             if dry_run or result.ok:
                 out.ok = True
                 break
+        if out.ok and lane.branch and not dry_run:
+            # The lane's commits are the deliverable; give them the name the
+            # mission asked for. A lane that landed nothing has no branch
+            # (release deleted it) and nothing to name.
+            if not out.branch:
+                out.attempts[-1]["note"] = f"branch '{lane.branch}' not created: no commits landed"
+            else:
+                why = _rename_branch(mission.cwd, out.branch, lane.branch)
+                if why:
+                    out.ok = False
+                    out.attempts[-1]["error"] = f"branch '{lane.branch}' not claimed: {why}"
+                else:
+                    out.branch = lane.branch
+                    out.attempts[-1]["branch"] = lane.branch
 
     def settle(lane_result: LaneResult) -> None:
         done[lane_result.name] = lane_result
@@ -747,6 +790,19 @@ def run_mission(
             while progressed:
                 progressed = False
                 for lane in list(pending):
+                    if stop_requested():
+                        # Running lanes end at their next poll; nothing new starts.
+                        pending.remove(lane)
+                        settle(
+                            LaneResult(
+                                name=lane.name,
+                                ok=False,
+                                needs=list(lane.needs),
+                                base=lane.base,
+                                skipped="interrupted: stop requested; not started",
+                            )
+                        )
+                        continue
                     if any(need not in done for need in lane.needs):
                         continue
                     pending.remove(lane)
@@ -773,7 +829,7 @@ def run_mission(
     lane_results = [done[lane.name] for lane in mission.lanes]
 
     collate_out: dict | None = None
-    if mission.collate and not dry_run:
+    if mission.collate and not dry_run and not stop_requested():
         collate_out = _run_collate(mission, lane_results, ledger, mission_dir, base)
 
     # A pipeline is judged on its outputs: the lanes nothing else depends
@@ -783,6 +839,9 @@ def run_mission(
     ok = all(sinks_ok) if mission.require == "all" else any(sinks_ok)
     if collate_out is not None and not collate_out.get("ok"):
         ok = False
+    interrupted = stop_requested()
+    if interrupted:
+        ok = False  # whatever landed, the mission did not run to its end
 
     duration = time.monotonic() - started
     report_path = mission_dir / "report.md"
@@ -802,10 +861,40 @@ def run_mission(
         mission_dir=str(mission_dir),
         report_path=str(report_path),
         dry_run=dry_run,
+        interrupted=interrupted,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
+
+
+def _check_branches(mission: Mission) -> None:
+    """Every `branch` a lane claims must be a valid name that the repo does
+    not already have, checked before any fleet is spawned: finding out after
+    a $5 build that its name was taken is the wrong time."""
+    for lane in mission.lanes:
+        if not lane.branch:
+            continue
+        if git_run(mission.cwd, "check-ref-format", "--branch", lane.branch).returncode != 0:
+            raise MissionInvalid(f"lane '{lane.name}': '{lane.branch}' is not a valid branch name")
+        # Local heads and every remote's tracking branches: a name that only
+        # exists as origin/x would collide the moment the operator pushed.
+        remotes = git_run(mission.cwd, "remote").stdout.split()
+        refs = [f"refs/heads/{lane.branch}"] + [f"refs/remotes/{r}/{lane.branch}" for r in remotes]
+        for ref in refs:
+            if git_run(mission.cwd, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': branch '{lane.branch}' already exists "
+                    f"in {mission.cwd} ({ref})"
+                )
+
+
+def _rename_branch(repo: str, old: str, new: str) -> str | None:
+    """Rename a run-id branch to its deliverable name; the reason on failure."""
+    moved = git_run(repo, "branch", "-m", old, new)
+    if moved.returncode != 0:
+        return moved.stderr.strip() or f"git branch -m exited {moved.returncode}"
+    return None
 
 
 def _render(template: str, mission: Mission, done: dict[str, LaneResult], *, dry_run: bool) -> str:
@@ -962,6 +1051,12 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 f"{_usd(a.get('cost_usd'))} | "
                 f"{a.get('tokens') or ''} | {a['duration_s']} |"
             )
+    if result.interrupted:
+        lines += [
+            "",
+            "**Interrupted**: a stop was requested; lanes still running were killed "
+            "and lanes not yet started were skipped.",
+        ]
     if result.budget.get("exceeded"):
         lines += ["", f"**Budget exceeded**: {json.dumps(result.budget)}"]
     elif result.budget.get("unverifiable"):
@@ -980,6 +1075,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         for a in lane.attempts:
             if a.get("error"):
                 lines.append(f"- {a['attempt']}: {a['error']}")
+            if a.get("note"):
+                lines.append(f"- {a['attempt']}: {a['note']}")
             if a.get("worktree"):
                 lines.append(f"- {a['attempt']}: uncommitted work kept at `{a['worktree']}`")
         if lane.diff_path:

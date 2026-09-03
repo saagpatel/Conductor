@@ -264,6 +264,16 @@ crash mid-mission does not lose the finished stages. A fleet that commits
 on its own (Claude Code, Cursor, and Antigravity do) is landed work, not
 "nothing to commit".
 
+A lane's `branch` names its deliverable: once the lane's commits land, its
+`conductor/<run_id>` branch is renamed to that name (`refactor/x`), so what
+the operator merges is not a timestamp. The name is checked before any
+fleet spawns: an invalid name, a name already in the repo, a `conductor/`
+prefix, or two lanes claiming one name are refused at mission start, not
+after a $5 build. A lane that landed nothing has no branch to name and says
+so. Upstream lanes keep their run-id branches; the first production
+pipeline (2026-09-03) needed a hand rename, which is how this field earned
+its place.
+
 ## Isolation: a branch is not a worktree
 
 HEAD and the index are shared mutable state, so two fleets editing one
@@ -277,6 +287,18 @@ uncommitted work. Deleting an agent's uncommitted edits to tidy up is the
 wrong trade. If a worktree cannot be created (not a repo, no commits yet, a
 git error), a write dispatch is refused before anything spawns rather than
 run in the shared checkout; a read dispatch proceeds in place and says so.
+
+Ctrl-C or `kill` on `conductor dispatch` or `conductor mission` ends the run
+the same way a timeout does. Every running dispatch kills its fleet's
+process group at its next poll (within `POLL_S`, 2s), is priced from the
+watcher's last reading and receipted with `interrupted: true`, and releases
+its worktree; a mission skips the lanes that had not started, does not
+spend the collate, and still writes its report, marked **Interrupted**. A
+second signal is the operator insisting and exits at once. Before this,
+killing conductor left the fleet running in a worktree nothing would
+release (found live 2026-09-03, on the first production pipeline). An
+interrupted run is not over its cap and not "unpriced": the stop is the
+only verdict it gets.
 
 ## Cost accounting
 

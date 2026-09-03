@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -82,6 +83,7 @@ class Result:
     error: str | None = None
     dry_run: bool = False
     no_op_ok: bool = False  # a write that may legitimately change nothing
+    interrupted: bool = False  # a stop request ended the run
 
     def failure(self) -> str | None:
         """Why the run is not ok, in one line, or None when it is.
@@ -200,6 +202,26 @@ def _tail(path: Path, lines: int = TAIL_LINES) -> str:
     return "\n".join(content[-lines:])
 
 
+# Set by the CLI's signal handlers. Every wait loop polls it, so a stop
+# request ends each running dispatch the same way a timeout does: the
+# fleet's process group is killed, the run is priced from the watcher and
+# receipted, and its worktree is released. Nothing is orphaned.
+_STOP = threading.Event()
+
+
+def request_stop() -> None:
+    """Ask every running dispatch to end at its next poll."""
+    _STOP.set()
+
+
+def stop_requested() -> bool:
+    return _STOP.is_set()
+
+
+def clear_stop() -> None:
+    _STOP.clear()
+
+
 def dispatch(
     spec: Spec,
     *,
@@ -291,6 +313,7 @@ def dispatch(
     error: str | None = None
     timed_out = False
     capped = False
+    interrupted = False
     exit_code: int | None = None
     budget = (
         Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap) if spec.cap_usd is not None else None
@@ -302,7 +325,10 @@ def dispatch(
     )
 
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+        proc: subprocess.Popen | None = None
         try:
+            if stop_requested():
+                raise Interrupted("stop requested before the fleet was spawned")
             proc = subprocess.Popen(
                 argv,
                 cwd=spec.cwd,
@@ -313,11 +339,15 @@ def dispatch(
             )
         except OSError as exc:
             error = f"cannot spawn {fleet.binary}: {exc}"
-            proc = None
+        except Interrupted as exc:
+            interrupted = True
+            error = f"interrupted: {exc}"
         if proc is not None:
-            exit_code, timed_out, capped = _wait(proc, timeout, watcher)
+            exit_code, timed_out, capped, interrupted = _wait(proc, timeout, watcher)
             if timed_out:
                 error = f"timed out after {timeout}s; process group killed"
+            elif interrupted:
+                error = "interrupted: stop requested; process group killed"
             elif capped:
                 assert watcher is not None and watcher.usage is not None  # over_cap saw a figure
                 error = (
@@ -350,8 +380,11 @@ def dispatch(
 
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
-        tests = run_tests(spec.cwd, test_command)
-        if commit and commit.committed and (tests.timed_out or tests.exit_code != 0):
+        tests = run_tests(spec.cwd, test_command, stop=stop_requested)
+        if tests.interrupted:
+            interrupted = True
+            error = "interrupted: stop requested during the gate; process group killed"
+        if commit and commit.committed and not tests.passed:
             # A branch must never carry a commit that failed its gate; the
             # work stays staged in the tree for the kept worktree.
             commit = uncommit(spec.cwd, commit, before.head)
@@ -406,7 +439,12 @@ def dispatch(
             usage.cost_basis = "estimated"
     usage_dict = usage.to_dict() if usage is not None else None
     if budget is not None:
-        budget.settle(usage.cost_usd if usage else None, killed=capped, fleet_status=output.status)
+        budget.settle(
+            usage.cost_usd if usage else None,
+            killed=capped,
+            interrupted=interrupted,
+            fleet_status=output.status,
+        )
         if watcher is not None and watcher.usage is None:
             verdict.notes.append("budget watcher saw no running usage; cap checked after the run")
 
@@ -444,16 +482,22 @@ def dispatch(
         fleet_error=output.error,
         error=error,
         no_op_ok=no_op_ok,
+        interrupted=interrupted,
     )
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 
 
+class Interrupted(Exception):
+    """A stop was requested before this dispatch could spawn its fleet."""
+
+
 def _wait(
     proc: subprocess.Popen, timeout: int, watcher: Watcher | None
-) -> tuple[int | None, bool, bool]:
-    """Wait for the fleet, in short polls so the budget watcher gets a look
-    in. Returns (exit_code, timed_out, over_cap).
+) -> tuple[int | None, bool, bool, bool]:
+    """Wait for the fleet, in short polls so the budget watcher and a stop
+    request get a look in. Returns (exit_code, timed_out, over_cap,
+    interrupted).
 
     Whatever ended the wait, the process group is killed afterwards. On a
     timeout or a cap that is the point; after a clean exit it clears any
@@ -462,7 +506,7 @@ def _wait(
     group is conductor's own (start_new_session), so nothing else is hit.
     """
     deadline = time.monotonic() + timeout
-    timed_out = over_cap = False
+    timed_out = over_cap = interrupted = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -473,12 +517,15 @@ def _wait(
             break
         except subprocess.TimeoutExpired:
             pass
+        if _STOP.is_set():
+            interrupted = True
+            break
         if watcher is not None and watcher.over_cap():
             over_cap = True
             break
     killpg(proc.pid)
     proc.wait()
-    return proc.returncode, timed_out, over_cap
+    return proc.returncode, timed_out, over_cap, interrupted
 
 
 def claim_dir(parent: Path, name: str) -> tuple[str, Path]:

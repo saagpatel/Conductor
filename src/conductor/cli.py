@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
 from .mission import MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
-from .runner import Result, dispatch
+from .runner import Result, dispatch, request_stop, stop_requested
 from .verify import GitState, run_tests
 
 
@@ -281,8 +283,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _install_stop_handlers() -> None:
+    """Ctrl-C or a `kill` ends the run cleanly instead of orphaning the fleet.
+
+    The first signal asks every running dispatch to stop: each one kills
+    its fleet's process group at its next poll, is priced and receipted,
+    and releases its worktree; a mission skips what has not started and
+    still writes its report. A second signal is the operator insisting, and
+    falls through to Python's default (an immediate exit).
+    """
+
+    def on_signal(signum: int, frame: object) -> None:
+        if stop_requested():
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+            return
+        request_stop()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, on_signal)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.func in (cmd_dispatch, cmd_mission):
+        _install_stop_handlers()
     return args.func(args)
 
 

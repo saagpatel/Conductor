@@ -47,17 +47,27 @@ class Budget:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def settle(self, cost_usd: float | None, *, killed: bool, fleet_status: str | None) -> None:
+    def settle(
+        self,
+        cost_usd: float | None,
+        *,
+        killed: bool,
+        fleet_status: str | None,
+        interrupted: bool = False,
+    ) -> None:
         """The verdict, once the run is over and priced.
 
         A fleet that stopped itself on its own budget flag is over the cap
         whatever its reported figure says; so is a run the watcher killed.
         A run that comes back with no figure at all was never capped by
         anything, and must not read as within budget; it is flagged
-        `unpriced` and the runner fails it closed.
+        `unpriced` and the runner fails it closed. A run conductor
+        interrupted was stopped by something other than its cap; it is not
+        over budget, and coming back unpriced is no evidence about the cap
+        either way.
         """
         self.observed_usd = cost_usd
-        self.unpriced = cost_usd is None and not killed
+        self.unpriced = cost_usd is None and not killed and not interrupted
         self.exceeded = (
             killed
             or fleet_status == "error_max_budget_usd"

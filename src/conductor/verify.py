@@ -15,6 +15,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -270,42 +273,79 @@ class TestOutcome:
     ran: bool
     exit_code: int | None = None
     timed_out: bool = False
+    interrupted: bool = False  # a stop request ended the gate
     tail: str = ""
+
+    @property
+    def passed(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out and not self.interrupted
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def run_tests(cwd: str, command: str, timeout: int = 900) -> TestOutcome:
+GATE_POLL_S = 2
+
+
+def run_tests(
+    cwd: str,
+    command: str,
+    timeout: int = 900,
+    *,
+    stop: Callable[[], bool] | None = None,
+) -> TestOutcome:
     """Run the caller's own gate. Never piped: a pipeline's exit code is the
     last stage's, so a piped gate reports the pager's success, not the suite's.
 
     The gate gets its own process group, exactly like a fleet: a suite that
     hangs and is killed must not leave xdist workers, a dev server, or a
     cargo test runner behind to keep editing the tree after the verdict.
+    It is waited on in short polls so a stop request (`stop()` true) ends it
+    the same way: a 15-minute suite must not outlive the operator's Ctrl-C.
+    Output goes to a temporary file, not a pipe, so a chatty suite cannot
+    block on a full pipe while conductor is not reading.
     """
-    try:
-        proc = subprocess.Popen(
-            command,
-            cwd=cwd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        killpg(proc.pid)
-        proc.communicate()
-        return TestOutcome(
-            ran=True, timed_out=True, tail=f"timed out after {timeout}s; process group killed"
-        )
-    killpg(proc.pid)  # stragglers after a clean exit, same as a fleet
-    combined = out.strip().splitlines()
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=cwd,
+                shell=True,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
+        deadline = time.monotonic() + timeout
+        timed_out = interrupted = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                proc.wait(timeout=min(GATE_POLL_S, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if stop is not None and stop():
+                interrupted = True
+                break
+        killpg(proc.pid)  # on a timeout that is the point; after a clean exit, stragglers
+        proc.wait()
+        if timed_out:
+            return TestOutcome(
+                ran=True, timed_out=True, tail=f"timed out after {timeout}s; process group killed"
+            )
+        if interrupted:
+            return TestOutcome(
+                ran=True,
+                interrupted=True,
+                tail="interrupted: stop requested; process group killed",
+            )
+        out.seek(0)
+        combined = out.read().strip().splitlines()
     return TestOutcome(
         ran=True,
         exit_code=proc.returncode,
