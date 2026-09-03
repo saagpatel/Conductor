@@ -12,9 +12,11 @@ from pathlib import Path
 
 from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
+from .gc import cmd_gc
 from .mission import MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
 from .runner import Result, dispatch, request_stop, stop_requested
+from .spend import cmd_spend
 from .verify import GitState, run_tests
 
 
@@ -256,6 +258,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_prices = sub.add_parser("prices", help="show the effective per-model price table")
     p_prices.set_defaults(func=cmd_prices)
 
+    p_spend = sub.add_parser("spend", help="summarize cost and usage from run receipts")
+    p_spend.add_argument("--since", help="inclusive UTC date or ISO datetime")
+    p_spend.add_argument("--until", help="exclusive UTC date or ISO datetime")
+    p_spend.add_argument(
+        "--by", choices=("day", "fleet", "model", "mission", "run"), default="fleet"
+    )
+    p_spend.add_argument("--json", action="store_true")
+    p_spend.set_defaults(func=cmd_spend)
+
     p_mission = sub.add_parser(
         "mission",
         help="run a mission file: one prompt fanned out to N lanes with fallbacks, "
@@ -279,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_runs = sub.add_parser("runs", help="list recent dispatches")
     p_runs.add_argument("--limit", type=int, default=20)
     p_runs.set_defaults(func=cmd_runs)
+
+    p_gc = sub.add_parser("gc", help="plan safe worktree and conductor-branch cleanup")
+    p_gc.add_argument("--repo", action="append", default=[], metavar="PATH")
+    p_gc.add_argument("--older-than", type=float, default=0, metavar="HOURS")
+    p_gc.add_argument("--apply", action="store_true")
+    p_gc.set_defaults(func=cmd_gc)
 
     return parser
 

@@ -300,6 +300,22 @@ release (found live 2026-09-03, on the first production pipeline). An
 interrupted run is not over its cap and not "unpriced": the stop is the
 only verdict it gets.
 
+### Garbage collection
+
+`conductor gc` reconstructs a cleanup plan from current Git state and the
+isolation records under `$CONDUCTOR_HOME/runs`. It reports one JSON object per
+worktree, `conductor/*` branch, or incomplete audit directory and changes
+nothing by default; pass `--apply` to prune vanished registrations, remove
+clean conductor-home worktrees, and delete conductor branches whose commits
+are already reachable from `HEAD` or another non-conductor branch. `--repo`
+adds repositories to those discovered from receipts, and `--older-than`
+limits actions to older run ids.
+
+GC never removes a dirty worktree, a worktree outside
+`$CONDUCTOR_HOME/worktrees`, a branch outside `conductor/`, an unmerged
+conductor branch, or any run or mission directory. Directories without a
+`result.json` are reported as possible in-progress or crashed work and kept.
+
 ## Cost accounting
 
 Only the claude fleet reports dollars. Codex reports usage only in its
@@ -320,6 +336,15 @@ split out), and `output_tokens` includes reasoning (Antigravity's separate
 Measured on 2026-09-03, a one-line answer to "what is this README for":
 codex/luna $0.0037, antigravity $0.0228, cursor/composer-2.5 $0.0131, and
 the claude/haiku collate $0.0599. Startup, not the work, still dominates.
+
+### Spend reports
+
+`conductor spend` totals the durable receipts under `$CONDUCTOR_HOME/runs`,
+grouped by fleet by default or by day, model, mission, or run. `--since` is
+inclusive, `--until` is exclusive, and both accept a UTC date or ISO datetime;
+`--json` emits machine-readable rows. Estimated and unpriced runs are counted
+separately, so a missing price can never make a run look free. Malformed or
+unreadable receipts are counted as skipped on the total row.
 
 ### Per-dispatch caps
 
@@ -357,6 +382,10 @@ instead of reading as within budget.
 - `conductor verify`: inspect repo state, optionally run a gate
 - `conductor runs` / `conductor missions`: recent dispatches and missions
 - `conductor prices`: the effective price table after overrides
+- `conductor spend`: summarize cost and tokens by day, fleet, model, mission,
+  or run
+- `conductor gc`: plan safe worktree and `conductor/*` branch cleanup; pass
+  `--apply` to execute it
 
 Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 
