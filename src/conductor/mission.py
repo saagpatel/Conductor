@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .fleets import DispatchRefused, Spec
-from .runner import Result, claim_dir, conductor_home, dispatch
+from .runner import Result, _slug, claim_dir, conductor_home, dispatch
 
 REQUIRE = ("all", "any")
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -48,7 +48,6 @@ _INHERITED = (
     "timeout",
     "test",
     "commit",
-    "schema",
     "isolate",
 )
 
@@ -115,6 +114,18 @@ class Collate:
     instructions: str = DEFAULT_COLLATE_INSTRUCTIONS
     max_chars: int = COLLATE_MAX_CHARS
 
+    def spec(self, cwd: str, prompt: str) -> Spec:
+        return Spec(
+            fleet=self.fleet,
+            prompt=prompt,
+            cwd=cwd,
+            model=self.model,
+            effort=self.effort,
+            mode="read",
+            timeout=self.timeout,
+            schema=self.schema,
+        )
+
 
 @dataclass
 class Mission:
@@ -152,14 +163,7 @@ class Mission:
                     raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
         if self.collate:
             try:
-                Spec(
-                    fleet=self.collate.fleet,
-                    prompt="collate",
-                    cwd=self.cwd,
-                    model=self.collate.model,
-                    effort=self.collate.effort,
-                    schema=self.collate.schema,
-                ).validate()
+                self.collate.spec(self.cwd, "collate").validate()
             except DispatchRefused as exc:
                 raise MissionInvalid(f"collate: {exc}") from exc
 
@@ -428,9 +432,8 @@ class MissionResult:
         }
 
 
-def _slug(text: str, limit: int = 32) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return (s[:limit].rstrip("-")) or "mission"
+def _usd(value: float | None) -> str:
+    return "" if value is None else f"{value:.4f}"
 
 
 def run_mission(
@@ -439,7 +442,9 @@ def run_mission(
     mission.validate()
     base = home or conductor_home()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    mission_id, mission_dir = claim_dir(base / "missions", f"{stamp}-{_slug(mission.name)}")
+    mission_id, mission_dir = claim_dir(
+        base / "missions", f"{stamp}-{_slug(mission.name, default='mission')}"
+    )
     (mission_dir / "mission.json").write_text(json.dumps(mission.to_dict(), indent=2))
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -464,7 +469,7 @@ def run_mission(
             if not dry_run and not ledger.can_spend():
                 out.skipped = (
                     f"budget exhausted before {attempt.label()}: "
-                    f"${ledger.spent:.4f} of ${ledger.max:.2f}"
+                    f"${_usd(ledger.spent)} of ${_usd(ledger.max)}"
                 )
                 break
             result = dispatch(
@@ -562,23 +567,14 @@ def _run_collate(
         last = lane.attempts[-1] if lane.attempts else {}
         parts.append(
             f"\n### Lane `{lane.name}` ({last.get('attempt', '?')}, ok={lane.ok}, "
-            f"cost_usd={lane.cost_usd:.4f})\n\n{_lane_answer(lane, col.max_chars)}\n"
+            f"cost_usd={_usd(lane.cost_usd)})\n\n{_lane_answer(lane, col.max_chars)}\n"
         )
     parts.append(f"\n## Instructions\n\n{col.instructions.strip()}\n")
     prompt = "".join(parts)
     (mission_dir / "collate-prompt.txt").write_text(prompt)
 
     result = dispatch(
-        Spec(
-            fleet=col.fleet,
-            prompt=prompt,
-            cwd=mission.cwd,
-            model=col.model,
-            effort=col.effort,
-            mode="read",
-            timeout=col.timeout,
-            schema=col.schema,
-        ),
+        col.spec(mission.cwd, prompt),
         home=base,
     )
     ledger.add(result)
@@ -609,7 +605,7 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         f"- id: `{result.mission_id}`",
         f"- ok: **{result.ok}** (require: {mission.require})",
         f"- cwd: `{mission.cwd}`",
-        f"- cost: ${result.cost_usd:.4f} across {result.tokens} tokens"
+        f"- cost: ${_usd(result.cost_usd)} across {result.tokens} tokens"
         + (
             f" ({result.budget['unpriced_dispatches']} dispatch(es) unpriced)"
             if result.budget.get("unpriced_dispatches")
@@ -627,7 +623,7 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             lines.append(
                 f"| {lane.name} | {a['attempt']} | {a['ok']} | {a['exit_code']} | "
                 f"{a['no_op']} | {a['commits']} | {a.get('branch') or ''} | "
-                f"{'' if a.get('cost_usd') is None else f'{a["cost_usd"]:.4f}'} | "
+                f"{_usd(a.get('cost_usd'))} | "
                 f"{a.get('tokens') or ''} | {a['duration_s']} |"
             )
     if result.budget.get("exceeded"):

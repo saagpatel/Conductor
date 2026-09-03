@@ -8,7 +8,6 @@ are all real.
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from pathlib import Path
 
@@ -21,30 +20,6 @@ from conductor.mission import (
     mission_from_dict,
     run_mission,
 )
-
-
-def _git(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "repo"
-    r.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=r, check=True)
-    (r / "seed.txt").write_text("seed\n")
-    subprocess.run(["git", "add", "-A"], cwd=r, check=True)
-    subprocess.run(["git", "commit", "-qm", "seed"], cwd=r, check=True)
-    return r
-
-
-@pytest.fixture
-def home(tmp_path: Path) -> Path:
-    return tmp_path / "conductor-home"
 
 
 def fake_fleets(monkeypatch, by_fleet: dict[str, list[str]]) -> None:
@@ -307,7 +282,7 @@ def test_budget_stops_further_spend_and_says_so(repo, home, monkeypatch, tmp_pat
 
 
 def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(
-    repo, home, monkeypatch, tmp_path
+    repo, home, monkeypatch, tmp_path, git_out
 ):
     fake_fleets(
         monkeypatch,
@@ -324,11 +299,11 @@ def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(
     assert result.ok is True
     branches = [lane["attempts"][-1]["branch"] for lane in result.lanes]
     assert len(set(branches)) == 2 and all(b.startswith("conductor/") for b in branches)
-    assert _git(repo, "status", "--porcelain") == ""
-    assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
-    assert "a.txt" in _git(repo, "ls-tree", "--name-only", branches[0])
-    assert "b.txt" in _git(repo, "ls-tree", "--name-only", branches[1])
-    assert "a.txt" not in _git(repo, "ls-tree", "--name-only", "main")
+    assert git_out(repo, "status", "--porcelain") == ""
+    assert git_out(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert "a.txt" in git_out(repo, "ls-tree", "--name-only", branches[0])
+    assert "b.txt" in git_out(repo, "ls-tree", "--name-only", branches[1])
+    assert "a.txt" not in git_out(repo, "ls-tree", "--name-only", "main")
 
 
 def test_collate_sees_every_lane_answer_and_its_cost_counts(repo, home, monkeypatch, tmp_path):

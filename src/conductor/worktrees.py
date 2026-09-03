@@ -17,27 +17,12 @@ because deleting an agent's uncommitted work to tidy up is the wrong trade.
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .verify import git_run
+
 GIT_TIMEOUT = 60
-
-
-def _git(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=GIT_TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        # A vanished cwd or a hung git must read as a failed command, not as
-        # an exception in the middle of an unattended run.
-        return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
 
 
 @dataclass
@@ -66,11 +51,11 @@ def create(repo: str, name: str, parent: Path) -> Isolation:
     here: a read dispatch on a non-repo is fine, a write dispatch is the
     caller's call.
     """
-    top = _git(repo, "rev-parse", "--show-toplevel")
+    top = git_run(repo, "rev-parse", "--show-toplevel", timeout=GIT_TIMEOUT)
     if top.returncode != 0:
         return Isolation(requested=True, active=False, reason="not a git repository")
     root = top.stdout.strip()
-    head = _git(root, "rev-parse", "--verify", "HEAD")
+    head = git_run(root, "rev-parse", "--verify", "HEAD", timeout=GIT_TIMEOUT)
     if head.returncode != 0:
         return Isolation(
             requested=True, active=False, repo=root, reason="repository has no commits yet"
@@ -79,7 +64,9 @@ def create(repo: str, name: str, parent: Path) -> Isolation:
     branch = f"conductor/{name}"
     path = parent / name
     parent.mkdir(parents=True, exist_ok=True)
-    added = _git(root, "worktree", "add", "-b", branch, str(path), base)
+    added = git_run(
+        root, "worktree", "add", "-b", branch, str(path), base, timeout=GIT_TIMEOUT
+    )
     if added.returncode != 0:
         return Isolation(
             requested=True,
@@ -121,18 +108,20 @@ def release(iso: Isolation) -> Isolation:
     if not Path(iso.worktree).is_dir():
         # The fleet (or something else) removed its own desk. Nothing to keep;
         # tell git so the stale registration does not block the next add.
-        _git(iso.repo, "worktree", "prune")
+        git_run(iso.repo, "worktree", "prune", timeout=GIT_TIMEOUT)
         iso.kept = False
         iso.reason = "worktree directory vanished during the dispatch; registration pruned"
         return iso
-    status = _git(iso.worktree, "status", "--porcelain")
+    status = git_run(iso.worktree, "status", "--porcelain", timeout=GIT_TIMEOUT)
     dirty = status.returncode != 0 or bool(status.stdout.strip())
     if dirty:
         iso.kept = True
         iso.reason = "worktree kept: it holds uncommitted changes"
         return iso
-    head = _git(iso.worktree, "rev-parse", "HEAD").stdout.strip()
-    removed = _git(iso.repo, "worktree", "remove", iso.worktree)
+    head = git_run(iso.worktree, "rev-parse", "HEAD", timeout=GIT_TIMEOUT).stdout.strip()
+    removed = git_run(
+        iso.repo, "worktree", "remove", iso.worktree, timeout=GIT_TIMEOUT
+    )
     if removed.returncode != 0:
         iso.kept = True
         iso.reason = f"worktree kept: remove failed: {removed.stderr.strip()}"
@@ -141,7 +130,7 @@ def release(iso: Isolation) -> Isolation:
     if head == iso.base_sha:
         # Clean and still at the base: nothing landed, so a branch would only
         # be litter. A no-op lane leaves no trace but its run directory.
-        _git(iso.repo, "branch", "-D", iso.branch)
+        git_run(iso.repo, "branch", "-D", iso.branch, timeout=GIT_TIMEOUT)
         iso.branch = ""
         iso.reason = "worktree removed; no commits landed, branch deleted"
         return iso

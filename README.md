@@ -212,15 +212,15 @@ the claude/haiku collate $0.0599. Startup, not the work, still dominates.
 
 ## Commands
 
-- `conductor fleets` — the routing policy, and whether each binary is installed
-- `conductor dispatch` — run one prompt on one fleet (`--dry-run` prints the argv,
+- `conductor fleets`: the routing policy, and whether each binary is installed
+- `conductor dispatch`: run one prompt on one fleet (`--dry-run` prints the argv,
   `--schema` requests structured output, `--test` runs a gate afterward,
   `--commit` lands the work, `--isolate` runs in a fresh worktree)
-- `conductor mission FILE` — run a mission file (`--dry-run` validates and
+- `conductor mission FILE`: run a mission file (`--dry-run` validates and
   records every argv without spawning)
-- `conductor verify` — inspect repo state, optionally run a gate
-- `conductor runs` / `conductor missions` — recent dispatches and missions
-- `conductor prices` — the effective price table after overrides
+- `conductor verify`: inspect repo state, optionally run a gate
+- `conductor runs` / `conductor missions`: recent dispatches and missions
+- `conductor prices`: the effective price table after overrides
 
 Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 

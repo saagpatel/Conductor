@@ -29,6 +29,7 @@ from . import prices, worktrees
 from .fleets import FLEETS, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
+from .paths import conductor_home
 from .verify import (
     CommitOutcome,
     GitState,
@@ -42,13 +43,9 @@ from .verify import (
 TAIL_LINES = 20
 
 
-def conductor_home() -> Path:
-    return Path(os.environ.get("CONDUCTOR_HOME", Path.home() / ".conductor"))
-
-
-def _slug(text: str, limit: int = 32) -> str:
+def _slug(text: str, limit: int = 32, default: str = "run") -> str:
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return (s[:limit].rstrip("-")) or "run"
+    return (s[:limit].rstrip("-")) or default
 
 
 @dataclass

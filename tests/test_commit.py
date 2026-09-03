@@ -21,17 +21,11 @@ from conductor.verify import commit_work
 
 
 @pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "repo"
-    r.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=r, check=True)
-    (r / "seed.txt").write_text("seed\n")
-    (r / "doomed.txt").write_text("delete me\n")
-    subprocess.run(["git", "add", "-A"], cwd=r, check=True)
-    subprocess.run(["git", "commit", "-qm", "seed"], cwd=r, check=True)
-    return r
+def repo(repo: Path) -> Path:
+    (repo / "doomed.txt").write_text("delete me\n")
+    subprocess.run(["git", "add", "doomed.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed doomed"], cwd=repo, check=True)
+    return repo
 
 
 def test_commit_lands_the_dispatchs_work(repo: Path):

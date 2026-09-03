@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import subprocess
 import time
 from pathlib import Path
 
@@ -19,30 +18,6 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.runner import dispatch
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "repo"
-    r.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=r, check=True)
-    subprocess.run(["git", "config", "user.name", "test"], cwd=r, check=True)
-    (r / "seed.txt").write_text("seed\n")
-    subprocess.run(["git", "add", "-A"], cwd=r, check=True)
-    subprocess.run(["git", "commit", "-qm", "seed"], cwd=r, check=True)
-    return r
-
-
-@pytest.fixture
-def home(tmp_path: Path) -> Path:
-    return tmp_path / "conductor-home"
-
-
-def fake_fleet(monkeypatch, argv: list[str]) -> None:
-    """Point every builder at a command we control, so dispatch mechanics can
-    be tested without spending a token or needing a CLI installed."""
-    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: argv)
 
 
 def spec_for(repo: Path, **kw) -> Spec:
@@ -60,10 +35,10 @@ def test_dry_run_spawns_nothing_and_records_the_argv(repo: Path, home: Path):
     assert not (Path(result.run_dir) / "stdout.log").exists()
 
 
-def test_exit_zero_with_no_bytes_moved_is_not_success(repo, home, monkeypatch):
+def test_exit_zero_with_no_bytes_moved_is_not_success(repo, home, fake_fleet):
     """The failure this whole module exists to catch: a run that reports
     success, exits 0, and changed nothing."""
-    fake_fleet(monkeypatch, ["sh", "-c", "echo 'Done! All tests pass.'; exit 0"])
+    fake_fleet(["sh", "-c", "echo 'Done! All tests pass.'; exit 0"])
     result = dispatch(spec_for(repo, mode="write"), home=home)
     assert result.exit_code == 0
     assert result.verdict["no_op"] is True
@@ -71,9 +46,8 @@ def test_exit_zero_with_no_bytes_moved_is_not_success(repo, home, monkeypatch):
     assert any("moved no bytes" in n for n in result.verdict["notes"])
 
 
-def test_a_write_that_lands_a_commit_is_success(repo, home, monkeypatch):
+def test_a_write_that_lands_a_commit_is_success(repo, home, fake_fleet):
     fake_fleet(
-        monkeypatch,
         ["sh", "-c", "echo work > new.txt && git add -A && git commit -qm 'agent work'"],
     )
     result = dispatch(spec_for(repo, mode="write"), home=home)
@@ -84,33 +58,33 @@ def test_a_write_that_lands_a_commit_is_success(repo, home, monkeypatch):
     assert result.ok is True
 
 
-def test_a_dirty_tree_counts_as_work_even_without_a_commit(repo, home, monkeypatch):
-    fake_fleet(monkeypatch, ["sh", "-c", "echo uncommitted > scratch.txt"])
+def test_a_dirty_tree_counts_as_work_even_without_a_commit(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo uncommitted > scratch.txt"])
     result = dispatch(spec_for(repo, mode="write"), home=home)
     assert result.verdict["dirty_delta"] == 1
     assert result.verdict["no_op"] is False
     assert result.ok is True
 
 
-def test_read_mode_does_not_require_bytes_to_move(repo, home, monkeypatch):
+def test_read_mode_does_not_require_bytes_to_move(repo, home, fake_fleet):
     """Research dispatches are supposed to change nothing."""
-    fake_fleet(monkeypatch, ["sh", "-c", "echo 'here is my analysis'; exit 0"])
+    fake_fleet(["sh", "-c", "echo 'here is my analysis'; exit 0"])
     result = dispatch(spec_for(repo, mode="read"), home=home)
     assert result.verdict["no_op"] is True
     assert result.ok is True
 
 
-def test_nonzero_exit_is_failure_and_the_tail_comes_from_stderr(repo, home, monkeypatch):
-    fake_fleet(monkeypatch, ["sh", "-c", "echo 'boom' >&2; exit 7"])
+def test_nonzero_exit_is_failure_and_the_tail_comes_from_stderr(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo 'boom' >&2; exit 7"])
     result = dispatch(spec_for(repo), home=home)
     assert result.exit_code == 7
     assert result.ok is False
     assert "boom" in result.tail
 
 
-def test_output_streams_to_disk_and_never_through_the_summary(repo, home, monkeypatch):
+def test_output_streams_to_disk_and_never_through_the_summary(repo, home, fake_fleet):
     """A verbose agent must not be able to flood the orchestrator."""
-    fake_fleet(monkeypatch, ["sh", "-c", "for i in $(seq 1 5000); do echo line-$i; done"])
+    fake_fleet(["sh", "-c", "for i in $(seq 1 5000); do echo line-$i; done"])
     result = dispatch(spec_for(repo), home=home)
     on_disk = Path(result.stdout_path).read_text()
     assert on_disk.count("\n") == 5000
@@ -118,12 +92,12 @@ def test_output_streams_to_disk_and_never_through_the_summary(repo, home, monkey
     assert "line-1\n" not in json.dumps(result.summary())
 
 
-def test_timeout_kills_the_whole_process_group(repo, home, monkeypatch):
+def test_timeout_kills_the_whole_process_group(repo, home, fake_fleet):
     """An orphaned grandchild still editing the repo would race whatever runs
     next, so the timeout must kill the tree, not just the child."""
     marker = repo / "grandchild.pid"
     script = f"sh -c 'echo $$ > {marker}; sleep 60' & sleep 60"
-    fake_fleet(monkeypatch, ["sh", "-c", script])
+    fake_fleet(["sh", "-c", script])
 
     started = time.monotonic()
     result = dispatch(spec_for(repo, timeout=2), home=home)
@@ -139,13 +113,13 @@ def test_timeout_kills_the_whole_process_group(repo, home, monkeypatch):
         os.kill(pid, signal.SIGKILL if False else 0)
 
 
-def test_a_grandchild_that_outlives_the_fleet_is_reaped(repo, home, monkeypatch):
+def test_a_grandchild_that_outlives_the_fleet_is_reaped(repo, home, fake_fleet):
     """agy's print timeout returns while its shell child keeps running and
     keeps editing the tree (seen live 2026-09-03). The fleet exiting cleanly
     must still leave no process behind."""
     marker = repo / "straggler.pid"
     # $! is the background job's own pid; a subshell's $$ would be the parent's.
-    fake_fleet(monkeypatch, ["sh", "-c", f"sleep 60 & echo $! > {marker}; sleep 0.2; exit 0"])
+    fake_fleet(["sh", "-c", f"sleep 60 & echo $! > {marker}; sleep 0.2; exit 0"])
     result = dispatch(spec_for(repo), home=home)
     assert result.exit_code == 0
     pid = int(marker.read_text().strip())
@@ -163,10 +137,12 @@ def test_a_grandchild_that_outlives_the_fleet_is_reaped(repo, home, monkeypatch)
         os.kill(pid, 0)
 
 
-def test_same_second_same_prompt_same_fleet_get_distinct_run_ids(repo, home, monkeypatch):
+def test_same_second_same_prompt_same_fleet_get_distinct_run_ids(
+    repo, home, fake_fleet, monkeypatch
+):
     """Two lanes of one mission can collide on the timestamped id; the run
     directory (and so the worktree branch) must still be unique."""
-    fake_fleet(monkeypatch, ["sh", "-c", "echo hi"])
+    fake_fleet(["sh", "-c", "echo hi"])
     frozen = runner_mod.datetime.now(runner_mod.UTC)
 
     class FrozenDatetime:
@@ -182,26 +158,28 @@ def test_same_second_same_prompt_same_fleet_get_distinct_run_ids(repo, home, mon
     assert Path(a.run_dir).is_dir() and Path(b.run_dir).is_dir()
 
 
-def test_a_missing_binary_is_reported_not_raised(repo, home, monkeypatch):
-    fake_fleet(monkeypatch, ["conductor-no-such-binary-xyz"])
+def test_a_missing_binary_is_reported_not_raised(repo, home, fake_fleet):
+    fake_fleet(["conductor-no-such-binary-xyz"])
     result = dispatch(spec_for(repo), home=home)
     assert result.ok is False
     assert result.error and "cannot spawn" in result.error
 
 
-def test_failing_gate_sinks_an_otherwise_successful_run(repo, home, monkeypatch):
-    fake_fleet(monkeypatch, ["sh", "-c", "echo x > f.txt"])
+def test_failing_gate_sinks_an_otherwise_successful_run(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo x > f.txt"])
     result = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 1")
     assert result.verdict["no_op"] is False
     assert result.tests["exit_code"] == 1
     assert result.ok is False
 
 
-def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(repo, home, monkeypatch):
+def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(
+    repo, home, fake_fleet
+):
     """agy exits 1 on its print timeout today; if a future version exits 0
     with status ERROR, the status must still sink the run."""
     envelope = '{"status":"ERROR","response":"","error":"timeout waiting for response"}'
-    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'; exit 0"])
+    fake_fleet(["sh", "-c", f"echo '{envelope}'; exit 0"])
     result = dispatch(spec_for(repo, fleet="antigravity", mode="read"), home=home)
     assert result.exit_code == 0
     assert result.fleet_status == "ERROR"
@@ -210,26 +188,26 @@ def test_a_fleet_that_reports_its_own_failure_is_believed_over_exit_zero(repo, h
     assert result.summary()["error"] == "timeout waiting for response"
 
 
-def test_tokens_without_dollars_are_priced_from_the_table(repo, home, monkeypatch):
+def test_tokens_without_dollars_are_priced_from_the_table(repo, home, fake_fleet):
     """Cursor and Antigravity report tokens but no cost; Codex reports usage
     only in its event stream. All three must land with a dollar figure."""
     envelope = (
         '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
         '"usage":{"inputTokens":1000000,"outputTokens":1000000}}'
     )
-    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'"])
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
     result = dispatch(spec_for(repo, fleet="cursor", model="composer-2.5"), home=home)
     assert result.usage["cost_basis"] == "estimated"
     assert result.usage["cost_usd"] == 0.5 + 2.5
     assert result.summary()["cost_usd"] == 3.0
 
 
-def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, monkeypatch):
+def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, fake_fleet):
     envelope = (
         '{"result":"PONG","total_cost_usd":0.231398,'
         '"usage":{"input_tokens":2,"cache_creation_input_tokens":57836,"output_tokens":5}}'
     )
-    fake_fleet(monkeypatch, ["sh", "-c", f"echo '{envelope}'"])
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
     result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
     assert result.usage["cost_basis"] == "reported"
     assert result.usage["cost_usd"] == 0.231398
@@ -246,9 +224,9 @@ def test_codex_answer_falls_back_to_its_last_message_file(repo, home, monkeypatc
     assert Path(result.answer_path).read_text() == "PONG-FROM-FILE"
 
 
-def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, monkeypatch):
+def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, fake_fleet, monkeypatch):
     """A timed-out gate has no exit code; 'no exit code' must not read as 0."""
-    fake_fleet(monkeypatch, ["sh", "-c", "echo x > f.txt"])
+    fake_fleet(["sh", "-c", "echo x > f.txt"])
     monkeypatch.setattr(
         runner_mod,
         "run_tests",
@@ -260,23 +238,23 @@ def test_a_gate_that_hangs_is_a_failure_not_a_pass(repo, home, monkeypatch):
     assert result.ok is False
 
 
-def test_the_summary_says_why_a_run_is_not_ok(repo, home, monkeypatch):
+def test_the_summary_says_why_a_run_is_not_ok(repo, home, fake_fleet):
     """Seven things can sink a run; the orchestrator should not have to
     reconstruct which one from the raw fields."""
-    fake_fleet(monkeypatch, ["sh", "-c", "echo 'Done!'; exit 0"])
+    fake_fleet(["sh", "-c", "echo 'Done!'; exit 0"])
     no_op = dispatch(spec_for(repo, mode="write"), home=home)
     assert no_op.summary()["failure"] == "write dispatch moved no bytes"
-    fake_fleet(monkeypatch, ["sh", "-c", "exit 7"])
+    fake_fleet(["sh", "-c", "exit 7"])
     assert dispatch(spec_for(repo), home=home).summary()["failure"] == "exit code 7"
-    fake_fleet(monkeypatch, ["sh", "-c", "echo x > f.txt"])
+    fake_fleet(["sh", "-c", "echo x > f.txt"])
     gate = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 3")
     assert gate.summary()["failure"] == "gate exited 3"
-    fake_fleet(monkeypatch, ["sh", "-c", "echo fine"])
+    fake_fleet(["sh", "-c", "echo fine"])
     assert dispatch(spec_for(repo), home=home).summary()["failure"] is None
 
 
-def test_every_run_leaves_an_audit_trail(repo, home, monkeypatch):
-    fake_fleet(monkeypatch, ["sh", "-c", "echo hi"])
+def test_every_run_leaves_an_audit_trail(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo hi"])
     result = dispatch(spec_for(repo), home=home)
     run_dir = Path(result.run_dir)
     for name in ("prompt.txt", "argv.json", "stdout.log", "stderr.log", "result.json"):

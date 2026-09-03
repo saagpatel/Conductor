@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+from .paths import conductor_home
 
 AS_OF = "2026-09-03"
 log = logging.getLogger("conductor.prices")
@@ -99,8 +100,7 @@ DEFAULT_PRICES: dict[str, Price] = {
 
 
 def _override_path() -> Path:
-    home = Path(os.environ.get("CONDUCTOR_HOME", Path.home() / ".conductor"))
-    return home / "prices.json"
+    return conductor_home() / "prices.json"
 
 
 def load_prices(override: Path | None = None, errors: list[str] | None = None) -> dict[str, Price]:
@@ -139,13 +139,12 @@ def load_prices(override: Path | None = None, errors: list[str] | None = None) -
             # A missing or null cache rate takes the vendor-standard default.
             cache_read = value.get("cache_read")
             cache_write = value.get("cache_write")
-            table[key] = Price(
-                input=inp,
-                output=out,
-                cache_read=float(cache_read) if cache_read is not None else inp * 0.10,
-                cache_write=float(cache_write) if cache_write is not None else inp * 1.25,
-                note=str(value.get("note", "override")),
-            )
+            price = _std(inp, out, str(value.get("note", "override")))
+            if cache_read is not None:
+                price = replace(price, cache_read=float(cache_read))
+            if cache_write is not None:
+                price = replace(price, cache_write=float(cache_write))
+            table[key] = price
         except (KeyError, TypeError, ValueError) as exc:
             _problem(errors, f"{path}: '{key}' needs numeric input/output ({exc}); entry ignored")
     return table

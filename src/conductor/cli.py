@@ -11,7 +11,8 @@ from pathlib import Path
 from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec
 from .mission import MissionInvalid, load_mission, run_mission
-from .runner import Result, conductor_home, dispatch
+from .paths import conductor_home
+from .runner import Result, dispatch
 from .verify import GitState, run_tests
 
 
@@ -145,8 +146,6 @@ def cmd_mission(args: argparse.Namespace) -> int:
         return 3
     result = run_mission(mission, dry_run=args.dry_run)
     print(json.dumps(result.summary(), indent=2))
-    if args.dry_run:
-        return 0
     return 0 if result.ok else 1
 
 

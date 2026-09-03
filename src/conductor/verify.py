@@ -14,24 +14,30 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 GIT_TIMEOUT = 30
 
 
-def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
+def git_run(
+    cwd: str | Path, *args: str, timeout: int = GIT_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", *args],
-            cwd=cwd,
+            cwd=str(cwd),
             capture_output=True,
             text=True,
-            timeout=GIT_TIMEOUT,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         # A cwd the fleet deleted, or a hung git, must read as a failed
         # command rather than an exception in the middle of a 3am run.
         return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
+
+
+_git = git_run
 
 
 @dataclass
