@@ -7,3 +7,5 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+# Claude Code session worktrees
+.claude/worktrees/
