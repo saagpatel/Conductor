@@ -302,7 +302,7 @@ def test_mission_resumes_the_same_fleet_and_records_cache_visibility(
     assert "resumed" not in summary
     report = Path(result.report_path).read_text()
     assert "| cached | resumed |" in report
-    assert "40/60 (67%)" in report and "| yes |" in report
+    assert "40/100 (40%)" in report and "| yes |" in report
 
 
 def test_mission_runs_fresh_when_the_fleet_differs(repo, home, monkeypatch, tmp_path):

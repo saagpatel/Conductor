@@ -1224,12 +1224,14 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _cached(row: dict) -> str:
-    input_tokens = int(row.get("input_tokens") or 0)
-    if input_tokens <= 0:
-        return "-"
+    # `input_tokens` is the uncached share (outputs.py normalizes every fleet
+    # to that), so the denominator is everything the model read, or a Codex
+    # lane shows 317% cached.
     cache_read = int(row.get("cache_read_tokens") or 0)
-    percent = cache_read / input_tokens * 100
-    return f"{cache_read}/{input_tokens} ({percent:.0f}%)"
+    total = int(row.get("input_tokens") or 0) + cache_read
+    if total <= 0:
+        return "-"
+    return f"{cache_read}/{total} ({cache_read / total * 100:.0f}%)"
 
 
 def _resumed_label(row: dict) -> str:
@@ -1396,7 +1398,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             )
         if lane.input_tokens:
             lines.append(
-                f"- cache reads: {lane.cache_read_tokens}/{lane.input_tokens} input tokens"
+                f"- cache reads: {lane.cache_read_tokens}/"
+                f"{lane.input_tokens + lane.cache_read_tokens} input tokens"
             )
         if lane.tip_sha:
             state = "clean" if lane.clean else "with uncommitted work"

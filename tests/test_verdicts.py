@@ -79,7 +79,7 @@ def test_parse_checklist_accepts_strings_and_objects_and_refuses_bad_input():
 
 def test_checklist_schema_pins_shape_and_cardinality():
     schema = checklist_schema(CRITERIA)
-    assert schema["$schema"].endswith("2020-12/schema")
+    assert "$schema" not in schema  # Claude Code rejects the draft URI
     assert schema["additionalProperties"] is False
     array = schema["properties"]["criteria"]
     assert array["minItems"] == array["maxItems"] == 2

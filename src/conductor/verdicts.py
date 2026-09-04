@@ -74,8 +74,10 @@ def parse_checklist(raw: object) -> list[Criterion]:
 def checklist_schema(criteria: list[Criterion]) -> dict:
     """The fleet-facing JSON Schema for one fixed checklist."""
     ids = [criterion.id for criterion in criteria]
+    # No "$schema" key: Claude Code's --json-schema validator rejects the
+    # draft URI outright ("no schema with key or ref"), killing the lane
+    # before a model is ever called. Verified live 2026-09-03.
     return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": False,
         "required": ["verdict", "criteria", "summary"],
