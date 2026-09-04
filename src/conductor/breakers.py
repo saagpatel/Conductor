@@ -159,11 +159,7 @@ def _entries(fleet: str, text: str) -> list[tuple[str, str | None]]:
         if fleet == "codex":
             signature = _codex_signature(event)
             if signature is not None:
-                # File edits arrive as completed progress events, and Codex
-                # may reuse their item id. Deduplicating that id turns six
-                # real edits into one tool call and hides a rising budget.
-                identity = None if signature.startswith("edit:") else _identity(fleet, event)
-                entries.append((signature, identity))
+                entries.append((signature, _identity(fleet, event)))
         elif fleet == "claude":
             entries.extend(
                 (signature, _identity(fleet, event, identity))
