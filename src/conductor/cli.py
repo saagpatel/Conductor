@@ -98,6 +98,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             effort=args.effort,
             mode=args.mode,
             timeout=args.timeout,
+            stall_timeout=args.stall_timeout,
+            loop_limit=args.loop_limit,
+            max_tool_calls=args.max_tool_calls,
             schema=args.schema,
             verdict=criteria,
             resume=args.resume,
@@ -235,6 +238,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "exit_code": data["exit_code"],
                 "no_op": git_verdict.get("no_op"),
                 "duration_s": round(data.get("duration_s", 0), 1),
+                "tool_calls": (data.get("breaker") or {}).get("tool_calls", 0),
             }
         )
     print(json.dumps(rows, indent=2))
@@ -262,6 +266,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument("--mode", default="read", choices=MODES)
     p_dispatch.add_argument("--cwd", default=".", help="the fleet's working directory")
     p_dispatch.add_argument("--timeout", type=int, help="seconds; per-mode default otherwise")
+    p_dispatch.add_argument(
+        "--stall-timeout",
+        type=int,
+        default=600,
+        metavar="SECONDS",
+        help="kill after this many seconds without stdout growth; 0 disables",
+    )
+    p_dispatch.add_argument(
+        "--loop-limit",
+        type=int,
+        default=6,
+        metavar="N",
+        help="kill after N identical consecutive tool calls; 0 disables",
+    )
+    p_dispatch.add_argument(
+        "--max-tool-calls",
+        type=int,
+        metavar="N",
+        help="kill after more than N tool calls; 0 disables",
+    )
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
     p_dispatch.add_argument("--resume", metavar="SESSION_ID", help="resume a fleet session")
     p_dispatch.add_argument(

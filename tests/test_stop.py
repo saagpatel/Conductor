@@ -124,9 +124,12 @@ def test_wait_polls_the_stop_flag(monkeypatch):
     monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
     threading.Timer(0.3, request_stop).start()
     started = time.monotonic()
-    code, timed_out, over_cap, interrupted = runner_mod._wait(proc, 60, None)
+    code, timed_out, over_cap, interrupted, breaker = runner_mod._wait(
+        proc, 60, None, None
+    )
     assert time.monotonic() - started < 5
     assert interrupted and not timed_out and not over_cap
+    assert breaker is None
     assert code != 0
 
 

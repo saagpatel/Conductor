@@ -20,6 +20,18 @@ CLAUDE = (
     '"cache_read_input_tokens":0,"output_tokens":5}}'
 )
 
+CLAUDE_STREAM_JSON = "\n".join(
+    [
+        '{"type":"system","subtype":"init","session_id":"stream-session"}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result","content":"done"}]}}',
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"session_id":"stream-session","total_cost_usd":0.04,'
+        '"structured_output":{"answer":"four"},'
+        '"usage":{"input_tokens":7,"output_tokens":3}}',
+    ]
+)
+
 CURSOR = (
     '{"type":"result","subtype":"success","is_error":false,"duration_ms":5972,'
     '"result":"PONG","session_id":"f510f063",'
@@ -83,6 +95,14 @@ def test_claude_cost_and_cache_write_are_captured():
     assert out.usage.cost_basis == "reported"
     assert out.usage.cache_write_tokens == 57836
     assert out.usage.output_tokens == 5
+
+
+def test_claude_stream_json_takes_the_last_result_with_all_final_fields():
+    out = parse("claude", CLAUDE_STREAM_JSON)
+    assert out.answer == '{\n  "answer": "four"\n}'
+    assert out.session_id == "stream-session"
+    assert out.usage is not None and out.usage.input_tokens == 7
+    assert out.usage.output_tokens == 3 and out.usage.cost_usd == 0.04
 
 
 def test_camel_case_usage_is_normalized():

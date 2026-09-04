@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices, worktrees
+from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .fleets import FLEETS, Spec, build_argv
 from .outputs import FleetOutput
@@ -87,6 +88,7 @@ class Result:
     commit: dict | None = None
     usage: dict | None = None
     budget: dict | None = None
+    breaker: dict | None = None
     answer_path: str | None = None
     diff_path: str | None = None
     isolation: dict | None = None
@@ -211,6 +213,8 @@ class Result:
             "cache_read_tokens": (self.usage or {}).get("cache_read_tokens"),
             "cap_usd": (self.budget or {}).get("cap_usd"),
             "over_cap": bool((self.budget or {}).get("exceeded")),
+            "tool_calls": (self.breaker or {}).get("tool_calls", 0),
+            "breaker": (self.breaker or {}).get("tripped"),
             "answer_path": self.answer_path,
             "diff_path": self.diff_path,
             "run_dir": self.run_dir,
@@ -578,6 +582,8 @@ def dispatch(
     timed_out = False
     capped = False
     interrupted = False
+    breaker_reason: str | None = None
+    breaker: Breaker | None = None
     exit_code: int | None = None
     budget = (
         Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap) if spec.cap_usd is not None else None
@@ -602,13 +608,23 @@ def dispatch(
                 start_new_session=True,
             )
             _register_live_group(proc.pid)
+            if spec.stall_timeout or spec.loop_limit or spec.max_tool_calls:
+                breaker = Breaker(
+                    spec.fleet,
+                    stdout_path,
+                    stall_s=spec.stall_timeout,
+                    loop_limit=spec.loop_limit,
+                    max_tool_calls=spec.max_tool_calls,
+                )
         except OSError as exc:
             error = f"cannot spawn {fleet.binary}: {exc}"
         except Interrupted as exc:
             interrupted = True
             error = f"interrupted: {exc}"
         if proc is not None:
-            exit_code, timed_out, capped, interrupted = _wait(proc, timeout, watcher)
+            exit_code, timed_out, capped, interrupted, breaker_reason = _wait(
+                proc, timeout, watcher, breaker
+            )
             if timed_out:
                 error = f"timed out after {timeout}s; process group killed"
             elif interrupted:
@@ -619,8 +635,11 @@ def dispatch(
                     f"budget cap hit: ${watcher.usage.cost_usd:.4f} estimated against a "
                     f"${spec.cap_usd:.4f} cap; process group killed"
                 )
+            elif breaker_reason is not None:
+                error = f"{breaker_reason}; process group killed"
 
     duration = time.monotonic() - started
+    breaker_state = breaker.to_dict() if breaker is not None else None
 
     # The fleet's own envelope first: a fleet that says it failed (on any
     # exit code) must not have its work committed as if it had succeeded.
@@ -814,7 +833,7 @@ def dispatch(
     if budget is not None:
         budget.settle(
             usage.cost_usd if usage else None,
-            killed=capped,
+            killed=capped or breaker_reason is not None,
             interrupted=interrupted,
             fleet_status=output.status,
         )
@@ -853,6 +872,7 @@ def dispatch(
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
         budget=budget.to_dict() if budget is not None else None,
+        breaker=breaker_state,
         answer_path=answer_path,
         diff_path=diff_path,
         isolation=iso.to_dict() if iso is not None else None,
@@ -888,11 +908,14 @@ def _self_commit_sha(cwd: str, before: GitState) -> str | None:
 
 
 def _wait(
-    proc: subprocess.Popen, timeout: int, watcher: Watcher | None
-) -> tuple[int | None, bool, bool, bool]:
+    proc: subprocess.Popen,
+    timeout: int,
+    watcher: Watcher | None,
+    breaker: Breaker | None,
+) -> tuple[int | None, bool, bool, bool, str | None]:
     """Wait for the fleet, in short polls so the budget watcher and a stop
     request get a look in. Returns (exit_code, timed_out, over_cap,
-    interrupted).
+    interrupted, breaker_reason).
 
     Whatever ended the wait, the process group is killed afterwards. On a
     timeout or a cap that is the point; after a clean exit it clears any
@@ -902,6 +925,7 @@ def _wait(
     """
     deadline = time.monotonic() + timeout
     timed_out = over_cap = interrupted = False
+    breaker_reason: str | None = None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -918,9 +942,16 @@ def _wait(
         if watcher is not None and watcher.over_cap():
             over_cap = True
             break
+        if breaker is not None and (breaker_reason := breaker.check()) is not None:
+            break
+    if not (timed_out or over_cap or interrupted) and breaker is not None:
+        # Fast runs may finish between polls. Parse their final complete lines
+        # so receipts still count tools and a just-completed runaway is not
+        # allowed to evade the ceiling by exiting in the same two-second tick.
+        breaker_reason = breaker.check()
     _kill_live_group(proc.pid)
     proc.wait()
-    return proc.returncode, timed_out, over_cap, interrupted
+    return proc.returncode, timed_out, over_cap, interrupted, breaker_reason
 
 
 def claim_dir(parent: Path, name: str) -> tuple[str, Path]:

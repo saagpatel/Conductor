@@ -147,6 +147,12 @@ def test_claude_headless_loads_no_operator_settings():
     assert argv[argv.index("--setting-sources") + 1] == "project"
 
 
+def test_claude_streams_progress_and_enables_verbose_print_mode():
+    argv = build_argv(spec(fleet="claude"))
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in argv
+
+
 def test_timeouts_default_by_mode_and_are_never_zero():
     assert spec(mode="read").resolved_timeout() == 600
     assert spec(mode="write").resolved_timeout() == 1200

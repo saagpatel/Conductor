@@ -218,6 +218,9 @@ class Spec:
     last_message: str | None = None  # path the fleet should write its answer to
     resume: str | None = None  # fleet session id to continue
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
+    stall_timeout: int | None = 600  # silence before conductor kills the fleet; 0 disables
+    loop_limit: int | None = 6  # identical consecutive tool calls; 0 disables
+    max_tool_calls: int | None = None  # total tool-call ceiling; 0 disables
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
     test_policy: str = "clean"
 
@@ -273,6 +276,15 @@ class Spec:
             self._validate_schema()
         if self.cap_usd is not None:
             self._validate_cap()
+        for name, value in (
+            ("stall_timeout", self.stall_timeout),
+            ("loop_limit", self.loop_limit),
+            ("max_tool_calls", self.max_tool_calls),
+        ):
+            if value is None or value == 0:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise DispatchRefused(f"{name} must be positive; 0 or null disables")
 
     def _validate_cap(self) -> None:
         """A cap conductor cannot enforce is refused, not silently ignored.
@@ -347,7 +359,10 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         "--effort",
         _CLAUDE_EFFORT[spec.effort],
         "--output-format",
-        "json",
+        "stream-json",
+        # Print mode otherwise refuses stream-json before the model starts,
+        # leaving a lane with neither progress events nor a useful receipt.
+        "--verbose",
         # Headless runs load no MCP servers: --strict-mcp-config with no
         # --mcp-config means an empty server set, which is both leaner and
         # the standing rule for unattended Claude Code.

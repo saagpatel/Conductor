@@ -164,7 +164,7 @@ Each is now pinned by a test.
 | `cursor` | Headless read mode stops on an interactive "do you trust this directory?" prompt and exits 1 having done nothing. Needs `--trust` (`--force` implies it, but read mode has no `--force`). |
 | `codex` | Can edit files but never commit under `workspace-write`. |
 | `claude` | A one-word reply cost **$0.2314**, because each headless spawn writes a fresh ~57.8K-token prompt cache. Antigravity's equivalent moved ~14K input tokens, Cursor's ~23K. Startup overhead, not the work, dominates short dispatches: do not send small jobs to this fleet. |
-| `claude` | Loading the operator's user settings ran 46 hook invocations on a one-word prompt (24 at session start), one of which rewrote a memory file, and cost $0.24 against $0.05 without them. conductor passes `--setting-sources project`: the target repo's own settings still apply, the operator's do not. In that mode `--output-format json` prints the whole event list as one array; the parser reads the `result` event out of it. `--bare` would also drop CLAUDE.md discovery but refuses OAuth. |
+| `claude` | Loading the operator's user settings ran 46 hook invocations on a one-word prompt (24 at session start), one of which rewrote a memory file, and cost $0.24 against $0.05 without them. conductor passes `--setting-sources project`: the target repo's own settings still apply, the operator's do not. It uses `--output-format stream-json --verbose` so progress is visible while Claude works; the final `result` event keeps the same answer, session, usage, cost, error, and structured-output fields. The parser still accepts the older array and single-object receipts. `--bare` would also drop CLAUDE.md discovery but refuses OAuth. |
 | `antigravity` | `--print-timeout` defaults to **5m0s** whatever conductor does with the process. An 8s cap on a 25s task exits 1 with `status: ERROR`, `error: "timeout waiting for response"`, and the work cut. conductor pins it to the spec's timeout minus 5s, so agy stops itself (and still prints its usage and its own error) just before conductor's process-group kill would leave nothing to price. |
 | `claude` | `--json-schema` takes the schema **text**, not a path (a path fails with "not valid JSON"). The validated object comes back under `structured_output`. Codex (`--output-schema`) and Antigravity (`--json-schema`) take a path. |
 | `cursor` | Has no structured-output flag at all. A `--schema` dispatch to Cursor is refused before spawn rather than silently handed prose. |
@@ -253,8 +253,9 @@ ceiling (see below). A key the loader does not know is refused, so `need`
 cannot quietly turn a dependent lane into a root.
 
 Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
-`timeout`, `test`, `test_policy`, `test_surface`, `commit`, `isolate`,
-`cap_usd`, `no_op_ok`, `schema`, and `verdict`. `test_policy` is `clean` (the default),
+`timeout`, `stall_timeout`, `loop_limit`, `max_tool_calls`, `test`, `test_policy`,
+`test_surface`, `commit`, `isolate`, `cap_usd`, `no_op_ok`, `schema`, and `verdict`.
+`test_policy` is `clean` (the default),
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
 
@@ -506,6 +507,25 @@ the ledger as `cost_usd: null`. A cap on an unpriced model is refused before
 spawn rather than silently unenforced, and a capped run that comes back with
 no usage at all fails closed (`cap unenforced: the run came back unpriced`)
 instead of reading as within budget.
+
+#### Breakers
+
+Three progress breakers run beside the budget watcher in the same two-second
+poll loop:
+
+- the stall breaker kills a fleet whose `stdout.log` has not grown for 600
+  seconds by default;
+- the loop breaker kills after 6 identical consecutive tool-call signatures;
+- the tool budget kills after more than the configured total tool calls, and
+  is off by default.
+
+Set `--stall-timeout 0`, `--loop-limit 0`, or `--max-tool-calls 0` to disable
+that breaker. Missions use the corresponding `stall_timeout`, `loop_limit`,
+and `max_tool_calls` attempt keys, inherited like `timeout`. A trip kills the
+whole process group, skips the gate, and is priced from the watcher's last
+reading exactly like a cap kill. The receipt records the reason, tool count,
+and last-output age. Claude dispatches use `stream-json --verbose` so their
+tool calls reach these breakers before the final result.
 
 ## Commands
 

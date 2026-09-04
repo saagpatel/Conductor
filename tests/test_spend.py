@@ -20,6 +20,7 @@ def _run(
     basis: str | None,
     tokens: int,
     cache_read_tokens: int = 0,
+    tool_calls: int = 0,
     ok: bool = True,
     dry_run: bool = False,
 ) -> None:
@@ -38,6 +39,7 @@ def _run(
                     "cache_read_tokens": cache_read_tokens,
                 },
                 "duration_s": 1.0,
+                "breaker": {"tool_calls": tool_calls, "tripped": None},
                 "ok": ok,
                 "interrupted": False,
                 "dry_run": dry_run,
@@ -102,6 +104,7 @@ def test_spend_groups_every_supported_run_dimension(
         "unpriced_runs": 1,
         "tokens": 600,
         "cache_read_tokens": 0,
+        "tool_calls": 0,
         "skipped": 0,
         "dry_runs": 0,
     }
@@ -209,7 +212,8 @@ def test_spend_sums_cache_reads_and_exposes_them_in_text_and_json(
     assert rows[-1]["cache_read_tokens"] == 75
     assert main(["spend"]) == 0
     text = capsys.readouterr().out
-    assert "cache_read_tokens" in text and text.splitlines()[-1].split()[-1] == "75"
+    assert "cache_read_tokens" in text and text.splitlines()[-1].split()[-2] == "75"
+    assert "tool_calls" in text and text.splitlines()[-1].split()[-1] == "0"
 
 
 def test_spend_rejects_a_bad_since_with_one_line_and_exit_two(home: Path, monkeypatch, capsys):

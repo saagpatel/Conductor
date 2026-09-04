@@ -31,6 +31,7 @@ class Run:
     estimated: bool
     tokens: int
     cache_read_tokens: int
+    tool_calls: int
     dry_run: bool = False  # spawned nothing and spent nothing; not an unpriced run
 
 
@@ -46,6 +47,7 @@ class Row:
     unpriced_runs: int = 0
     tokens: int = 0
     cache_read_tokens: int = 0
+    tool_calls: int = 0
     dry_runs: int = 0  # counted on the total row only; never spend, never unpriced
 
     def add(self, run: Run) -> None:
@@ -58,6 +60,7 @@ class Row:
         self.estimated_runs += int(run.estimated)
         self.tokens += run.tokens
         self.cache_read_tokens += run.cache_read_tokens
+        self.tool_calls += run.tool_calls
 
     def to_dict(self, *, skipped: int | None = None) -> dict[str, str | int | float]:
         row: dict[str, str | int | float] = {
@@ -69,6 +72,7 @@ class Row:
             "unpriced_runs": self.unpriced_runs,
             "tokens": self.tokens,
             "cache_read_tokens": self.cache_read_tokens,
+            "tool_calls": self.tool_calls,
         }
         if skipped is not None:
             row["skipped"] = skipped
@@ -126,9 +130,19 @@ def _read_run(path: Path) -> Run | None:
             return None
 
         dry_run = raw.get("dry_run") is True
+        breaker = raw.get("breaker")
+        if breaker is None:
+            tool_calls = 0
+        elif isinstance(breaker, dict):
+            raw_tools = breaker.get("tool_calls", 0)
+            if isinstance(raw_tools, bool) or not isinstance(raw_tools, int) or raw_tools < 0:
+                return None
+            tool_calls = raw_tools
+        else:
+            return None
         usage = raw.get("usage")
         if usage is None:
-            return Run(run_id, created, fleet, model, ok, None, False, 0, 0, dry_run)
+            return Run(run_id, created, fleet, model, ok, None, False, 0, 0, tool_calls, dry_run)
         if not isinstance(usage, dict):
             return None
         cost = _number(usage.get("cost_usd"))
@@ -155,6 +169,7 @@ def _read_run(path: Path) -> Run | None:
             basis == "estimated",
             tokens,
             raw_cache,
+            tool_calls,
             dry_run,
         )
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
@@ -256,6 +271,7 @@ def _print_table(rows: list[Row], total: Row, skipped: int) -> None:
         "unpriced",
         "tokens",
         "cache_read_tokens",
+        "tool_calls",
     )
     values = [
         (
@@ -267,6 +283,7 @@ def _print_table(rows: list[Row], total: Row, skipped: int) -> None:
             str(row.unpriced_runs),
             str(row.tokens),
             str(row.cache_read_tokens),
+            str(row.tool_calls),
         )
         for row in [*rows, total]
     ]

@@ -56,6 +56,9 @@ _INHERITED = (
     "mode",
     "prompt",
     "timeout",
+    "stall_timeout",
+    "loop_limit",
+    "max_tool_calls",
     "test",
     "test_policy",
     "test_surface",
@@ -66,6 +69,7 @@ _INHERITED = (
     "schema",
     "verdict",
 )
+_BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls"})
 
 # Every key a mission file may use, per object. A typo (`need` for `needs`)
 # would otherwise silently turn a dependent lane into a root.
@@ -127,6 +131,9 @@ class Attempt:
     mode: str = "read"
     prompt: str = ""
     timeout: int | None = None
+    stall_timeout: int | None = 600
+    loop_limit: int | None = 6
+    max_tool_calls: int | None = None
     test: str | None = None
     commit: str | None = None
     schema: str | None = None
@@ -155,6 +162,9 @@ class Attempt:
             effort=self.effort,
             mode=self.mode,
             timeout=self.timeout,
+            stall_timeout=self.stall_timeout,
+            loop_limit=self.loop_limit,
+            max_tool_calls=self.max_tool_calls,
             schema=self.schema,
             verdict=self.verdict,
             resume=resume,
@@ -537,7 +547,7 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
         # load-time validation refuses it on any lane it does not fit.)
         out.pop("model", None)
     for key in _INHERITED:
-        if key in raw and raw[key] is not None:
+        if key in raw and (raw[key] is not None or key in _BREAKER_KEYS):
             out[key] = raw[key]
     if raw.get("prompt_file"):
         prompt_path = (base_dir / str(raw["prompt_file"])).expanduser().resolve()
@@ -566,6 +576,12 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
     for key in ("isolate", "no_op_ok"):
         if fields.get(key) is not None and not isinstance(fields[key], bool):
             raise MissionInvalid(f"{where}: {key} must be true or false")
+    for key in _BREAKER_KEYS:
+        value = fields.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise MissionInvalid(f"{where}: {key} must be positive; 0 or null disables")
     verdict = None
     if "verdict" in fields:
         try:
@@ -580,6 +596,9 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             mode=str(fields.get("mode", "read")),
             prompt=str(fields["prompt"]),
             timeout=int(fields["timeout"]) if fields.get("timeout") is not None else None,
+            stall_timeout=_breaker_value(fields, "stall_timeout", 600),
+            loop_limit=_breaker_value(fields, "loop_limit", 6),
+            max_tool_calls=_breaker_value(fields, "max_tool_calls", None),
             test=fields.get("test"),
             commit=fields.get("commit"),
             schema=fields.get("schema"),
@@ -592,6 +611,13 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
         )
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"{where}: {exc}") from exc
+
+
+def _breaker_value(fields: dict, key: str, default: int | None) -> int | None:
+    """Preserve an explicit mission null: it disables instead of defaulting."""
+    if key not in fields or fields[key] is None:
+        return None if key in fields else default
+    return int(fields[key])
 
 
 def _default_lane_name(primary: Attempt, existing: list[Lane]) -> str:
@@ -683,6 +709,8 @@ class LaneResult:
     tokens: int = 0
     cache_read_tokens: int = 0
     input_tokens: int = 0
+    tool_calls: int = 0
+    breaker: str | None = None
     skipped: str | None = None
     needs: list[str] = field(default_factory=list)
     base: str | None = None
@@ -748,6 +776,8 @@ class MissionResult:
                     "cost_usd": lane["cost_usd"],
                     "cache_read_tokens": lane.get("cache_read_tokens", 0),
                     "input_tokens": lane.get("input_tokens", 0),
+                    "tool_calls": lane.get("tool_calls", 0),
+                    "breaker": lane.get("breaker"),
                     "resume": lane.get("resume"),
                     "session_id": lane.get("session_id"),
                     "skipped": lane.get("skipped"),
@@ -926,6 +956,8 @@ def run_mission(
             out.tokens += int(summary.get("tokens") or 0)
             out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
             out.input_tokens += int(summary.get("input_tokens") or 0)
+            out.tool_calls += int(summary.get("tool_calls") or 0)
+            out.breaker = summary.get("breaker")
             # A lane's answer, diff, and tree are its final attempt's. A failed
             # primary's answer left in place would be what the collate reads
             # when the fallback produced none.
@@ -1351,13 +1383,13 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         f"- duration: {result.duration_s:.1f}s",
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
-        "cost_usd | tokens | cached | resumed | dur_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "cost_usd | tokens | tools | cached | resumed | dur_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for lane in lanes:
         if not lane.attempts and lane.skipped:
             lines.append(
-                f"| {lane.name} | (skipped) | False | | | | no | | | | | - | no | |"
+                f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
             )
         for a in lane.attempts:
             cost = _usd(a.get("cost_usd"))
@@ -1369,7 +1401,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 f"{a['no_op']} | {_test_touched(a.get('test_surface'))} | {a['commits']} | "
                 f"{a.get('branch') or ''} | "
                 f"{cost} | "
-                f"{a.get('tokens') or ''} | {_cached(a)} | {_resumed_label(a)} | "
+                f"{a.get('tokens') or ''} | {a.get('tool_calls', 0)} | {_cached(a)} | "
+                f"{_resumed_label(a)} | "
                 f"{a['duration_s']} |"
             )
     for note in result.notes:
@@ -1407,6 +1440,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         if lane.skipped:
             lines.append(f"Skipped: {lane.skipped}")
         for a in lane.attempts:
+            if a.get("breaker"):
+                lines.append(f"- breaker: {a['breaker']}")
             if a.get("error"):
                 lines.append(f"- {a['attempt']}: {a['error']}")
             if a.get("note"):

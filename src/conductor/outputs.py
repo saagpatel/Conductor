@@ -108,10 +108,35 @@ def parse(fleet: str, stdout: str) -> FleetOutput:
         return _parse_antigravity(text)
     if fleet == "cursor":
         return _parse_cursor(text)
+    if fleet == "claude":
+        return _parse_claude(text)
     payload = _last_json_object(text)
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
     return _parse_envelope(fleet, payload, text)
+
+
+def _parse_claude(text: str) -> FleetOutput:
+    """Claude now streams NDJSON so breakers can see tool calls in flight.
+
+    The final result event keeps the old envelope fields.  Stored transcripts
+    from the earlier single-object and JSON-array formats remain readable;
+    selecting a result event instead of merely the last object prevents a
+    trailing non-result event from hiding the paid answer and usage.
+    """
+    try:
+        raw: object = json.loads(text)
+    except json.JSONDecodeError:
+        raw = [event for event in map(json_line, text.splitlines()) if event is not None]
+    if isinstance(raw, list):
+        events = [event for event in raw if isinstance(event, dict)]
+        results = [event for event in events if event.get("type") == "result"]
+        payload = (results or events or [None])[-1]
+    else:
+        payload = raw if isinstance(raw, dict) else None
+    if payload is None:
+        return FleetOutput(answer=text, parsed=False)
+    return _parse_envelope("claude", payload, text)
 
 
 def _parse_antigravity(text: str) -> FleetOutput:

@@ -1,5 +1,6 @@
 """conductor: one dispatch contract across four agent fleets."""
 
+from .breakers import Breaker, tool_events
 from .fleets import EFFORTS, FLEETS, MODES, DispatchRefused, Spec, build_argv
 from .mission import Mission, MissionInvalid, MissionResult, load_mission, run_mission
 from .prices import estimate, load_prices
@@ -21,6 +22,7 @@ __all__ = [
     "FLEETS",
     "MODES",
     "DispatchRefused",
+    "Breaker",
     "Criterion",
     "ChecklistVerdict",
     "GitState",
@@ -42,4 +44,5 @@ __all__ = [
     "parse_verdict",
     "run_mission",
     "run_tests",
+    "tool_events",
 ]
