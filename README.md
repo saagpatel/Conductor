@@ -283,7 +283,11 @@ receipts seed both priced and unpriced spend, so restarting is not a fresh
 budget. Collate is kept only when its successful result and answer still exist
 and every summarized lane was kept; otherwise it runs again. `running.json`
 holds the mission's pid, start time, and host while it is active. A live lock
-refuses a second runner; a stale lock is removed and recorded in the result.
+refuses a second runner; on the same host conductor also compares the process
+start time so a recycled pid cannot keep an old lock alive. A lock from another
+host is refused rather than guessed stale; after verifying that host is no
+longer running the mission, the operator may remove the lock. A demonstrably
+stale local lock is removed and recorded in the result.
 
 The boundary is deliberately honest. A lane that half-committed before a crash
 has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted

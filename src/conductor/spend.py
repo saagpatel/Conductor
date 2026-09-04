@@ -188,11 +188,18 @@ def _mission_runs(data: dict[str, object]) -> set[str]:
                 run_ids.add(final)
             elif isinstance(final, dict) and isinstance(final.get("run_id"), str):
                 run_ids.add(final["run_id"])
-            attempts = lane.get("attempts")
-            if isinstance(attempts, list):
+            for key in ("previous_attempts", "attempts"):
+                attempts = lane.get(key)
+                if not isinstance(attempts, list):
+                    continue
                 for attempt in attempts:
                     if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
                         run_ids.add(attempt["run_id"])
+    previous_collates = data.get("previous_collates")
+    if isinstance(previous_collates, list):
+        for collate in previous_collates:
+            if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
+                run_ids.add(collate["run_id"])
     collate = data.get("collate")
     if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
         run_ids.add(collate["run_id"])

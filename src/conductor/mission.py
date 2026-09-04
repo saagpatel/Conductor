@@ -33,6 +33,7 @@ import re
 import secrets
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import tomllib
@@ -945,6 +946,7 @@ class MissionResult:
     interrupted: bool = False  # a stop request ended the mission early
     resumes: list[dict] = field(default_factory=list)
     resumed_from: dict | None = None
+    previous_collates: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1063,6 +1065,59 @@ def _pid_alive(pid: object) -> bool:
     return True
 
 
+def _process_started(pid: int) -> datetime | None:
+    """The local process start time, so a recycled pid cannot own an old lock."""
+    try:
+        found = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    stamp = " ".join(found.stdout.split())
+    if found.returncode != 0 or not stamp:
+        return None
+    try:
+        local = datetime.strptime(stamp, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return datetime.fromtimestamp(time.mktime(local.timetuple()), UTC)
+
+
+def _lock_status(raw: dict) -> tuple[bool, str]:
+    """Whether a lock still owns the mission, with the evidence used."""
+    host = raw.get("host")
+    local_host = socket.gethostname()
+    if isinstance(host, str) and host and host != local_host:
+        # A pid from another host says nothing about local liveness. Treating
+        # its lookup miss as stale lets two machines spend the same mission.
+        return True, f"host {host} differs from this host {local_host}"
+    pid = raw.get("pid")
+    if not _pid_alive(pid):
+        return False, f"pid {pid!r} is not alive"
+    assert isinstance(pid, int)  # _pid_alive accepted only positive integers
+    locked_at = raw.get("started")
+    try:
+        lock_started = (
+            datetime.fromisoformat(locked_at.replace("Z", "+00:00")).astimezone(UTC)
+            if isinstance(locked_at, str)
+            else None
+        )
+    except ValueError:
+        lock_started = None
+    process_started = _process_started(pid)
+    if (
+        lock_started is not None
+        and process_started is not None
+        and process_started > lock_started
+    ):
+        return False, f"pid {pid} started after the lock and was reused"
+    return True, f"pid {pid} is alive"
+
+
 def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
     """Claim one mission directory, replacing only a demonstrably stale lock."""
     lock = mission_dir / "running.json"
@@ -1082,15 +1137,16 @@ def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
             return lock, notes
         except FileExistsError:
             current = _json_object(lock) or {}
-            if _pid_alive(current.get("pid")):
+            live, reason = _lock_status(current)
+            if live:
                 raise MissionInvalid(
-                    f"mission '{mission_dir.name}' is still running (pid {current['pid']})"
+                    f"mission '{mission_dir.name}' is still running ({reason})"
                 ) from None
             try:
                 lock.unlink()
             except FileNotFoundError:
                 continue
-            notes.append("removed stale running.json lock before resume")
+            notes.append(f"removed stale running.json lock before resume ({reason})")
 
 
 def _artifact_matches(recorded: str | None, expected: Path) -> bool:
@@ -1107,6 +1163,10 @@ def _trusted_lane(mission: Mission, mission_dir: Path, lane: Lane, result: LaneR
     if result.name != lane.name or result.ok is not True or result.skipped is not None:
         return False
     if not result.attempts:
+        return False
+    if result.attempts[-1].get("spawned") is not True:
+        # A rehearsal writes ok receipts without doing the work. Trusting one
+        # turns the next real resume into another rehearsal with no dispatch.
         return False
     if not _artifact_matches(result.answer_path, mission_dir / "answers" / f"{lane.name}.txt"):
         return False
@@ -1134,17 +1194,57 @@ def _trusted_lane(mission: Mission, mission_dir: Path, lane: Lane, result: LaneR
     return True
 
 
-def _read_previous_lanes(mission_dir: Path, mission: Mission) -> dict[str, LaneResult]:
+def _salvage_previous_lane(lane: Lane, raw: dict) -> LaneResult:
+    """Keep safe accounting fields from a receipt that cannot be trusted."""
+    known = {key: value for key, value in raw.items() if key in LaneResult.__dataclass_fields__}
+    known["name"] = lane.name
+    known["ok"] = False
+    known["kept"] = False
+    try:
+        return LaneResult.from_dict(known)
+    except (TypeError, ValueError):
+        attempts: list[dict] = []
+        for key in ("previous_attempts", "attempts"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                attempts.extend(
+                    item
+                    for item in value
+                    if isinstance(item, dict) and isinstance(item.get("run_id"), str)
+                )
+        return LaneResult(name=lane.name, ok=False, previous_attempts=attempts)
+
+
+def _read_previous_lanes(
+    mission_dir: Path, mission: Mission
+) -> tuple[dict[str, LaneResult], list[str], int]:
     previous: dict[str, LaneResult] = {}
+    notes: list[str] = []
+    accounting_unknown = 0
     for lane in mission.lanes:
         raw = _json_object(mission_dir / "lanes" / f"{lane.name}.json")
         if raw is None:
             continue
         try:
             previous[lane.name] = LaneResult.from_dict(raw)
-        except (TypeError, ValueError):
-            continue
-    return previous
+        except (TypeError, ValueError) as exc:
+            salvaged = _salvage_previous_lane(lane, raw)
+            previous[lane.name] = salvaged
+            run_ids = [
+                attempt.get("run_id")
+                for attempt in [*salvaged.previous_attempts, *salvaged.attempts]
+                if isinstance(attempt.get("run_id"), str)
+            ]
+            if not run_ids:
+                accounting_unknown += 1
+                accounting = "no run ids were salvageable; budget marked unverifiable"
+            else:
+                accounting = f"salvaged {len(set(run_ids))} run id(s) for spend and history"
+            notes.append(
+                f"lane '{lane.name}': previous receipt unreadable ({exc}); "
+                f"lane will rerun and {accounting}"
+            )
+    return previous, notes, accounting_unknown
 
 
 def _run_receipt_spend(
@@ -1160,6 +1260,11 @@ def _run_receipt_spend(
     collate = (prior_result or {}).get("collate")
     if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
         attempts.setdefault(collate["run_id"], collate)
+    previous_collates = (prior_result or {}).get("previous_collates")
+    if isinstance(previous_collates, list):
+        for old_collate in previous_collates:
+            if isinstance(old_collate, dict) and isinstance(old_collate.get("run_id"), str):
+                attempts.setdefault(old_collate["run_id"], old_collate)
 
     spent = 0.0
     unpriced = 0
@@ -1202,7 +1307,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     history = (prior_result or {}).get("resumes")
     if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
         history = []
-    previous = _read_previous_lanes(mission_dir, mission)
+    previous, notes, accounting_unknown = _read_previous_lanes(mission_dir, mission)
     kept: dict[str, LaneResult] = {}
     rerun: set[str] = set()
     for lane in mission.lanes:
@@ -1240,7 +1345,8 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         history=list(history),
         collate=collate,
         spent_usd=spent,
-        unpriced_dispatches=unpriced,
+        notes=notes,
+        unpriced_dispatches=unpriced + accounting_unknown,
     )
 
 
@@ -1254,7 +1360,7 @@ def run_mission(
     mission.validate()
     base = Path(home or conductor_home())
     if resume_dir is None:
-        _check_branches(mission)
+        _check_branches(mission, dry_run=dry_run)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         mission_id, mission_dir = claim_dir(
             base / "missions", f"{stamp}-{_slug(mission.name, default='mission')}"
@@ -1285,6 +1391,7 @@ def run_mission(
                 kept=set(resume.kept),
                 previous=resume.previous,
                 notes=resume.notes,
+                dry_run=dry_run,
             )
         return _execute_mission(
             mission,
@@ -1326,12 +1433,15 @@ def _execute_mission(
     started = time.monotonic()
     done: dict[str, LaneResult] = dict(resume.kept)
 
-    def run_lane(lane: Lane) -> LaneResult:
-        # One lane's crash must not take the mission's other lanes, its
-        # ledger, or its report down with it: the failure becomes that
-        # lane's result and the mission still writes result.json.
+    def fresh_lane_result(lane: Lane, *, skipped: str | None = None) -> LaneResult:
         old = resume.previous.get(lane.name)
-        out = LaneResult(name=lane.name, ok=False, needs=list(lane.needs), base=lane.base)
+        out = LaneResult(
+            name=lane.name,
+            ok=False,
+            needs=list(lane.needs),
+            base=lane.base,
+            skipped=skipped,
+        )
         if old is not None:
             out.previous_attempts = [*old.previous_attempts, *old.attempts]
             out.cost_usd = old.cost_usd
@@ -1340,6 +1450,20 @@ def _execute_mission(
             out.cache_read_tokens = old.cache_read_tokens
             out.input_tokens = old.input_tokens
             out.tool_calls = old.tool_calls
+            if dry_run:
+                # A resume rehearsal must retain the previous lineage so the
+                # next real resume can safely reclaim its unchanged branch.
+                out.base_sha = old.base_sha
+                out.tip_sha = old.tip_sha
+                out.clean = old.clean
+                out.branch = old.branch
+        return out
+
+    def run_lane(lane: Lane) -> LaneResult:
+        # One lane's crash must not take the mission's other lanes, its
+        # ledger, or its report down with it: the failure becomes that
+        # lane's result and the mission still writes result.json.
+        out = fresh_lane_result(lane)
         try:
             _run_attempts(lane, out)
         except Exception as exc:  # noqa: BLE001 - boundary for an unattended run
@@ -1437,10 +1561,11 @@ def _execute_mission(
             out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
             out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
             iso = result.isolation or {}
-            out.base_sha = iso.get("base_sha") or ""
-            out.tip_sha = iso.get("tip_sha") or ""
-            out.clean = iso.get("clean")
-            out.branch = iso.get("branch") or ""
+            if not dry_run:
+                out.base_sha = iso.get("base_sha") or ""
+                out.tip_sha = iso.get("tip_sha") or ""
+                out.clean = iso.get("clean")
+                out.branch = iso.get("branch") or ""
             out.test_touched = _test_touched(result.test_surface)
             out.verdict = result.verdict
             out.session_id = result.session_id
@@ -1510,11 +1635,8 @@ def _execute_mission(
                         # Running lanes end at their next poll; nothing new starts.
                         pending.remove(lane)
                         settle(
-                            LaneResult(
-                                name=lane.name,
-                                ok=False,
-                                needs=list(lane.needs),
-                                base=lane.base,
+                            fresh_lane_result(
+                                lane,
                                 skipped="interrupted: stop requested; not started",
                             )
                         )
@@ -1526,11 +1648,8 @@ def _execute_mission(
                     bad = [need for need in lane.needs if not done[need].ok]
                     if bad:
                         settle(
-                            LaneResult(
-                                name=lane.name,
-                                ok=False,
-                                needs=list(lane.needs),
-                                base=lane.base,
+                            fresh_lane_result(
+                                lane,
                                 skipped=f"needs {', '.join(bad)}, which was not ok",
                             )
                         )
@@ -1545,11 +1664,21 @@ def _execute_mission(
     lane_results = [done[lane.name] for lane in mission.lanes]
 
     collate_out: dict | None = None
+    prior_collates = (resume.prior_result or {}).get("previous_collates")
+    previous_collates = (
+        [dict(item) for item in prior_collates if isinstance(item, dict)]
+        if isinstance(prior_collates, list)
+        else []
+    )
     if mission.collate and resume.collate == "kept":
         prior_collate = (resume.prior_result or {}).get("collate")
         collate_out = dict(prior_collate) if isinstance(prior_collate, dict) else None
-    elif mission.collate and not dry_run and not stop_requested():
-        collate_out = _run_collate(mission, lane_results, ledger, mission_dir, base)
+    elif mission.collate:
+        prior_collate = (resume.prior_result or {}).get("collate")
+        if isinstance(prior_collate, dict):
+            previous_collates.append(dict(prior_collate))
+        if not dry_run and not stop_requested():
+            collate_out = _run_collate(mission, lane_results, ledger, mission_dir, base)
 
     # A pipeline is judged on its outputs: the lanes nothing else depends
     # on. In a flat mission that is every lane, as before.
@@ -1633,8 +1762,11 @@ def _execute_mission(
         ),
         lanes=[lane.to_dict() for lane in lane_results],
         cost_usd=ledger.to_dict()["spent_usd"],
-        tokens=sum(lane.tokens for lane in lane_results)
-        + int((collate_out or {}).get("tokens") or 0),
+        tokens=(
+            sum(lane.tokens for lane in lane_results)
+            + sum(int(item.get("tokens") or 0) for item in previous_collates)
+            + int((collate_out or {}).get("tokens") or 0)
+        ),
         duration_s=duration,
         budget=budget_state,
         collate=collate_out,
@@ -1646,6 +1778,7 @@ def _execute_mission(
         interrupted=interrupted,
         resumes=resumes,
         resumed_from=resume_entry,
+        previous_collates=previous_collates,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -1658,6 +1791,7 @@ def _check_branches(
     kept: set[str] | None = None,
     previous: dict[str, LaneResult] | None = None,
     notes: list[str] | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Every `branch` a lane claims must be a valid name that the repo does
     not already have, checked before any fleet is spawned: finding out after
@@ -1685,6 +1819,12 @@ def _check_branches(
             if ref == f"refs/heads/{lane.branch}" and previous_tip:
                 tip = git_run(mission.cwd, "rev-parse", "--verify", f"{ref}^{{commit}}")
                 if tip.returncode == 0 and tip.stdout.strip() == previous_tip:
+                    if dry_run:
+                        notes.append(
+                            f"would delete branch '{lane.branch}' at its previous tip "
+                            "before rerun"
+                        )
+                        continue
                     deleted = git_run(mission.cwd, "branch", "-D", "--", lane.branch)
                     if deleted.returncode != 0:
                         detail = deleted.stderr.strip() or deleted.stdout.strip()

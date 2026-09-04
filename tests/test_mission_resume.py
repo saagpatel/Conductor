@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import shlex
+import socket
 import subprocess
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from conductor import mission as mission_mod
 from conductor import runner as runner_mod
 from conductor.cli import build_parser, main
 from conductor.fleets import Spec
@@ -211,6 +214,35 @@ def test_failed_pipeline_resumes_only_the_failed_lane_and_keeps_total_spend(
     assert "| build | (kept) | True |" in report
 
 
+def test_dry_run_receipt_is_rerun_before_a_real_resume(repo, home, monkeypatch, tmp_path):
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}],
+        },
+        base_dir=tmp_path,
+    )
+    rehearsal = run_mission(mission, home=home, dry_run=True)
+    rehearsal_run = rehearsal.lanes[0]["attempts"][0]["run_id"]
+    calls = 0
+
+    def fake_build(spec: Spec) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return _command("actually ran")
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    resumed = run_mission(
+        _snapshot(rehearsal), home=home, resume_dir=Path(rehearsal.mission_dir)
+    )
+
+    assert calls == 1 and resumed.ok is True
+    assert resumed.resumed_from["kept"] == []
+    assert resumed.resumed_from["rerun"] == ["a"]
+    assert resumed.lanes[0]["previous_attempts"][0]["spawned"] is False
+    assert resumed.lanes[0]["attempts"][0]["run_id"] != rehearsal_run
+
+
 def test_bogus_tip_commit_forces_a_lane_rerun(repo, home, monkeypatch, tmp_path):
     calls = 0
 
@@ -335,6 +367,53 @@ def test_moved_deliverable_branch_refuses_then_previous_tip_is_reclaimed(
     assert "deleted branch 'deliverable/build' at its previous tip before rerun" in resumed.notes
 
 
+def test_dry_run_resume_does_not_delete_a_reclaimable_branch(
+    repo, home, monkeypatch, tmp_path, git_out
+):
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: _command("done", action="printf 'work\\n' > work.txt"),
+    )
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "claude",
+                    "mode": "write",
+                    "prompt": "BUILD",
+                    "commit": "build",
+                    "branch": "deliverable/build",
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    first_tip = first.lanes[0]["tip_sha"]
+    Path(first.lanes[0]["answer_path"]).unlink()
+
+    rehearsal = run_mission(
+        _snapshot(first),
+        home=home,
+        dry_run=True,
+        resume_dir=Path(first.mission_dir),
+    )
+
+    assert git_out(repo, "rev-parse", "deliverable/build") == first_tip
+    assert "would delete branch 'deliverable/build'" in "\n".join(rehearsal.notes)
+    assert rehearsal.lanes[0]["attempts"][0]["spawned"] is False
+
+    resumed = run_mission(
+        _snapshot(rehearsal), home=home, resume_dir=Path(rehearsal.mission_dir)
+    )
+    assert resumed.ok is True
+    assert git_out(repo, "rev-parse", "deliverable/build") == resumed.lanes[0]["tip_sha"]
+    assert "deleted branch 'deliverable/build'" in "\n".join(resumed.notes)
+
+
 def test_interrupted_mission_keeps_ok_lane_and_reruns_interrupted_lane(
     repo, home, monkeypatch, tmp_path
 ):
@@ -376,6 +455,65 @@ def test_interrupted_mission_keeps_ok_lane_and_reruns_interrupted_lane(
     assert resumed.lanes[1]["previous_attempts"][0]["error"].startswith("interrupted")
 
 
+def test_scheduler_skip_preserves_paid_attempts_across_another_resume(
+    repo, home, monkeypatch, tmp_path
+):
+    calls = {"BUILD": 0, "FIX": 0}
+
+    def fake_build(spec: Spec) -> list[str]:
+        key = spec.prompt.split()[0]
+        calls[key] += 1
+        if key == "BUILD" and calls[key] == 1:
+            return _command("built", cost=0.1, action="printf 'work\\n' > work.txt")
+        if key == "BUILD":
+            return _command("build failed", cost=0.1, exit_code=7)
+        return _command("fix failed", cost=0.3, exit_code=8)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "concurrency": 1,
+            "max_cost_usd": 0.5,
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "claude",
+                    "mode": "write",
+                    "prompt": "BUILD",
+                    "commit": "build",
+                },
+                {
+                    "name": "fix",
+                    "fleet": "claude",
+                    "base": "build",
+                    "prompt": "FIX",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    paid_fix_run = first.lanes[1]["attempts"][0]["run_id"]
+    Path(first.lanes[0]["answer_path"]).unlink()
+
+    skipped = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir)
+    )
+    assert skipped.lanes[1]["attempts"] == []
+    assert skipped.lanes[1]["previous_attempts"][0]["run_id"] == paid_fix_run
+    assert skipped.lanes[1]["cost_usd"] == pytest.approx(0.3)
+    assert skipped.budget["spent_usd"] == pytest.approx(0.5)
+
+    calls_before = dict(calls)
+    exhausted = run_mission(
+        _snapshot(skipped), home=home, resume_dir=Path(skipped.mission_dir)
+    )
+    assert calls == calls_before
+    assert exhausted.budget["spent_usd"] == pytest.approx(0.5)
+    assert exhausted.lanes[1]["previous_attempts"][0]["run_id"] == paid_fix_run
+
+
 def test_collate_is_kept_until_a_summarized_lane_reruns(
     repo, home, monkeypatch, tmp_path
 ):
@@ -410,6 +548,72 @@ def test_collate_is_kept_until_a_summarized_lane_reruns(
     assert len(rerun.resumes) == 2
 
 
+def test_every_rerun_collate_remains_in_the_cumulative_budget(
+    repo, home, monkeypatch, tmp_path
+):
+    def fake_build(spec: Spec) -> list[str]:
+        cost = 0.2 if spec.prompt.startswith("You are collating") else 0.1
+        return _command("done", cost=cost)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "max_cost_usd": 2,
+            "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}],
+            "collate": {"fleet": "claude"},
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    for expected in (0.6, 0.9):
+        Path(result.lanes[0]["answer_path"]).unlink()
+        result = run_mission(
+            _snapshot(result), home=home, resume_dir=Path(result.mission_dir)
+        )
+        assert result.budget["spent_usd"] == pytest.approx(expected)
+
+    assert len(result.previous_collates) == 2
+    assert len({item["run_id"] for item in result.previous_collates}) == 2
+
+
+def test_unreadable_lane_receipt_reruns_with_visible_preserved_spend(
+    repo, home, monkeypatch, tmp_path
+):
+    calls = 0
+
+    def fake_build(spec: Spec) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return _command("done", cost=0.25)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "max_cost_usd": 1,
+            "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}],
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    receipt_path = Path(first.mission_dir) / "lanes" / "a.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["future_field"] = "newer conductor"
+    receipt_path.write_text(json.dumps(receipt))
+
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir)
+    )
+
+    assert calls == 2 and resumed.resumed_from["rerun"] == ["a"]
+    assert resumed.budget["spent_usd"] == pytest.approx(0.5)
+    assert resumed.lanes[0]["previous_attempts"][0]["run_id"] == first.lanes[0][
+        "attempts"
+    ][0]["run_id"]
+    assert "previous receipt unreadable" in "\n".join(resumed.notes)
+
+
 def test_resume_refusals_stale_lock_cli_and_mission_listing(
     repo, home, monkeypatch, tmp_path, capsys
 ):
@@ -440,21 +644,64 @@ def test_resume_refusals_stale_lock_cli_and_mission_listing(
     sleeper = subprocess.Popen(["sleep", "60"])
     try:
         (mission_dir / "running.json").write_text(
-            json.dumps({"pid": sleeper.pid, "started": "now", "host": "test"})
+            json.dumps(
+                {
+                    "pid": sleeper.pid,
+                    "started": datetime.now(UTC).isoformat(),
+                    "host": socket.gethostname(),
+                }
+            )
         )
         assert main(["mission", "--resume", first.mission_id, "--dry-run"]) == 3
         assert "still running" in capsys.readouterr().err
+
+        (mission_dir / "running.json").write_text(
+            json.dumps(
+                {
+                    "pid": sleeper.pid,
+                    "started": "2000-01-01T00:00:00+00:00",
+                    "host": socket.gethostname(),
+                }
+            )
+        )
+        monkeypatch.setattr(
+            mission_mod,
+            "_process_started",
+            lambda pid: datetime.now(UTC),
+        )
+        assert main(["mission", "--resume", first.mission_id, "--dry-run"]) == 0
+        reused = json.loads(capsys.readouterr().out)
+        assert "started after the lock and was reused" in "\n".join(reused["notes"])
     finally:
         sleeper.terminate()
         sleeper.wait(timeout=5)
         (mission_dir / "running.json").unlink(missing_ok=True)
 
     (mission_dir / "running.json").write_text(
-        json.dumps({"pid": 999_999_999, "started": "then", "host": "test"})
+        json.dumps(
+            {
+                "pid": 999_999_999,
+                "started": datetime.now(UTC).isoformat(),
+                "host": "another-host.example",
+            }
+        )
+    )
+    assert main(["mission", "--resume", first.mission_id, "--dry-run"]) == 3
+    assert "differs from this host" in capsys.readouterr().err
+    (mission_dir / "running.json").unlink()
+
+    (mission_dir / "running.json").write_text(
+        json.dumps(
+            {
+                "pid": 999_999_999,
+                "started": datetime.now(UTC).isoformat(),
+                "host": socket.gethostname(),
+            }
+        )
     )
     assert main(["mission", "--resume", first.mission_id, "--dry-run"]) == 0
     resumed = json.loads(capsys.readouterr().out)
-    assert "removed stale running.json lock before resume" in resumed["notes"]
+    assert "removed stale running.json lock before resume" in "\n".join(resumed["notes"])
     assert not (mission_dir / "running.json").exists()
 
     with pytest.raises(SystemExit) as error:
@@ -468,7 +715,7 @@ def test_resume_refusals_stale_lock_cli_and_mission_listing(
     assert main(["missions"]) == 0
     rows = json.loads(capsys.readouterr().out)
     row = next(item for item in rows if item["mission_id"] == first.mission_id)
-    assert row["resumes"] == 1 and row["running"] is True
+    assert row["resumes"] == 2 and row["running"] is True
 
 
 def _verdict_answer(passed: bool) -> str:
