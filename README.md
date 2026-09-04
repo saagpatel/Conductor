@@ -259,6 +259,41 @@ Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
 
+### Resuming a mission
+
+Resume an interrupted or failed mission in its existing directory:
+
+```
+conductor mission --resume MISSION_ID
+```
+
+`MISSION_ID` is the directory name under `$CONDUCTOR_HOME/missions`. Conductor
+loads that directory's versioned `mission.json` snapshot, keeps each lane whose
+receipt is ok and not skipped, and reruns missing, failed, skipped, interrupted,
+or incomplete lanes. A kept lane is never dispatched or committed again, and
+its gate is not rerun. Its recorded answer, diff, and verdict artifacts must
+still exist. If the lane landed commits, its tip commit must still exist; a
+lane with a named deliverable `branch` is kept only while that branch still
+points to the recorded tip. A branch left at the previous failed tip is deleted
+before that lane reruns, while a branch moved elsewhere is treated as somebody
+else's work and the resume is refused.
+
+The `max_cost_usd` ledger covers the whole mission across resumes. Prior run
+receipts seed both priced and unpriced spend, so restarting is not a fresh
+budget. Collate is kept only when its successful result and answer still exist
+and every summarized lane was kept; otherwise it runs again. `running.json`
+holds the mission's pid, start time, and host while it is active. A live lock
+refuses a second runner; on the same host conductor also compares the process
+start time so a recycled pid cannot keep an old lock alive. A lock from another
+host is refused rather than guessed stale; after verifying that host is no
+longer running the mission, the operator may remove the lock. A demonstrably
+stale local lock is removed and recorded in the result.
+
+The boundary is deliberately honest. A lane that half-committed before a crash
+has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted
+on their receipts and artifact paths; beyond commit and named-branch existence,
+their work is not re-verified during resume.
+
 ### Pipelines: build, then independent review, then fix
 
 Lanes can depend on each other. Three lane fields make a flat fan-out a

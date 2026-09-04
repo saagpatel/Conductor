@@ -14,7 +14,7 @@ from pathlib import Path
 from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
-from .mission import MissionInvalid, load_mission, run_mission
+from .mission import Mission, MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
@@ -174,11 +174,33 @@ def cmd_prices(args: argparse.Namespace) -> int:
 
 def cmd_mission(args: argparse.Namespace) -> int:
     try:
-        mission = load_mission(args.file)
+        if args.resume:
+            if Path(args.resume).name != args.resume or args.resume in {".", ".."}:
+                raise MissionInvalid("--resume must be a mission directory name")
+            home = conductor_home()
+            mission_dir = home / "missions" / args.resume
+            if not mission_dir.is_dir():
+                raise MissionInvalid(f"mission '{args.resume}' does not exist")
+            snapshot = mission_dir / "mission.json"
+            if not snapshot.is_file():
+                raise MissionInvalid(f"mission '{args.resume}' has no mission.json snapshot")
+            try:
+                raw = json.loads(snapshot.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise MissionInvalid(f"mission snapshot is invalid: {exc}") from exc
+            mission = Mission.from_snapshot(raw)
+            result = run_mission(
+                mission,
+                home=home,
+                dry_run=args.dry_run,
+                resume_dir=mission_dir,
+            )
+        else:
+            mission = load_mission(args.file)
+            result = run_mission(mission, home=conductor_home(), dry_run=args.dry_run)
     except MissionInvalid as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
-    result = run_mission(mission, dry_run=args.dry_run)
     print(json.dumps(result.summary(), indent=2))
     return 0 if result.ok else 1
 
@@ -193,7 +215,14 @@ def cmd_missions(args: argparse.Namespace) -> int:
     for path in entries[: args.limit]:
         result_file = path / "result.json"
         if not result_file.is_file():
-            rows.append({"mission_id": path.name, "status": "incomplete"})
+            rows.append(
+                {
+                    "mission_id": path.name,
+                    "status": "incomplete",
+                    "resumes": 0,
+                    "running": (path / "running.json").is_file(),
+                }
+            )
             continue
         data = json.loads(result_file.read_text())
         rows.append(
@@ -203,6 +232,8 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "lanes": [(lane["name"], lane["ok"]) for lane in data.get("lanes", [])],
                 "cost_usd": round(data.get("cost_usd", 0), 4),
                 "duration_s": round(data.get("duration_s", 0), 1),
+                "resumes": len(data.get("resumes") or []),
+                "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),
             }
         )
@@ -346,7 +377,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="run a mission file: one prompt fanned out to N lanes with fallbacks, "
         "a concurrency cap, a dollar budget, worktree isolation, and one report",
     )
-    p_mission.add_argument("file", help="mission .json or .toml")
+    mission_source = p_mission.add_mutually_exclusive_group(required=True)
+    mission_source.add_argument("file", nargs="?", help="mission .json or .toml")
+    mission_source.add_argument(
+        "--resume",
+        metavar="MISSION_ID",
+        help="resume a mission directory under CONDUCTOR_HOME/missions",
+    )
     p_mission.add_argument(
         "--dry-run", action="store_true", help="validate and record argv, spawn nothing"
     )
