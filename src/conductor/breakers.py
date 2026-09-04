@@ -268,6 +268,11 @@ class Breaker:
             self.loop_limit is not None
             and len(self.signatures) >= self.loop_limit
             and len(set(self.signatures[-self.loop_limit :])) == 1
+            # Codex's file_change event names the path, never the content, so
+            # six successive edits to one large module look identical. They
+            # are progress, not a loop: the breaker killed its own successor's
+            # build that way (2026-09-04). Edits count as tool calls only.
+            and not self.signatures[-1].startswith("edit:")
         ):
             signature = self.signatures[-1]
             self.tripped = f"looping: {signature} repeated {self.loop_limit} times"

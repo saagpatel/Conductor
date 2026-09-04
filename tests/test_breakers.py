@@ -280,6 +280,18 @@ def test_loop_breaker_trips_only_on_identical_tail(tmp_path: Path):
     distinct = Breaker("codex", path, stall_s=None, loop_limit=6, max_tool_calls=None)
     assert distinct.check() is None
 
+    # Successive edits to one file are progress: Codex reports only the path.
+    edit = _line(
+        {
+            "type": "item.completed",
+            "item": {"id": "e", "type": "file_change", "changes": [{"path": "big.py"}]},
+        }
+    )
+    path.write_text("\n".join([edit] * 6) + "\n")
+    edits = Breaker("codex", path, stall_s=None, loop_limit=6, max_tool_calls=None)
+    assert edits.check() is None
+    assert edits.to_dict()["tool_calls"] == 6
+
 
 @pytest.mark.parametrize(("count", "reason"), [(3, None), (4, "tool budget hit: 4 tool calls")])
 def test_tool_budget_trips_at_n_plus_one(tmp_path: Path, count: int, reason: str | None):
