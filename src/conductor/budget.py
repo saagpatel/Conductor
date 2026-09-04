@@ -15,6 +15,9 @@ and kills the process group the moment the estimate crosses the cap:
     sum of the last figure each step reported.
   * Cursor reports usage once, in its final result. Its cap can only be
     checked after the fact, and the result says so.
+  * Claude reports per-message usage in assistant stream events. Its native
+    dollar cap remains authoritative; conductor tails those messages only so
+    a breaker-killed run still has a best available price.
 
 The check runs on conductor's own wait loop every `POLL_S` seconds, so a
 watched fleet overshoots by at most one model response plus one poll. The
@@ -29,7 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import prices
-from .outputs import Usage, agy_step_usage, json_line, usage_from_codex
+from .outputs import Usage, agy_step_usage, claude_stream_usage, json_line, usage_from_codex
 
 POLL_S = 2.0
 
@@ -82,10 +85,11 @@ def codex_sessions_dir() -> Path:
 class Watcher:
     """Follows one running dispatch's usage; says when it crosses the cap.
 
-    Built for every codex and antigravity dispatch, cap or not, because the
-    usage it collects is also the only price a killed run can get. With no
-    cap it never fires. Other fleets leak nothing mid-run; for them poll()
-    is always None.
+    Built for every codex, antigravity, and Claude dispatch, cap or not,
+    because the usage it collects is also the only price a killed run can
+    get. Claude's watcher never enforces its cap: the CLI's native dollar cap
+    remains authoritative. Cursor leaks nothing mid-run, so its poll() is
+    always None.
     """
 
     def __init__(
@@ -100,11 +104,13 @@ class Watcher:
         self.model_id = model_id
         self.table = table if table is not None else prices.load_prices()
         self.usage: Usage | None = None
-        self._source: _CodexRollout | _AgySteps | None
+        self._source: _CodexRollout | _AgySteps | _ClaudeMessages | None
         if fleet == "codex":
             self._source = _CodexRollout(stdout_path)
         elif fleet == "antigravity":
             self._source = _AgySteps(stdout_path)
+        elif fleet == "claude":
+            self._source = _ClaudeMessages(stdout_path)
         else:
             self._source = None
 
@@ -209,4 +215,20 @@ class _AgySteps:
         if new:
             self._seen.extend(new)
             self.usage = agy_step_usage("\n".join(self._seen))
+        return self.usage
+
+
+class _ClaudeMessages:
+    """Running usage from Claude assistant events before its final result."""
+
+    def __init__(self, stdout_path: Path) -> None:
+        self._tail = _Tail(stdout_path)
+        self._seen: list[str] = []
+        self.usage: Usage | None = None
+
+    def poll(self) -> Usage | None:
+        new = self._tail.lines()
+        if new:
+            self._seen.extend(new)
+            self.usage = claude_stream_usage("\n".join(self._seen))
         return self.usage

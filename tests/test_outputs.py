@@ -29,6 +29,8 @@ CLAUDE_STREAM_JSON = "\n".join(
         '"session_id":"stream-session","total_cost_usd":0.04,'
         '"structured_output":{"answer":"four"},'
         '"usage":{"input_tokens":7,"output_tokens":3}}',
+        '{"type":"user","message":{"content":[{"type":"tool_result",'
+        '"content":"cleanup complete"}]}}',
     ]
 )
 
@@ -103,6 +105,38 @@ def test_claude_stream_json_takes_the_last_result_with_all_final_fields():
     assert out.session_id == "stream-session"
     assert out.usage is not None and out.usage.input_tokens == 7
     assert out.usage.output_tokens == 3 and out.usage.cost_usd == 0.04
+
+
+def test_a_claude_stream_without_result_fails_closed_and_keeps_partial_usage():
+    stream = "\n".join(
+        [
+            '{"type":"system","subtype":"init","session_id":"stream-session"}',
+            '{"type":"assistant","session_id":"stream-session","message":{'
+            '"id":"message-1","usage":{"input_tokens":2,"output_tokens":3,'
+            '"cache_creation_input_tokens":100},"content":[{"type":"tool_use",'
+            '"id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}',
+            '{"type":"user","session_id":"stream-session","message":{'
+            '"content":[{"type":"tool_result","tool_use_id":"tool-1"}]}}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.answer == ""
+    assert out.error == "claude stream ended without a result event"
+    assert out.session_id == "stream-session"
+    assert out.usage is not None and out.usage.input_tokens == 2
+    assert out.usage.output_tokens == 3 and out.usage.cache_write_tokens == 100
+
+
+def test_one_claude_assistant_event_is_a_cut_short_stream_not_an_envelope():
+    stream = (
+        '{"type":"assistant","session_id":"stream-session","message":{'
+        '"id":"message-1","usage":{"input_tokens":2,"output_tokens":3},'
+        '"content":[{"type":"text","text":"partial"}]}}'
+    )
+    out = parse("claude", stream)
+    assert out.answer == "partial"
+    assert out.error == "claude stream ended without a result event"
+    assert out.usage is not None and out.usage.total_tokens == 5
 
 
 def test_camel_case_usage_is_normalized():

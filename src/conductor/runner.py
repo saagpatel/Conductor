@@ -591,7 +591,14 @@ def dispatch(
     # The watcher follows the fleet's running usage whether or not there is a
     # cap: it is also the only price a run that conductor kills can get.
     watcher = (
-        Watcher(spec.fleet, model_id, stdout_path, spec.cap_usd) if fleet.cap == "watcher" else None
+        Watcher(
+            spec.fleet,
+            model_id,
+            stdout_path,
+            spec.cap_usd if fleet.cap == "watcher" else None,
+        )
+        if spec.fleet in {"claude", "codex", "antigravity"}
+        else None
     )
 
     with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
@@ -948,7 +955,7 @@ def _wait(
         # Fast runs may finish between polls. Parse their final complete lines
         # so receipts still count tools and a just-completed runaway is not
         # allowed to evade the ceiling by exiting in the same two-second tick.
-        breaker_reason = breaker.check()
+        breaker_reason = breaker.check(final=True)
     _kill_live_group(proc.pid)
     proc.wait()
     return proc.returncode, timed_out, over_cap, interrupted, breaker_reason

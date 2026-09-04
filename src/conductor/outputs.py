@@ -131,12 +131,93 @@ def _parse_claude(text: str) -> FleetOutput:
     if isinstance(raw, list):
         events = [event for event in raw if isinstance(event, dict)]
         results = [event for event in events if event.get("type") == "result"]
+        if not results and any(event.get("type") is not None for event in events):
+            return _claude_cut_short(events, text)
         payload = (results or events or [None])[-1]
+    elif isinstance(raw, dict) and raw.get("type") not in {None, "result"}:
+        # A one-event stream is still a stream, not a legacy final envelope.
+        # Treating one assistant event as an envelope promotes its raw JSON
+        # to an answer and lets an exit-0 truncation look successful.
+        return _claude_cut_short([raw], text)
     else:
         payload = raw if isinstance(raw, dict) else None
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
     return _parse_envelope("claude", payload, text)
+
+
+def _claude_cut_short(events: list[dict], text: str) -> FleetOutput:
+    return FleetOutput(
+        answer=claude_said(events),
+        usage=claude_stream_usage(text),
+        parsed=True,
+        error="claude stream ended without a result event",
+        session_id=_last_stream_id(text, "session_id"),
+    )
+
+
+def claude_said(events: list[dict]) -> str:
+    """Text Claude completed before a stream was cut short."""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        identity = message.get("id") if isinstance(message, dict) else None
+        identity = identity or event.get("uuid")
+        if isinstance(identity, str) and identity:
+            if identity in seen:
+                continue
+            seen.add(identity)
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"].strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+def claude_stream_usage(text: str) -> Usage | None:
+    """The per-message usage Claude exposed before its final result.
+
+    Claude may repeat one assistant message in the stream. Its message id is
+    the stable identity; summing lifecycle copies would overprice a breaker
+    kill and turn progress reporting into a second billing bug.
+    """
+    messages: dict[str, dict] = {}
+    anonymous: list[dict] = []
+    try:
+        raw: object = json.loads(text)
+    except json.JSONDecodeError:
+        raw = None
+    events = (
+        [event for event in raw if isinstance(event, dict)]
+        if isinstance(raw, list)
+        else [event for event in map(json_line, text.splitlines()) if event is not None]
+    )
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        identity = message.get("id") or event.get("uuid")
+        if isinstance(identity, str) and identity:
+            messages[identity] = usage
+        else:
+            anonymous.append(usage)
+    raw_messages = [*messages.values(), *anonymous]
+    if not raw_messages:
+        return None
+    total: dict[str, int] = {}
+    for raw in raw_messages:
+        for key, value in raw.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[key] = total.get(key, 0) + int(value)
+    return usage_from_raw("claude", total)
 
 
 def _parse_antigravity(text: str) -> FleetOutput:

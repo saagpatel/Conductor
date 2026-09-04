@@ -50,20 +50,20 @@ def _codex_signature(event: dict) -> str | None:
     return None
 
 
-def _claude_signatures(event: dict) -> list[str]:
+def _claude_signatures(event: dict) -> list[tuple[str, object | None]]:
     if event.get("type") != "assistant":
         return []
     message = event.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, list):
         return []
-    signatures: list[str] = []
+    signatures: list[tuple[str, object | None]] = []
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
         name = block.get("name")
         if isinstance(name, str):
-            signatures.append(f"{name}:{_hash(block.get('input'))}")
+            signatures.append((f"{name}:{_hash(block.get('input'))}", block.get("id")))
     return signatures
 
 
@@ -75,7 +75,16 @@ def _tool_and_args(container: dict) -> tuple[str | None, object]:
         args = _args(raw_tool, args)
         raw_tool = raw_tool.get("name") or raw_tool.get("tool_name")
     if isinstance(raw_tool, str):
+        tool_info = container.get("tool_info")
+        if args is None and isinstance(tool_info, dict):
+            args = _args(tool_info)
         return raw_tool, args
+
+    tool_info = container.get("tool_info")
+    if isinstance(tool_info, dict):
+        name = tool_info.get("name") or tool_info.get("tool_name")
+        if isinstance(name, str):
+            return name, _args(tool_info, args)
 
     metadata = container.get("metadata")
     if isinstance(metadata, dict):
@@ -122,9 +131,27 @@ def _cursor_signature(event: dict) -> str | None:
     return f"{tool}:{_hash(args)}" if tool is not None else None
 
 
-def tool_events(fleet: str, text: str) -> list[str]:
-    """The tool-call signatures present in complete JSON objects in ``text``."""
-    signatures: list[str] = []
+def _identity(fleet: str, event: dict, nested: object | None = None) -> str | None:
+    """A lifecycle-stable call id, so started and completed count once."""
+    value: object | None = nested
+    if fleet == "codex":
+        item = event.get("item")
+        value = item.get("id") if isinstance(item, dict) else None
+    elif fleet == "antigravity":
+        step = event.get("step_update")
+        value = step.get("step_index") if isinstance(step, dict) else event.get("step_index")
+    elif fleet == "cursor":
+        call = event.get("tool_call")
+        if isinstance(call, dict):
+            value = call.get("toolCallId") or call.get("tool_call_id")
+        value = value or event.get("call_id")
+    if isinstance(value, str | int) and not isinstance(value, bool):
+        return f"{fleet}:{value}"
+    return None
+
+
+def _entries(fleet: str, text: str) -> list[tuple[str, str | None]]:
+    entries: list[tuple[str, str | None]] = []
     for line in text.splitlines():
         event = json_line(line)
         if event is None:
@@ -132,18 +159,37 @@ def tool_events(fleet: str, text: str) -> list[str]:
         if fleet == "codex":
             signature = _codex_signature(event)
             if signature is not None:
-                signatures.append(signature)
+                entries.append((signature, _identity(fleet, event)))
         elif fleet == "claude":
-            signatures.extend(_claude_signatures(event))
+            entries.extend(
+                (signature, _identity(fleet, event, identity))
+                for signature, identity in _claude_signatures(event)
+            )
         elif fleet == "antigravity":
             signature = _antigravity_signature(event)
             if signature is not None:
-                signatures.append(signature)
+                entries.append((signature, _identity(fleet, event)))
         elif fleet == "cursor":
             signature = _cursor_signature(event)
             if signature is not None:
-                signatures.append(signature)
+                entries.append((signature, _identity(fleet, event)))
+    return entries
+
+
+def _new_signatures(fleet: str, text: str, seen: set[str]) -> list[str]:
+    signatures: list[str] = []
+    for signature, identity in _entries(fleet, text):
+        if identity is not None:
+            if identity in seen:
+                continue
+            seen.add(identity)
+        signatures.append(signature)
     return signatures
+
+
+def tool_events(fleet: str, text: str) -> list[str]:
+    """The tool-call signatures present in complete JSON objects in ``text``."""
+    return _new_signatures(fleet, text, set())
 
 
 class Breaker:
@@ -167,6 +213,7 @@ class Breaker:
         self.tripped: str | None = None
         self._offset = 0
         self._partial = b""
+        self._seen_calls: set[str] = set()
         self._last_size = self._size()
         self._last_change = time.monotonic()
 
@@ -176,7 +223,7 @@ class Breaker:
         except OSError:
             return 0
 
-    def _read(self, now: float) -> None:
+    def _read(self, now: float, *, final: bool = False) -> None:
         size = self._size()
         if size != self._last_size:
             self._last_size = size
@@ -192,21 +239,29 @@ class Breaker:
                 chunk = source.read()
         except OSError:
             return
-        if not chunk:
-            return
-        self._offset += len(chunk)
-        parts = (self._partial + chunk).split(b"\n")
-        self._partial = parts.pop()
+        parts: list[bytes] = []
+        if chunk:
+            self._offset += len(chunk)
+            parts = (self._partial + chunk).split(b"\n")
+            self._partial = parts.pop()
+        if final and self._partial:
+            # Once the process exited, EOF terminates its final event even if
+            # the fleet omitted a newline. Leaving it buffered lets a last
+            # tool call evade the ceiling by finishing between polls.
+            parts.append(self._partial)
+            self._partial = b""
         complete = "\n".join(part.decode(errors="replace") for part in parts)
         if complete:
-            self.signatures.extend(tool_events(self.fleet, complete))
+            self.signatures.extend(
+                _new_signatures(self.fleet, complete, self._seen_calls)
+            )
 
-    def check(self) -> str | None:
+    def check(self, *, final: bool = False) -> str | None:
         """Return and remember the first breaker reason, or None."""
         if self.tripped is not None:
             return self.tripped
         now = time.monotonic()
-        self._read(now)
+        self._read(now, final=final)
         if self.stall_s is not None and now - self._last_change >= self.stall_s:
             self.tripped = f"stalled: no output for {self.stall_s}s"
         elif (

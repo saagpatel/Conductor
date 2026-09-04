@@ -26,11 +26,15 @@ def _line(value: dict) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
-def _codex_command(command: str) -> str:
+def _codex_command(command: str, identity: str | None = None) -> str:
     return _line(
         {
             "type": "item.completed",
-            "item": {"id": command, "type": "command_execution", "command": command},
+            "item": {
+                "id": identity or command,
+                "type": "command_execution",
+                "command": command,
+            },
         }
     )
 
@@ -41,7 +45,21 @@ def test_tool_events_normalize_every_fleet_fixture_shape():
             _line(
                 {
                     "type": "item.started",
-                    "item": {"type": "command_execution", "command": "pytest -q"},
+                    "item": {
+                        "id": "item-1",
+                        "type": "command_execution",
+                        "command": "pytest -q",
+                    },
+                }
+            ),
+            _line(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item-1",
+                        "type": "command_execution",
+                        "command": "pytest -q",
+                    },
                 }
             ),
             _line(
@@ -81,35 +99,61 @@ def test_tool_events_normalize_every_fleet_fixture_shape():
     )
     assert tool_events("claude", claude) == [f"Bash:{_digest(claude_input)}"]
 
-    agy_args = {"command": "git status"}
+    agy_args = {"path": "README.md", "line_end": 20}
     agy = "\n".join(
         [
             _line(
                 {
                     "event": "step_update",
-                    "step_update": {"tool_name": "terminal", "args": agy_args},
+                    "step_update": {
+                        "conversation_id": "conversation-1",
+                        "step_index": 3,
+                        "state": "RUNNING",
+                        "step_type": "tool",
+                        "tool_name": "view_file",
+                        "tool_info": {"name": "view_file", "parameters": agy_args},
+                    },
                 }
             ),
             _line(
                 {
                     "event": "step_update",
-                    "step_update": {"step_type": "analysis", "name": "reason"},
+                    "step_update": {
+                        "conversation_id": "conversation-1",
+                        "step_index": 3,
+                        "state": "DONE",
+                        "step_type": "tool",
+                        "tool_name": "view_file",
+                        "tool_info": {
+                            "name": "view_file",
+                            "parameters": agy_args,
+                            "output": "contents",
+                        },
+                    },
+                }
+            ),
+            _line(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "step_index": 4,
+                        "state": "DONE",
+                        "usage": {"input_tokens": 10},
+                    },
                 }
             ),
         ]
     )
-    assert tool_events("antigravity", agy) == [
-        f"terminal:{_digest(agy_args)}",
-        f"analysis:{_digest(None)}",
-    ]
+    assert tool_events("antigravity", agy) == [f"view_file:{_digest(agy_args)}"]
 
     cursor_args = {"plan": "inspect"}
-    cursor = _line(
-        {
-            "type": "tool_call",
-            "subtype": "completed",
-            "tool_call": {"createPlanToolCall": {"args": cursor_args}},
-        }
+    cursor_call = {
+        "toolCallId": "tool-1",
+        "createPlanToolCall": {"args": cursor_args},
+    }
+    cursor = "\n".join(
+        _line({"type": "tool_call", "subtype": subtype, "tool_call": cursor_call})
+        for subtype in ("started", "completed")
     )
     assert tool_events("cursor", cursor) == [f"createPlan:{_digest(cursor_args)}"]
 
@@ -131,6 +175,58 @@ def test_breaker_reads_only_new_complete_lines(tmp_path: Path):
     # A third poll must not re-read either prior line.
     assert breaker.check() is None
     assert breaker.to_dict()["tool_calls"] == 2
+
+
+def test_breaker_deduplicates_a_call_completed_on_a_later_poll(tmp_path: Path):
+    path = tmp_path / "stdout.log"
+    started = _line(
+        {
+            "type": "item.started",
+            "item": {"id": "item-1", "type": "command_execution", "command": "pytest"},
+        }
+    )
+    completed = _line(
+        {
+            "type": "item.completed",
+            "item": {"id": "item-1", "type": "command_execution", "command": "pytest"},
+        }
+    )
+    path.write_text(started + "\n")
+    breaker = Breaker("codex", path, stall_s=None, loop_limit=None, max_tool_calls=None)
+    assert breaker.check() is None and breaker.to_dict()["tool_calls"] == 1
+    with path.open("a") as output:
+        output.write(completed + "\n")
+    assert breaker.check() is None and breaker.to_dict()["tool_calls"] == 1
+
+
+def test_final_check_consumes_an_unterminated_last_event(tmp_path: Path):
+    path = tmp_path / "stdout.log"
+    path.write_text(_codex_command("one") + "\n" + _codex_command("two"))
+    breaker = Breaker("codex", path, stall_s=None, loop_limit=None, max_tool_calls=1)
+    assert breaker.check() is None and breaker.to_dict()["tool_calls"] == 1
+    assert breaker.check(final=True) == "tool budget hit: 2 tool calls"
+    assert breaker.check() == "tool budget hit: 2 tool calls"
+    assert breaker.to_dict()["tool_calls"] == 2
+
+
+def test_dispatch_checks_an_unterminated_final_event_after_exit(repo, home, fake_fleet):
+    first = _codex_command("one")
+    second = _codex_command("two")
+    fake_fleet(["sh", "-c", f"printf '%s\\n%s' '{first}' '{second}'"])
+    result = dispatch(
+        Spec(
+            fleet="codex",
+            prompt="final event",
+            cwd=str(repo),
+            stall_timeout=0,
+            loop_limit=0,
+            max_tool_calls=1,
+        ),
+        home=home,
+    )
+    reason = "tool budget hit: 2 tool calls"
+    assert result.error == f"{reason}; process group killed"
+    assert result.breaker is not None and result.breaker["tool_calls"] == 2
 
 
 def test_healthy_dispatch_receipt_still_reports_tool_progress(repo, home, fake_fleet):
@@ -174,7 +270,9 @@ def test_healthy_dispatch_receipt_still_reports_tool_progress(repo, home, fake_f
 
 def test_loop_breaker_trips_only_on_identical_tail(tmp_path: Path):
     path = tmp_path / "stdout.log"
-    path.write_text("\n".join(_codex_command("same") for _ in range(6)) + "\n")
+    path.write_text(
+        "\n".join(_codex_command("same", f"item-{n}") for n in range(6)) + "\n"
+    )
     repeated = Breaker("codex", path, stall_s=None, loop_limit=6, max_tool_calls=None)
     assert repeated.check() == "looping: cmd:same repeated 6 times"
 
@@ -254,6 +352,50 @@ def test_stall_dispatch_is_killed_priced_receipted_and_never_gated(
     assert json.loads(capsys.readouterr().out)[0]["tool_calls"] == 0
 
 
+def test_a_claude_breaker_kill_is_priced_from_streamed_message_usage(
+    repo, home, fake_fleet, monkeypatch
+):
+    assistant = _line(
+        {
+            "type": "assistant",
+            "session_id": "claude-session",
+            "message": {
+                "id": "message-1",
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "cache_creation_input_tokens": 10_000,
+                },
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "Read",
+                        "input": {"path": "README.md"},
+                    }
+                ],
+            },
+        }
+    )
+    fake_fleet(["sh", "-c", f"echo '{assistant}'; sleep 60"])
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    result = dispatch(
+        Spec(
+            fleet="claude",
+            model="sonnet",
+            prompt="loop",
+            cwd=str(repo),
+            timeout=20,
+            stall_timeout=0,
+            loop_limit=1,
+        ),
+        home=home,
+    )
+    assert result.error is not None and result.error.startswith("looping: Read:")
+    assert result.usage is not None and result.usage["cost_usd"] > 0
+    assert result.usage["cost_basis"] == "estimated"
+
+
 def test_spec_cli_and_mission_breaker_values_validate_and_zero_disables(tmp_path: Path):
     defaults = Spec(fleet="codex", prompt="x", cwd=str(tmp_path))
     assert (defaults.stall_timeout, defaults.loop_limit, defaults.max_tool_calls) == (600, 6, None)
@@ -325,7 +467,9 @@ def test_spec_cli_and_mission_breaker_values_validate_and_zero_disables(tmp_path
 def test_looping_mission_primary_falls_back_and_reports_tools_and_spend(
     repo, home, monkeypatch, tmp_path, capsys
 ):
-    repeated = "; ".join(f"echo '{_codex_command('same')}'" for _ in range(6))
+    repeated = "; ".join(
+        f"echo '{_codex_command('same', f'item-{n}')}'" for n in range(6)
+    )
     claude = _line(
         {
             "type": "result",
