@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices
@@ -106,7 +107,7 @@ class Watcher:
         self.usage: Usage | None = None
         self._source: _CodexRollout | _AgySteps | _ClaudeMessages | None
         if fleet == "codex":
-            self._source = _CodexRollout(stdout_path)
+            self._source = _CodexRollout(stdout_path, since=datetime.now(UTC))
         elif fleet == "antigravity":
             self._source = _AgySteps(stdout_path)
         elif fleet == "claude":
@@ -162,13 +163,33 @@ class _Tail:
         return [p.decode(errors="replace") for p in parts]
 
 
-class _CodexRollout:
-    """Cumulative usage from the session rollout Codex writes as it works."""
+_CODEX_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 
-    def __init__(self, stdout_path: Path) -> None:
+
+class _CodexRollout:
+    """Cumulative usage from the session rollout Codex writes as it works.
+
+    The totals are cumulative over the whole thread, so a resumed thread's
+    rollout opens with everything the earlier dispatch already paid for.
+    Counting that again tripped a $5 fix lane two seconds in with the $7.93
+    its build lane had spent (2026-09-04). Every token_count stamped before
+    `since` (this dispatch's spawn) is the baseline; the run's own usage is
+    the cumulative figure less that baseline.
+    """
+
+    def __init__(self, stdout_path: Path, *, since: datetime | None = None) -> None:
         self._stdout = _Tail(stdout_path)
         self._thread_id: str | None = None
         self._rollout: _Tail | None = None
+        self._since = since
+        self._baseline: dict | None = None
         self.usage: Usage | None = None
 
     def poll(self) -> Usage | None:
@@ -182,9 +203,32 @@ class _CodexRollout:
             if not isinstance(payload, dict) or payload.get("type") != "token_count":
                 continue
             total = (payload.get("info") or {}).get("total_token_usage")
-            if isinstance(total, dict):
-                self.usage = usage_from_codex(total)
+            if not isinstance(total, dict):
+                continue
+            if self._before_spawn((ev or {}).get("timestamp")):
+                self._baseline = total
+                continue
+            self.usage = usage_from_codex(self._less_baseline(total))
         return self.usage
+
+    def _before_spawn(self, stamp: object) -> bool:
+        if self._since is None or not isinstance(stamp, str):
+            return False  # an unstamped line cannot be placed; count it
+        try:
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return when < self._since
+
+    def _less_baseline(self, total: dict) -> dict:
+        if not self._baseline:
+            return total
+        return {
+            key: max(0, int(total.get(key) or 0) - int(self._baseline.get(key) or 0))
+            for key in _CODEX_USAGE_KEYS
+        }
 
     def _locate(self) -> None:
         if self._thread_id is None:

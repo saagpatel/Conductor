@@ -271,3 +271,43 @@ def test_the_tail_reads_only_new_lines_and_holds_a_partial_one(tmp_path):
     assert tail.lines() == ['{"b":2}']
     assert tail.lines() == []
     assert _Tail(tmp_path / "missing").lines() == []
+
+
+def test_resumed_codex_thread_counts_only_usage_after_spawn(tmp_path, monkeypatch):
+    """A resumed thread's rollout opens with the earlier dispatch's totals;
+    pricing them again tripped a fix lane's cap two seconds in."""
+    from datetime import UTC, datetime, timedelta
+
+    from conductor.budget import _CodexRollout
+
+    rollout = _codex_home(tmp_path, monkeypatch)
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(STARTED + "\n")
+    spawn = datetime.now(UTC)
+    before = (spawn - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    after = (spawn + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+
+    def stamped(stamp: str, **usage: int) -> str:
+        return json.dumps(
+            {
+                "timestamp": stamp,
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {"total_token_usage": usage}},
+            }
+        )
+
+    rollout.write_text(
+        stamped(before, input_tokens=1000, cached_input_tokens=200, output_tokens=500)
+        + "\n"
+        + stamped(after, input_tokens=1300, cached_input_tokens=400, output_tokens=520)
+        + "\n"
+    )
+    source = _CodexRollout(stdout, since=spawn)
+    usage = source.poll()
+    assert usage is not None
+    assert usage.cache_read_tokens == 200 and usage.output_tokens == 20
+    assert usage.input_tokens == 100  # (1300 - 1000) input less (400 - 200) cached
+
+    # Without a spawn time (an unstamped legacy fixture) nothing is discounted.
+    fresh = _CodexRollout(stdout)
+    assert fresh.poll().output_tokens == 520

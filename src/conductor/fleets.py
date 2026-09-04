@@ -218,7 +218,9 @@ class Spec:
     last_message: str | None = None  # path the fleet should write its answer to
     resume: str | None = None  # fleet session id to continue
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
-    stall_timeout: int | None = 600  # silence before conductor kills the fleet; 0 disables
+    # 900s, the gate's own default: a fleet running a long suite inside one
+    # tool call prints nothing until it returns, and must not be killed for it.
+    stall_timeout: int | None = 900  # silence before conductor kills the fleet; 0 disables
     loop_limit: int | None = 6  # identical consecutive tool calls; 0 disables
     max_tool_calls: int | None = None  # total tool-call ceiling; 0 disables
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE

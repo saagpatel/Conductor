@@ -398,7 +398,7 @@ def test_a_claude_breaker_kill_is_priced_from_streamed_message_usage(
 
 def test_spec_cli_and_mission_breaker_values_validate_and_zero_disables(tmp_path: Path):
     defaults = Spec(fleet="codex", prompt="x", cwd=str(tmp_path))
-    assert (defaults.stall_timeout, defaults.loop_limit, defaults.max_tool_calls) == (600, 6, None)
+    assert (defaults.stall_timeout, defaults.loop_limit, defaults.max_tool_calls) == (900, 6, None)
     Spec(
         fleet="codex",
         prompt="x",
@@ -516,7 +516,7 @@ def test_readme_documents_breaker_defaults_disabling_pricing_and_claude_streamin
     readme = (Path(__file__).parents[1] / "README.md").read_text()
     section = readme.split("#### Breakers", 1)[1].split("## Commands", 1)[0]
     compact = " ".join(section.split())
-    assert "600" in compact and "6 identical" in compact and "off by default" in compact
+    assert "900" in compact and "6 identical" in compact and "off by default" in compact
     assert "--stall-timeout 0" in compact and "--loop-limit 0" in compact
     assert "--max-tool-calls 0" in compact
     assert "priced from the watcher's last reading" in compact
