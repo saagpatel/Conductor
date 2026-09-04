@@ -281,13 +281,16 @@ def test_loop_breaker_trips_only_on_identical_tail(tmp_path: Path):
     assert distinct.check() is None
 
     # Successive edits to one file are progress: Codex reports only the path.
-    edit = _line(
-        {
-            "type": "item.completed",
-            "item": {"id": "e", "type": "file_change", "changes": [{"path": "big.py"}]},
-        }
-    )
-    path.write_text("\n".join([edit] * 6) + "\n")
+    edits_stream = [
+        _line(
+            {
+                "type": "item.completed",
+                "item": {"id": f"e{n}", "type": "file_change", "changes": [{"path": "big.py"}]},
+            }
+        )
+        for n in range(6)
+    ]
+    path.write_text("\n".join(edits_stream) + "\n")
     edits = Breaker("codex", path, stall_s=None, loop_limit=6, max_tool_calls=None)
     assert edits.check() is None
     assert edits.to_dict()["tool_calls"] == 6
