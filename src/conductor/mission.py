@@ -28,9 +28,11 @@ one mode, and a list of fleets.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import shutil
+import socket
 import threading
 import time
 import tomllib
@@ -235,8 +237,11 @@ class Mission:
     source: str = ""
     prompt: str | None = None  # the mission-level prompt, kept verbatim for templates
     template_max_chars: int = TEMPLATE_MAX_CHARS
+    snapshot_version: int = 1
 
     def validate(self) -> None:
+        if self.snapshot_version != 1:
+            raise MissionInvalid(f"unsupported snapshot_version {self.snapshot_version!r}")
         if not self.lanes:
             raise MissionInvalid("a mission needs at least one lane")
         if not isinstance(self.require, (str, dict)):
@@ -371,6 +376,102 @@ class Mission:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_snapshot(cls, raw: dict) -> Mission:
+        """Load the exact shape written to ``mission.json``.
+
+        Mission input files use inherited lane fields and ``fallback`` while
+        the durable snapshot stores the fully rendered attempts. Translating
+        the latter back through the normal loader keeps one validation path
+        without asking a resumed run to re-read prompt files that may have
+        moved or changed since the mission started.
+        """
+        if not isinstance(raw, dict):
+            raise MissionInvalid("mission snapshot must be an object")
+        expected = {
+            "name",
+            "cwd",
+            "lanes",
+            "concurrency",
+            "require",
+            "max_cost_usd",
+            "collate",
+            "source",
+            "prompt",
+            "template_max_chars",
+            "snapshot_version",
+        }
+        _require_snapshot_keys(raw, expected, "mission snapshot")
+        if raw["snapshot_version"] != 1:
+            raise MissionInvalid(
+                f"unsupported snapshot_version {raw['snapshot_version']!r}"
+            )
+        if not isinstance(raw["source"], str):
+            raise MissionInvalid("mission snapshot source must be a string")
+        if not isinstance(raw["lanes"], list):
+            raise MissionInvalid("mission snapshot lanes must be a list")
+
+        lanes: list[dict] = []
+        lane_keys = {"name", "attempts", "needs", "base", "resume", "branch"}
+        attempt_keys = set(Attempt.__dataclass_fields__)
+        for index, raw_lane in enumerate(raw["lanes"]):
+            if not isinstance(raw_lane, dict):
+                raise MissionInvalid(f"mission snapshot lane {index} must be an object")
+            _require_snapshot_keys(raw_lane, lane_keys, f"mission snapshot lane {index}")
+            attempts = raw_lane["attempts"]
+            if not isinstance(attempts, list) or not attempts:
+                raise MissionInvalid(
+                    f"mission snapshot lane {index} needs a non-empty attempts list"
+                )
+            checked: list[dict] = []
+            for attempt_index, attempt in enumerate(attempts):
+                if not isinstance(attempt, dict):
+                    raise MissionInvalid(
+                        f"mission snapshot lane {index} attempt {attempt_index} must be an object"
+                    )
+                _require_snapshot_keys(
+                    attempt,
+                    attempt_keys,
+                    f"mission snapshot lane {index} attempt {attempt_index}",
+                )
+                checked.append(dict(attempt))
+            lane = {
+                "name": raw_lane["name"],
+                "needs": raw_lane["needs"],
+                "base": raw_lane["base"],
+                "resume": raw_lane["resume"],
+                "branch": raw_lane["branch"],
+                **checked[0],
+                "fallback": checked[1:],
+            }
+            lanes.append(lane)
+
+        collate = raw["collate"]
+        if collate is not None:
+            if not isinstance(collate, dict):
+                raise MissionInvalid("mission snapshot collate must be an object or null")
+            _require_snapshot_keys(
+                collate, set(Collate.__dataclass_fields__), "mission snapshot collate"
+            )
+        mission_raw = {
+            "name": raw["name"],
+            "cwd": raw["cwd"],
+            "lanes": lanes,
+            "concurrency": raw["concurrency"],
+            "require": raw["require"],
+            "max_cost_usd": raw["max_cost_usd"],
+            "collate": collate,
+            "prompt": raw["prompt"],
+            "template_max_chars": raw["template_max_chars"],
+        }
+        mission = mission_from_dict(
+            mission_raw, base_dir=Path("/"), source=raw["source"]
+        )
+        mission.snapshot_version = 1
+        if json.dumps(mission.to_dict(), sort_keys=True) != json.dumps(raw, sort_keys=True):
+            raise MissionInvalid("mission snapshot does not round-trip through validation")
+        return mission
+
 
 def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
     """Every template reference in `text`; anything else between double
@@ -416,6 +517,16 @@ def load_mission(path: str | Path) -> Mission:
 
 def _reject_unknown(raw: dict, allowed: frozenset[str] | set[str], where: str) -> None:
     unknown = sorted(k for k in raw if k not in allowed)
+    if unknown:
+        raise MissionInvalid(f"{where}: unknown field(s) {', '.join(unknown)}")
+
+
+def _require_snapshot_keys(raw: dict, expected: set[str], where: str) -> None:
+    """Reject a partial or augmented receipt before it becomes executable state."""
+    missing = sorted(expected - set(raw))
+    unknown = sorted(set(raw) - expected)
+    if missing:
+        raise MissionInvalid(f"{where}: missing field(s) {', '.join(missing)}")
     if unknown:
         raise MissionInvalid(f"{where}: unknown field(s) {', '.join(unknown)}")
 
@@ -686,6 +797,12 @@ class Ledger:
                 # spent past what its own cap allowed before the stop.
                 self.unpriced += 1
 
+    def seed(self, spent_usd: float, unpriced_dispatches: int) -> None:
+        """Start a resumed mission from spend already present on disk."""
+        with self._lock:
+            self.spent = float(spent_usd)
+            self.unpriced = int(unpriced_dispatches)
+
     def to_dict(self) -> dict:
         with self._lock:
             return {
@@ -722,6 +839,8 @@ class LaneResult:
     verdict: dict | None = None
     resume: dict | None = None
     session_id: str | None = None
+    previous_attempts: list[dict] = field(default_factory=list)
+    kept: bool = False
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -735,6 +854,75 @@ class LaneResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> LaneResult:
+        """Rehydrate one durable lane receipt without accepting new fields."""
+        if not isinstance(raw, dict):
+            raise ValueError("lane receipt must be an object")
+        expected = set(cls.__dataclass_fields__)
+        unknown = sorted(set(raw) - expected)
+        if unknown:
+            raise ValueError(f"lane receipt has unknown field(s): {', '.join(unknown)}")
+        required = {"name", "ok"}
+        missing = sorted(required - set(raw))
+        if missing:
+            raise ValueError(f"lane receipt is missing field(s): {', '.join(missing)}")
+        if not isinstance(raw["name"], str) or not isinstance(raw["ok"], bool):
+            raise ValueError("lane receipt name and ok have invalid types")
+        for key in ("attempts", "previous_attempts", "needs"):
+            if key in raw and not isinstance(raw[key], list):
+                raise ValueError(f"lane receipt {key} must be a list")
+        if "attempts" in raw and not all(isinstance(item, dict) for item in raw["attempts"]):
+            raise ValueError("lane receipt attempts must contain objects")
+        attempt_keys = {
+            "run_id",
+            "fleet",
+            "attempt",
+            "ok",
+            "exit_code",
+            "no_op",
+            "commits",
+            "duration_s",
+        }
+        for attempt in raw.get("attempts", []):
+            missing_attempt = sorted(attempt_keys - set(attempt))
+            if missing_attempt:
+                raise ValueError(
+                    "lane receipt attempt is missing field(s): "
+                    + ", ".join(missing_attempt)
+                )
+        if "previous_attempts" in raw and not all(
+            isinstance(item, dict) for item in raw["previous_attempts"]
+        ):
+            raise ValueError("lane receipt previous_attempts must contain objects")
+        if "needs" in raw and not all(isinstance(item, str) for item in raw["needs"]):
+            raise ValueError("lane receipt needs must contain strings")
+        for key in (
+            "cost_usd",
+            "unpriced_attempts",
+            "tokens",
+            "cache_read_tokens",
+            "input_tokens",
+            "tool_calls",
+        ):
+            value = raw.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+                raise ValueError(f"lane receipt {key} must be a non-negative number")
+        for key in ("answer_path", "diff_path", "skipped", "base", "session_id"):
+            if raw.get(key) is not None and not isinstance(raw[key], str):
+                raise ValueError(f"lane receipt {key} must be a string or null")
+        for key in ("base_sha", "tip_sha", "branch", "test_touched", "breaker"):
+            if key in raw and raw[key] is not None and not isinstance(raw[key], str):
+                raise ValueError(f"lane receipt {key} must be a string or null")
+        if raw.get("clean") is not None and not isinstance(raw["clean"], bool):
+            raise ValueError("lane receipt clean must be true, false, or null")
+        for key in ("verdict", "resume"):
+            if raw.get(key) is not None and not isinstance(raw[key], dict):
+                raise ValueError(f"lane receipt {key} must be an object or null")
+        if "kept" in raw and not isinstance(raw["kept"], bool):
+            raise ValueError("lane receipt kept must be true or false")
+        return cls(**raw)
 
 
 @dataclass
@@ -755,6 +943,8 @@ class MissionResult:
     notes: list[str] = field(default_factory=list)
     dry_run: bool = False
     interrupted: bool = False  # a stop request ended the mission early
+    resumes: list[dict] = field(default_factory=list)
+    resumed_from: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -797,6 +987,8 @@ class MissionResult:
             ),
             "quorum": self.quorum,
             "notes": self.notes,
+            "resumes": self.resumes,
+            "resumed_from": self.resumed_from,
             "report_path": self.report_path,
             "mission_dir": self.mission_dir,
         }
@@ -838,17 +1030,288 @@ def _tighter(*caps: float | None) -> float | None:
     return min(known) if known else None
 
 
+@dataclass
+class _ResumePlan:
+    previous: dict[str, LaneResult] = field(default_factory=dict)
+    kept: dict[str, LaneResult] = field(default_factory=dict)
+    rerun: set[str] = field(default_factory=set)
+    prior_result: dict | None = None
+    history: list[dict] = field(default_factory=list)
+    collate: str | None = None
+    notes: list[str] = field(default_factory=list)
+    spent_usd: float = 0.0
+    unpriced_dispatches: int = 0
+
+
+def _json_object(path: Path) -> dict | None:
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _pid_alive(pid: object) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
+    """Claim one mission directory, replacing only a demonstrably stale lock."""
+    lock = mission_dir / "running.json"
+    notes: list[str] = []
+    while True:
+        try:
+            with lock.open("x") as target:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "started": datetime.now(UTC).isoformat(),
+                        "host": socket.gethostname(),
+                    },
+                    target,
+                    indent=2,
+                )
+            return lock, notes
+        except FileExistsError:
+            current = _json_object(lock) or {}
+            if _pid_alive(current.get("pid")):
+                raise MissionInvalid(
+                    f"mission '{mission_dir.name}' is still running (pid {current['pid']})"
+                ) from None
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                continue
+            notes.append("removed stale running.json lock before resume")
+
+
+def _artifact_matches(recorded: str | None, expected: Path) -> bool:
+    if recorded is None:
+        return True
+    try:
+        return Path(recorded).resolve() == expected.resolve() and expected.is_file()
+    except OSError:
+        return False
+
+
+def _trusted_lane(mission: Mission, mission_dir: Path, lane: Lane, result: LaneResult) -> bool:
+    """Whether a completed receipt is enough to skip every effect of a lane."""
+    if result.name != lane.name or result.ok is not True or result.skipped is not None:
+        return False
+    if not result.attempts:
+        return False
+    if not _artifact_matches(result.answer_path, mission_dir / "answers" / f"{lane.name}.txt"):
+        return False
+    if not _artifact_matches(result.diff_path, mission_dir / "diffs" / f"{lane.name}.patch"):
+        return False
+    if result.verdict is not None and not (
+        mission_dir / "verdicts" / f"{lane.name}.json"
+    ).is_file():
+        return False
+    if result.tip_sha and result.tip_sha != result.base_sha:
+        commit = git_run(mission.cwd, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
+        if commit.returncode != 0:
+            return False
+    if lane.branch:
+        if not result.tip_sha or result.branch != lane.branch:
+            return False
+        branch = git_run(
+            mission.cwd,
+            "rev-parse",
+            "--verify",
+            f"refs/heads/{lane.branch}^{{commit}}",
+        )
+        if branch.returncode != 0 or branch.stdout.strip() != result.tip_sha:
+            return False
+    return True
+
+
+def _read_previous_lanes(mission_dir: Path, mission: Mission) -> dict[str, LaneResult]:
+    previous: dict[str, LaneResult] = {}
+    for lane in mission.lanes:
+        raw = _json_object(mission_dir / "lanes" / f"{lane.name}.json")
+        if raw is None:
+            continue
+        try:
+            previous[lane.name] = LaneResult.from_dict(raw)
+        except (TypeError, ValueError):
+            continue
+    return previous
+
+
+def _run_receipt_spend(
+    base: Path, previous: dict[str, LaneResult], prior_result: dict | None
+) -> tuple[float, int]:
+    """Price prior dispatches once from their authoritative run receipts."""
+    attempts: dict[str, dict] = {}
+    for lane in previous.values():
+        for attempt in [*lane.previous_attempts, *lane.attempts]:
+            run_id = attempt.get("run_id")
+            if isinstance(run_id, str):
+                attempts.setdefault(run_id, attempt)
+    collate = (prior_result or {}).get("collate")
+    if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
+        attempts.setdefault(collate["run_id"], collate)
+
+    spent = 0.0
+    unpriced = 0
+    # Lane receipts retain the attempt summaries for auditability, but spend
+    # reads run receipts so moving attempts under previous_attempts cannot
+    # count the same paid dispatch twice.
+    for run_id, summary in attempts.items():
+        receipt = _json_object(base / "runs" / run_id / "result.json")
+        if receipt is not None and receipt.get("dry_run") is True:
+            continue
+        usage = receipt.get("usage") if receipt is not None else None
+        cost = usage.get("cost_usd") if isinstance(usage, dict) else None
+        if isinstance(cost, int | float) and not isinstance(cost, bool):
+            spent += float(cost)
+        elif receipt is not None:
+            if receipt.get("spawned") is True and receipt.get("interrupted") is not True:
+                unpriced += 1
+        elif isinstance(summary.get("cost_usd"), int | float) and not isinstance(
+            summary.get("cost_usd"), bool
+        ):
+            spent += float(summary["cost_usd"])
+        elif summary.get("unpriced") is True:
+            unpriced += 1
+    return spent, unpriced
+
+
+def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
+    collate = (prior_result or {}).get("collate")
+    if not isinstance(collate, dict) or collate.get("ok") is not True:
+        return False
+    answer = collate.get("answer_path")
+    return _artifact_matches(
+        answer if isinstance(answer, str) else None,
+        mission_dir / "collated.txt",
+    ) and isinstance(answer, str)
+
+
+def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _ResumePlan:
+    prior_result = _json_object(mission_dir / "result.json")
+    history = (prior_result or {}).get("resumes")
+    if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
+        history = []
+    previous = _read_previous_lanes(mission_dir, mission)
+    kept: dict[str, LaneResult] = {}
+    rerun: set[str] = set()
+    for lane in mission.lanes:
+        old = previous.get(lane.name)
+        if old is not None and _trusted_lane(mission, mission_dir, lane, old):
+            old.kept = True
+            kept[lane.name] = old
+        else:
+            rerun.add(lane.name)
+
+    # A downstream receipt describes the exact upstream artifacts it read or
+    # built on. If one of those inputs must run again, its consumers do too.
+    changed = True
+    while changed:
+        changed = False
+        for lane in mission.lanes:
+            if lane.name in kept and any(need in rerun for need in lane.needs):
+                kept.pop(lane.name)
+                rerun.add(lane.name)
+                changed = True
+
+    collate: str | None = None
+    if mission.collate:
+        collate = (
+            "kept"
+            if not rerun and _collate_is_trusted(mission_dir, prior_result)
+            else "rerun"
+        )
+    spent, unpriced = _run_receipt_spend(base, previous, prior_result)
+    return _ResumePlan(
+        previous=previous,
+        kept=kept,
+        rerun=rerun,
+        prior_result=prior_result,
+        history=list(history),
+        collate=collate,
+        spent_usd=spent,
+        unpriced_dispatches=unpriced,
+    )
+
+
 def run_mission(
-    mission: Mission, *, home: Path | None = None, dry_run: bool = False
+    mission: Mission,
+    *,
+    home: Path | None = None,
+    dry_run: bool = False,
+    resume_dir: Path | None = None,
 ) -> MissionResult:
     mission.validate()
-    _check_branches(mission)
-    base = home or conductor_home()
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    mission_id, mission_dir = claim_dir(
-        base / "missions", f"{stamp}-{_slug(mission.name, default='mission')}"
-    )
-    (mission_dir / "mission.json").write_text(json.dumps(mission.to_dict(), indent=2))
+    base = Path(home or conductor_home())
+    if resume_dir is None:
+        _check_branches(mission)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        mission_id, mission_dir = claim_dir(
+            base / "missions", f"{stamp}-{_slug(mission.name, default='mission')}"
+        )
+    else:
+        mission_dir = Path(resume_dir).expanduser().resolve()
+        missions_root = (base / "missions").expanduser().resolve()
+        if mission_dir.parent != missions_root or not mission_dir.is_dir():
+            raise MissionInvalid(
+                "resume directory must be an existing mission under CONDUCTOR_HOME"
+            )
+        if not (mission_dir / "mission.json").is_file():
+            raise MissionInvalid(f"mission '{mission_dir.name}' has no mission.json snapshot")
+        mission_id = mission_dir.name
+
+    running, lock_notes = _acquire_running_lock(mission_dir)
+    try:
+        if resume_dir is None:
+            (mission_dir / "mission.json").write_text(
+                json.dumps(mission.to_dict(), indent=2)
+            )
+            resume = _ResumePlan(notes=lock_notes)
+        else:
+            resume = _build_resume_plan(mission, mission_dir, base)
+            resume.notes.extend(lock_notes)
+            _check_branches(
+                mission,
+                kept=set(resume.kept),
+                previous=resume.previous,
+                notes=resume.notes,
+            )
+        return _execute_mission(
+            mission,
+            base=base,
+            dry_run=dry_run,
+            mission_id=mission_id,
+            mission_dir=mission_dir,
+            resume=resume,
+            is_resume=resume_dir is not None,
+        )
+    finally:
+        try:
+            running.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _execute_mission(
+    mission: Mission,
+    *,
+    base: Path,
+    dry_run: bool,
+    mission_id: str,
+    mission_dir: Path,
+    resume: _ResumePlan,
+    is_resume: bool,
+) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
     diffs_dir = mission_dir / "diffs"
@@ -859,14 +1322,24 @@ def run_mission(
     verdicts_dir.mkdir(exist_ok=True)
 
     ledger = Ledger(mission.max_cost_usd)
+    ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
     started = time.monotonic()
-    done: dict[str, LaneResult] = {}  # every lane that has reached a terminal state
+    done: dict[str, LaneResult] = dict(resume.kept)
 
     def run_lane(lane: Lane) -> LaneResult:
         # One lane's crash must not take the mission's other lanes, its
         # ledger, or its report down with it: the failure becomes that
         # lane's result and the mission still writes result.json.
+        old = resume.previous.get(lane.name)
         out = LaneResult(name=lane.name, ok=False, needs=list(lane.needs), base=lane.base)
+        if old is not None:
+            out.previous_attempts = [*old.previous_attempts, *old.attempts]
+            out.cost_usd = old.cost_usd
+            out.unpriced_attempts = old.unpriced_attempts
+            out.tokens = old.tokens
+            out.cache_read_tokens = old.cache_read_tokens
+            out.input_tokens = old.input_tokens
+            out.tool_calls = old.tool_calls
         try:
             _run_attempts(lane, out)
         except Exception as exc:  # noqa: BLE001 - boundary for an unattended run
@@ -1025,7 +1498,7 @@ def run_mission(
     # to a fixed point before waiting again, so a three-deep chain behind a
     # failure ends immediately and nothing can wait forever (cycles are
     # refused at load).
-    pending = list(mission.lanes)
+    pending = [lane for lane in mission.lanes if lane.name not in resume.kept]
     running: dict[Future[LaneResult], Lane] = {}
     with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
         while pending or running:
@@ -1072,14 +1545,17 @@ def run_mission(
     lane_results = [done[lane.name] for lane in mission.lanes]
 
     collate_out: dict | None = None
-    if mission.collate and not dry_run and not stop_requested():
+    if mission.collate and resume.collate == "kept":
+        prior_collate = (resume.prior_result or {}).get("collate")
+        collate_out = dict(prior_collate) if isinstance(prior_collate, dict) else None
+    elif mission.collate and not dry_run and not stop_requested():
         collate_out = _run_collate(mission, lane_results, ledger, mission_dir, base)
 
     # A pipeline is judged on its outputs: the lanes nothing else depends
     # on. In a flat mission that is every lane, as before.
     sink_names = {lane.name for lane in mission.sinks()}
     quorum: dict | None = None
-    notes: list[str] = []
+    notes: list[str] = list(resume.notes)
     if isinstance(mission.require, dict):
         if dry_run:
             # A rehearsal validates the graph and every dispatch contract but
@@ -1138,6 +1614,16 @@ def run_mission(
 
     duration = time.monotonic() - started
     report_path = mission_dir / "report.md"
+    resume_entry: dict | None = None
+    resumes = list(resume.history)
+    if is_resume:
+        resume_entry = {
+            "at": datetime.now(UTC).isoformat(),
+            "kept": [lane.name for lane in mission.lanes if lane.name in resume.kept],
+            "rerun": [lane.name for lane in mission.lanes if lane.name in resume.rerun],
+            "collate": resume.collate,
+        }
+        resumes.append(resume_entry)
     result = MissionResult(
         mission_id=mission_id,
         name=mission.name,
@@ -1146,8 +1632,7 @@ def run_mission(
             json.dumps(mission.require) if isinstance(mission.require, dict) else mission.require
         ),
         lanes=[lane.to_dict() for lane in lane_results],
-        cost_usd=sum(lane.cost_usd for lane in lane_results)
-        + float((collate_out or {}).get("cost_usd") or 0.0),
+        cost_usd=ledger.to_dict()["spent_usd"],
         tokens=sum(lane.tokens for lane in lane_results)
         + int((collate_out or {}).get("tokens") or 0),
         duration_s=duration,
@@ -1159,31 +1644,62 @@ def run_mission(
         notes=notes,
         dry_run=dry_run,
         interrupted=interrupted,
+        resumes=resumes,
+        resumed_from=resume_entry,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 
 
-def _check_branches(mission: Mission) -> None:
+def _check_branches(
+    mission: Mission,
+    *,
+    kept: set[str] | None = None,
+    previous: dict[str, LaneResult] | None = None,
+    notes: list[str] | None = None,
+) -> None:
     """Every `branch` a lane claims must be a valid name that the repo does
     not already have, checked before any fleet is spawned: finding out after
     a $5 build that its name was taken is the wrong time."""
+    kept = kept or set()
+    previous = previous or {}
+    notes = notes if notes is not None else []
     for lane in mission.lanes:
         if not lane.branch:
             continue
         if git_run(mission.cwd, "check-ref-format", "--branch", lane.branch).returncode != 0:
             raise MissionInvalid(f"lane '{lane.name}': '{lane.branch}' is not a valid branch name")
+        if lane.name in kept:
+            continue
         # Local heads and every remote's tracking branches: a name that only
         # exists as origin/x would collide the moment the operator pushed.
         remotes = git_run(mission.cwd, "remote").stdout.split()
         refs = [f"refs/heads/{lane.branch}"] + [f"refs/remotes/{r}/{lane.branch}" for r in remotes]
         for ref in refs:
-            if git_run(mission.cwd, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
-                raise MissionInvalid(
-                    f"lane '{lane.name}': branch '{lane.branch}' already exists "
-                    f"in {mission.cwd} ({ref})"
-                )
+            current = git_run(mission.cwd, "rev-parse", "--verify", "--quiet", ref)
+            if current.returncode != 0:
+                continue
+            old = previous.get(lane.name)
+            previous_tip = old.tip_sha if old is not None else ""
+            if ref == f"refs/heads/{lane.branch}" and previous_tip:
+                tip = git_run(mission.cwd, "rev-parse", "--verify", f"{ref}^{{commit}}")
+                if tip.returncode == 0 and tip.stdout.strip() == previous_tip:
+                    deleted = git_run(mission.cwd, "branch", "-D", "--", lane.branch)
+                    if deleted.returncode != 0:
+                        detail = deleted.stderr.strip() or deleted.stdout.strip()
+                        raise MissionInvalid(
+                            f"lane '{lane.name}': branch '{lane.branch}' at its previous tip "
+                            f"could not be deleted before rerun: {detail}"
+                        )
+                    notes.append(
+                        f"deleted branch '{lane.branch}' at its previous tip before rerun"
+                    )
+                    continue
+            raise MissionInvalid(
+                f"lane '{lane.name}': branch '{lane.branch}' already exists "
+                f"in {mission.cwd} ({ref})"
+            )
 
 
 def _rename_branch(repo: str, old: str, new: str) -> str | None:
@@ -1357,12 +1873,34 @@ def _run_collate(
     }
 
 
+def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = None) -> str:
+    cost = _usd(attempt.get("cost_usd"))
+    if attempt.get("unpriced"):
+        cost += " (1 unpriced)"
+    return (
+        f"| {lane.name} | {label or attempt['attempt']} | {attempt['ok']} | "
+        f"{_verdict_label(attempt.get('verdict_data')) or ''} | {attempt['exit_code']} | "
+        f"{attempt['no_op']} | {_test_touched(attempt.get('test_surface'))} | "
+        f"{attempt['commits']} | {attempt.get('branch') or ''} | {cost} | "
+        f"{attempt.get('tokens') or ''} | {attempt.get('tool_calls', 0)} | "
+        f"{_cached(attempt)} | {_resumed_label(attempt)} | {attempt['duration_s']} |"
+    )
+
+
 def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) -> str:
     require = json.dumps(mission.require) if isinstance(mission.require, dict) else mission.require
     lines = [
         f"# Mission `{mission.name}`",
         "",
         f"- id: `{result.mission_id}`",
+    ]
+    if result.resumed_from is not None:
+        kept = ", ".join(result.resumed_from["kept"]) or "none"
+        rerun = ", ".join(result.resumed_from["rerun"]) or "none"
+        lines.append(
+            f"- resumed: attempt {len(result.resumes) + 1}; kept {kept}; rerun {rerun}"
+        )
+    lines += [
         f"- ok: **{result.ok}** (require: {require}"
         + (", judged on the pipeline's final lanes" if any(lane.needs for lane in lanes) else "")
         + ")",
@@ -1391,20 +1929,11 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             lines.append(
                 f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
             )
+        if lane.kept and lane.attempts:
+            lines.append(_attempt_report_row(lane, lane.attempts[-1], "(kept)"))
+            continue
         for a in lane.attempts:
-            cost = _usd(a.get("cost_usd"))
-            if a.get("unpriced"):
-                cost += " (1 unpriced)"
-            lines.append(
-                f"| {lane.name} | {a['attempt']} | {a['ok']} | "
-                f"{_verdict_label(a.get('verdict_data')) or ''} | {a['exit_code']} | "
-                f"{a['no_op']} | {_test_touched(a.get('test_surface'))} | {a['commits']} | "
-                f"{a.get('branch') or ''} | "
-                f"{cost} | "
-                f"{a.get('tokens') or ''} | {a.get('tool_calls', 0)} | {_cached(a)} | "
-                f"{_resumed_label(a)} | "
-                f"{a['duration_s']} |"
-            )
+            lines.append(_attempt_report_row(lane, a))
     for note in result.notes:
         lines += ["", f"**Note**: {note}"]
     if result.interrupted:
