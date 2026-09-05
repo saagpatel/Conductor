@@ -1881,6 +1881,16 @@ def _execute_mission(
             summary["resume"] = resume_state
             if resume_note:
                 summary["note"] = resume_note
+            if result.cancelled:
+                # dispatch()'s own receipt only knows the generic default
+                # reason; the mission knows which lane actually won, so the
+                # attempt's error must say the same thing report.md's
+                # "Skipped:" line says, not a different cancel string.
+                cancel_reason = cancel_reasons.get(
+                    lane.name, "cancelled: another lane already passed"
+                )
+                summary["error"] = cancel_reason
+                summary["failure"] = cancel_reason
             summary["unpriced"] = (
                 result.spawned and not result.interrupted and summary.get("cost_usd") is None
             )
@@ -1911,9 +1921,7 @@ def _execute_mission(
                 resume_failed = True
             if result.cancelled:
                 # Another sink already passed; no fallback is worth trying.
-                out.skipped = cancel_reasons.get(
-                    lane.name, "cancelled: another lane already passed"
-                )
+                out.skipped = cancel_reason
                 break
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
@@ -2363,19 +2371,22 @@ def _collate_body(mission: Mission, lanes: list[LaneResult], col: Collate) -> st
 def _collate_candidates(
     lanes: list[LaneResult], ranking: list[dict], candidates: int
 ) -> tuple[list[LaneResult], list[str]]:
-    """The lanes a capped collate may see, in rank order, and the sink names
-    left out because `candidates` capped the judge's input. `candidates`
-    larger than the number of ranked sinks simply uses what there is; a lane
-    the ranking never touched (not a sink, or skipped) always rides along."""
+    """Only the top `candidates` sink lanes of item 3's ranking, in rank
+    order, and the names of every lane left out. `candidates` larger than
+    the number of ranked sinks simply uses what there is. Everything else --
+    a ranked sink the cap dropped, a sink early_cancel skipped before it
+    could be ranked, or a non-sink pipeline stage -- is left out: the spec
+    says the judge sees only the top sinks, not pipeline context, so a lane
+    that never finished or was never a candidate gets no seat either."""
     if not candidates:
         return lanes, []
     by_name = {lane.name: lane for lane in lanes}
     ranked_names = [row["lane"] for row in ranking]
     chosen_names = ranked_names[:candidates]
-    omitted_names = ranked_names[candidates:]
+    omitted_ranked = ranked_names[candidates:]
+    omitted_rest = [lane.name for lane in lanes if lane.name not in ranked_names]
     chosen = [by_name[name] for name in chosen_names if name in by_name]
-    extra = [lane for lane in lanes if lane.name not in ranked_names]
-    return chosen + extra, omitted_names
+    return chosen, omitted_ranked + omitted_rest
 
 
 def _omitted_note(omitted: list[str]) -> str:
@@ -2614,10 +2625,17 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for lane in lanes:
-        if not lane.attempts and lane.skipped:
-            lines.append(
-                f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
-            )
+        if lane.skipped:
+            # A lane cancelled mid-run still has an attempt, but the table
+            # must flag it the same way a lane cancelled before it ever
+            # started is flagged, not print it as an ordinary failed attempt.
+            if lane.attempts:
+                lines.append(_attempt_report_row(lane, lane.attempts[-1], "(skipped)"))
+            else:
+                lines.append(
+                    f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
+                )
+            continue
         if lane.kept and lane.attempts:
             lines.append(_attempt_report_row(lane, lane.attempts[-1], "(kept)"))
             continue

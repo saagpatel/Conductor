@@ -176,6 +176,43 @@ def test_early_cancel_kills_a_running_lane_and_skips_a_pending_one(
     assert saved["early_cancel"]["winner"] == "fast"
 
 
+def test_a_cancelled_running_lanes_attempt_error_matches_its_skip_reason(
+    repo, home, monkeypatch, tmp_path
+):
+    """The receipt dispatch() writes for a cancelled attempt and the
+    LaneResult.skipped reason mission.py records must name the same winner --
+    otherwise report.md shows two different cancel strings for one lane."""
+    monkeypatch.setattr(runner_mod, "build_argv", _early_cancel_build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    mission = mission_from_dict(_early_cancel_mission(repo), base_dir=tmp_path)
+
+    result = run_mission(mission, home=home)
+
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    slow = by_name["slow"]
+    assert slow["attempts"], "the slow lane must have been dispatched before cancellation"
+    assert slow["attempts"][-1]["error"] == slow["skipped"]
+
+
+def test_report_table_marks_a_cancelled_running_lane_as_skipped(
+    repo, home, monkeypatch, tmp_path
+):
+    """A lane cancelled mid-run still has an attempt (it was running), but the
+    summary table must flag it the same way a never-started cancelled lane is
+    flagged, not print it as an ordinary failed attempt."""
+    monkeypatch.setattr(runner_mod, "build_argv", _early_cancel_build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    mission = mission_from_dict(_early_cancel_mission(repo), base_dir=tmp_path)
+
+    result = run_mission(mission, home=home)
+
+    report = Path(result.report_path).read_text()
+    table = report.split("| lane | attempt |", 1)[1].split("\n\n", 1)[0]
+    slow_rows = [line for line in table.splitlines() if line.startswith("| slow |")]
+    assert len(slow_rows) == 1
+    assert "(skipped)" in slow_rows[0]
+
+
 def test_early_cancel_snapshot_round_trips(repo, home, tmp_path):
     raw = {
         "cwd": str(repo),
@@ -394,6 +431,38 @@ def test_collate_candidates_judges_only_the_top_two_of_four(
     assert "Lane `b`" in prompt and "Lane `d`" in prompt
     assert "Lane `a`" not in prompt and "Lane `c`" not in prompt
     assert "omitted by ranking: c, a" in prompt
+
+
+def test_collate_candidates_drops_a_sink_lane_that_early_cancel_skipped(
+    repo, home, monkeypatch, tmp_path
+):
+    """A sink lane cancelled by early_cancel never reaches item 3's ranking,
+    so `_collate_candidates` must not fall back to treating it as
+    non-ranked context: it must stay out of the judge's prompt and schema,
+    the same as any other lane the cap dropped."""
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "antigravity":
+            return ["sh", "-c", f"printf '%s\\n' {json.dumps(_antigravity_strongest('fast'))}"]
+        return _early_cancel_build(spec)
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    raw = _early_cancel_mission(repo)
+    raw["collate"] = {"fleet": "antigravity", "rank": True, "candidates": 2}
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+
+    result = run_mission(mission, home=home)
+
+    assert result.ok is True
+    assert result.collate["candidates"] == ["fast"]
+
+    schema = json.loads(Path(result.mission_dir, "collate-rank.schema.json").read_text())
+    assert schema["properties"]["strongest"]["enum"] == ["fast"]
+
+    prompt = Path(result.mission_dir, "collate-prompt-forward.txt").read_text()
+    assert "Lane `slow`" not in prompt
+    assert "Lane `pending`" not in prompt
+    assert "omitted by ranking: slow, pending" in prompt
 
 
 # --- item 5: documentation ---------------------------------------------------
