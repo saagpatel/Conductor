@@ -1454,7 +1454,12 @@ def _artifact_matches(recorded: str | None, expected: Path) -> bool:
 
 
 def _trusted_lane(
-    mission: Mission, mission_dir: Path, lane: Lane, result: LaneResult, *, prior_ok: bool
+    mission: Mission,
+    mission_dir: Path,
+    lane: Lane,
+    result: LaneResult,
+    *,
+    prior_ok: bool = False,
 ) -> bool:
     """Whether a completed receipt is enough to skip every effect of a lane."""
     if result.name != lane.name:
