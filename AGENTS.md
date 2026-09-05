@@ -41,6 +41,40 @@ claim below lives in `docs/research/` (dated reports with URLs and live-probe re
 - Pipeline shape is measured, not assumed. "Sol builds, Opus reviews" was a habit; the receipts
   in `docs/RESET-2026-09.md` show cheaper shapes doing the same work.
 
+## Shape A: the measured default and its operating rules
+
+Shape A shipped C3, A3, A4, and B5 on 2026-09-05 (v0.13.0 to v0.16.0) at 26 to 49 percent of the
+Sol/Opus cost per item; receipts in `docs/RESET-2026-09.md`. The shape: Sonnet 5 builds at `hard`
+under a per-lane cap; Gemini 3.7 Flash and Grok 4.6 review cold, in parallel, with the no-quota
+template; Sonnet fixes on the build's resumed thread; the lead reads the diff, runs the gate in a
+fresh worktree, tidies, merges, and cuts the release. Every rule below cost a receipt to learn:
+
+1. **Declare stages and a vendor policy on the mission.** `stage: build | review | fix` per lane,
+   `policy` naming the vendors each stage may use. A `fix` lane runs under the reproduce gate, so it
+   cannot verify with a throwaway script; a `review` lane is refused if any build attempt shares its
+   vendor, so a build fallback on the reviewer's vendor is not allowed (drop the fallback, rerun by
+   hand if the build fails).
+2. **Size the build cap to the spec:** about a dollar per spec item on Sonnet at `hard`, plus two
+   dollars for any item that touches the scheduler, the runner's wait loop, or resume. A cap sized for
+   a small item cut two builders off one lint error and one README phrase from green.
+3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
+   The clean gate reruns the original tests against the new source; when the new source refuses a
+   shape the old fixtures build, both builders were right and both were rejected. The lead then reads
+   every edit to an existing test.
+4. **Every spec says: keep existing call signatures working** (new parameters as keywords with
+   defaults). The first Sonnet build changed one and the clean gate rejected a green run.
+5. **Reviewers that run the suite pass `--basetemp` under `$TMPDIR`.** A read lane that leaves pytest
+   scratch in its worktree fails on bytes even when its findings are right.
+6. **The salvage path is normal, not exceptional.** A kept worktree with a green own gate is a
+   deliverable: gate it, read it, commit it, then run the review and fix lanes as a mission with
+   `cwd` at that commit and the diff pasted into the mission prompt. Cost of the remainder: $1.50 to
+   $2.50.
+7. **Keep both reviewers.** Across four runs Grok found real defects outside the diff's own lines every
+   time and Gemini's NO_FINDINGS was correct every time on what the diff alone shows. Complementary,
+   not redundant, and $0.70 to $1.00 for the pair.
+8. **A session restart kills a background mission.** Send conductor SIGINT (it writes an interrupted
+   receipt), restart, then `conductor mission --resume <id>`; finished lanes are not paid twice.
+
 ## Reviewer prompts: no quotas, ever
 
 A review lane measures what is there. The evidence (`docs/research/2026-09-04-research-frontier-models.md` §6):
@@ -100,10 +134,11 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   why behind a rule, positive instructions over prohibitions, no over-firm language. Anthropic's
   verbatim anti-test-gaming and investigate-before-answering snippets belong in every build
   prompt.
-- **Conductor bug (found 2026-09-04):** write lanes run with `--permission-mode acceptEdits`,
-  which refuses Bash beyond `pwd`/`ls`. A Claude build lane cannot run tests; Haiku edited blind
-  and reported success, Sonnet stopped and asked. Fix before any Claude build lane:
-  `--permission-mode bypassPermissions` or `--allowedTools "Bash(<gate>)"`.
+- Write lanes run with `--permission-mode bypassPermissions` (fixed 2026-09-05, 2881fe1, pinned by a
+  test). Before that they ran with `acceptEdits`, which refuses Bash beyond `pwd`/`ls`: Haiku edited
+  blind and reported success, Sonnet stopped and asked. Sonnet 5 at `hard` has since built four
+  roadmap items; its one recurring trap is changing an existing call signature, so every spec says
+  not to.
 
 ### Gemini 3.8 Flash and 3.7 Flash (fleet `antigravity`, binary `agy`)
 

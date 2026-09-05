@@ -6,6 +6,24 @@ findings through conductor's own build → review → fix pipeline ($15.88,
 232 tests), and four parallel research sweeps of how the field builds
 orchestrators. Sources are linked where a claim rests on one.
 
+## Shipped since this was written
+
+| item | version | shape | cost |
+|---|---|---|---|
+| A1 clean re-run of the gate | 0.8.0 | Sol build, Opus review, Sol fix | $13.40 |
+| A2 structured verdicts and quorum | 0.9.0 | same | $15.45 |
+| B1 thread reuse | 0.10.0 | same | $14.53 |
+| B4 rate and progress breakers | 0.11.0 | same | $19.32 |
+| C1 checkpoint and resume | 0.12.0 | same | $19.40 |
+| C3 liveness | 0.13.0 | Shape A (Sonnet build, Gemini + Grok review, Sonnet fix) | $5.05 |
+| A3 judge hygiene | 0.14.0 | Shape A | $19.65 ($8.90 for the work; the rest is operating error, receipted) |
+| A4 reviewer direction and reproduce-before-fix | 0.15.0 | Shape A | $8.03 |
+| B5 early cancel and best-of-n | 0.16.0 | Shape A | $9.49 |
+
+Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
+("Shape A"). Next candidates: A5 signed lane receipts and C2 the pause primitive, which can run
+as two missions in parallel and merge in that order.
+
 ## What conductor is, in one paragraph
 
 One dispatch contract over four coding-agent fleets (Claude Code, Codex,
