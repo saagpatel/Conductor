@@ -213,6 +213,36 @@ def test_error_kind_covers_every_kind_and_precedence(name, overrides, expected):
     assert expected in KINDS
 
 
+def test_a_breaker_kill_under_a_generous_cap_is_breaker_not_cap():
+    """`budget.settle()` (budget.py) sets `exceeded=True` for *any* kill,
+    breaker or cap watcher alike (`killed=capped or breaker_reason is not
+    None` in runner.py), so a breaker-killed run with a cap nowhere near hit
+    still carries `budget["exceeded"] is True` (see
+    test_breakers.py::test_stall_dispatch_is_killed_priced_receipted_and_never_gated,
+    `cap_usd=10.0`, `budget["exceeded"] is True`, cost far under $10). `cap`
+    must mean the run was actually stopped for its cap, not merely that some
+    other breaker-triggered kill also set the shared flag."""
+    result = _result(
+        breaker={"tripped": "stalled: no output for 2s"},
+        budget={"exceeded": True, "cap_usd": 10.0, "observed_usd": 0.02},
+        error="stalled: no output for 2s; process group killed",
+    )
+    assert result.ok is False
+    assert error_kind(result) == "breaker"
+
+
+def test_a_genuine_cap_kill_is_still_cap_even_with_a_breaker_dict_present():
+    """The fix for the case above must not swallow a real cap kill: when the
+    observed spend actually cleared the cap, `cap` still wins over `breaker`,
+    matching the spec's own 'a cap kill that also timed out is cap' rule."""
+    result = _result(
+        breaker={"tripped": "stalled: no output for 2s"},
+        budget={"exceeded": True, "cap_usd": 1.0, "observed_usd": 5.0},
+        error="over budget ($5.00 > $1.00); process group killed",
+    )
+    assert error_kind(result) == "cap"
+
+
 def test_kinds_are_exhaustive_over_the_documented_order():
     assert KINDS == (
         "interrupted",
@@ -480,6 +510,28 @@ def test_mission_errors_summary_report_line_and_cli(repo, home, monkeypatch, tmp
 def test_conductor_runs_shows_the_kind(repo, home, monkeypatch, capsys):
     fake_fleets(monkeypatch, {"claude": ["sh", "-c", "exit 3"]})
     dispatch(spec_for(repo, mode="read"), home=home)
+
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["runs"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["kind"] == "exit"
+
+
+def test_conductor_runs_recomputes_kind_for_a_pre_c5_receipt(repo, home, monkeypatch, capsys):
+    """`kind` is documented as 'computed, not stored, so an old receipt read
+    back still classifies' -- but `cmd_runs` (cli.py) reads it with a plain
+    `data.get("kind")` off the JSON on disk, so a receipt written before this
+    field existed (no `kind` key at all) must still classify, not read back
+    as `null` for a dispatch that was not ok."""
+    fake_fleets(monkeypatch, {"claude": ["sh", "-c", "exit 3"]})
+    dispatch(spec_for(repo, mode="read"), home=home)
+
+    run_dir = next((home / "runs").iterdir())
+    result_file = run_dir / "result.json"
+    data = json.loads(result_file.read_text())
+    assert data["ok"] is False
+    del data["kind"]  # simulate a receipt written before C5 shipped
+    result_file.write_text(json.dumps(data))
 
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     assert main(["runs"]) == 0

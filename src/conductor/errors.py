@@ -105,6 +105,33 @@ def _is_refusal(fleet: str, text: str, status: str | None) -> bool:
     )
 
 
+def _capped(result: Result) -> bool:
+    """True only for a genuine cap verdict, not merely a shared `killed` flag.
+
+    `budget.settle()` (budget.py) sets `exceeded=True` for *any* kill the
+    watcher observed -- a breaker trip included (`killed=capped or
+    breaker_reason is not None` in runner.py) -- so `budget["exceeded"]` alone
+    cannot tell a real cap kill from a breaker kill that happened to run
+    under a cap. A kill is only `cap` here when there is independent evidence
+    of it: the native budget flag, an observed spend over the cap, or no
+    breaker trip at all to blame it on instead.
+    """
+    budget = result.budget or {}
+    if not budget:
+        return False
+    if budget.get("unpriced"):
+        return True
+    if not budget.get("exceeded"):
+        return False
+    if result.fleet_status == "error_max_budget_usd":
+        return True
+    cap_usd = budget.get("cap_usd")
+    observed = budget.get("observed_usd")
+    if cap_usd is not None and observed is not None and observed > cap_usd:
+        return True
+    return not (result.breaker or {}).get("tripped")
+
+
 def _gate_failed(result: Result) -> bool:
     """Mirrors `Result.failure()`'s own gate check: whichever gate counted
     (the clean replacement, or the fleet's own) ran and did not pass."""
@@ -148,8 +175,7 @@ def error_kind(result: Result) -> str | None:
         return "interrupted"
     if result.cancelled:
         return "cancelled"
-    budget = result.budget or {}
-    if budget.get("exceeded") or budget.get("unpriced"):
+    if _capped(result):
         return "cap"
     if (result.breaker or {}).get("tripped"):
         return "breaker"
