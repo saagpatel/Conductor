@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import prices, worktrees
+from . import attest, prices, worktrees
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .fleets import FLEETS, Spec, build_argv
@@ -93,6 +93,14 @@ class Result:
     breaker: dict | None = None
     answer_path: str | None = None
     diff_path: str | None = None
+    attestation_path: str | None = None
+    # The same bounds the signed attestation carries, recorded here too so a
+    # verifier can compare against this receipt directly instead of
+    # re-deriving them from `isolation`/`commit`, which is only correct for
+    # an isolated or landed dispatch (A5 review: a non-isolated read lane's
+    # real HEAD was read back as a mismatch otherwise).
+    base_commit: str | None = None
+    tip_commit: str | None = None
     isolation: dict | None = None
     fleet_status: str | None = None
     fleet_error: str | None = None
@@ -220,6 +228,7 @@ class Result:
             "breaker": (self.breaker or {}).get("tripped"),
             "answer_path": self.answer_path,
             "diff_path": self.diff_path,
+            "attestation_path": self.attestation_path,
             "run_dir": self.run_dir,
             "session_id": self.session_id,
             "resumed": self.resumed,
@@ -272,6 +281,97 @@ def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
         and not counted.get("timed_out")
         and not counted.get("interrupted")
     )
+
+
+def _gate_summary(
+    tests_dict: dict | None, surface_state: dict | None, test_command: str | None
+) -> dict:
+    """Which gate run counted for this dispatch, and its verdict, in the
+    shape the signed receipt carries (A5's `gate` block)."""
+    clean = (surface_state or {}).get("clean_gate") or {}
+    if clean.get("ran"):
+        counted, label = clean, "clean"
+    elif tests_dict and tests_dict.get("ran"):
+        counted, label = tests_dict, "own"
+    else:
+        counted, label = None, "none"
+    return {
+        "command": test_command,
+        "counted": label,
+        "exit_code": counted.get("exit_code") if counted else None,
+        "passed": _gate_passed(tests_dict, surface_state),
+    }
+
+
+def _commit_bounds(
+    before: GitState,
+    after: GitState,
+    commit: CommitOutcome | None,
+    iso: worktrees.Isolation | None,
+) -> tuple[str | None, str | None]:
+    """The base and tip commit a dispatch actually ran between, on whichever
+    evidence exists: a landed commit's sha, else the isolated worktree's
+    tip, else the cwd's own HEAD after the run, so a fleet that deletes its
+    working tree still yields a receipt (both fields null). This is the one
+    place that derives them, so the signed statement and the plain receipt
+    (`Result.base_commit`/`tip_commit`) can never disagree with each other."""
+    tip_commit = None
+    if commit is not None and commit.committed:
+        tip_commit = commit.sha or None
+    elif iso is not None and iso.tip_sha:
+        tip_commit = iso.tip_sha
+    elif after.head:
+        tip_commit = after.head
+    return before.head or None, tip_commit
+
+
+def _lane_receipt_statement(
+    *,
+    run_id: str,
+    fleet: str,
+    model: str,
+    mode: str,
+    stage: str | None,
+    cwd: str,
+    base_commit: str | None,
+    tip_commit: str | None,
+    diff_path: str | None,
+    surface_state: dict | None,
+    tests_dict: dict | None,
+    test_command: str | None,
+    reproduce_state: dict | None,
+    ok: bool,
+    error: str | None,
+) -> dict:
+    """The statement A5 signs into `attestation.json`: what conductor can
+    check about this one dispatch without trusting the fleet's own report."""
+    test_surface = (
+        {
+            "digest_before": surface_state["digest_before"],
+            "digest_after": surface_state["digest_after"],
+            "touched": surface_state["touched"],
+        }
+        if surface_state is not None
+        else None
+    )
+    return {
+        "_type": "conductor/lane-receipt/v1",
+        "run_id": run_id,
+        "fleet": fleet,
+        "model": model,
+        "mode": mode,
+        "stage": stage,
+        "cwd": cwd,
+        "base_commit": base_commit,
+        "tip_commit": tip_commit,
+        "source_diff_sha256": attest.file_sha256(diff_path) if diff_path else None,
+        "test_surface": test_surface,
+        "gate": _gate_summary(tests_dict, surface_state, test_command),
+        "reproduce_verdict": (reproduce_state or {}).get("verdict"),
+        "ok": ok,
+        "error": error,
+        "ended_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
 
 
 def _git_failure(detail: str, *, worktree: Path, patch_bytes: int = 0) -> dict:
@@ -1075,6 +1175,7 @@ def dispatch(
         else:
             git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
 
+    base_commit, tip_commit = _commit_bounds(before, after, commit, iso)
     result = Result(
         run_id=run_id,
         fleet=spec.fleet,
@@ -1102,6 +1203,8 @@ def dispatch(
         breaker=breaker_state,
         answer_path=answer_path,
         diff_path=diff_path,
+        base_commit=base_commit,
+        tip_commit=tip_commit,
         isolation=iso.to_dict() if iso is not None else None,
         fleet_status=output.status,
         fleet_error=output.error,
@@ -1112,6 +1215,35 @@ def dispatch(
         interrupted=interrupted,
         cancelled=cancelled,
     )
+    if result.spawned:
+        statement = _lane_receipt_statement(
+            run_id=run_id,
+            fleet=spec.fleet,
+            model=model_id,
+            mode=spec.mode,
+            stage=spec.stage,
+            cwd=spec.cwd,
+            base_commit=base_commit,
+            tip_commit=tip_commit,
+            diff_path=diff_path,
+            surface_state=surface_state,
+            tests_dict=tests.to_dict() if tests else None,
+            test_command=test_command,
+            reproduce_state=reproduce_state,
+            ok=result.ok,
+            error=result.failure(),
+        )
+        try:
+            key = attest.receipt_key(base)
+            envelope = attest.sign(statement, key)
+            attestation_file = run_dir / "attestation.json"
+            attestation_file.write_text(json.dumps(envelope, indent=2))
+            result.attestation_path = str(attestation_file)
+        except OSError as exc:
+            reason = f"attestation not written: {exc}"
+            print(reason, file=sys.stderr)
+            if result.error is None:
+                result.error = reason
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 

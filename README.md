@@ -592,6 +592,53 @@ those lanes too. The prompt says which lanes were left out and why
 `candidates: ["<lane>", ...]`. `candidates` larger than the number of
 dispatched sink lanes just uses what there is.
 
+### Signed lane receipts
+
+Every spawned dispatch writes `attestation.json` beside its `result.json`: a
+Dead Simple Signing Envelope (DSSE) over HMAC-SHA256, standard library only.
+The signed statement carries `base_commit`, `tip_commit`, the sha256 of
+`diff.patch`, the test surface's content digests before and after, and the
+gate's command line, which run counted (`clean`, `own`, or `none`), its exit
+code, and whether it passed. Those are exactly the fields a caller would
+otherwise have to trust the fleet's own exit code and prose for: "the fleet
+did X" becomes something checkable on bytes, not a claim. A dry run or a
+dispatch refused before spawn writes no envelope, since nothing ran.
+
+A mission chains every lane's envelope together: each time a lane settles,
+`receipts/<index>-<lane>.json` records that lane's run id, its
+`attestation.json` path and hash, and the sha256 of the previous link's own
+file, so the sequence is tamper-evident end to end, not just each entry on
+its own. `receipts/chain.json` is the unsigned index; `result.json` carries
+`chain: {"path", "links", "head"}` and `report.md` shows one line. A resumed
+mission continues the same chain (`previous` points at the last link already
+on disk); a kept lane never reruns and keeps whichever link it already
+earned, so it appears once, not twice.
+
+```
+conductor attest MISSION_ID
+```
+
+walks `chain.json` in order and verifies every link's signature, that its
+file matches the hash recorded in `chain.json`, that its `previous` field
+matches the prior link's actual file hash, and, for a link with a run, that
+the run's own `attestation.json` still matches that recorded hash and still
+agrees with `result.json` and `diff.patch`. It prints one JSON object naming
+every link's verdict and problems, exits 0 when every link verifies, 1 when
+one does not, and 3 when the mission, its chain, or the signing key does not
+exist.
+
+The key lives at `$CONDUCTOR_HOME/keys/receipt.key`, directory mode 700, file
+mode 600, created on first use and never copied into a receipt. This is
+HMAC, not a keypair: whoever can read that file can forge a receipt with it,
+so the trust boundary is the file's permissions, not cryptography an
+attacker without the key could break. What it buys is narrower and still
+real — a receipt cannot be edited after the fact by anything that does not
+hold the key.
+
+Evidence (`docs/ROADMAP-2026-09.md` item A5): "Bernstein's signed replay
+receipts, the IETF signed action receipts draft
+([draft-marques-asqav-compliance-receipts](https://datatracker.ietf.org/doc/html/draft-marques-asqav-compliance-receipts-08))."
+
 ## Isolation: a branch is not a worktree
 
 HEAD and the index are shared mutable state, so two fleets editing one
@@ -753,6 +800,8 @@ modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
   or run
 - `conductor gc`: plan safe worktree and `conductor/*` branch cleanup; pass
   `--apply` to execute it
+- `conductor attest MISSION_ID`: verify a mission's signed receipt chain on
+  bytes
 
 Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 

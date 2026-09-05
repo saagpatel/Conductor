@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import prices
+from . import attest, prices
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
 from .mission import STAGES, Mission, MissionInvalid, load_mission, run_mission
@@ -242,6 +242,139 @@ def cmd_missions(args: argparse.Namespace) -> int:
         )
     print(json.dumps(rows, indent=2))
     return 0
+
+
+def _verify_run_attestation(
+    home: Path, run_id: str, link_statement: dict, key: bytes
+) -> list[str]:
+    """Whether one mission link's run still checks out: its attestation.json
+    is unmoved and verifies, and it agrees with the run's own result.json
+    and diff.patch on the few things the mission link claims about it."""
+    problems: list[str] = []
+    run_dir = home / "runs" / run_id
+    attestation_file = run_dir / "attestation.json"
+    expected_sha = link_statement.get("attestation_sha256")
+    actual_sha = attest.file_sha256(attestation_file)
+    if actual_sha is None:
+        problems.append(f"run '{run_id}': attestation.json is missing")
+        return problems
+    if expected_sha is not None and actual_sha != expected_sha:
+        problems.append(f"run '{run_id}': attestation.json sha256 disagrees with the mission link")
+    try:
+        envelope = json.loads(attestation_file.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"run '{run_id}': attestation.json unreadable: {exc}")
+        return problems
+    statement, reason = attest.verify(envelope, key)
+    if statement is None:
+        problems.append(f"run '{run_id}': attestation signature: {reason}")
+        return problems
+    try:
+        result_data = json.loads((run_dir / "result.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"run '{run_id}': result.json unreadable: {exc}")
+        return problems
+    if statement.get("ok") != result_data.get("ok"):
+        problems.append(f"run '{run_id}': attestation ok disagrees with result.json")
+    # Compare against the receipt's own `base_commit`/`tip_commit`, not a
+    # reconstruction from `isolation`/`commit`: those are only set for an
+    # isolated or landed dispatch, so a non-isolated read lane's real HEAD
+    # would otherwise read back as a mismatch that never happened.
+    if statement.get("base_commit") != result_data.get("base_commit"):
+        problems.append(f"run '{run_id}': attestation base_commit disagrees with result.json")
+    if statement.get("tip_commit") != result_data.get("tip_commit"):
+        problems.append(f"run '{run_id}': attestation tip_commit disagrees with result.json")
+    expected_digest = attest.file_sha256(run_dir / "diff.patch")
+    if statement.get("source_diff_sha256") != expected_digest:
+        problems.append(f"run '{run_id}': attestation source_diff_sha256 disagrees with diff.patch")
+    return problems
+
+
+def _invalid(reason: str) -> None:
+    print(json.dumps({"invalid": reason}, indent=2), file=sys.stderr)
+
+
+def cmd_attest(args: argparse.Namespace) -> int:
+    """Verify a mission's signed receipt chain on bytes: every link's
+    signature, its place in the hash chain, and, for a link with a run,
+    that the run's own attestation still matches its result.json and diff."""
+    mission_id = args.mission_id
+    if Path(mission_id).name != mission_id or mission_id in {".", ".."}:
+        _invalid("MISSION_ID must be a mission directory name")
+        return 3
+    home = conductor_home()
+    mission_dir = home / "missions" / mission_id
+    chain_path = mission_dir / "receipts" / "chain.json"
+    if not mission_dir.is_dir():
+        _invalid(f"mission '{mission_id}' does not exist")
+        return 3
+    if not chain_path.is_file():
+        _invalid(f"mission '{mission_id}' has no receipt chain")
+        return 3
+    key = attest.read_receipt_key(home)
+    if key is None:
+        _invalid("receipt key is missing")
+        return 3
+    try:
+        chain = json.loads(chain_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        _invalid(f"chain.json is invalid: {exc}")
+        return 3
+    if not isinstance(chain, dict) or not isinstance(chain.get("links"), list):
+        _invalid("chain.json is malformed")
+        return 3
+
+    results: list[dict] = []
+    previous_sha: str | None = None
+    for entry in chain["links"]:
+        index = entry.get("index") if isinstance(entry, dict) else None
+        lane = entry.get("lane") if isinstance(entry, dict) else None
+        recorded_sha = entry.get("sha256") if isinstance(entry, dict) else None
+        path_str = entry.get("path") if isinstance(entry, dict) else None
+        problems: list[str] = []
+        run_id: str | None = None
+        actual_sha: str | None = None
+        link_path = Path(path_str) if isinstance(path_str, str) else None
+        if link_path is None or not link_path.is_file():
+            problems.append("link file missing")
+        else:
+            actual_sha = attest.file_sha256(link_path)
+            if actual_sha != recorded_sha:
+                problems.append("link file sha256 does not match chain.json")
+            try:
+                envelope = json.loads(link_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                envelope = None
+                problems.append(f"link file is not valid JSON: {exc}")
+            if envelope is not None:
+                statement, reason = attest.verify(envelope, key)
+                if statement is None:
+                    problems.append(f"link signature: {reason}")
+                else:
+                    if statement.get("previous") != previous_sha:
+                        problems.append("previous does not match the prior link")
+                    run_id = statement.get("run_id")
+                    if isinstance(run_id, str):
+                        problems.extend(_verify_run_attestation(home, run_id, statement, key))
+        results.append(
+            {
+                "index": index,
+                "lane": lane,
+                "run_id": run_id,
+                "verified": not problems,
+                "problems": problems,
+            }
+        )
+        previous_sha = actual_sha
+
+    out = {
+        "mission_id": chain.get("mission_id", mission_id),
+        "key_id": attest.key_id(key),
+        "links": results,
+        "verified": all(row["verified"] for row in results),
+    }
+    print(json.dumps(out, indent=2))
+    return 0 if out["verified"] else 1
 
 
 LIVENESS_STALE_S: int = 30
@@ -481,6 +614,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_gc.add_argument("--older-than", type=float, default=0, metavar="HOURS")
     p_gc.add_argument("--apply", action="store_true")
     p_gc.set_defaults(func=cmd_gc)
+
+    p_attest = sub.add_parser(
+        "attest", help="verify a mission's signed receipt chain on bytes"
+    )
+    p_attest.add_argument("mission_id", metavar="MISSION_ID")
+    p_attest.set_defaults(func=cmd_attest)
 
     return parser
 
