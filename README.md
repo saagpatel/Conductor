@@ -431,8 +431,9 @@ quorum. The quorum also requires every sink outside its `of` list to be ok.
 
 A quorum's `of` names at most three lanes — three judges with a dissent slot
 tally better than five. Three lanes need that dissent slot: `pass` must be
-at most 2, so no verdict is unanimous by construction. Two-lane quorums keep
-the old rule (`pass` may equal the length of `of`). A quorum's lanes, over
+at most 2, so the gate never requires all three lanes to agree, even though
+all three can still pass. Two-lane quorums keep the old rule (`pass` may
+equal the length of `of`). A quorum's lanes, over
 every attempt including fallbacks, must also span at least two vendors
 (`anthropic`, `openai`, `google`, `xai`, `cursor`); a quorum confined to one
 vendor is refused at load, because a disagreement within one vendor's family
