@@ -273,8 +273,13 @@ def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
 
 
 def _git_failure(detail: str, *, worktree: Path, patch_bytes: int = 0) -> dict:
+    # `infra_error` marks a failure in the transplant machinery itself (worktree
+    # add, read-tree, apply, ...) rather than in the gate command it was meant
+    # to run. A caller that treats "the gate command exited nonzero" as meaningful
+    # evidence (the reproduce gate, in particular: exit nonzero there normally
+    # means the check reproduces the bug) must not read this the same way.
     outcome = TestOutcome(ran=True, exit_code=1, tail=detail).to_dict()
-    outcome.update(worktree=str(worktree), patch_bytes=patch_bytes)
+    outcome.update(worktree=str(worktree), patch_bytes=patch_bytes, infra_error=True)
     return outcome
 
 
@@ -539,6 +544,15 @@ def _reproduce_receipt(
         return (
             {**outcome, "verdict": "skipped"},
             "interrupted: stop requested during the reproduce gate; process group killed",
+        )
+    if outcome.get("infra_error"):
+        # The transplant itself failed (worktree add, read-tree, apply, ...);
+        # the gate command never ran, so a nonzero exit here is not evidence
+        # that anything was reproduced.
+        return (
+            {**outcome, "verdict": "no-check"},
+            "fix without a reproducing check: reproduce gate could not run: "
+            + outcome.get("tail", ""),
         )
     if _gate_passed(outcome, None):
         return (
@@ -871,6 +885,8 @@ def dispatch(
         # ordinary gate (own or clean) is skipped below, same as any other
         # error caught before this point.
         error = reproduce_error
+        if reproduce_state.get("interrupted"):
+            interrupted = True
 
     # Commit before the Git verdict is taken, so it describes the state
     # the caller is actually left with.
@@ -951,6 +967,12 @@ def dispatch(
         if commit and commit.committed:
             commit = uncommit(spec.cwd, commit, before.head)
         error = forbid_error
+
+    if reproduce_error is not None and commit and commit.committed:
+        # A fix that never reproduced anything must not land, even when the
+        # fleet committed its own work directly instead of leaving it staged
+        # for conductor's own commit_work to pick up.
+        commit = uncommit(spec.cwd, commit, before.head)
 
     after = GitState.capture(spec.cwd)
     git_verdict = compare(spec.cwd, before, after)
