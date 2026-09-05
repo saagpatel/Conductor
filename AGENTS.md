@@ -55,8 +55,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    vendor, so a build fallback on the reviewer's vendor is not allowed (drop the fallback, rerun by
    hand if the build fails).
 2. **Size the build cap to the spec:** about a dollar per spec item on Sonnet at `hard`, plus two
-   dollars for any item that touches the scheduler, the runner's wait loop, or resume. A cap sized for
-   a small item cut two builders off one lint error and one README phrase from green.
+   dollars for any item that touches the scheduler, the runner's wait loop, or resume, plus a dollar
+   for every module past the second that the spec touches. A cap sized for a small item cut two
+   builders off one lint error and one README phrase from green; a five-item spec spread over four
+   modules (B2) was cut $2 short the same way.
 3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
    The clean gate reruns the original tests against the new source; when the new source refuses a
    shape the old fixtures build, both builders were right and both were rejected. The lead then reads
@@ -64,16 +66,28 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 4. **Every spec says: keep existing call signatures working** (new parameters as keywords with
    defaults). The first Sonnet build changed one and the clean gate rejected a green run.
 5. **Reviewers that run the suite pass `--basetemp` under `$TMPDIR`.** A read lane that leaves pytest
-   scratch in its worktree fails on bytes even when its findings are right.
+   scratch in its worktree fails on bytes even when its findings are right. **Gemini does not run the
+   suite at all on this repo:** `agy` starts it as a background task and polls the log every few
+   seconds, and a two-minute suite burns the tool ceiling before it returns (killed twice on C4, at
+   261 and 196 calls, no answer written). Its review prompt says "do not run the test suite; read the
+   diff and the code". Grok runs it fine in the foreground.
 6. **The salvage path is normal, not exceptional.** A kept worktree with a green own gate is a
    deliverable: gate it, read it, commit it, then run the review and fix lanes as a mission with
    `cwd` at that commit and the diff pasted into the mission prompt. Cost of the remainder: $1.50 to
    $2.50.
-7. **Keep both reviewers.** Across four runs Grok found real defects outside the diff's own lines every
-   time and Gemini's NO_FINDINGS was correct every time on what the diff alone shows. Complementary,
-   not redundant, and $0.70 to $1.00 for the pair.
+7. **Keep both reviewers.** Across seven runs Grok found real defects outside the diff's own lines every
+   time it reported, and Gemini's answer was correct every time it wrote one (NO_FINDINGS on what the
+   diff alone shows, or the same bug Grok found). Complementary, not redundant, and $0.70 to $1.00 for
+   the pair. **Grok's cap is $1.50 when the pasted diff is over 30 KB:** at $1.00 it twice finished a
+   complete review a few cents over, which fails the lane and skips the fix (Cursor's cap is a verdict
+   after the run).
 8. **A session restart kills a background mission.** Send conductor SIGINT (it writes an interrupted
    receipt), restart, then `conductor mission --resume <id>`; finished lanes are not paid twice.
+9. **Never launch a mission from a checkout that is mid-merge.** The venv's `conductor` imports
+   `src/` from the working tree, so a conflict marker in `mission.py` is a `SyntaxError` at startup
+   and the mission never starts. A mission already running is unaffected (its modules are loaded), so
+   merging while lanes run is fine; launching is not. Three parallel missions merged in series worked
+   (B2, B3, C4); the lead's merge and salvage time, not the fleet spend, was the cost that grew.
 
 ## Reviewer prompts: no quotas, ever
 
