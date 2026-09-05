@@ -1,0 +1,133 @@
+{
+  "run_id": "20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+  "fleet": "antigravity",
+  "model": "gemini-3.7-flash-medium",
+  "effort": "standard",
+  "mode": "read",
+  "cwd": "<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+  "timeout": 1200,
+  "exit_code": 0,
+  "timed_out": false,
+  "duration_s": 37.34370512500027,
+  "run_dir": "<home>/runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+  "stdout_path": "<home>/runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/stdout.log",
+  "stderr_path": "<home>/runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/stderr.log",
+  "tail": "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":13,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":1.0810089999999999,\"usage\":{\"input_tokens\":2279,\"output_tokens\":133,\"thinking_tokens\":29,\"cache_read_tokens\":48995,\"total_tokens\":2412}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":14,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/cli.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":14,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.044717,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/cli.py\"},\"output\":\"721 lines, 28841 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":15,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":1.150531,\"usage\":{\"input_tokens\":3085,\"output_tokens\":124,\"thinking_tokens\":20,\"cache_read_tokens\":48988,\"total_tokens\":3209}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":16,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/cli.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":16,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.038955,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/cli.py\"},\"output\":\"721 lines, 28841 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":17,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":1.243247,\"usage\":{\"input_tokens\":3935,\"output_tokens\":150,\"thinking_tokens\":47,\"cache_read_tokens\":48981,\"total_tokens\":4085}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":18,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/tests/test_errors.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":18,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.046013,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/tests/test_errors.py\"},\"output\":\"520 lines, 18381 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":19,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":1.180517,\"usage\":{\"input_tokens\":6835,\"output_tokens\":135,\"thinking_tokens\":14,\"cache_read_tokens\":48981,\"total_tokens\":6970}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":20,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/tests/test_errors.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":20,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.072385,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/tests/test_errors.py\"},\"output\":\"520 lines, 18381 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":21,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":4.859376,\"usage\":{\"input_tokens\":8206,\"output_tokens\":2058,\"thinking_tokens\":1953,\"cache_read_tokens\":53071,\"total_tokens\":10264}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":22,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/runner.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":22,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.038979,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/runner.py\"},\"output\":\"1677 lines, 66673 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":23,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"duration_seconds\":5.505015,\"usage\":{\"input_tokens\":3367,\"output_tokens\":1930,\"thinking_tokens\":1828,\"cache_read_tokens\":61237,\"total_tokens\":5297}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":24,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/mission.py\"}}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":24,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"view_file\",\"duration_seconds\":0.047515,\"tool_info\":{\"name\":\"view_file\",\"parameters\":{\"AbsolutePath\":\"<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/src/conductor/mission.py\"},\"output\":\"3571 lines, 152776 bytes\"}}}\n{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"step_index\":25,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"NO_FINDINGS\\n\",\"duration_seconds\":2.990809,\"usage\":{\"input_tokens\":6136,\"output_tokens\":757,\"thinking_tokens\":753,\"cache_read_tokens\":61236,\"total_tokens\":6893}}}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6\",\"status\":\"SUCCESS\",\"response\":\"NO_FINDINGS\\n\",\"duration_seconds\":31.808483,\"num_turns\":1,\"usage\":{\"input_tokens\":178529,\"output_tokens\":6416,\"thinking_tokens\":5169,\"cache_read_tokens\":502177,\"total_tokens\":184945}}}",
+  "spawned": true,
+  "git_verdict": {
+    "checked": true,
+    "no_op": true,
+    "commits_added": 0,
+    "files_changed": 0,
+    "dirty_delta": 0,
+    "branch_before": "conductor/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+    "branch_after": "conductor/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+    "branch_moved": false,
+    "notes": [
+      "no commits, no working-tree change: the run reported an outcome but moved no bytes",
+      "isolated on branch ; worktree removed; no commits landed, branch deleted"
+    ]
+  },
+  "verdict": null,
+  "tests": {
+    "ran": true,
+    "exit_code": 0,
+    "timed_out": false,
+    "interrupted": false,
+    "tail": "All checks passed!\n........................................................................ [ 13%]\n........................................................................ [ 26%]\n........................................................................ [ 39%]\n........................................................................ [ 52%]\n........................................................................ [ 65%]\n........................................................................ [ 78%]\n........................................................................ [ 91%]\n...............................................                          [100%]"
+  },
+  "test_surface": {
+    "policy": "clean",
+    "patterns": [
+      "tests/**",
+      "test/**",
+      "**/tests/**",
+      "**/test_*.py",
+      "**/*_test.py",
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/conftest.py",
+      "**/pytest.ini",
+      "**/tox.ini",
+      "**/setup.cfg",
+      "**/pyproject.toml",
+      "**/Makefile",
+      "**/noxfile.py",
+      ".github/workflows/**",
+      ".gitlab-ci.yml",
+      "**/package.json",
+      "**/jest.config.*",
+      "**/vitest.config.*",
+      "**/.pre-commit-config.yaml"
+    ],
+    "digest_before": "0c928adac999f645e28e8c2794458ac823b057235cc5a549bb74889a96cbb386",
+    "digest_after": "0c928adac999f645e28e8c2794458ac823b057235cc5a549bb74889a96cbb386",
+    "touched": false,
+    "changed": [],
+    "clean_gate": {
+      "ran": false,
+      "reason": "test surface unchanged"
+    }
+  },
+  "reproduce": {
+    "ran": false,
+    "exit_code": null,
+    "timed_out": false,
+    "tail": "stage is not fix",
+    "worktree": "",
+    "patch_bytes": 0,
+    "verdict": "skipped"
+  },
+  "commit": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 11585,
+    "cache_read_tokens": 502177,
+    "cache_write_tokens": 0,
+    "thinking_tokens": 5169,
+    "cost_usd": 0.081107,
+    "cost_basis": "estimated",
+    "total_tokens": 513762
+  },
+  "budget": {
+    "cap_usd": 1.0,
+    "enforcement": "watcher",
+    "exceeded": false,
+    "unpriced": false,
+    "observed_usd": 0.081107
+  },
+  "breaker": {
+    "tool_calls": 26,
+    "last_output_age_s": 0.0008814999964670278,
+    "last_tool_call_age_s": 0.0008814999964670278,
+    "tripped": null
+  },
+  "answer_path": "<home>/runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/answer.txt",
+  "diff_path": null,
+  "attestation_path": "<home>/runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/attestation.json",
+  "base_commit": "f2f5488304472ded812925ec47156d01dc6fa288",
+  "tip_commit": "f2f5488304472ded812925ec47156d01dc6fa288",
+  "isolation": {
+    "requested": true,
+    "active": true,
+    "repo": "<cwd>",
+    "worktree": "<home>/worktrees/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor",
+    "branch": "",
+    "base_sha": "f2f5488304472ded812925ec47156d01dc6fa288",
+    "kept": false,
+    "reason": "worktree removed; no commits landed, branch deleted",
+    "tip_sha": "f2f5488304472ded812925ec47156d01dc6fa288",
+    "clean": true
+  },
+  "fleet_status": "SUCCESS",
+  "fleet_error": null,
+  "session_id": "794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6",
+  "resumed": null,
+  "lane_env": null,
+  "error": null,
+  "dry_run": false,
+  "no_op_ok": false,
+  "interrupted": false,
+  "cancelled": false,
+  "ok": true
+}

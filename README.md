@@ -1083,6 +1083,122 @@ conductor process stopped writing; and a directory with neither file is reported
 as `incomplete`. `silent` is a flag for the operator, nothing more: conductor never
 modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
 
+## Golden missions
+
+A change to routing, a template, or `outputs.parse` used to be testable only
+by paying for a live mission. A golden fixture is a recorded transcript of a
+past real mission, replayed offline through the same parser, scheduler, and
+templating that ran it the first time. Evidence
+(`docs/ROADMAP-2026-09.md` item C7): "Recorded transcripts of past real
+missions replayed through the parser, scheduler, and templating offline, so
+a routing or template change is testable without spending on live vendors."
+
+### What a fixture holds
+
+`conductor golden record MISSION_ID --out DIR` copies a finished mission
+directory and every run it dispatched into `DIR`: `mission.json`,
+`result.json`, `report.md`, `lanes/*.json`, `pause.json` when present, and
+for every run id any lane's attempts name, `runs/<run_id>/result.json`,
+`stdout.jsonl`, `prompt.txt`, `answer.txt`, and `diff.patch`, each only when
+it exists. A run's transcript is stored as `stdout.jsonl`, never
+`stdout.log`: an operator's global git excludes routinely drop every
+`*.log` path from `git add` silently, and a fixture using that name would
+look committed while never actually landing in the repo. Replay restores it
+to `stdout.log` when it recreates a run directory, matching what a live run
+writes. `argv.json`, `stderr.log`, `liveness.json`, and `attestation.json`
+are never copied: argv is reconstructible from the spec, stderr is empty on
+every real run so far, liveness is a heartbeat with nothing to replay, and
+attestation's DSSE payload is base64 over the real run's paths (unscrubbable
+without breaking the signature) with a signature that cannot be verified
+without the operator's key -- a copy would be both unscrubbed and
+unverifiable, and nothing in replay reads it beyond hashing it into a
+throwaway chain. `golden.json` is the manifest: format, the source mission
+id, the fixture's own name, when it was recorded, the conductor version,
+the fleets it exercises, the placeholder names, and a sha256 per file.
+`expected.json` holds the mission's `projection` (below) at record time.
+
+### Scrubbing
+
+Every copied text file and every string inside every copied JSON document is
+scrubbed, longest replacement first so a home nested inside the user's own
+home is replaced before the shorter path that contains it: the conductor
+home becomes `<home>`, the mission's `cwd` becomes `<cwd>`, and the user's
+home directory (`Path.home()`) becomes `<user>`. Then secrets: any
+`NAME=value` where `NAME` contains `TOKEN`, `SECRET`, `KEY`, or `PASSWORD`
+becomes `NAME=<redacted>`; `Bearer <token>` becomes `Bearer <redacted>`;
+JSON object values whose key contains those words become `<redacted>`; and
+`sk-`, `xai-`, `ghp_`, or `AIza`-prefixed tokens of 16 or more characters
+become `<redacted>`. `golden.scrub_guard(path)` re-scans a fixture directory
+for the user's home path, the conductor home, or any of those secret
+patterns, as `file:line: <pattern name>`; empty when clean, which
+`conductor golden record` and `conductor golden check` both leave a fixture
+in. It also decodes any run of 64 or more base64 characters on a line and
+scans the decoded text the same way, reporting `file:line: <pattern name>
+(base64)` -- the shape a DSSE envelope like `attestation.json` carries a
+statement in, invisible to a plain-text scan, and part of why that file is
+never copied into a fixture at all.
+
+### Eliding a transcript
+
+`stdout.jsonl` is elided so a multi-megabyte transcript stays small and
+readable without changing what the parser sees: per JSON line, any string
+value longer than 512 characters becomes `<elided N chars
+sha256=<12 hex chars>>`, except the keys `result`, `response`, and `error`
+inside an event whose `type` (or, for antigravity, `event`) is `result`, the
+key `text` inside an event whose `type` is `assistant`, and the key `plan`
+anywhere, all of which are kept whole. A line that is not JSON is kept as it
+is. `record` refuses (`GoldenError`, naming the run and the field) unless
+`outputs.parse` agrees on `answer`, `usage`, `status`, `error`, and
+`session_id` before and after eliding.
+
+### Replaying offline
+
+`mission.run_mission(..., dispatcher=...)` takes a callable in place of a
+live `runner.dispatch`: when set, every attempt calls `dispatcher(spec,
+lane=<name>, attempt=<label>, retry=<index or None>, dry_run=..., ...)`
+with the same keyword values the live path gets, and the branch-claiming
+step after a lane's attempt walk sets `branch` on the lane and its final
+attempt without touching git. `golden.replay(fixture_dir, *, home, cwd)`
+builds exactly that dispatcher: it loads `mission.json` (with `<cwd>`
+mapped back to `cwd`) through the ordinary snapshot loader, and for the
+k-th call on a lane returns the k-th recorded run in that lane's
+`lanes/<name>.json` (`previous_attempts` then `attempts`) -- copying its
+files into `home/runs/<run_id>/` (`stdout.jsonl` restored to `stdout.log`),
+re-parsing that transcript, and recording
+a difference for any of the same five fields that disagree with what was
+recorded, or for a rendered prompt (template nonces normalized) that no
+longer matches `prompt.txt`. A call past the recorded count is itself a
+difference (`lane <name>: replay dispatched attempt <k> but the recording
+has <n>`), answered with a refused result so the mission still completes
+rather than raising. `runner.Result.from_dict` rehydrates a stored
+`result.json` back into a `Result`; an unknown field is refused by name, and
+a field missing from an older receipt takes its dataclass default.
+
+### Checking a fixture
+
+`golden.projection(result)` is the slice of a `MissionResult` a routing or
+template change is allowed to move -- `ok`, `require`, `notes`, `errors`,
+`escalation`, `early_cancel`, `paused`, `quorum`, a trimmed `ranking`
+(`lane`, `rank`, `ok`), the cache hit rate, and per lane and attempt the
+fields that describe what happened, never a path, a duration, a run id, a
+timestamp, or a dollar amount. `expected.json` pins that projection at
+record time. `conductor golden check [DIR ...]` replays each fixture (every
+directory under `tests/golden/` of the current working directory that holds
+a `golden.json`, by default) into a fresh temporary home and a fresh
+temporary git repository, and prints every difference -- the replay's own,
+plus one line per projection field that disagrees with `expected.json` --
+prefixed by the fixture's name; exit 1 if anything printed, 0 if every
+fixture was clean. `--update` is for a deliberate change: it rewrites
+`expected.json` from the replay instead of reporting projection
+differences, so the next `check` is clean once the new behavior is the one
+you meant.
+
+```
+conductor golden record 20260905T171417Z-c5-error-kinds --out tests/golden/c5-build-cascade-capped
+conductor golden check
+conductor golden check tests/golden/c5-build-cascade-capped --update
+```
+
 ## Commands
 
 - `conductor fleets`: the routing policy, and whether each binary is installed
@@ -1107,6 +1223,11 @@ modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
   port-claim cleanup; pass `--apply` to execute it
 - `conductor attest MISSION_ID`: verify a mission's signed receipt chain on
   bytes
+- `conductor golden record MISSION_ID --out DIR`: record a finished mission
+  under `$CONDUCTOR_HOME` as an offline, scrubbed fixture (`--max-bytes`
+  overrides the 3,000,000-byte default)
+- `conductor golden check [DIR ...]`: replay fixtures offline and compare
+  against `expected.json` (`--update` rewrites it instead)
 
 Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 

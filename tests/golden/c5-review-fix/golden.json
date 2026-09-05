@@ -1,0 +1,39 @@
+{
+  "conductor_version": "0.22.0",
+  "files": {
+    "expected.json": "eb7d1acb876d972155773514b483d7c8f7428fc7d7453b19d5ebacf6d95fab72",
+    "lanes/fix.json": "ece4e77e23eb943aa072374933208fe701ce5fd2d6a94703314b0cb9c1eef195",
+    "lanes/review-gemini.json": "91110b04ef23adb1469cd4be35a03cec3ebed7ba12d9d05f557b67017838c469",
+    "lanes/review-grok.json": "4ee3fb746250418969682260718b4b84469fe57051600894919a350e5905bb30",
+    "mission.json": "dca6a3b838ccccdefdafe305abb1ba4288d400261430ec39d59c005029ad84fe",
+    "report.md": "01445b84229762300a90af3bb178bb36761edd6a1fecfd41c366bc6db23527ac",
+    "result.json": "46bf1d5ec7ead0b18095dbf3508b0050da15adb5cb3248fb834c3d2320d903ee",
+    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/answer.txt": "eb8bef82d2eafed4fbbda67d6495a9ba59a1234e65da8fd99cfd0b25e8a39c33",
+    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/prompt.txt": "778f38525fe8cffd838aff30fe4b3f9020a0fba504726f3e27beb4cf61b56fc4",
+    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/result.json": "104da4d9caaebf86da5a38727c03a7c924d407ead4fdcd695a72f8bf405a10d6",
+    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/stdout.jsonl": "1152e735cd26ab523cef35b88704222a3c346f454fe23b557beff18adc50858d",
+    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/answer.txt": "beee59605b8ea94d0d87c9cb59b76a6ec6b684602fba8f7b232f581aca942bf9",
+    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/prompt.txt": "6bdf7ab333c94d38b3b19936b77abba49b77313e81dee96b0e2c418a2ce0de46",
+    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/result.json": "c95421c0cb56ac6e7d399cf091574ac1803e63c46a0dfea051fcbf6558c4c579",
+    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/stdout.jsonl": "80dcfc831ef33eba86a8888f12fcbdb6eef08ce263264a492ea915d5d19d1a62",
+    "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/answer.txt": "664f697f715070296cb29a9912465ae8101dbb3835c0ed5ca224e65321059a82",
+    "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "b7d3afaf521f23c783f133464a14ce912e2b12443fd143c442ab80d01da93a01",
+    "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "20fcae1d4d7916e70128b97e6c3302452c30dbba1bd2cc2e16d7e7dfd0bc2843",
+    "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/result.json": "e33a92050863a9f8b3d58f90de2f9496940cb945b4f210d199e1efbc5af4d471",
+    "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "336c8f248c5d292e43cb8c8f231ef59d71e1f2a4ba9632bbb789cf6038e4b2b6"
+  },
+  "fleets": [
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260905T182328Z-c5-error-kinds-review",
+  "name": "c5-review-fix",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "recorded_at": "2026-09-05T20:05:46.738054Z"
+}

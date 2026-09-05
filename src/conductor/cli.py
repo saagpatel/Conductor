@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import attest, prices
+from . import attest, golden, prices
 from .errors import error_kind
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
@@ -514,6 +514,46 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_golden_record(args: argparse.Namespace) -> int:
+    home = conductor_home()
+    mission_dir = home / "missions" / args.mission_id
+    try:
+        fixture = golden.record(
+            mission_dir, Path(args.out), home=home, max_bytes=args.max_bytes
+        )
+    except golden.GoldenError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    total = sum(f.stat().st_size for f in fixture.rglob("*") if f.is_file())
+    print(json.dumps({"fixture": str(fixture), "bytes": total}, indent=2))
+    return 0
+
+
+def cmd_golden_check(args: argparse.Namespace) -> int:
+    if args.dirs:
+        fixture_dirs = [Path(d) for d in args.dirs]
+    else:
+        golden_root = Path("tests/golden")
+        fixture_dirs = (
+            sorted({p.parent for p in golden_root.glob("*/golden.json")})
+            if golden_root.is_dir()
+            else []
+        )
+    any_diff = False
+    for fixture_dir in fixture_dirs:
+        try:
+            diffs = golden.check(fixture_dir, update=args.update)
+        except (golden.GoldenError, OSError, ValueError) as exc:
+            print(f"{fixture_dir.name}: {exc}")
+            any_diff = True
+            continue
+        for line in diffs:
+            print(f"{fixture_dir.name}: {line}")
+        if diffs:
+            any_diff = True
+    return 1 if any_diff else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="conductor",
@@ -695,6 +735,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_attest.add_argument("mission_id", metavar="MISSION_ID")
     p_attest.set_defaults(func=cmd_attest)
+
+    p_golden = sub.add_parser(
+        "golden", help="record and replay golden-mission fixtures offline (C7)"
+    )
+    golden_sub = p_golden.add_subparsers(dest="golden_command", required=True)
+
+    p_golden_record = golden_sub.add_parser(
+        "record", help="record a finished mission under CONDUCTOR_HOME as an offline fixture"
+    )
+    p_golden_record.add_argument("mission_id", metavar="MISSION_ID")
+    p_golden_record.add_argument("--out", required=True, metavar="DIR")
+    p_golden_record.add_argument(
+        "--max-bytes", type=int, default=golden.DEFAULT_MAX_BYTES, metavar="N"
+    )
+    p_golden_record.set_defaults(func=cmd_golden_record)
+
+    p_golden_check = golden_sub.add_parser(
+        "check",
+        help="replay every fixture under tests/golden (or the given directories) and "
+        "compare against expected.json",
+    )
+    p_golden_check.add_argument("dirs", nargs="*", metavar="DIR")
+    p_golden_check.add_argument(
+        "--update", action="store_true", help="rewrite expected.json from the replay"
+    )
+    p_golden_check.set_defaults(func=cmd_golden_check)
 
     return parser
 

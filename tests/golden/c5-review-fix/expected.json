@@ -1,0 +1,131 @@
+{
+  "cache_hit_rate": 0.981,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 502177,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "antigravity",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "read",
+          "model": "gemini-3.7-flash-medium",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "retry": null,
+          "retry_of": null,
+          "session_id": "794ef8aa-bf6c-4e3b-a4e5-2fb18f3bbcb6",
+          "tokens": 513762,
+          "tool_calls": 26
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "review-gemini",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 1235072,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "cursor",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "read",
+          "model": "cursor-grok-4.6-medium",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "retry": null,
+          "retry_of": null,
+          "session_id": "0d2905d0-725c-456a-a44b-550eebfd8fb3",
+          "tokens": 1251201,
+          "tool_calls": 58
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "review-grok",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 2145111,
+          "cache_write_tokens": 77019,
+          "cost_basis": "reported",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "claude",
+          "input_tokens": 50,
+          "kind": null,
+          "mode": "write",
+          "model": "claude-sonnet-5",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "retry": null,
+          "retry_of": null,
+          "session_id": "bc8a9f0c-9a95-4365-ba80-7c35543430a9",
+          "tokens": 2238663,
+          "tool_calls": 25
+        }
+      ],
+      "base": null,
+      "branch": "feat/error-kinds-fix",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "fix",
+      "needs": [
+        "review-gemini",
+        "review-grok"
+      ],
+      "ok": true,
+      "skipped": null,
+      "stage": "fix"
+    }
+  ],
+  "notes": [],
+  "ok": true,
+  "paused": null,
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "fix",
+      "ok": true,
+      "rank": 1
+    }
+  ],
+  "require": "all"
+}
