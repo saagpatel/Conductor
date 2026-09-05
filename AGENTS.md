@@ -27,9 +27,14 @@ claim below lives in `docs/research/` (dated reports with URLs and live-probe re
 
 - **Codex / OpenAI lanes are paused** until the operator lifts it: no `codex exec`, no `codex`
   fleet in any mission, no `codex-delegate`. Sol, Terra, Luna alike.
-- Preferred lanes: Gemini (antigravity), Grok and Composer (cursor), Claude, and the cheap open
-  models through OpenCode (DeepSeek V4 Flash, GLM-5.3-Flash first). Orchestration judgment sits
-  with the lead session, not with the most expensive lane.
+- Preferred lanes: Gemini (antigravity), Grok and Composer (cursor), Claude. Orchestration
+  judgment sits with the lead session, not with the most expensive lane.
+- **Shelved 2026-09-04, operator decision:** OpenCode, OpenRouter, Ollama, pi, and local models. Not
+  fleets, not to be re-proposed without the operator raising it. Reasons on record: free hosted tiers
+  carry training and confidentiality terms; local inference runs the GPU flat out (fans, 23 GB
+  resident, minutes per task) and a 30B mixture-of-experts is already the lightest useful option; paid
+  OpenRouter saves nothing over the existing lanes. The research and probe receipts in
+  `docs/research/` stay as the record; the OpenCode and pi sections below are that record, not policy.
 - Free-tier gateway models (`*-free`, `contributor-free`, Big Pickle) never see a private repo:
   NVIDIA's free endpoints are trial-use-only with a "no confidential data" clause, Meta's
   contributor tier trains on your prompts, the rest may. Scratch repos only.
