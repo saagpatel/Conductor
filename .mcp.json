@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "bridge-db": {
+      "type": "stdio",
+      "command": "${HOME}/.local/state/bridge-db/current/bin/bridge-db-mcp",
+      "args": [],
+      "env": {
+        "BRIDGE_DB_AUTH_MODE": "warn",
+        "BRIDGE_DB_PRINCIPAL_TOKEN": "${BRIDGE_DB_PRINCIPAL_TOKEN}"
+      }
+    }
+  }
+}
