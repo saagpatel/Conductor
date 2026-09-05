@@ -19,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -926,9 +927,6 @@ def _self_commit_sha(cwd: str, before: GitState) -> str | None:
     return sha if ancestor.returncode == 0 else None
 
 
-LIVENESS_STALE_S: int = 30
-
-
 def _write_liveness(
     run_dir: Path,
     pid: int,
@@ -966,8 +964,10 @@ def _write_liveness(
     try:
         tmp_file.write_text(json.dumps(heartbeat, indent=2))
         os.replace(tmp_file, target_file)
-    except OSError:
-        pass
+    except OSError as exc:
+        # A heartbeat that cannot be written must not end the run; the run
+        # then reads as `silent` in `conductor runs`, which is the truth.
+        print(f"liveness heartbeat not written: {exc}", file=sys.stderr)
 
 
 def _wait(
@@ -992,9 +992,12 @@ def _wait(
     """
     start_time = started if started is not None else time.monotonic()
     out_path = stdout_path or (run_dir / "stdout.log" if run_dir else None)
-    if run_dir is not None and out_path is not None:
-        _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
 
+    def beat() -> None:
+        if run_dir is not None and out_path is not None:
+            _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
+
+    beat()
     deadline = time.monotonic() + timeout
     timed_out = over_cap = interrupted = False
     breaker_reason: str | None = None
@@ -1008,19 +1011,14 @@ def _wait(
             break
         except subprocess.TimeoutExpired:
             pass
-        if run_dir is not None and out_path is not None:
-            _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
+        beat()
         if _STOP.is_set():
             interrupted = True
             break
         if watcher is not None and watcher.over_cap():
             over_cap = True
-            if run_dir is not None and out_path is not None:
-                _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
             break
         if breaker is not None and (breaker_reason := breaker.check()) is not None:
-            if run_dir is not None and out_path is not None:
-                _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
             break
     if (
         not (timed_out or over_cap or interrupted)
@@ -1031,8 +1029,7 @@ def _wait(
         # so receipts still count tools and a just-completed runaway is not
         # allowed to evade the ceiling by exiting in the same two-second tick.
         breaker_reason = breaker.check(final=True)
-    if run_dir is not None and out_path is not None:
-        _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
+    beat()
     _kill_live_group(proc.pid)
     proc.wait()
     return proc.returncode, timed_out, over_cap, interrupted, breaker_reason
