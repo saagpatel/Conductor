@@ -400,6 +400,15 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # refuses OAuth, which is how this machine is logged in.
         "--setting-sources",
         "project",
+        # Roadmap B2: pin the system prompt after its first render and move
+        # cwd, env info, memory paths, and git status out of it into the
+        # first user message, so every lane's request begins with identical
+        # bytes -- what a prompt cache needs to hit. Evidence: moving dynamic
+        # content after the static prefix took one production hit rate from
+        # 7% to 84% (docs/ROADMAP-2026-09.md item B2).
+        "--system-prompt-snapshot",
+        "on",
+        "--exclude-dynamic-system-prompt-sections",
     ]
     # Write mode bypasses permissions outright. `acceptEdits` auto-approves
     # Edit/Write but still refuses Bash beyond `pwd`/`ls`, so a build lane

@@ -151,6 +151,17 @@ def test_claude_headless_loads_no_operator_settings():
     assert argv[argv.index("--setting-sources") + 1] == "project"
 
 
+def test_claude_pins_the_system_prompt_and_moves_dynamic_sections_out():
+    """B2: every Claude dispatch, read and write, snapshots its system prompt
+    and moves cwd/env/git status out of it, so every lane's request begins
+    with identical bytes. Evidence: moving dynamic content after the static
+    prefix took one production hit rate from 7% to 84%."""
+    for mode in ("read", "write"):
+        argv = build_argv(spec(fleet="claude", mode=mode))
+        assert argv[argv.index("--system-prompt-snapshot") + 1] == "on"
+        assert "--exclude-dynamic-system-prompt-sections" in argv
+
+
 def test_claude_streams_progress_and_enables_verbose_print_mode():
     argv = build_argv(spec(fleet="claude"))
     assert argv[argv.index("--output-format") + 1] == "stream-json"
