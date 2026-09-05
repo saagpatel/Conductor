@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -196,6 +196,46 @@ class Result:
         # classifies correctly without needing its own field to go stale.
         d["kind"] = error_kind(self)
         return d
+
+    # The fields with no dataclass default: a receipt missing any of these
+    # cannot be rehydrated into a Result that means anything.
+    _REQUIRED_FIELDS = (
+        "run_id",
+        "fleet",
+        "model",
+        "effort",
+        "mode",
+        "cwd",
+        "timeout",
+        "exit_code",
+        "timed_out",
+        "duration_s",
+        "run_dir",
+        "stdout_path",
+        "stderr_path",
+        "tail",
+    )
+    # Computed by to_dict(), never a real field: present on every receipt but
+    # accepted and discarded here so `from_dict(r.to_dict())` round-trips.
+    _COMPUTED_FIELDS = frozenset({"ok", "kind"})
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> Result:
+        """Rehydrate a stored `result.json` (golden.py's replay reads a
+        recorded receipt back this way). Unknown keys are refused by name;
+        a key missing from an older receipt takes the dataclass default,
+        except for the fields above, which have none and are required."""
+        if not isinstance(raw, dict):
+            raise ValueError("result must be an object")
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(raw) - known - cls._COMPUTED_FIELDS)
+        if unknown:
+            raise ValueError(f"result has unknown field(s): {', '.join(unknown)}")
+        missing = sorted(f for f in cls._REQUIRED_FIELDS if f not in raw)
+        if missing:
+            raise ValueError(f"result is missing field(s): {', '.join(missing)}")
+        data = {k: v for k, v in raw.items() if k in known}
+        return cls(**data)
 
     def summary(self) -> dict:
         """The few lines an orchestrator actually needs to decide what next."""

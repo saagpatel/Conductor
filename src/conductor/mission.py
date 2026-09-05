@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -2240,6 +2241,7 @@ def run_mission(
     dry_run: bool = False,
     resume_dir: Path | None = None,
     answer: str | None = None,
+    dispatcher: Callable[..., Result] | None = None,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
@@ -2312,6 +2314,7 @@ def run_mission(
             resume=resume,
             is_resume=resume_dir is not None,
             stop_answer=stop_answer,
+            dispatcher=dispatcher,
         )
     finally:
         try:
@@ -2330,6 +2333,7 @@ def _execute_mission(
     resume: _ResumePlan,
     is_resume: bool,
     stop_answer: dict | None = None,
+    dispatcher: Callable[..., Result] | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -2425,14 +2429,14 @@ def _execute_mission(
             prompt = _with_prefix(
                 mission, _render(attempt.prompt, mission, done, dry_run=dry_run)
             )
-            result = dispatch(
-                attempt.spec(
-                    mission.cwd,
-                    cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
-                    prompt=prompt,
-                    resume=resume_id,
-                    stage=lane.stage,
-                ),
+            spec = attempt.spec(
+                mission.cwd,
+                cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
+                prompt=prompt,
+                resume=resume_id,
+                stage=lane.stage,
+            )
+            dispatch_kwargs = dict(
                 dry_run=dry_run,
                 test_command=attempt.test,
                 commit_message=attempt.commit,
@@ -2442,6 +2446,19 @@ def _execute_mission(
                 base_ref=base_ref,
                 cancel=lane_cancel_events.get(lane.name),
             )
+            if dispatcher is not None:
+                # C7: golden.replay's offline dispatcher, in place of a live
+                # spawn. Same keyword values the live call gets, plus which
+                # lane, which attempt label, and this call's retry index.
+                result = dispatcher(
+                    spec,
+                    lane=lane.name,
+                    attempt=attempt.label(),
+                    retry=retry_index,
+                    **dispatch_kwargs,
+                )
+            else:
+                result = dispatch(spec, **dispatch_kwargs)
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
                 (Path(result.run_dir) / "result.json").write_text(
@@ -2615,20 +2632,33 @@ def _execute_mission(
             # pipeline's output: its deliverable is the tip it was built on,
             # so the name goes there. Only a clean tip qualifies.
             if not out.branch and lane.base is not None and out.tip_sha and out.clean:
-                made = git_run(mission.cwd, "branch", "--", lane.branch, out.tip_sha)
-                if made.returncode != 0:
-                    out.ok = False
-                    error = f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
-                    out.attempts[-1].update(ok=False, error=error, failure=error)
-                else:
+                if dispatcher is not None:
+                    # C7 replay: no git operation, same fields and note text
+                    # as the live path takes when it succeeds.
                     out.branch = lane.branch
                     out.attempts[-1]["branch"] = lane.branch
                     out.attempts[-1]["note"] = (
                         f"branch '{lane.branch}' created at {out.tip_sha[:8]}: "
                         "nothing landed on top of the base"
                     )
+                else:
+                    made = git_run(mission.cwd, "branch", "--", lane.branch, out.tip_sha)
+                    if made.returncode != 0:
+                        out.ok = False
+                        error = f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
+                        out.attempts[-1].update(ok=False, error=error, failure=error)
+                    else:
+                        out.branch = lane.branch
+                        out.attempts[-1]["branch"] = lane.branch
+                        out.attempts[-1]["note"] = (
+                            f"branch '{lane.branch}' created at {out.tip_sha[:8]}: "
+                            "nothing landed on top of the base"
+                        )
             elif not out.branch:
                 out.attempts[-1]["note"] = f"branch '{lane.branch}' not created: no commits landed"
+            elif dispatcher is not None:
+                out.branch = lane.branch
+                out.attempts[-1]["branch"] = lane.branch
             else:
                 why = _rename_branch(mission.cwd, out.branch, lane.branch)
                 if why:

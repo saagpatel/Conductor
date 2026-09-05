@@ -1,0 +1,147 @@
+{
+  "run_id": "20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+  "fleet": "claude",
+  "model": "claude-sonnet-5",
+  "effort": "hard",
+  "mode": "write",
+  "cwd": "<home>/worktrees/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+  "timeout": 3300,
+  "exit_code": 1,
+  "timed_out": false,
+  "duration_s": 2466.4584931659992,
+  "run_dir": "<home>/runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+  "stdout_path": "<home>/runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/stdout.log",
+  "stderr_path": "<home>/runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/stderr.log",
+  "tail": "",
+  "spawned": true,
+  "git_verdict": {
+    "checked": true,
+    "no_op": false,
+    "commits_added": 0,
+    "files_changed": 0,
+    "dirty_delta": 6,
+    "branch_before": "conductor/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+    "branch_after": "conductor/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+    "branch_moved": false,
+    "notes": [
+      "test surface changed: 1 file(s): tests/test_errors.py",
+      "isolated on branch conductor/20260905T173342Z-claude-you-are-one-lane-of-a-conductor; worktree kept: it holds uncommitted changes"
+    ]
+  },
+  "verdict": null,
+  "tests": {
+    "ran": true,
+    "exit_code": 0,
+    "timed_out": false,
+    "interrupted": false,
+    "tail": "All checks passed!\n........................................................................ [ 13%]\n........................................................................ [ 26%]\n........................................................................ [ 39%]\n........................................................................ [ 52%]\n........................................................................ [ 65%]\n........................................................................ [ 78%]\n........................................................................ [ 91%]\n...............................................                          [100%]"
+  },
+  "test_surface": {
+    "policy": "clean",
+    "patterns": [
+      "tests/**",
+      "test/**",
+      "**/tests/**",
+      "**/test_*.py",
+      "**/*_test.py",
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/conftest.py",
+      "**/pytest.ini",
+      "**/tox.ini",
+      "**/setup.cfg",
+      "**/pyproject.toml",
+      "**/Makefile",
+      "**/noxfile.py",
+      ".github/workflows/**",
+      ".gitlab-ci.yml",
+      "**/package.json",
+      "**/jest.config.*",
+      "**/vitest.config.*",
+      "**/.pre-commit-config.yaml"
+    ],
+    "digest_before": "c8965363efacd87bea477f6e5fe593615b6de1f9ed9a00cb7be4744a7ba0a2da",
+    "digest_after": "0c928adac999f645e28e8c2794458ac823b057235cc5a549bb74889a96cbb386",
+    "touched": true,
+    "changed": [
+      "tests/test_errors.py"
+    ],
+    "clean_gate": {
+      "ran": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "interrupted": false,
+      "tail": "All checks passed!\n........................................................................ [ 14%]\n........................................................................ [ 28%]\n........................................................................ [ 42%]\n........................................................................ [ 56%]\n........................................................................ [ 70%]\n........................................................................ [ 84%]\n........................................................................ [ 98%]\n......                                                                   [100%]",
+      "worktree": "<home>/worktrees/20260905T173342Z-claude-you-are-one-lane-of-a-conductor-clean",
+      "patch_bytes": 40517
+    }
+  },
+  "reproduce": {
+    "ran": false,
+    "exit_code": null,
+    "timed_out": false,
+    "tail": "stage is not fix",
+    "worktree": "",
+    "patch_bytes": 0,
+    "verdict": "skipped"
+  },
+  "commit": null,
+  "usage": {
+    "input_tokens": 254,
+    "output_tokens": 129056,
+    "cache_read_tokens": 31611386,
+    "cache_write_tokens": 337606,
+    "thinking_tokens": 0,
+    "cost_usd": 9.049014400000003,
+    "cost_basis": "reported",
+    "total_tokens": 32078302
+  },
+  "budget": {
+    "cap_usd": 9.0,
+    "enforcement": "native",
+    "exceeded": true,
+    "unpriced": false,
+    "observed_usd": 9.049014400000003
+  },
+  "breaker": {
+    "tool_calls": 130,
+    "last_output_age_s": 0.02332229199964786,
+    "last_tool_call_age_s": 13.731479624999338,
+    "tripped": null
+  },
+  "answer_path": null,
+  "diff_path": "<home>/runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/diff.patch",
+  "attestation_path": "<home>/runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/attestation.json",
+  "base_commit": "e0d0b0a0696a190d460c263b9e87570f20984986",
+  "tip_commit": "e0d0b0a0696a190d460c263b9e87570f20984986",
+  "isolation": {
+    "requested": true,
+    "active": true,
+    "repo": "<cwd>",
+    "worktree": "<home>/worktrees/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+    "branch": "conductor/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+    "base_sha": "e0d0b0a0696a190d460c263b9e87570f20984986",
+    "kept": true,
+    "reason": "worktree kept: it holds uncommitted changes",
+    "tip_sha": "e0d0b0a0696a190d460c263b9e87570f20984986",
+    "clean": false
+  },
+  "fleet_status": "error_max_budget_usd",
+  "fleet_error": "Reached maximum budget ($9)",
+  "session_id": "c0eba56f-fffe-461a-80d0-ebbd8e762589",
+  "resumed": null,
+  "lane_env": {
+    "ports": [
+      59629
+    ],
+    "setup": null,
+    "teardown": null,
+    "included": []
+  },
+  "error": null,
+  "dry_run": false,
+  "no_op_ok": false,
+  "interrupted": false,
+  "cancelled": false,
+  "ok": false
+}

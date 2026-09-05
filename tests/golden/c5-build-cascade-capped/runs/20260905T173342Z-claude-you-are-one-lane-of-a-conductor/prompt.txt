@@ -1,0 +1,119 @@
+You are one lane of a conductor mission on the conductor repository itself: a Python 3.12, stdlib-only dispatcher over headless agent CLIs. Every claim is judged on bytes: the diff, the gate, the receipts. Read before you write; cite file and line for anything you report.
+
+<context>
+You are working on `conductor`, a Python 3.12, stdlib-only dispatcher over headless agent
+CLIs (package `src/conductor`, tests in `tests/`). Work only in the current working directory,
+which is a git worktree conductor created for you; do not read or touch any other checkout of
+this repository. Read `AGENTS.md` and `README.md` before changing anything, in particular the
+README sections "What a result looks like", "Missions" (the fallback list), "Per-dispatch caps",
+and the cascade subsection.
+
+What exists today. `runner.Result.failure()` reduces a dispatch to one line: `error` (a cap
+kill, a breaker trip, a cancel, an interrupt, a setup failure, a refused dispatch), `budget`
+over cap, `timed out after Ns`, `exit code N`, `fleet reported: <fleet_error>` (the fleet's own
+error text, parsed by `outputs.py` from each fleet's envelope: Claude's `is_error` and
+`subtype`, Antigravity's `status`, Cursor's `error` events, Codex's), `gate exited N`, `write
+dispatch moved no bytes`, `read dispatch moved bytes`, `read dispatch returned no answer`, and
+`commit did not land`. `mission._run_attempts` walks a lane's attempts in order and moves to the
+next one whenever the previous was not ok, whatever the reason. So a rate limit on Sonnet and a
+gate failure on Sonnet both escalate to the same Gemini fallback, a transient transport error
+never retries the vendor that would have succeeded a minute later, and nothing on the receipt
+says which kind of failure happened without reading the prose.
+</context>
+
+<task>
+Implement roadmap item C5, structured error kinds, as the five items below. Implement all five
+and nothing beyond them. Do not commit; the harness commits. Do not change the package version.
+Keep every existing public function and method signature working: add new parameters as keyword
+arguments with defaults, never as required positional or keyword-only arguments, so that the
+existing tests, which call these functions directly, still pass unchanged. Every new mission key
+is opt-in, so no existing mission changes behavior; the `kind` field is the one addition every
+receipt gets.
+
+1. **`src/conductor/errors.py`, a new module.** A string-literal set `KINDS` and one function
+   `error_kind(result) -> str | None` that maps a `Result` to exactly one kind, or `None` when
+   `result.ok`. Kinds, checked in this order, first match wins: `interrupted` (a stop request),
+   `cancelled`, `cap` (budget exceeded, cap unenforced, or a cap kill), `breaker` (any breaker
+   trip), `timeout`, `setup` (setup failed or timed out), `refused` (conductor declined to spawn:
+   `spawned` false with an error, including ports and include refusals), `rate_limit`,
+   `transport`, `refusal` (the model declined the task), `fleet_error` (any other fleet-reported
+   error), `exit` (nonzero exit with no fleet error), `gate`, `no_op`, `read_moved_bytes`,
+   `no_answer`, `commit`, `unknown`. `rate_limit`, `transport`, and `refusal` are recognized from
+   the fleet's own error text and status with a per-fleet pattern table in the module (case-
+   insensitive substrings and exit codes): rate limit is `rate limit`, `rate_limit`, `429`,
+   `overloaded`, `529`, `quota`, `resource exhausted`, `too many requests`; transport is
+   `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`,
+   `network`, `502`, `503`, `504`, `stream ended without a result event`; refusal is Claude's
+   `subtype` starting with `error_` other than `error_max_budget_usd` and `error_max_turns`
+   when the text says `refus`, `cannot help`, or `not able to`, and for every fleet the text
+   `I can't help` or `I cannot help`. Keep the table readable: one tuple per kind per fleet,
+   with a comment on where each pattern was seen. Add `kind: str | None` to `Result.to_dict`
+   and `summary` (computed, not stored, so an old receipt read back still classifies), and show
+   it in `conductor runs` rows.
+
+2. **Fallbacks that select on kind.** A `fallback` entry may set `"on": [<kind>, ...]` (any
+   kind from `KINDS`; an unknown one is refused at load naming the lane and the entry). Add it
+   to `_FALLBACK_KEYS` and as `Attempt.on: list[str] | None = None` (None means every kind, as
+   today), carried through the snapshot. In `_run_attempts`, after an attempt fails with kind
+   `k`, the next attempt runs only if its `on` is None or contains `k`; otherwise it is passed
+   over with a note on the lane (`skipped fallback <label>: does not handle <kind>`) and the
+   walk continues to the one after. Cascade attempts (B3) never set `on`. The attempt row
+   gains `kind`, and the lane result gains `kinds: [<kind per attempt in order>]`.
+
+3. **Retry the same vendor on transient kinds.** A mission may set `"retry": {"kinds":
+   [<kind>, ...], "attempts": <int 1..5>, "backoff_s": <number >= 0>}` (default None: no retry;
+   `kinds` defaults to `["rate_limit", "transport"]` when omitted, `backoff_s` to 0). Add it to
+   `_MISSION_KEYS`, the `Mission` dataclass, `to_dict`, `from_snapshot`, and validate it. When
+   an attempt fails with a kind in `retry.kinds`, the same attempt is dispatched again (same
+   spec, a fresh run id, the same cancel event and ledger rules) up to `attempts` extra times,
+   sleeping `backoff_s * 2**i` between tries (poll the stop flag and the lane's cancel event
+   during the sleep in one-second steps, ending the sleep as an interrupt or cancel would), before
+   the fallback walk continues. Each retry is its own attempt row with `retry_of: <the first
+   run id>` and `retry: <i>`; the lane's `kinds` lists every one. A dry run never retries.
+
+4. **Mission and report.** `MissionResult` gains `errors: dict[str, int]` (kind to count over
+   every attempt of every lane, empty when nothing failed) in `result.json` and `summary`, and
+   `report.md` shows one line when non-empty: `Errors: <kind> x<n>, ...`. The lane table's
+   attempt rows show the kind beside the failure text. `conductor missions` rows gain
+   `"errors"`.
+
+5. **README and tests.** Document the kinds and their order, the per-fleet patterns as a table,
+   `fallback.on`, `retry`, the receipt fields, and the evidence sentence from
+   `docs/ROADMAP-2026-09.md` item C5 (the audit's own top capability ask; OpenAI Agents SDK
+   `error_handlers`). Pin the documentation with a README test in the style of the existing
+   README tests (see `test_readme_documents_early_cancel_ranking_and_candidates` in
+   `tests/test_best_of_n.py`). Tests go in `tests/test_errors.py`, using the existing fixtures
+   `repo`, `home`, and `fake_fleet` from `tests/conftest.py`, the dispatch patterns in
+   `tests/test_dispatch.py`, the breaker-kill patterns in `tests/test_breakers.py`, and the
+   mission and fallback patterns in `tests/test_mission.py` and `tests/test_cascade.py`:
+   - `error_kind` on hand-built `Result`s for every kind in order, including the precedence
+     cases (a cap kill that also timed out is `cap`; a fleet error that mentions a rate limit
+     is `rate_limit`, not `fleet_error`), and on a fake-fleet dispatch that reports a Claude
+     `is_error` envelope with a rate-limit message;
+   - `fallback.on`: a lane whose first fallback handles only `gate` is passed over on a
+     `no_op` failure and the second fallback runs, with the note and the `kinds` list; an
+     unknown kind is refused; snapshot round trip;
+   - `retry`: validation; a fake fleet that fails with a transport message twice and then
+     succeeds is retried twice on the same attempt with `retry_of` set, the lane is ok and
+     the ledger counted all three; a stop during the backoff ends it as an interrupt; a dry
+     run does not retry;
+   - `errors` on the mission result, the report line, and `conductor missions`; `conductor
+     runs` shows the kind.
+   Existing tests stay unchanged.
+
+6. **Summary.** Finish with a summary listing items 1 through 5 with done or partial, the test
+   that pins each, any existing test you changed and why, and the final test count.
+</task>
+
+<gate>
+Run this before finishing and make it pass; it is the same gate the harness runs:
+
+    PYTHONPATH=src <cwd>/.venv/bin/ruff check src tests && PYTHONPATH=src <cwd>/.venv/bin/pytest -q -p no:cacheprovider
+
+When you run the suite yourself, pass `--basetemp` pointing outside this working tree (for
+example a directory under `$TMPDIR`), so pytest's scratch files never land in the repository.
+Do not hard-code values or create solutions that only work for specific test inputs. If the
+task is unreasonable or infeasible, or if any of the tests are incorrect, please inform me
+rather than working around them. Never speculate about code you have not opened: read a file
+before you change or describe it.
+</gate>
