@@ -97,6 +97,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "template_max_chars",
     "self_judging",
     "policy",
+    "early_cancel",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -109,6 +110,7 @@ _COLLATE_KEYS = {
     "cap_usd",
     "include_diffs",
     "rank",
+    "candidates",
 }
 _SELF_JUDGING_VALUES = ("allow",)
 
@@ -231,6 +233,7 @@ class Collate:
     cap_usd: float | None = None
     include_diffs: bool = True  # the judge sees each lane's patch, not just its prose
     rank: bool = False  # comparative judge: dispatched twice, both lane orders
+    candidates: int = 0  # judge only the top N sinks of the mechanical ranking; 0 = every lane
 
     def spec(
         self, cwd: str, prompt: str, *, cap_usd: float | None = None, schema: str | None = None
@@ -267,6 +270,9 @@ class Mission:
     # Per-stage vendor allowlist: {"<stage>": {"vendors": [<vendor id>, ...]}}.
     # Only stages named here are restricted; see _validate_policy.
     policy: dict | None = None
+    # Under require: any, cancel every other lane the moment one sink passes
+    # its gate (B5). Refused at load unless require is "any".
+    early_cancel: bool = False
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -283,6 +289,8 @@ class Mission:
             raise MissionInvalid("max_cost_usd must be positive")
         if self.template_max_chars < 1:
             raise MissionInvalid("template_max_chars must be positive")
+        if self.early_cancel and self.require != "any":
+            raise MissionInvalid("early_cancel needs require: any")
         seen: set[str] = set()
         branches: set[str] = set()
         for lane in self.lanes:
@@ -324,6 +332,8 @@ class Mission:
         if self.collate:
             if self.collate.rank and len(self.lanes) < 2:
                 raise MissionInvalid("collate rank needs at least two lanes")
+            if self.collate.candidates and self.collate.candidates < 2:
+                raise MissionInvalid("collate candidates must be at least 2")
             try:
                 if self.collate.rank:
                     names_for_rank = [lane.name for lane in self.lanes]
@@ -518,6 +528,7 @@ class Mission:
             "snapshot_version",
             "self_judging",
             "policy",
+            "early_cancel",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -584,6 +595,7 @@ class Mission:
             "template_max_chars": raw["template_max_chars"],
             "self_judging": raw["self_judging"],
             "policy": raw["policy"],
+            "early_cancel": raw["early_cancel"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -791,6 +803,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 cap_usd=float(cap) if cap is not None else None,
                 include_diffs=bool(raw_collate.get("include_diffs", True)),
                 rank=bool(raw_collate.get("rank", False)),
+                candidates=int(raw_collate.get("candidates", 0)),
             )
         except (TypeError, ValueError) as exc:
             raise MissionInvalid(f"collate: {exc}") from exc
@@ -820,6 +833,9 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 raise MissionInvalid(
                     f"policy for stage '{stage_key}': vendors must be a list of strings"
                 )
+    early_cancel = raw.get("early_cancel", False)
+    if not isinstance(early_cancel, bool):
+        raise MissionInvalid("early_cancel must be true or false")
     mission = Mission(
         name=name,
         cwd=cwd,
@@ -833,6 +849,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         template_max_chars=template_max,
         self_judging=self_judging,
         policy=policy,
+        early_cancel=early_cancel,
     )
     mission.validate()
     return mission
@@ -1002,10 +1019,10 @@ class Ledger:
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)
-            elif result.spawned and not result.interrupted:
-                # A run conductor stopped (before or after spawn) and could
-                # not price is not evidence about the budget; it cannot have
-                # spent past what its own cap allowed before the stop.
+            elif result.spawned and not result.interrupted and not result.cancelled:
+                # A run conductor stopped or cancelled (before or after spawn)
+                # and could not price is not evidence about the budget; it
+                # cannot have spent past what its own cap allowed before then.
                 self.unpriced += 1
 
     def seed(self, spent_usd: float, unpriced_dispatches: int) -> None:
@@ -1159,6 +1176,11 @@ class MissionResult:
     resumes: list[dict] = field(default_factory=list)
     resumed_from: dict | None = None
     previous_collates: list[dict] = field(default_factory=list)
+    # {"winner": <lane>, "cancelled": [<lane>, ...]} the moment early_cancel cut
+    # the rest of the mission short; null when nothing was cancelled.
+    early_cancel: dict | None = None
+    # The dispatched sink lanes, best first, on bytes and gate results alone.
+    ranking: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1242,6 +1264,67 @@ def _tighter(*caps: float | None) -> float | None:
     """The smallest of the caps that are set, or None when none is."""
     known = [c for c in caps if c is not None]
     return min(known) if known else None
+
+
+def _patch_bytes(lane: LaneResult) -> int | None:
+    if not lane.diff_path or not Path(lane.diff_path).is_file():
+        return None
+    return Path(lane.diff_path).stat().st_size
+
+
+def _gate_exit(lane: LaneResult) -> int | None:
+    last = lane.attempts[-1] if lane.attempts else {}
+    exit_code = last.get("tests")
+    return exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+
+
+def rank_lanes(lanes: list[LaneResult], mission_order: list[str]) -> list[dict]:
+    """A total order over the dispatched (not skipped) lanes in `lanes`, best
+    first, on bytes and gate results alone -- no model judgment. B5: rank
+    mechanically so a comparative judge only has to look at the survivors
+    (Generative Verifiers, https://arxiv.org/abs/2408.15240).
+
+    Order: ok before not; a passing verdict before a failing or absent one;
+    an untouched test surface before a touched one; a clean gate before a
+    failed one before none; a smaller patch before a larger one (no patch
+    ranks last); lower cost before higher; mission order as the final
+    tie-break.
+    """
+    order_index = {name: i for i, name in enumerate(mission_order)}
+
+    def key(lane: LaneResult) -> tuple:
+        ok_rank = 0 if lane.ok else 1
+        verdict_rank = 0 if (lane.verdict is not None and lane.verdict.get("passed")) else 1
+        touched_rank = 0 if lane.test_touched == "no" else 1
+        exit_code = _gate_exit(lane)
+        gate_rank = 0 if exit_code == 0 else (2 if exit_code is None else 1)
+        patch = _patch_bytes(lane)
+        patch_rank = (0, patch) if patch is not None else (1, 0)
+        return (
+            ok_rank,
+            verdict_rank,
+            touched_rank,
+            gate_rank,
+            patch_rank,
+            lane.cost_usd,
+            order_index.get(lane.name, len(mission_order)),
+        )
+
+    dispatched = [lane for lane in lanes if lane.skipped is None]
+    ranked = sorted(dispatched, key=key)
+    return [
+        {
+            "lane": lane.name,
+            "rank": i,
+            "ok": lane.ok,
+            "verdict": _verdict_label(lane.verdict),
+            "test_touched": lane.test_touched,
+            "gate_exit": _gate_exit(lane),
+            "patch_bytes": _patch_bytes(lane),
+            "cost_usd": round(lane.cost_usd, 6),
+        }
+        for i, lane in enumerate(ranked, start=1)
+    ]
 
 
 @dataclass
@@ -1370,9 +1453,23 @@ def _artifact_matches(recorded: str | None, expected: Path) -> bool:
         return False
 
 
-def _trusted_lane(mission: Mission, mission_dir: Path, lane: Lane, result: LaneResult) -> bool:
+def _trusted_lane(
+    mission: Mission,
+    mission_dir: Path,
+    lane: Lane,
+    result: LaneResult,
+    *,
+    prior_ok: bool = False,
+) -> bool:
     """Whether a completed receipt is enough to skip every effect of a lane."""
-    if result.name != lane.name or result.ok is not True or result.skipped is not None:
+    if result.name != lane.name:
+        return False
+    if result.skipped is not None:
+        # A lane cancelled because another sink already passed is a settled
+        # outcome of a mission that succeeded, not unfinished work; rerunning
+        # it on resume would just repeat the cancellation for nothing.
+        return result.skipped.startswith("cancelled:") and prior_ok
+    if result.ok is not True:
         return False
     if not result.attempts:
         return False
@@ -1544,9 +1641,10 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     previous, notes, accounting_unknown = _read_previous_lanes(mission_dir, mission)
     kept: dict[str, LaneResult] = {}
     rerun: set[str] = set()
+    prior_ok = bool((prior_result or {}).get("ok"))
     for lane in mission.lanes:
         old = previous.get(lane.name)
-        if old is not None and _trusted_lane(mission, mission_dir, lane, old):
+        if old is not None and _trusted_lane(mission, mission_dir, lane, old, prior_ok=prior_ok):
             old.kept = True
             kept[lane.name] = old
         else:
@@ -1666,6 +1764,13 @@ def _execute_mission(
     ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
     started = time.monotonic()
     done: dict[str, LaneResult] = dict(resume.kept)
+    sink_names = {lane.name for lane in mission.sinks()}
+    # B5 early cancel: a per-lane cancel event, created the moment a lane is
+    # dispatched, plus the reason it fired -- written before the event is set,
+    # so the running dispatch's own thread always sees it once `cancel.is_set()`.
+    lane_cancel_events: dict[str, threading.Event] = {}
+    cancel_reasons: dict[str, str] = {}
+    cancel_state: dict[str, object] = {"winner": None, "cancelled": []}
 
     def fresh_lane_result(lane: Lane, *, skipped: str | None = None) -> LaneResult:
         old = resume.previous.get(lane.name)
@@ -1764,6 +1869,7 @@ def _execute_mission(
                 home=base,
                 no_op_ok=attempt.no_op_ok,
                 base_ref=base_ref,
+                cancel=lane_cancel_events.get(lane.name),
             )
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
@@ -1780,6 +1886,16 @@ def _execute_mission(
             summary["resume"] = resume_state
             if resume_note:
                 summary["note"] = resume_note
+            if result.cancelled:
+                # dispatch()'s own receipt only knows the generic default
+                # reason; the mission knows which lane actually won, so the
+                # attempt's error must say the same thing report.md's
+                # "Skipped:" line says, not a different cancel string.
+                cancel_reason = cancel_reasons.get(
+                    lane.name, "cancelled: another lane already passed"
+                )
+                summary["error"] = cancel_reason
+                summary["failure"] = cancel_reason
             summary["unpriced"] = (
                 result.spawned and not result.interrupted and summary.get("cost_usd") is None
             )
@@ -1808,6 +1924,10 @@ def _execute_mission(
             out.session_id = result.session_id
             if result.resumed is not None and result.resumed.get("ok") is False:
                 resume_failed = True
+            if result.cancelled:
+                # Another sink already passed; no fallback is worth trying.
+                out.skipped = cancel_reason
+                break
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
                 break
@@ -1862,6 +1982,25 @@ def _execute_mission(
     # refused at load).
     pending = [lane for lane in mission.lanes if lane.name not in resume.kept]
     running: dict[Future[LaneResult], Lane] = {}
+
+    def _fire_early_cancel(winner: str) -> None:
+        """The moment one sink passes: cancel every other lane, running or
+        not yet started, and let the scheduler start nothing new."""
+        if cancel_state["winner"] is not None:
+            return
+        cancel_state["winner"] = winner
+        reason = f"cancelled: lane {winner} already passed"
+        for lane in list(pending):
+            pending.remove(lane)
+            cancel_state["cancelled"].append(lane.name)
+            settle(fresh_lane_result(lane, skipped=reason))
+        for lane in running.values():
+            cancel_reasons[lane.name] = reason
+            cancel_state["cancelled"].append(lane.name)
+            event = lane_cancel_events.get(lane.name)
+            if event is not None:
+                event.set()
+
     with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
         while pending or running:
             progressed = True
@@ -1891,14 +2030,29 @@ def _execute_mission(
                             )
                         )
                     else:
+                        lane_cancel_events[lane.name] = threading.Event()
                         running[pool.submit(run_lane, lane)] = lane
             if not running:
                 break
             finished, _ = wait(running, return_when=FIRST_COMPLETED)
             for future in finished:
                 running.pop(future)
-                settle(future.result())
+                result = future.result()
+                settle(result)
+                if (
+                    mission.early_cancel
+                    and cancel_state["winner"] is None
+                    and result.name in sink_names
+                    and result.ok
+                ):
+                    _fire_early_cancel(result.name)
     lane_results = [done[lane.name] for lane in mission.lanes]
+    # B5 mechanical ranking: bytes and gate results, no model judgment, over
+    # the sink lanes that were actually dispatched (not skipped or cancelled).
+    ranking = rank_lanes(
+        [lane for lane in lane_results if lane.name in sink_names],
+        [lane.name for lane in mission.lanes],
+    )
 
     collate_out: dict | None = None
     prior_collates = (resume.prior_result or {}).get("previous_collates")
@@ -1915,11 +2069,18 @@ def _execute_mission(
         if isinstance(prior_collate, dict):
             previous_collates.append(dict(prior_collate))
         if not dry_run and not stop_requested():
-            collate_out = _run_collate(mission, lane_results, ledger, mission_dir, base)
+            collate_out = _run_collate(
+                mission, lane_results, ledger, mission_dir, base, ranking=ranking
+            )
+
+    early_cancel_out = (
+        {"winner": cancel_state["winner"], "cancelled": list(cancel_state["cancelled"])}
+        if cancel_state["cancelled"]
+        else None
+    )
 
     # A pipeline is judged on its outputs: the lanes nothing else depends
     # on. In a flat mission that is every lane, as before.
-    sink_names = {lane.name for lane in mission.sinks()}
     quorum: dict | None = None
     notes: list[str] = list(resume.notes)
     if isinstance(mission.require, dict):
@@ -2012,6 +2173,8 @@ def _execute_mission(
         resumes=resumes,
         resumed_from=resume_entry,
         previous_collates=previous_collates,
+        early_cancel=early_cancel_out,
+        ranking=ranking,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -2210,23 +2373,53 @@ def _collate_body(mission: Mission, lanes: list[LaneResult], col: Collate) -> st
     return "".join(parts)
 
 
+def _collate_candidates(
+    lanes: list[LaneResult], ranking: list[dict], candidates: int
+) -> tuple[list[LaneResult], list[str]]:
+    """Only the top `candidates` sink lanes of item 3's ranking, in rank
+    order, and the names of every lane left out. `candidates` larger than
+    the number of ranked sinks simply uses what there is. Everything else --
+    a ranked sink the cap dropped, a sink early_cancel skipped before it
+    could be ranked, or a non-sink pipeline stage -- is left out: the spec
+    says the judge sees only the top sinks, not pipeline context, so a lane
+    that never finished or was never a candidate gets no seat either."""
+    if not candidates:
+        return lanes, []
+    by_name = {lane.name: lane for lane in lanes}
+    ranked_names = [row["lane"] for row in ranking]
+    chosen_names = ranked_names[:candidates]
+    omitted_ranked = ranked_names[candidates:]
+    omitted_rest = [lane.name for lane in lanes if lane.name not in ranked_names]
+    chosen = [by_name[name] for name in chosen_names if name in by_name]
+    return chosen, omitted_ranked + omitted_rest
+
+
+def _omitted_note(omitted: list[str]) -> str:
+    if not omitted:
+        return ""
+    return f"\n(omitted by ranking: {', '.join(omitted)})\n"
+
+
 def _run_collate(
     mission: Mission,
     lanes: list[LaneResult],
     ledger: Ledger,
     mission_dir: Path,
     base: Path,
+    *,
+    ranking: list[dict],
 ) -> dict:
     col = mission.collate
     assert col is not None
+    chosen, omitted = _collate_candidates(lanes, ranking, col.candidates)
     if col.rank:
-        return _run_rank_collate(mission, lanes, col, ledger, mission_dir, base)
+        return _run_rank_collate(mission, chosen, col, ledger, mission_dir, base, omitted=omitted)
     why = ledger.blocker()
     if why:
         return {"ok": False, "error": f"{why}; collate not started", "cost_usd": None}
 
     instructions = f"\n## Instructions\n\n{col.instructions.strip()}\n"
-    prompt = _collate_body(mission, lanes, col) + instructions
+    prompt = _collate_body(mission, chosen, col) + _omitted_note(omitted) + instructions
     (mission_dir / "collate-prompt.txt").write_text(prompt)
 
     result = dispatch(
@@ -2252,6 +2445,7 @@ def _run_collate(
         ),
         "tokens": summary.get("tokens"),
         "error": summary.get("error"),
+        "candidates": [lane.name for lane in chosen] if col.candidates else None,
     }
 
 
@@ -2287,11 +2481,16 @@ def _run_rank_collate(
     ledger: Ledger,
     mission_dir: Path,
     base: Path,
+    *,
+    omitted: list[str] | None = None,
 ) -> dict:
     """A comparative judge, dispatched once per lane order (position bias in
     a judge is systematic, not a rare failure mode); agreement names a
     winner, and any disagreement or invalid order escalates instead of
-    picking one."""
+    picking one. `lanes` is already whatever `candidates` left the judge to
+    see; the schema enum and both orders cover only those lanes."""
+    omitted = omitted or []
+    candidate_names = [lane.name for lane in lanes] if col.candidates else None
     why = ledger.blocker()
     if why:
         return {
@@ -2301,6 +2500,7 @@ def _run_rank_collate(
             "rank": True,
             "strongest": None,
             "orders": [],
+            "candidates": candidate_names,
         }
     names = [lane.name for lane in lanes]
     schema_path = mission_dir / "collate-rank.schema.json"
@@ -2313,7 +2513,11 @@ def _run_rank_collate(
     fleet = model = None
     for label, ordered in (("forward", lanes), ("reverse", list(reversed(lanes)))):
         ordered_names = [lane.name for lane in ordered]
-        prompt = _collate_body(mission, ordered, col) + _rank_contract(ordered_names)
+        prompt = (
+            _collate_body(mission, ordered, col)
+            + _omitted_note(omitted)
+            + _rank_contract(ordered_names)
+        )
         (mission_dir / f"collate-prompt-{label}.txt").write_text(prompt)
         result = dispatch(
             col.spec(
@@ -2349,6 +2553,7 @@ def _run_rank_collate(
         "orders": records,
         "cost_usd": round(total_cost, 6) if any_cost else None,
         "tokens": total_tokens,
+        "candidates": candidate_names,
     }
     invalid_at = next((i for i, r in enumerate(records, 1) if r["invalid"]), None)
     if invalid_at is not None:
@@ -2405,6 +2610,11 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             f"- Quorum: {len(result.quorum['passed'])} of {len(result.quorum['of'])} passed "
             f"(need {result.quorum['pass']})"
         )
+    if result.early_cancel:
+        lines.append(
+            f"- Early cancel: lane {result.early_cancel['winner']} passed; cancelled "
+            f"{', '.join(result.early_cancel['cancelled'])}"
+        )
     lines += [
         f"- cwd: `{mission.cwd}`",
         f"- cost: ${_usd(result.cost_usd)} across {result.tokens} tokens"
@@ -2420,10 +2630,17 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for lane in lanes:
-        if not lane.attempts and lane.skipped:
-            lines.append(
-                f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
-            )
+        if lane.skipped:
+            # A lane cancelled mid-run still has an attempt, but the table
+            # must flag it the same way a lane cancelled before it ever
+            # started is flagged, not print it as an ordinary failed attempt.
+            if lane.attempts:
+                lines.append(_attempt_report_row(lane, lane.attempts[-1], "(skipped)"))
+            else:
+                lines.append(
+                    f"| {lane.name} | (skipped) | False | | | | no | | | | | | - | no | |"
+                )
+            continue
         if lane.kept and lane.attempts:
             lines.append(_attempt_report_row(lane, lane.attempts[-1], "(kept)"))
             continue
@@ -2481,6 +2698,21 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         if lane.verdict is not None:
             lines += ["", "### Verdict", "", _rendered_verdict(lane.verdict)]
         lines += ["", _lane_answer(lane, REPORT_MAX_CHARS)]
+    if result.ranking:
+        lines += [
+            "",
+            "## Ranking",
+            "",
+            "| rank | lane | ok | verdict | test_touched | gate_exit | patch_bytes | cost_usd |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for row in result.ranking:
+            gate_exit = row["gate_exit"] if row["gate_exit"] is not None else ""
+            patch_bytes = row["patch_bytes"] if row["patch_bytes"] is not None else ""
+            lines.append(
+                f"| {row['rank']} | {row['lane']} | {row['ok']} | {row['verdict'] or ''} | "
+                f"{row['test_touched']} | {gate_exit} | {patch_bytes} | {_usd(row['cost_usd'])} |"
+            )
     if result.collate:
         lines += ["", "## Collated", ""]
         if result.collate.get("rank"):
