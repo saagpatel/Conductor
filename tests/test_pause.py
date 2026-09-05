@@ -8,6 +8,7 @@ operator instead of a fleet's own output ever being trusted to ask for one.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,14 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from conductor.runner import clear_stop, request_stop
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stop():
+    clear_stop()
+    yield
+    clear_stop()
 
 
 def envelope(answer: str, cost: float | None = None) -> str:
@@ -375,3 +384,66 @@ def test_readme_documents_the_pause_primitive():
     assert "exits **4**" in section
     assert "docs/ROADMAP-2026-09.md" in section and "item C2" in section
     assert "LangGraph `interrupt()`" in section and "Microsoft request/response events" in section
+
+
+# --- review fixes -------------------------------------------------------
+
+
+def test_stop_requested_while_parking_is_interrupted_not_paused(
+    repo, home, monkeypatch, tmp_path
+):
+    """Spec item 2: 'A stop request that arrives while the mission is
+    parking is handled as today (interrupted).' A pause point can fire while
+    another lane is still running (already dispatched, so it is not
+    cancelled); if a stop signal arrives during that wait, the mission must
+    come out interrupted, not parked waiting on an operator answer."""
+
+    def fake_build(spec):
+        key = spec.prompt.split()[0]
+        if key == "SLOW":
+            return ["sh", "-c", f"sleep 1; echo '{envelope('slow')}'"]
+        return ["sh", "-c", f"echo '{envelope('trigger')}'"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "pause": {"before": ["trigger"]},
+        "lanes": [
+            {"name": "slow", "fleet": "claude", "prompt": "SLOW"},
+            {"name": "trigger", "fleet": "claude", "prompt": "TRIGGER"},
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    threading.Timer(0.3, request_stop).start()
+    result = run_mission(mission, home=home)
+
+    assert result.interrupted is True
+    assert result.paused is None
+    assert not (Path(result.mission_dir) / "pause.json").exists()
+    assert result.ok is False
+
+
+def test_answer_stop_is_resolved_not_still_waiting(repo, home, monkeypatch, tmp_path, capsys):
+    """Spec item 3 vs item 4: an operator `stop` answer is a resolved,
+    terminal result carrying the record -- it is not the 'neither ok nor
+    failed; it is waiting' state that earns exit 4 and a 'resume with an
+    answer' line in report.md. Only a genuinely unanswered park (no
+    `answer` key on `paused`) is still waiting."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission_path = tmp_path / "m.json"
+    mission_path.write_text(json.dumps(PIPELINE | {"cwd": str(repo)}))
+    assert main(["mission", str(mission_path)]) == 4
+    mission_id = json.loads(capsys.readouterr().out)["mission_id"]
+
+    exit_code = main(["mission", "--resume", mission_id, "--answer", "stop"])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1  # resolved (the operator said stop), not still waiting
+    assert summary["paused"]["answer"] == "stop"
+    report = Path(summary["report_path"]).read_text()
+    assert "Resume with: conductor mission --resume" not in report

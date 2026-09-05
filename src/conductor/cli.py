@@ -208,7 +208,9 @@ def cmd_mission(args: argparse.Namespace) -> int:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
     print(json.dumps(result.summary(), indent=2))
-    if result.paused:
+    if result.paused and "answer" not in result.paused:
+        # An `answer` already on `paused` (the operator said `stop`) is a
+        # resolved, terminal result, not a mission still waiting on one.
         return 4
     return 0 if result.ok else 1
 

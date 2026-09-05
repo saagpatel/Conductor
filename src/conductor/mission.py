@@ -2242,7 +2242,11 @@ def _execute_mission(
                     ):
                         _fire_early_cancel(result.name)
 
-        if pause_info is not None:
+        if pause_info is not None and not stop_requested():
+            # A stop that arrives while a lane already dispatched before the
+            # park is still finishing is handled as an ordinary interrupt,
+            # not a parked mission waiting on an operator answer: nothing
+            # here is written and `interrupted` (below) carries the result.
             prior_pause = _json_object(mission_dir / "pause.json") or {}
             (mission_dir / "pause.json").write_text(
                 json.dumps(
@@ -2881,7 +2885,10 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             "**Interrupted**: a stop was requested; lanes still running were killed "
             "and lanes not yet started were skipped.",
         ]
-    if result.paused:
+    if result.paused and "answer" not in result.paused:
+        # An `answer` on `paused` means this is a resolved (`stop`) record,
+        # not a mission still waiting on the operator; only the latter gets
+        # the resume line.
         lines += [
             "",
             f"**Paused**: {result.paused['question']} Resume with: "
