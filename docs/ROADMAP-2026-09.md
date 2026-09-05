@@ -19,6 +19,7 @@ orchestrators. Sources are linked where a claim rests on one.
 | A3 judge hygiene | 0.14.0 | Shape A | $19.65 ($8.90 for the work; the rest is operating error, receipted) |
 | A4 reviewer direction and reproduce-before-fix | 0.15.0 | Shape A | $8.03 |
 | B5 early cancel and best-of-n | 0.16.0 | Shape A | $9.49 |
+| A5 signed lane receipts | 0.17.0 | Shape A, in parallel with C2 | $8.92 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). Next candidates: A5 signed lane receipts and C2 the pause primitive, which can run
