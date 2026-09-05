@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest
+from .errors import KINDS, error_kind
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
@@ -90,6 +91,11 @@ _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "too
 # would otherwise silently turn a dependent lane into a root.
 _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
 _FALLBACK_KEYS = _ATTEMPT_KEYS
+# C5: `on` selects a fallback by the previous attempt's error kind. It is not
+# in `_INHERITED` (each fallback's own, never cascaded to the next) and not
+# in `_FALLBACK_KEYS`, which the cascade attempt is also checked against --
+# a cascade attempt is a lane's first attempt, never a response to a kind.
+_FALLBACK_ENTRY_KEYS = _FALLBACK_KEYS | {"on"}
 _LANE_KEYS = _ATTEMPT_KEYS | {
     "name",
     "fallback",
@@ -116,6 +122,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "prefix",
     "prefix_file",
     "cascade",
+    "retry",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -182,6 +189,9 @@ class Attempt:
     setup: str | None = None
     teardown: str | None = None
     include: list[str] | None = None
+    # C5: which of the previous attempt's error `KINDS` this fallback answers;
+    # None (every fallback but a hand-set one) means every kind, as before.
+    on: list[str] | None = None
 
     def spec(
         self,
@@ -320,6 +330,10 @@ class Mission:
     # fallbacks. None when the mission sets no cascade. See _parse_cascade
     # and the per-lane prepend in mission_from_dict.
     cascade: dict | None = None
+    # C5: {"kinds": [<kind>, ...], "attempts": <int>, "backoff_s": <number>}.
+    # None (the default) means no attempt is ever retried on its own vendor.
+    # See _parse_retry and the retry loop in _run_attempts.
+    retry: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -596,6 +610,7 @@ class Mission:
             "early_cancel",
             "pause",
             "cascade",
+            "retry",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -655,6 +670,10 @@ class Mission:
             primary_attempt, fallback_attempts = (
                 (checked[1], checked[2:]) if cascaded else (checked[0], checked[1:])
             )
+            # C5: `on` is a fallback-only key (never `_LANE_KEYS`, so a lane
+            # dict cannot carry it); a primary or cascade attempt's own `on`
+            # is always None and must not be spread onto the lane dict below.
+            primary_attempt = {k: v for k, v in primary_attempt.items() if k != "on"}
             lane = {
                 "name": raw_lane["name"],
                 "needs": raw_lane["needs"],
@@ -691,6 +710,7 @@ class Mission:
             "early_cancel": raw["early_cancel"],
             "pause": raw["pause"],
             "cascade": raw["cascade"],
+            "retry": raw["retry"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -860,11 +880,12 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         for j, raw_fb in enumerate(raw_lane.get("fallback") or []):
             if not isinstance(raw_fb, dict):
                 raise MissionInvalid(f"lane {i} fallback {j} must be an object")
-            _reject_unknown(raw_fb, _FALLBACK_KEYS, f"lane {i} fallback {j}")
+            _reject_unknown(raw_fb, _FALLBACK_ENTRY_KEYS, f"lane {i} fallback {j}")
             attempts.append(
                 _attempt(
                     _attempt_fields(raw_fb, base_dir, primary_fields),
                     where=f"{lane_where} fallback {j}",
+                    on=raw_fb.get("on"),
                 )
             )
         lane_name = str(raw_lane.get("name") or _default_lane_name(primary, lanes))
@@ -955,6 +976,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     if not isinstance(early_cancel, bool):
         raise MissionInvalid("early_cancel must be true or false")
     pause = _parse_pause(raw.get("pause"))
+    retry = _parse_retry(raw.get("retry"))
     prefix = _load_prefix(raw, base_dir)
     mission = Mission(
         name=name,
@@ -973,6 +995,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         early_cancel=early_cancel,
         pause=pause,
         cascade=cascade_fields,
+        retry=retry,
     )
     mission.validate()
     return mission
@@ -1015,6 +1038,45 @@ def _parse_pause(raw_pause: object) -> dict | None:
     if not before and spend_usd is None:
         raise MissionInvalid("pause needs 'before', 'spend_usd', or both")
     return {"before": before, "spend_usd": spend_usd}
+
+
+_DEFAULT_RETRY_KINDS = ("rate_limit", "transport")
+
+
+def _parse_retry(raw_retry: object) -> dict | None:
+    """C5: retry the same attempt on its own vendor before the fallback walk
+    moves on, for the kinds a moment's wait is likely to fix. `None` (the
+    default) retries nothing; `kinds` and `backoff_s` have defaults, but a
+    mission that sets `retry` must say how many extra tries it is paying for."""
+    if raw_retry is None:
+        return None
+    if not isinstance(raw_retry, dict):
+        raise MissionInvalid("retry must be an object")
+    unknown = sorted(set(raw_retry) - {"kinds", "attempts", "backoff_s"})
+    if unknown:
+        raise MissionInvalid(f"retry: unknown field(s) {', '.join(unknown)}")
+    kinds_raw = raw_retry.get("kinds", list(_DEFAULT_RETRY_KINDS))
+    if not isinstance(kinds_raw, list) or not all(isinstance(k, str) for k in kinds_raw):
+        raise MissionInvalid("retry.kinds must be a list of kind strings")
+    unknown_kinds = [k for k in kinds_raw if k not in KINDS]
+    if unknown_kinds:
+        raise MissionInvalid(
+            f"retry.kinds names unknown kind {unknown_kinds[0]!r}; known: {', '.join(KINDS)}"
+        )
+    if "attempts" not in raw_retry:
+        raise MissionInvalid("retry.attempts is required")
+    attempts_raw = raw_retry["attempts"]
+    if isinstance(attempts_raw, bool) or not isinstance(attempts_raw, int) or not (
+        1 <= attempts_raw <= 5
+    ):
+        raise MissionInvalid("retry.attempts must be an integer from 1 to 5")
+    try:
+        backoff_s = float(raw_retry.get("backoff_s", 0))
+    except (TypeError, ValueError) as exc:
+        raise MissionInvalid(f"retry.backoff_s must be a number: {exc}") from exc
+    if backoff_s < 0:
+        raise MissionInvalid("retry.backoff_s must be at least 0")
+    return {"kinds": list(kinds_raw), "attempts": attempts_raw, "backoff_s": backoff_s}
 
 
 def _load_prefix(raw: dict, base_dir: Path) -> str | None:
@@ -1081,7 +1143,20 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
     return out
 
 
-def _attempt(fields: dict, *, where: str) -> Attempt:
+def _validate_on(raw_on: object, where: str) -> list[str] | None:
+    if raw_on is None:
+        return None
+    if not isinstance(raw_on, list) or not all(isinstance(k, str) for k in raw_on):
+        raise MissionInvalid(f"{where}: on must be a list of kind strings")
+    unknown = [k for k in raw_on if k not in KINDS]
+    if unknown:
+        raise MissionInvalid(
+            f"{where}: on names unknown kind {unknown[0]!r}; known: {', '.join(KINDS)}"
+        )
+    return list(raw_on)
+
+
+def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
     if "fleet" not in fields:
         raise MissionInvalid(f"{where}: fleet is required")
     if not str(fields.get("prompt", "")).strip():
@@ -1122,6 +1197,7 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             verdict = parse_checklist(fields["verdict"])
         except ValueError as exc:
             raise MissionInvalid(f"{where}: verdict: {exc}") from exc
+    validated_on = _validate_on(on, where)
     try:
         return Attempt(
             fleet=str(fields["fleet"]),
@@ -1147,6 +1223,7 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             setup=fields.get("setup"),
             teardown=fields.get("teardown"),
             include=list(include) if include is not None else None,
+            on=validated_on,
         )
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"{where}: {exc}") from exc
@@ -1361,6 +1438,9 @@ class LaneResult:
     session_id: str | None = None
     previous_attempts: list[dict] = field(default_factory=list)
     kept: bool = False
+    # C5: the error kind of every attempt actually dispatched on this lane,
+    # in order (None for an attempt that was ok).
+    kinds: list[str | None] = field(default_factory=list)
     # B3: true when this lane's first attempt was dispatched and was not ok,
     # and a later attempt then ran (a cascade attempt escalating to the
     # lane's own attempts, or an ordinary fallback escalation).
@@ -1394,7 +1474,7 @@ class LaneResult:
             raise ValueError(f"lane receipt is missing field(s): {', '.join(missing)}")
         if not isinstance(raw["name"], str) or not isinstance(raw["ok"], bool):
             raise ValueError("lane receipt name and ok have invalid types")
-        for key in ("attempts", "previous_attempts", "needs"):
+        for key in ("attempts", "previous_attempts", "needs", "kinds"):
             if key in raw and not isinstance(raw[key], list):
                 raise ValueError(f"lane receipt {key} must be a list")
         if "attempts" in raw and not all(isinstance(item, dict) for item in raw["attempts"]):
@@ -1491,6 +1571,9 @@ class MissionResult:
     # B3: set whenever the mission has a cascade; {"lanes", "cheap_ok",
     # "escalated", "rate", "cascade_usd", "escalated_usd"}. None otherwise.
     escalation: dict | None = None
+    # C5: error kind -> count, over every attempt of every lane. Empty, never
+    # null, when nothing failed.
+    errors: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1536,6 +1619,7 @@ class MissionResult:
             ),
             "quorum": self.quorum,
             "escalation": self.escalation,
+            "errors": self.errors,
             "paused": self.paused,
             "notes": self.notes,
             "resumes": self.resumes,
@@ -1670,6 +1754,25 @@ def _tighter(*caps: float | None) -> float | None:
     """The smallest of the caps that are set, or None when none is."""
     known = [c for c in caps if c is not None]
     return min(known) if known else None
+
+
+def _pollable_sleep(seconds: float, cancel_event: threading.Event | None) -> str | None:
+    """C5's retry backoff: sleep in one-second steps, polling the global stop
+    flag and this lane's own cancel event exactly like a running dispatch's
+    own wait loop does. Returns "interrupted" or "cancelled" the moment
+    either fires (checked once even for a zero-length backoff), else `None`
+    once the full duration has elapsed."""
+    remaining = max(0.0, seconds)
+    while True:
+        if stop_requested():
+            return "interrupted"
+        if cancel_event is not None and cancel_event.is_set():
+            return "cancelled"
+        if remaining <= 0:
+            return None
+        step = min(1.0, remaining)
+        time.sleep(step)
+        remaining -= step
 
 
 def _patch_bytes(lane: LaneResult) -> int | None:
@@ -2249,6 +2352,11 @@ def _execute_mission(
     lane_cancel_events: dict[str, threading.Event] = {}
     cancel_reasons: dict[str, str] = {}
     cancel_state: dict[str, object] = {"winner": None, "cancelled": []}
+    # C5: notes from the fallback.on walk (a fallback passed over because it
+    # does not handle the kind that just failed), folded into the mission's
+    # own notes once every lane has settled. Plain list.append is safe here:
+    # each lane's own worker thread only ever appends its own lane's notes.
+    mission_notes: list[str] = []
 
     def fresh_lane_result(lane: Lane, *, skipped: str | None = None) -> LaneResult:
         old = resume.previous.get(lane.name)
@@ -2299,7 +2407,115 @@ def _execute_mission(
                 out.skipped = f"cannot build on {lane.base}: {why}"
                 return
         resume_failed = False
-        for attempt in lane.attempts:
+
+        def dispatch_one(
+            attempt: Attempt,
+            *,
+            resume_id: str | None,
+            resume_state: dict | None,
+            resume_note: str | None,
+            retry_of: str | None = None,
+            retry_index: int | None = None,
+        ) -> tuple[Result, str | None]:
+            """Dispatch one attempt (or one retry of it), fold it into `out`,
+            and return the result and its error kind. Every field `out`
+            tracks across the whole lane is updated here, once, so a retry
+            costs the same bookkeeping as an ordinary attempt."""
+            nonlocal resume_failed
+            prompt = _with_prefix(
+                mission, _render(attempt.prompt, mission, done, dry_run=dry_run)
+            )
+            result = dispatch(
+                attempt.spec(
+                    mission.cwd,
+                    cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
+                    prompt=prompt,
+                    resume=resume_id,
+                    stage=lane.stage,
+                ),
+                dry_run=dry_run,
+                test_command=attempt.test,
+                commit_message=attempt.commit,
+                isolate=attempt.isolated(),
+                home=base,
+                no_op_ok=attempt.no_op_ok,
+                base_ref=base_ref,
+                cancel=lane_cancel_events.get(lane.name),
+            )
+            if resume_note and resume_id is None:
+                result.git_verdict.setdefault("notes", []).append(resume_note)
+                (Path(result.run_dir) / "result.json").write_text(
+                    json.dumps(result.to_dict(), indent=2)
+                )
+            ledger.add(result)
+            kind = error_kind(result)
+            summary = result.summary()
+            summary["test_surface"] = result.test_surface
+            summary["verdict_data"] = result.verdict
+            summary["reproduce"] = result.reproduce
+            summary["lane"] = lane.name
+            summary["attempt"] = attempt.label()
+            summary["resume"] = resume_state
+            summary["kind"] = kind
+            if retry_of is not None:
+                summary["retry_of"] = retry_of
+                summary["retry"] = retry_index
+            if resume_note:
+                summary["note"] = resume_note
+            if result.cancelled:
+                # dispatch()'s own receipt only knows the generic default
+                # reason; the mission knows which lane actually won, so the
+                # attempt's error must say the same thing report.md's
+                # "Skipped:" line says, not a different cancel string.
+                cancel_reason = cancel_reasons.get(
+                    lane.name, "cancelled: another lane already passed"
+                )
+                summary["error"] = cancel_reason
+                summary["failure"] = cancel_reason
+            summary["unpriced"] = (
+                result.spawned and not result.interrupted and summary.get("cost_usd") is None
+            )
+            out.attempts.append(summary)
+            out.kinds.append(kind)
+            out.cost_usd += float(summary.get("cost_usd") or 0.0)
+            if summary["unpriced"]:
+                out.unpriced_attempts += 1
+            out.tokens += int(summary.get("tokens") or 0)
+            out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
+            out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
+            out.input_tokens += int(summary.get("input_tokens") or 0)
+            out.tool_calls += int(summary.get("tool_calls") or 0)
+            out.breaker = summary.get("breaker")
+            # A lane's answer, diff, and tree are its final attempt's. A failed
+            # primary's answer left in place would be what the collate reads
+            # when the fallback produced none.
+            out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
+            out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
+            iso = result.isolation or {}
+            if not dry_run:
+                out.base_sha = iso.get("base_sha") or ""
+                out.tip_sha = iso.get("tip_sha") or ""
+                out.clean = iso.get("clean")
+                out.branch = iso.get("branch") or ""
+            out.test_touched = _test_touched(result.test_surface)
+            out.verdict = result.verdict
+            out.session_id = result.session_id
+            if result.resumed is not None and result.resumed.get("ok") is False:
+                resume_failed = True
+            return result, kind
+
+        attempts = lane.attempts
+        i = 0
+        last_kind: str | None = None
+        while i < len(attempts):
+            attempt = attempts[i]
+            i += 1
+            if last_kind is not None and attempt.on is not None and last_kind not in attempt.on:
+                mission_notes.append(
+                    f"lane '{lane.name}': skipped fallback {attempt.label()}: "
+                    f"does not handle {last_kind}"
+                )
+                continue
             blocked = None if dry_run else ledger.blocker()
             if stop_requested():
                 blocked = "interrupted: stop requested"
@@ -2333,81 +2549,60 @@ def _execute_mission(
                     if resume_id is not None
                     else f"resume from lane {lane.resume} not applied: {reason}"
                 )
-            prompt = _with_prefix(mission, _render(attempt.prompt, mission, done, dry_run=dry_run))
-            result = dispatch(
-                attempt.spec(
-                    mission.cwd,
-                    cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
-                    prompt=prompt,
-                    resume=resume_id,
-                    stage=lane.stage,
-                ),
-                dry_run=dry_run,
-                test_command=attempt.test,
-                commit_message=attempt.commit,
-                isolate=attempt.isolated(),
-                home=base,
-                no_op_ok=attempt.no_op_ok,
-                base_ref=base_ref,
-                cancel=lane_cancel_events.get(lane.name),
+            result, kind = dispatch_one(
+                attempt, resume_id=resume_id, resume_state=resume_state, resume_note=resume_note
             )
-            if resume_note and resume_id is None:
-                result.git_verdict.setdefault("notes", []).append(resume_note)
-                (Path(result.run_dir) / "result.json").write_text(
-                    json.dumps(result.to_dict(), indent=2)
+            first_run_id = result.run_id
+
+            # C5: retry the same attempt on its own vendor for a transient
+            # kind, before the fallback walk moves on to a different vendor.
+            retries_done = 0
+            ended_backoff: str | None = None
+            while (
+                not dry_run
+                and not result.ok
+                and not result.cancelled
+                and mission.retry is not None
+                and kind in mission.retry["kinds"]
+                and retries_done < mission.retry["attempts"]
+            ):
+                backoff = mission.retry["backoff_s"] * (2**retries_done)
+                ended_backoff = _pollable_sleep(backoff, lane_cancel_events.get(lane.name))
+                if ended_backoff is not None:
+                    break
+                retries_done += 1
+                result, kind = dispatch_one(
+                    attempt,
+                    resume_id=resume_id,
+                    resume_state=resume_state,
+                    resume_note=resume_note,
+                    retry_of=first_run_id,
+                    retry_index=retries_done,
                 )
-            ledger.add(result)
-            summary = result.summary()
-            summary["test_surface"] = result.test_surface
-            summary["verdict_data"] = result.verdict
-            summary["reproduce"] = result.reproduce
-            summary["lane"] = lane.name
-            summary["attempt"] = attempt.label()
-            summary["resume"] = resume_state
-            if resume_note:
-                summary["note"] = resume_note
-            if result.cancelled:
-                # dispatch()'s own receipt only knows the generic default
-                # reason; the mission knows which lane actually won, so the
-                # attempt's error must say the same thing report.md's
-                # "Skipped:" line says, not a different cancel string.
-                cancel_reason = cancel_reasons.get(
-                    lane.name, "cancelled: another lane already passed"
+            if ended_backoff is not None:
+                # The backoff itself was cut short by a stop or a cancel; the
+                # last dispatched attempt's own kind is stale evidence once
+                # that happens, so the receipt says what actually ended it,
+                # the same way an interrupted or cancelled dispatch would.
+                last_summary = out.attempts[-1]
+                text = (
+                    "interrupted: stop requested during retry backoff; not retried"
+                    if ended_backoff == "interrupted"
+                    else cancel_reasons.get(lane.name, "cancelled: another lane already passed")
                 )
-                summary["error"] = cancel_reason
-                summary["failure"] = cancel_reason
-            summary["unpriced"] = (
-                result.spawned and not result.interrupted and summary.get("cost_usd") is None
-            )
-            out.attempts.append(summary)
-            out.cost_usd += float(summary.get("cost_usd") or 0.0)
-            if summary["unpriced"]:
-                out.unpriced_attempts += 1
-            out.tokens += int(summary.get("tokens") or 0)
-            out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
-            out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
-            out.input_tokens += int(summary.get("input_tokens") or 0)
-            out.tool_calls += int(summary.get("tool_calls") or 0)
-            out.breaker = summary.get("breaker")
-            # A lane's answer, diff, and tree are its final attempt's. A failed
-            # primary's answer left in place would be what the collate reads
-            # when the fallback produced none.
-            out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
-            out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
-            iso = result.isolation or {}
-            if not dry_run:
-                out.base_sha = iso.get("base_sha") or ""
-                out.tip_sha = iso.get("tip_sha") or ""
-                out.clean = iso.get("clean")
-                out.branch = iso.get("branch") or ""
-            out.test_touched = _test_touched(result.test_surface)
-            out.verdict = result.verdict
-            out.session_id = result.session_id
-            if result.resumed is not None and result.resumed.get("ok") is False:
-                resume_failed = True
+                last_summary["kind"] = ended_backoff
+                last_summary["error"] = text
+                last_summary["failure"] = text
+                out.kinds[-1] = ended_backoff
+                out.skipped = text
+                break
+
+            last_kind = kind
             if result.cancelled:
                 # Another sink already passed; no fallback is worth trying.
-                out.skipped = cancel_reason
+                out.skipped = cancel_reasons.get(
+                    lane.name, "cancelled: another lane already passed"
+                )
                 break
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
@@ -2619,6 +2814,11 @@ def _execute_mission(
         [lane.name for lane in mission.lanes],
     )
     escalation_out = _escalation_summary(mission, lane_results)
+    errors_out: dict[str, int] = {}
+    for lane_result in lane_results:
+        for kind in lane_result.kinds:
+            if kind:
+                errors_out[kind] = errors_out.get(kind, 0) + 1
 
     collate_out: dict | None = None
     prior_collates = (resume.prior_result or {}).get("previous_collates")
@@ -2650,7 +2850,7 @@ def _execute_mission(
     # A pipeline is judged on its outputs: the lanes nothing else depends
     # on. In a flat mission that is every lane, as before.
     quorum: dict | None = None
-    notes: list[str] = list(resume.notes)
+    notes: list[str] = list(resume.notes) + mission_notes
     if chain.error:
         notes.append(chain.error)
     if isinstance(mission.require, dict):
@@ -2751,6 +2951,7 @@ def _execute_mission(
         chain=None if dry_run else chain.to_result(),
         paused=pause_park,
         escalation=escalation_out,
+        errors=errors_out,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -3239,6 +3440,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             f"{esc['escalated']} escalated (${_usd(esc['cascade_usd'])} on the cheap attempts, "
             f"${_usd(esc['escalated_usd'])} after)"
         )
+    if result.errors:
+        parts = ", ".join(f"{kind} x{count}" for kind, count in sorted(result.errors.items()))
+        lines.append(f"- Errors: {parts}")
     lines += [
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
@@ -3312,8 +3516,10 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         for a in lane.attempts:
             if a.get("breaker"):
                 lines.append(f"- breaker: {a['breaker']}")
-            if a.get("error"):
-                lines.append(f"- {a['attempt']}: {a['error']}")
+            failure_text = a.get("error") or a.get("failure")
+            if failure_text:
+                kind_suffix = f" (kind: {a['kind']})" if a.get("kind") else ""
+                lines.append(f"- {a['attempt']}: {failure_text}{kind_suffix}")
             if a.get("note"):
                 lines.append(f"- {a['attempt']}: {a['note']}")
             if a.get("worktree"):

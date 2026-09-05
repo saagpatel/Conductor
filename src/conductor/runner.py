@@ -33,6 +33,7 @@ from . import attest, prices, worktrees
 from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
+from .errors import error_kind
 from .fleets import FLEETS, DispatchRefused, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
@@ -190,6 +191,10 @@ class Result:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["ok"] = self.ok
+        # Computed, not stored: derived only from fields already on this
+        # object, so a Result rehydrated from an old receipt still
+        # classifies correctly without needing its own field to go stale.
+        d["kind"] = error_kind(self)
         return d
 
     def summary(self) -> dict:
@@ -198,6 +203,7 @@ class Result:
         return {
             "run_id": self.run_id,
             "ok": self.ok,
+            "kind": error_kind(self),
             "fleet": self.fleet,
             "model": self.model,
             "effort": self.effort,

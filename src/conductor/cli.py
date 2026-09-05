@@ -261,6 +261,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "report": data.get("report_path"),
                 "paused": paused,
                 "escalation": data.get("escalation"),
+                "errors": data.get("errors"),
             }
         )
     print(json.dumps(rows, indent=2))
@@ -482,6 +483,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
             {
                 "run_id": data["run_id"],
                 "ok": data.get("ok"),
+                "kind": data.get("kind"),
                 "fleet": data["fleet"],
                 "model": data["model"],
                 "session_id": data.get("session_id"),

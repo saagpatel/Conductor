@@ -316,6 +316,71 @@ have found real defects for $0.03 — but a fixed ladder can be worse than
 routing on some code tasks ([Is Escalation Worth
 It](https://arxiv.org/pdf/2605.06350)); see `docs/ROADMAP-2026-09.md` item B3.
 
+### Structured error kinds
+
+A cap hit, a rate limit, a model refusal, a transport failure, and an empty
+diff used to escalate down a lane's fallback list the same way: "not ok",
+with the reason readable only in the attempt's prose. Every failed dispatch
+now also classifies as exactly one of a fixed set of kinds, checked in this
+order, first match wins:
+
+```
+interrupted, cancelled, cap, breaker, timeout, setup, refused, rate_limit,
+transport, refusal, fleet_error, exit, gate, no_op, read_moved_bytes,
+no_answer, commit, unknown
+```
+
+A cap kill that also timed out is `cap`, not `timeout`; a fleet error that
+also mentions a rate limit is `rate_limit`, not `fleet_error`. `kind` is
+computed from the receipt's own fields, never stored as one of its own, so
+a receipt written before this feature still classifies correctly when read
+back. It shows up as `kind` on every dispatch receipt (`result.json`,
+`conductor runs`; `null` when the dispatch was `ok`).
+
+`rate_limit`, `transport`, and `refusal` are read from the fleet's own
+reported error text and status, case-insensitive:
+
+| Kind | Patterns |
+|---|---|
+| `rate_limit` | `rate limit`, `rate_limit`, `429`, `overloaded`, `529`, `quota`, `resource exhausted`, `too many requests` |
+| `transport` | `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`, `network`, `502`, `503`, `504`, `stream ended without a result event` |
+| `refusal` | Claude's `subtype` starting with `error_` (other than `error_max_budget_usd` and `error_max_turns`) when the text says `refus`, `cannot help`, or `not able to`; on every fleet, the text `I can't help` or `I cannot help` |
+
+A fallback may set `"on": [<kind>, ...]` to run only in answer to those
+kinds; an unknown kind is refused at load, naming the lane and the entry.
+When the previous attempt's kind is not in the next attempt's `on`, that
+attempt is passed over with a note
+(`skipped fallback <label>: does not handle <kind>`) and the walk continues
+to the one after it:
+
+```json
+{"fleet": "codex", "fallback": [{"fleet": "claude", "on": ["rate_limit", "transport"]}]}
+```
+
+A mission may also set `retry`, to try the same attempt again on its own
+vendor before the fallback walk moves to a different one:
+
+```json
+{"retry": {"kinds": ["rate_limit", "transport"], "attempts": 2, "backoff_s": 1}}
+```
+
+`kinds` defaults to `["rate_limit", "transport"]` when omitted, `backoff_s`
+to 0, and `attempts` (1 to 5) is required. An attempt that fails with a kind
+in `kinds` is redispatched — same spec, a fresh run id, the same cancel
+event and ledger rules — up to `attempts` more times, waiting `backoff_s *
+2^i` between tries; a stop or a lane cancel arriving during that wait ends
+it exactly as it would end a running dispatch, as `interrupted` or
+`cancelled`. Each retry is its own attempt row, `retry_of` naming the first
+attempt's run id and `retry` its index; the lane's `kinds` lists every
+attempt's kind in order, retries included. A dry run never retries.
+
+`MissionResult.errors` (`result.json`, `conductor missions`) tallies every
+kind seen across every lane's attempts, empty when nothing failed; when it
+is non-empty `report.md` shows one line, `Errors: <kind> x<n>, ...`, and
+each attempt's own line in its lane section carries `(kind: <kind>)` beside
+its error text. This was the audit's own top capability ask
+(`docs/ROADMAP-2026-09.md` item C5; OpenAI Agents SDK `error_handlers`).
+
 ### Resuming a mission
 
 Resume an interrupted or failed mission in its existing directory:
