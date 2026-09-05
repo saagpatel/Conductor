@@ -1008,6 +1008,8 @@ def _wait(
             break
         except subprocess.TimeoutExpired:
             pass
+        if run_dir is not None and out_path is not None:
+            _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
         if _STOP.is_set():
             interrupted = True
             break
