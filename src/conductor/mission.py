@@ -86,7 +86,16 @@ _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "too
 # would otherwise silently turn a dependent lane into a root.
 _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
 _FALLBACK_KEYS = _ATTEMPT_KEYS
-_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "resume", "branch", "stage"}
+_LANE_KEYS = _ATTEMPT_KEYS | {
+    "name",
+    "fallback",
+    "needs",
+    "base",
+    "resume",
+    "branch",
+    "stage",
+    "cascade",
+}
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
     "cwd",
@@ -102,6 +111,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "pause",
     "prefix",
     "prefix_file",
+    "cascade",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -223,6 +233,12 @@ class Lane:
     branch: str | None = None
     # This lane's place in a build/review/fix pipeline (STAGES), or None.
     stage: str | None = None
+    # B3: whether the mission's cascade was actually prepended as this
+    # lane's first attempt. Load-derived, not mission-file input; from_snapshot
+    # reads it back to tell a cascade attempt apart from a genuine primary
+    # when replaying attempts[0], since the two are siblings under mission
+    # defaults, not parent and child, and must not inherit from each other.
+    cascaded: bool = False
 
 
 @dataclass
@@ -287,6 +303,11 @@ class Mission:
     # handling. Refused when neither key carries anything (validated at parse
     # time, in mission_from_dict).
     pause: dict | None = None
+    # B3: an attempt-shaped dict (fleet required) prepended as the first
+    # attempt of every qualifying lane, its own attempts following as the
+    # fallbacks. None when the mission sets no cascade. See _parse_cascade
+    # and the per-lane prepend in mission_from_dict.
+    cascade: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -562,6 +583,7 @@ class Mission:
             "policy",
             "early_cancel",
             "pause",
+            "cascade",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -574,12 +596,25 @@ class Mission:
             raise MissionInvalid("mission snapshot lanes must be a list")
 
         lanes: list[dict] = []
-        lane_keys = {"name", "attempts", "needs", "base", "resume", "branch", "stage"}
+        lane_keys = {
+            "name",
+            "attempts",
+            "needs",
+            "base",
+            "resume",
+            "branch",
+            "stage",
+            "cascaded",
+        }
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
             if not isinstance(raw_lane, dict):
                 raise MissionInvalid(f"mission snapshot lane {index} must be an object")
             _require_snapshot_keys(raw_lane, lane_keys, f"mission snapshot lane {index}")
+            if not isinstance(raw_lane["cascaded"], bool):
+                raise MissionInvalid(
+                    f"mission snapshot lane {index} cascaded must be true or false"
+                )
             attempts = raw_lane["attempts"]
             if not isinstance(attempts, list) or not attempts:
                 raise MissionInvalid(
@@ -597,6 +632,17 @@ class Mission:
                     f"mission snapshot lane {index} attempt {attempt_index}",
                 )
                 checked.append(dict(attempt))
+            # A cascade attempt and the lane's real primary are siblings under
+            # mission defaults, not parent and child: replaying them through
+            # the ordinary primary/fallback merge would let the real primary
+            # inherit fields from the cascade attempt it never actually
+            # inherited from. When cascaded, skip checked[0] (the cascade
+            # attempt) here and let the mission-level cascade re-derive it
+            # fresh against the real primary below, reproducing it exactly.
+            cascaded = raw_lane["cascaded"]
+            primary_attempt, fallback_attempts = (
+                (checked[1], checked[2:]) if cascaded else (checked[0], checked[1:])
+            )
             lane = {
                 "name": raw_lane["name"],
                 "needs": raw_lane["needs"],
@@ -604,8 +650,9 @@ class Mission:
                 "resume": raw_lane["resume"],
                 "branch": raw_lane["branch"],
                 "stage": raw_lane["stage"],
-                **checked[0],
-                "fallback": checked[1:],
+                **primary_attempt,
+                "fallback": fallback_attempts,
+                "cascade": cascaded,
             }
             lanes.append(lane)
 
@@ -631,6 +678,7 @@ class Mission:
             "policy": raw["policy"],
             "early_cancel": raw["early_cancel"],
             "pause": raw["pause"],
+            "cascade": raw["cascade"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -776,9 +824,18 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         # lanes list is where fleets belong.
         raise MissionInvalid("set fleet on each lane, not on the mission")
 
+    cascade_fields = _parse_cascade(raw.get("cascade"), base_dir)
+
     raw_lanes = raw.get("lanes")
     if not isinstance(raw_lanes, list):
         raise MissionInvalid("mission needs a 'lanes' list")
+    # B3: with no lane declaring a stage, the cascade targets every write
+    # lane; the moment any lane declares one, it targets build-stage lanes
+    # only, so a fixed ladder never quietly reaches into review or fix.
+    any_staged = any(
+        isinstance(raw_lane, dict) and raw_lane.get("stage") is not None
+        for raw_lane in raw_lanes
+    )
     lanes: list[Lane] = []
     for i, raw_lane in enumerate(raw_lanes):
         if not isinstance(raw_lane, dict):
@@ -806,6 +863,19 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         lane_stage = raw_lane.get("stage")
         if lane_stage is not None and not isinstance(lane_stage, str):
             raise MissionInvalid(f"lane {i}: stage must be a string")
+        lane_cascade = raw_lane.get("cascade", True)
+        if not isinstance(lane_cascade, bool):
+            raise MissionInvalid(f"lane {i}: cascade must be true or false")
+        lane_cascaded = False
+        if cascade_fields is not None and lane_cascade:
+            qualifies = lane_stage == "build" if any_staged else primary.mode == "write"
+            if qualifies:
+                cascade_attempt = _attempt(
+                    _attempt_fields(cascade_fields, base_dir, primary_fields),
+                    where=f"{lane_where} cascade",
+                )
+                attempts = [cascade_attempt, *attempts]
+                lane_cascaded = True
         lanes.append(
             Lane(
                 name=lane_name,
@@ -815,6 +885,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 resume=lane_resume,
                 branch=lane_branch,
                 stage=lane_stage,
+                cascaded=lane_cascaded,
             )
         )
 
@@ -889,9 +960,25 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         policy=policy,
         early_cancel=early_cancel,
         pause=pause,
+        cascade=cascade_fields,
     )
     mission.validate()
     return mission
+
+
+def _parse_cascade(raw_cascade: object, base_dir: Path) -> dict | None:
+    """B3: the mission's cheap-first attempt, an attempt-shaped object with a
+    required `fleet`. Parsed once, at the mission level; merged onto each
+    qualifying lane's own primary fields (the way a fallback merges) when
+    that lane's cascade attempt is built."""
+    if raw_cascade is None:
+        return None
+    if not isinstance(raw_cascade, dict):
+        raise MissionInvalid("cascade must be an object")
+    _reject_unknown(raw_cascade, _FALLBACK_KEYS, "cascade")
+    if "fleet" not in raw_cascade:
+        raise MissionInvalid("cascade: fleet is required")
+    return _attempt_fields(raw_cascade, base_dir, {})
 
 
 def _parse_pause(raw_pause: object) -> dict | None:
@@ -1245,6 +1332,10 @@ class LaneResult:
     session_id: str | None = None
     previous_attempts: list[dict] = field(default_factory=list)
     kept: bool = False
+    # B3: true when this lane's first attempt was dispatched and was not ok,
+    # and a later attempt then ran (a cascade attempt escalating to the
+    # lane's own attempts, or an ordinary fallback escalation).
+    escalated: bool = False
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -1327,6 +1418,8 @@ class LaneResult:
                 raise ValueError(f"lane receipt {key} must be an object or null")
         if "kept" in raw and not isinstance(raw["kept"], bool):
             raise ValueError("lane receipt kept must be true or false")
+        if "escalated" in raw and not isinstance(raw["escalated"], bool):
+            raise ValueError("lane receipt escalated must be true or false")
         return cls(**raw)
 
 
@@ -1366,6 +1459,9 @@ class MissionResult:
     # B2: {"input_tokens", "cache_read_tokens", "cache_write_tokens", "hit_rate"}
     # summed over every lane's attempts and the collate.
     cache: dict | None = None
+    # B3: set whenever the mission has a cascade; {"lanes", "cheap_ok",
+    # "escalated", "rate", "cascade_usd", "escalated_usd"}. None otherwise.
+    escalation: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1395,6 +1491,7 @@ class MissionResult:
                     "skipped": lane.get("skipped"),
                     "test_touched": lane.get("test_touched", "no"),
                     "verdict": _verdict_label(lane.get("verdict")),
+                    "escalated": lane.get("escalated", False),
                 }
                 for lane in self.lanes
             ],
@@ -1409,6 +1506,7 @@ class MissionResult:
                 else None
             ),
             "quorum": self.quorum,
+            "escalation": self.escalation,
             "paused": self.paused,
             "notes": self.notes,
             "resumes": self.resumes,
@@ -1555,6 +1653,45 @@ def _gate_exit(lane: LaneResult) -> int | None:
     last = lane.attempts[-1] if lane.attempts else {}
     exit_code = last.get("tests")
     return exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+
+
+def _cascade_target_lanes(mission: Mission) -> list[Lane]:
+    """Lanes the cascade attempt was actually prepended to at load. A lane
+    that opted out with `cascade: false` has no cheap attempt, so its own
+    primary must not be counted as one (cross-vendor review of B3)."""
+    if mission.cascade is None:
+        return []
+    return [lane for lane in mission.lanes if lane.cascaded]
+
+
+def _cascade_label(cascade: dict) -> str:
+    fleet = cascade.get("fleet")
+    model = cascade.get("model")
+    return f"{fleet}/{model}" if model else str(fleet)
+
+
+def _escalation_summary(mission: Mission, lane_results: list[LaneResult]) -> dict | None:
+    """B3: the mission-wide escalation rate and dollars, logged beside the
+    cap (docs/ROADMAP-2026-09.md item B3)."""
+    if mission.cascade is None:
+        return None
+    names = {lane.name for lane in _cascade_target_lanes(mission)}
+    targeted = [lr for lr in lane_results if lr.name in names]
+    lanes_n = len(targeted)
+    cheap_ok = sum(1 for lr in targeted if lr.attempts and lr.attempts[0].get("ok") is True)
+    escalated = sum(1 for lr in targeted if lr.escalated)
+    cascade_usd = sum(lr.attempts[0].get("cost_usd") or 0.0 for lr in targeted if lr.attempts)
+    escalated_usd = sum(
+        sum(a.get("cost_usd") or 0.0 for a in lr.attempts[1:]) for lr in targeted if lr.escalated
+    )
+    return {
+        "lanes": lanes_n,
+        "cheap_ok": cheap_ok,
+        "escalated": escalated,
+        "rate": round(escalated / lanes_n, 3) if lanes_n else None,
+        "cascade_usd": round(cascade_usd, 6),
+        "escalated_usd": round(escalated_usd, 6),
+    }
 
 
 def rank_lanes(lanes: list[LaneResult], mission_order: list[str]) -> list[dict]:
@@ -2103,6 +2240,7 @@ def _execute_mission(
             out.cache_write_tokens = old.cache_write_tokens
             out.input_tokens = old.input_tokens
             out.tool_calls = old.tool_calls
+            out.escalated = old.escalated
             if dry_run:
                 # A resume rehearsal must retain the previous lineage so the
                 # next real resume can safely reclaim its unchanged branch.
@@ -2245,6 +2383,7 @@ def _execute_mission(
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
                 break
+        out.escalated = len(out.attempts) > 1 and out.attempts[0].get("ok") is not True
         if out.ok and lane.branch and not dry_run:
             # The lane's commits are the deliverable; give them the name the
             # mission asked for. A lane that landed nothing has no branch of
@@ -2450,6 +2589,7 @@ def _execute_mission(
         [lane for lane in lane_results if lane.name in sink_names],
         [lane.name for lane in mission.lanes],
     )
+    escalation_out = _escalation_summary(mission, lane_results)
 
     collate_out: dict | None = None
     prior_collates = (resume.prior_result or {}).get("previous_collates")
@@ -2581,6 +2721,7 @@ def _execute_mission(
         ranking=ranking,
         chain=None if dry_run else chain.to_result(),
         paused=pause_park,
+        escalation=escalation_out,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -3060,6 +3201,14 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         lines.append(
             f"- Receipt chain: {result.chain['links']} links, "
             f"head {(result.chain['head'] or '')[:12]}"
+        )
+    if result.escalation:
+        esc = result.escalation
+        label = _cascade_label(mission.cascade) if mission.cascade else ""
+        lines.append(
+            f"- Cascade: {esc['cheap_ok']} of {esc['lanes']} lanes passed on {label}; "
+            f"{esc['escalated']} escalated (${_usd(esc['cascade_usd'])} on the cheap attempts, "
+            f"${_usd(esc['escalated_usd'])} after)"
         )
     lines += [
         "",

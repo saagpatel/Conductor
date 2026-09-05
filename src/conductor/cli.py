@@ -256,6 +256,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),
                 "paused": paused,
+                "escalation": data.get("escalation"),
             }
         )
     print(json.dumps(rows, indent=2))
