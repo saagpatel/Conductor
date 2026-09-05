@@ -20,10 +20,12 @@ orchestrators. Sources are linked where a claim rests on one.
 | A4 reviewer direction and reproduce-before-fix | 0.15.0 | Shape A | $8.03 |
 | B5 early cancel and best-of-n | 0.16.0 | Shape A | $9.49 |
 | A5 signed lane receipts | 0.17.0 | Shape A, in parallel with C2 | $8.92 |
+| C2 pause primitive | 0.18.0 | Shape A, in parallel with A5 | $8.24 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
-("Shape A"). Next candidates: A5 signed lane receipts and C2 the pause primitive, which can run
-as two missions in parallel and merge in that order.
+("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
+order; the second merge was the lead's. Next candidates: the open Phase B and C items (B2, B3, C4
+through C7), through the same shape.
 
 ## What conductor is, in one paragraph
 
