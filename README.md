@@ -549,6 +549,49 @@ name and says so. Upstream lanes keep their run-id branches; the first productio
 pipeline (2026-09-03) needed a hand rename, which is how this field earned
 its place.
 
+#### Early cancel, mechanical ranking, and best-of-n
+
+A `require: any` mission may set `"early_cancel": true` (refused at load on
+any other `require`, message `early_cancel needs require: any`, since
+cancelling the rest only makes sense once one lane passing is already enough
+to win). The moment a sink lane settles ok, conductor cancels every other
+lane still running (its fleet is killed the way a cap kill ends one: process
+group killed, priced from the watcher's last reading, no gate, no commit)
+and skips every lane not yet started, without starting anything new. A
+cancelled lane's `LaneResult` is not ok; its `skipped` reads
+`cancelled: lane <name> already passed`, so `report.md`'s table shows it and
+`require: any` still reads true from the lane that actually passed. The
+mission result carries `early_cancel: {"winner": "<lane>", "cancelled":
+["<lane>", ...]}`, null when nothing needed cancelling. On resume, a lane
+`skipped` for this reason is treated as finished rather than rerun, as long
+as the mission it belongs to was itself ok — rerunning it would just repeat
+the same cancellation.
+
+Once every lane has settled, conductor ranks the sink lanes that were
+actually dispatched (not skipped) on a fixed order, best first, and no model
+judgment: ok before not; a passing verdict before a failing or absent one;
+an untouched test surface (`test_touched: no`) before a touched one; a gate
+exit code of 0 before nonzero before none; a smaller `diffs/<lane>.patch`
+before a larger one (no patch ranks last); lower `cost_usd` before higher;
+mission order as the final tie-break. Bytes and gate results come before any
+model judgment because a judge is the expensive, fallible step and a broken
+gate or an empty diff is settled evidence, not something worth a model's
+opinion (Generative Verifiers, `docs/ROADMAP-2026-09.md` item B5,
+<https://arxiv.org/abs/2408.15240>). The result carries `ranking: [{"lane",
+"rank", "ok", "verdict", "test_touched", "gate_exit", "patch_bytes",
+"cost_usd"}, ...]`, and `report.md` shows it as a `## Ranking` table. A
+mission with a single sink still gets a one-row ranking.
+
+`collate` also takes `"candidates": <int>` (0, the default, means every
+lane; set it, it must be at least 2 or refused at load) to judge only the
+ranking's top N sink lanes instead of every lane, so a judge is not spent
+rereading redundant losers. The forward dispatch sees the chosen lanes in
+rank order; a ranking collate's schema enum and reverse order cover only
+those lanes too. The prompt says which lanes were left out and why
+(`omitted by ranking: <lane>, <lane>`), and the collate receipt records
+`candidates: ["<lane>", ...]`. `candidates` larger than the number of
+dispatched sink lanes just uses what there is.
+
 ## Isolation: a branch is not a worktree
 
 HEAD and the index are shared mutable state, so two fleets editing one

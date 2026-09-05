@@ -102,6 +102,7 @@ class Result:
     dry_run: bool = False
     no_op_ok: bool = False  # a write that may legitimately change nothing
     interrupted: bool = False  # a stop request ended the run
+    cancelled: bool = False  # another lane already passed; this one was cut
 
     @property
     def gate_passed(self) -> bool:
@@ -224,6 +225,7 @@ class Result:
             "resumed": self.resumed,
             "error": self.error or self.fleet_error,
             "failure": self.failure(),
+            "cancelled": self.cancelled,
         }
 
 
@@ -620,6 +622,8 @@ def dispatch(
     home: Path | None = None,
     no_op_ok: bool = False,
     base_ref: str | None = None,
+    cancel: threading.Event | None = None,
+    cancel_reason: str = "another lane already passed",
 ) -> Result:
     """Run one fleet and report honestly.
 
@@ -628,6 +632,13 @@ def dispatch(
     forces isolation, and a dispatch that cannot get its worktree is then
     refused in either mode, because running against HEAD would be running
     against the wrong code.
+
+    `cancel` ends a still-running fleet the way a cap kill does (process
+    group killed, priced from the watcher's last reading, no gate, no
+    commit) the moment it is set; a caller sets it once its own reason for
+    cancelling is known (a mission: another lane already passed) and
+    `cancel_reason` names that reason for the receipt. A cancel that arrives
+    after the fleet already exited cleanly changes nothing.
     """
     criteria = spec.verdict
     spec.validate()
@@ -739,6 +750,7 @@ def dispatch(
     timed_out = False
     capped = False
     interrupted = False
+    cancelled = False
     breaker_reason: str | None = None
     breaker: Breaker | None = None
     exit_code: int | None = None
@@ -800,9 +812,18 @@ def dispatch(
                 run_dir=run_dir,
                 stdout_path=stdout_path,
                 started=started,
+                cancel=cancel,
             )
+            # `_wait` folds a per-dispatch cancel into `interrupted` (same poll,
+            # same kill); this is the only place that tells the two apart, so
+            # the receipt says which one actually ended the run.
+            cancelled = interrupted and cancel is not None and cancel.is_set()
+            if cancelled:
+                interrupted = False
             if timed_out:
                 error = f"timed out after {timeout}s; process group killed"
+            elif cancelled:
+                error = f"cancelled: {cancel_reason}"
             elif interrupted:
                 error = "interrupted: stop requested; process group killed"
             elif capped:
@@ -1037,7 +1058,9 @@ def dispatch(
         budget.settle(
             usage.cost_usd if usage else None,
             killed=capped or breaker_reason is not None,
-            interrupted=interrupted,
+            # A cancel is not the cap firing either: another lane winning says
+            # nothing about this one's spend.
+            interrupted=interrupted or cancelled,
             fleet_status=output.status,
         )
         if watcher is not None and watcher.usage is None:
@@ -1087,6 +1110,7 @@ def dispatch(
         error=error,
         no_op_ok=no_op_ok,
         interrupted=interrupted,
+        cancelled=cancelled,
     )
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
@@ -1163,10 +1187,18 @@ def _wait(
     run_dir: Path | None = None,
     stdout_path: Path | None = None,
     started: float | None = None,
+    cancel: threading.Event | None = None,
 ) -> tuple[int | None, bool, bool, bool, str | None]:
     """Wait for the fleet, in short polls so the budget watcher and a stop
     request get a look in. Returns (exit_code, timed_out, over_cap,
     interrupted, breaker_reason).
+
+    `cancel` is polled in the same loop as the global stop flag and folds
+    into `interrupted` on the same terms: set only while the fleet is still
+    running, and never once it has already exited cleanly. The caller (only
+    `dispatch` passes one) tells a stop from a cancel apart by checking
+    `cancel.is_set()` itself, so this return shape stays exactly what every
+    existing caller already unpacks.
 
     Whatever ended the wait, the process group is killed afterwards. On a
     timeout or a cap that is the point; after a clean exit it clears any
@@ -1196,7 +1228,7 @@ def _wait(
         except subprocess.TimeoutExpired:
             pass
         beat()
-        if _STOP.is_set():
+        if _STOP.is_set() or (cancel is not None and cancel.is_set()):
             interrupted = True
             break
         if watcher is not None and watcher.over_cap():
