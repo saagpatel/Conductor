@@ -43,6 +43,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import attest
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
@@ -1042,6 +1043,96 @@ class Ledger:
             }
 
 
+class _ReceiptChain:
+    """A5's hash chain: one signed link per settled lane, under
+    `<mission_dir>/receipts/`. Each link names the previous link's own file
+    hash, so the sequence itself is tamper-evident, not just each entry.
+
+    A resume loads whatever chain already exists on disk and continues it
+    (`index` carries on, `previous` points at the last link there); a kept
+    lane never calls `append`, so it keeps whichever link it already earned.
+    A link that cannot be written is recorded as a mission note rather than
+    raised, matching every other best-effort receipt in a mission run.
+    """
+
+    def __init__(self, mission_dir: Path, mission_id: str, home: Path) -> None:
+        self.dir = mission_dir / "receipts"
+        self.mission_id = mission_id
+        self.home = home
+        self.links: list[dict] = []
+        self.head_sha: str | None = None
+        self.error: str | None = None
+        existing = _json_object(self.dir / "chain.json")
+        if isinstance(existing, dict) and isinstance(existing.get("links"), list):
+            self.links = [
+                {
+                    "index": link.get("index"),
+                    "lane": link.get("lane"),
+                    "path": link.get("path"),
+                    "sha256": link.get("sha256"),
+                }
+                for link in existing["links"]
+                if isinstance(link, dict)
+            ]
+            if self.links:
+                self.head_sha = self.links[-1]["sha256"]
+
+    def append(self, lane_result: LaneResult) -> None:
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            index = len(self.links)
+            final_attempt = lane_result.attempts[-1] if lane_result.attempts else None
+            run_id = final_attempt.get("run_id") if final_attempt else None
+            attestation_path: str | None = None
+            if isinstance(run_id, str):
+                candidate = self.home / "runs" / run_id / "attestation.json"
+                if candidate.is_file():
+                    attestation_path = str(candidate)
+            statement = {
+                "_type": "conductor/mission-link/v1",
+                "mission_id": self.mission_id,
+                "index": index,
+                "lane": lane_result.name,
+                "run_id": run_id,
+                "attestation_path": attestation_path,
+                "attestation_sha256": (
+                    attest.file_sha256(attestation_path) if attestation_path else None
+                ),
+                "skipped": lane_result.skipped,
+                "ok": lane_result.ok,
+                "previous": self.head_sha,
+                "linked_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            }
+            key = attest.receipt_key(self.home)
+            envelope = attest.sign(statement, key)
+            link_path = self.dir / f"{index:04d}-{lane_result.name}.json"
+            link_path.write_text(json.dumps(envelope, indent=2))
+            link_sha = attest.file_sha256(link_path)
+            self.links.append(
+                {
+                    "index": index,
+                    "lane": lane_result.name,
+                    "path": str(link_path),
+                    "sha256": link_sha,
+                }
+            )
+            self.head_sha = link_sha
+            (self.dir / "chain.json").write_text(
+                json.dumps({"mission_id": self.mission_id, "links": self.links}, indent=2)
+            )
+        except OSError as exc:
+            self.error = f"receipt chain link for lane '{lane_result.name}' not written: {exc}"
+
+    def to_result(self) -> dict | None:
+        if not self.links:
+            return None
+        return {
+            "path": str(self.dir / "chain.json"),
+            "links": len(self.links),
+            "head": self.head_sha,
+        }
+
+
 @dataclass
 class LaneResult:
     name: str
@@ -1181,6 +1272,9 @@ class MissionResult:
     early_cancel: dict | None = None
     # The dispatched sink lanes, best first, on bytes and gate results alone.
     ranking: list[dict] = field(default_factory=list)
+    # A5: {"path", "links", "head"} once at least one lane has settled and
+    # signed a link; null on a dry run, which writes no receipts.
+    chain: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1759,6 +1853,7 @@ def _execute_mission(
     lanes_dir.mkdir(exist_ok=True)
     verdicts_dir = mission_dir / "verdicts"
     verdicts_dir.mkdir(exist_ok=True)
+    chain = _ReceiptChain(mission_dir, mission_id, base)
 
     ledger = Ledger(mission.max_cost_usd)
     ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
@@ -1974,6 +2069,8 @@ def _execute_mission(
             (verdicts_dir / f"{lane_result.name}.json").write_text(
                 json.dumps(lane_result.verdict, indent=2)
             )
+        if not dry_run:
+            chain.append(lane_result)
 
     # The scheduler: a lane starts when every lane it needs has ended ok;
     # it is skipped the moment one of them ends otherwise. Skips propagate
@@ -2083,6 +2180,8 @@ def _execute_mission(
     # on. In a flat mission that is every lane, as before.
     quorum: dict | None = None
     notes: list[str] = list(resume.notes)
+    if chain.error:
+        notes.append(chain.error)
     if isinstance(mission.require, dict):
         if dry_run:
             # A rehearsal validates the graph and every dispatch contract but
@@ -2175,6 +2274,7 @@ def _execute_mission(
         previous_collates=previous_collates,
         early_cancel=early_cancel_out,
         ranking=ranking,
+        chain=None if dry_run else chain.to_result(),
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -2624,6 +2724,13 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             else ""
         ),
         f"- duration: {result.duration_s:.1f}s",
+    ]
+    if result.chain:
+        lines.append(
+            f"- Receipt chain: {result.chain['links']} links, "
+            f"head {(result.chain['head'] or '')[:12]}"
+        )
+    lines += [
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
         "cost_usd | tokens | tools | cached | resumed | dur_s |",
