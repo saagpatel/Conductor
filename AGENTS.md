@@ -147,6 +147,17 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   (none today); OpenRouter ids work now. Rate limits on OpenRouter `:free` (20/min) make them
   unusable for agent loops.
 
+### Local models through `pi` + llama.cpp (planned fleet `pi`)
+
+Receipts: `docs/research/2026-09-04-live-probe-pi-local.md`. Qwen3-Coder-30B-A3B Q4_K_M on the
+48 GB M4 Pro fixed the two-test probe with zero malformed tool calls in 20, but took 7 minutes and
+spent 12 calls in the wrong repo because the prompt named a path elsewhere: **name the working
+directory in every local write prompt.** Server: `llama-server --jinja -fa on -ngl 99 -c 65536
+--parallel 1`, no KV-cache quantization (it halves throughput and pushed attention onto the CPU here).
+Cold prefill is 136 s at 32K and 6 min at 64K, so local read lanes stay under ~16K tokens of input.
+`pi auth check` runs a full agent turn, not a ping; preflight with `GET /health`. Start the server per
+mission and stop it after (23 GB resident, GPU flat out while prefilling).
+
 ### GPT-5.6 Sol / Terra / Luna (fleet `codex`) — paused, record only
 
 Subtractive prompting (leaner system prompts scored 10-15% higher in OpenAI's own evals), state
