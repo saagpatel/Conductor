@@ -198,11 +198,25 @@ def _mission_runs(data: dict[str, object]) -> set[str]:
     previous_collates = data.get("previous_collates")
     if isinstance(previous_collates, list):
         for collate in previous_collates:
-            if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
-                run_ids.add(collate["run_id"])
+            if isinstance(collate, dict):
+                run_ids |= _collate_run_ids(collate)
     collate = data.get("collate")
-    if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
+    if isinstance(collate, dict):
+        run_ids |= _collate_run_ids(collate)
+    return run_ids
+
+
+def _collate_run_ids(collate: dict[str, object]) -> set[str]:
+    """A collate's priced runs: its own run (a prose collate) and/or both
+    order runs (a ranking collate)."""
+    run_ids: set[str] = set()
+    if isinstance(collate.get("run_id"), str):
         run_ids.add(collate["run_id"])
+    orders = collate.get("orders")
+    if isinstance(orders, list):
+        for order in orders:
+            if isinstance(order, dict) and isinstance(order.get("run_id"), str):
+                run_ids.add(order["run_id"])
     return run_ids
 
 

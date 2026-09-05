@@ -122,7 +122,12 @@ def test_snapshot_round_trips_every_mission_feature(tmp_path, repo, home):
                     "max_chars": 321,
                     "cap_usd": 0.5,
                     "include_diffs": False,
+                    "rank": False,
                 },
+                # fix-review (codex) judges build (codex), and the claude
+                # collate shares a vendor with the claude review lane; this
+                # mission exercises every field, self-judging included.
+                "self_judging": "allow",
             }
         )
     )
@@ -533,6 +538,10 @@ def test_collate_is_kept_until_a_summarized_lane_reruns(
                 {"name": "b", "fleet": "claude", "prompt": "B"},
             ],
             "collate": {"fleet": "claude"},
+            # Resume/kept-collate accounting is under test, not vendor
+            # diversity; this claude-only mission would otherwise be
+            # refused at load (A3 self-judging).
+            "self_judging": "allow",
         },
         base_dir=tmp_path,
     )
@@ -562,6 +571,9 @@ def test_every_rerun_collate_remains_in_the_cumulative_budget(
             "max_cost_usd": 2,
             "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}],
             "collate": {"fleet": "claude"},
+            # Cumulative-budget accounting across reruns is under test, not
+            # vendor diversity.
+            "self_judging": "allow",
         },
         base_dir=tmp_path,
     )
@@ -730,6 +742,12 @@ def _verdict_answer(passed: bool) -> str:
     )
 
 
+def _codex_verdict_stream(answer: str) -> str:
+    item = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
+    done = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
+    return f"{item}\n{done}\n"
+
+
 def test_quorum_resume_tallies_a_kept_verdict_lane(
     repo, home, monkeypatch, tmp_path
 ):
@@ -739,16 +757,20 @@ def test_quorum_resume_tallies_a_kept_verdict_lane(
         key = spec.prompt.split()[0]
         calls[key] += 1
         failed_first = key == "R2" and calls[key] == 1
-        return _command(
-            _verdict_answer(True),
-            exit_code=1 if failed_first else 0,
-        )
+        exit_code = 1 if failed_first else 0
+        answer = _verdict_answer(True)
+        if spec.fleet == "codex":
+            body = shlex.quote(_codex_verdict_stream(answer))
+            return ["sh", "-c", f"printf '%s' {body}; exit {exit_code}"]
+        return _command(answer, exit_code=exit_code)
 
     monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    # r3 is on a different vendor than r1/r2: a quorum confined to one
+    # vendor is refused at load (A3).
     lanes = [
         {
             "name": name.lower(),
-            "fleet": "claude",
+            "fleet": "codex" if name == "R3" else "claude",
             "prompt": name,
             "verdict": ["correct"],
         }

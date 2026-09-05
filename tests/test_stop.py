@@ -96,6 +96,8 @@ def test_a_stopped_mission_skips_what_has_not_started_and_still_reports(
             ],
             "collate": {"fleet": "claude"},
             "max_cost_usd": 5.0,
+            # Interrupt handling, not vendor diversity, is under test here.
+            "self_judging": "allow",
         },
         base_dir=tmp_path,
     )

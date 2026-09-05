@@ -131,6 +131,35 @@ def test_spend_associates_attempts_with_their_mission(home: Path, monkeypatch, c
     }
 
 
+def test_spend_associates_a_ranking_collates_two_order_runs_with_their_mission(
+    home: Path, monkeypatch, capsys
+):
+    """A ranking collate prices two dispatches (one per lane order) onto
+    collate.orders[].run_id rather than collate.run_id; both must count
+    toward the mission, not fall through to '(standalone)'."""
+    first, second, third = _sample(home)
+    mission = home / "missions" / "20260104T000000Z-mission"
+    mission.mkdir(parents=True)
+    (mission / "result.json").write_text(
+        json.dumps(
+            {
+                "name": "rank-mission",
+                "lanes": [{"name": "build", "attempts": [{"run_id": first}]}],
+                "collate": {
+                    "rank": True,
+                    "orders": [{"run_id": second}, {"run_id": third}],
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--by", "mission", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert {row["group"]: row["runs"] for row in rows[:-1]} == {
+        "rank-mission": 3,
+    }
+
+
 def test_spend_window_is_since_inclusive_and_until_exclusive(home: Path, monkeypatch, capsys):
     _sample(home)
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))

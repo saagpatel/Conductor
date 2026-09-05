@@ -34,6 +34,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import tomllib
@@ -42,9 +43,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .fleets import DispatchRefused, Spec
+from .fleets import DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
-from .verdicts import Criterion, parse_checklist, render_verdict
+from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import git_run
 
@@ -89,6 +90,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "require",
     "max_cost_usd",
     "template_max_chars",
+    "self_judging",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -100,7 +102,9 @@ _COLLATE_KEYS = {
     "max_chars",
     "cap_usd",
     "include_diffs",
+    "rank",
 }
+_SELF_JUDGING_VALUES = ("allow",)
 
 DEFAULT_COLLATE_INSTRUCTIONS = (
     "Compare the lane results above. State where they agree, where they disagree, "
@@ -214,8 +218,11 @@ class Collate:
     max_chars: int = COLLATE_MAX_CHARS
     cap_usd: float | None = None
     include_diffs: bool = True  # the judge sees each lane's patch, not just its prose
+    rank: bool = False  # comparative judge: dispatched twice, both lane orders
 
-    def spec(self, cwd: str, prompt: str, *, cap_usd: float | None = None) -> Spec:
+    def spec(
+        self, cwd: str, prompt: str, *, cap_usd: float | None = None, schema: str | None = None
+    ) -> Spec:
         return Spec(
             fleet=self.fleet,
             prompt=prompt,
@@ -224,7 +231,7 @@ class Collate:
             effort=self.effort,
             mode="read",
             timeout=self.timeout,
-            schema=self.schema,
+            schema=self.schema if schema is None else schema,
             cap_usd=self.cap_usd if cap_usd is None else cap_usd,
         )
 
@@ -242,6 +249,9 @@ class Mission:
     prompt: str | None = None  # the mission-level prompt, kept verbatim for templates
     template_max_chars: int = TEMPLATE_MAX_CHARS
     snapshot_version: int = 1
+    # Lifts the self-vendor refusal (see _self_judging_findings): a judge
+    # never scores its own vendor unless the mission says so explicitly.
+    self_judging: str | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -286,10 +296,39 @@ class Mission:
         self._validate_graph(seen)
         self._validate_quorum(seen)
         if self.collate:
+            if self.collate.rank and len(self.lanes) < 2:
+                raise MissionInvalid("collate rank needs at least two lanes")
             try:
-                self.collate.spec(self.cwd, "collate").validate()
+                if self.collate.rank:
+                    names_for_rank = [lane.name for lane in self.lanes]
+                    prompt = "collate" + _rank_contract(names_for_rank)
+                    schema_path = _write_temp_schema(_rank_schema(names_for_rank))
+                    try:
+                        self.collate.spec(self.cwd, prompt, schema=schema_path).validate()
+                    finally:
+                        os.unlink(schema_path)
+                else:
+                    self.collate.spec(self.cwd, "collate").validate()
             except DispatchRefused as exc:
                 raise MissionInvalid(f"collate: {exc}") from exc
+        self._validate_self_judging()
+
+    def _validate_self_judging(self) -> None:
+        if self.self_judging is not None and self.self_judging not in _SELF_JUDGING_VALUES:
+            raise MissionInvalid(
+                f"self_judging must be one of {', '.join(_SELF_JUDGING_VALUES)}, "
+                f"got {self.self_judging!r}"
+            )
+        if self.self_judging in _SELF_JUDGING_VALUES:
+            return
+        findings = _self_judging_findings(self)
+        if findings:
+            judge, judged, vendor = findings[0]
+            raise MissionInvalid(
+                f"'{judge}' judges '{judged}', both on vendor '{vendor}'; "
+                "set self_judging: allow to permit this, or route one of them to a "
+                "different vendor"
+            )
 
     def _validate_quorum(self, names: set[str]) -> None:
         if not isinstance(self.require, dict):
@@ -304,6 +343,11 @@ class Mission:
             raise MissionInvalid("quorum of must be a list of lane names")
         if len(selected) < 2:
             raise MissionInvalid("quorum of must name at least two lanes")
+        if len(selected) > 3:
+            raise MissionInvalid(
+                "quorum of may name at most three lanes; three judges with a dissent "
+                "slot tally better than five"
+            )
         if len(set(selected)) != len(selected):
             raise MissionInvalid("quorum lane names must be unique")
         unknown = [name for name in selected if name not in names]
@@ -311,12 +355,21 @@ class Mission:
             raise MissionInvalid(f"quorum names unknown lane '{unknown[0]}'")
         if needed > len(selected):
             raise MissionInvalid("quorum pass cannot exceed the number of lanes in of")
+        if len(selected) == 3 and needed == 3:
+            raise MissionInvalid("quorum of three needs a dissent slot: pass must be at most 2")
         by_name = {lane.name: lane for lane in self.lanes}
         for name in selected:
             if any(attempt.verdict is None for attempt in by_name[name].attempts):
                 raise MissionInvalid(
                     f"quorum lane '{name}' must have a verdict on every attempt"
                 )
+        vendors = {
+            model_vendor(attempt.fleet, attempt.model)
+            for name in selected
+            for attempt in by_name[name].attempts
+        }
+        if len(vendors) < 2:
+            raise MissionInvalid("quorum lanes must span at least two vendors")
 
     def _validate_graph(self, names: set[str]) -> None:
         """Needs and bases name real lanes, never the lane itself, and form
@@ -404,6 +457,7 @@ class Mission:
             "prompt",
             "template_max_chars",
             "snapshot_version",
+            "self_judging",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -467,6 +521,7 @@ class Mission:
             "collate": collate,
             "prompt": raw["prompt"],
             "template_max_chars": raw["template_max_chars"],
+            "self_judging": raw["self_judging"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -491,6 +546,69 @@ def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
             )
         refs.append((m.group(1) or "", m.group(2) or "", bool(m.group(3))))
     return refs
+
+
+def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
+    """Every (judge, judged, vendor) pair where a judge could score a lane on
+    its own vendor: a verdict lane against its `base`, and the collate
+    against any lane it collates over (every lane in the mission).
+
+    "Could" rather than "does": which attempt of a lane ends up final is not
+    known at load time, so a shared vendor on any attempt (fallbacks
+    included) is enough to flag the pair.
+    """
+    by_name = {lane.name: lane for lane in mission.lanes}
+    findings: list[tuple[str, str, str]] = []
+    for lane in mission.lanes:
+        if lane.base is None or not any(a.verdict is not None for a in lane.attempts):
+            continue
+        judged = by_name.get(lane.base)
+        if judged is None:
+            continue
+        judge_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
+        judged_vendors = {model_vendor(a.fleet, a.model) for a in judged.attempts}
+        for vendor in sorted(judge_vendors & judged_vendors):
+            findings.append((lane.name, lane.base, vendor))
+    if mission.collate is not None:
+        collate_vendor = model_vendor(mission.collate.fleet, mission.collate.model)
+        for lane in mission.lanes:
+            lane_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
+            if collate_vendor in lane_vendors:
+                findings.append(("collate", lane.name, collate_vendor))
+    return findings
+
+
+def _rank_schema(lane_names: list[str]) -> dict:
+    """The fleet-facing JSON Schema for a two-order ranking collate."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["strongest", "reason"],
+        "properties": {
+            "strongest": {"type": "string", "enum": list(lane_names)},
+            "reason": {"type": "string"},
+        },
+    }
+
+
+def _rank_contract(lane_names: list[str]) -> str:
+    """Prompt suffix that says exactly what conductor will accept."""
+    schema = json.dumps(_rank_schema(lane_names), separators=(",", ":"), sort_keys=True)
+    names = ", ".join(lane_names)
+    return (
+        "\n\n## Conductor ranking verdict\n\n"
+        f"Which lane's result is strongest: {names}?\n\n"
+        "Your final answer must be exactly one JSON object matching this schema:\n"
+        f"{schema}\n"
+    )
+
+
+def _write_temp_schema(schema: dict) -> str:
+    """A throwaway schema file, for load-time validation only."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as target:
+        json.dump(schema, target)
+    return path
 
 
 # --- loading ----------------------------------------------------------------
@@ -604,6 +722,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
                 cap_usd=float(cap) if cap is not None else None,
                 include_diffs=bool(raw_collate.get("include_diffs", True)),
+                rank=bool(raw_collate.get("rank", False)),
             )
         except (TypeError, ValueError) as exc:
             raise MissionInvalid(f"collate: {exc}") from exc
@@ -616,6 +735,9 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         raise MissionInvalid(
             f"concurrency, max_cost_usd, and template_max_chars must be numbers: {exc}"
         ) from exc
+    self_judging = raw.get("self_judging")
+    if self_judging is not None and not isinstance(self_judging, str):
+        raise MissionInvalid("self_judging must be a string")
     mission = Mission(
         name=name,
         cwd=cwd,
@@ -627,6 +749,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         source=source,
         prompt=str(defaults["prompt"]) if defaults.get("prompt") else None,
         template_max_chars=template_max,
+        self_judging=self_judging,
     )
     mission.validate()
     return mission
@@ -946,6 +1069,7 @@ class MissionResult:
     report_path: str
     quorum: dict | None = None
     notes: list[str] = field(default_factory=list)
+    self_judging: list[str] = field(default_factory=list)
     dry_run: bool = False
     interrupted: bool = False  # a stop request ended the mission early
     resumes: list[dict] = field(default_factory=list)
@@ -1262,13 +1386,15 @@ def _run_receipt_spend(
             if isinstance(run_id, str):
                 attempts.setdefault(run_id, attempt)
     collate = (prior_result or {}).get("collate")
-    if isinstance(collate, dict) and isinstance(collate.get("run_id"), str):
-        attempts.setdefault(collate["run_id"], collate)
+    if isinstance(collate, dict):
+        for run_id, record in _collate_run_ids(collate):
+            attempts.setdefault(run_id, record)
     previous_collates = (prior_result or {}).get("previous_collates")
     if isinstance(previous_collates, list):
         for old_collate in previous_collates:
-            if isinstance(old_collate, dict) and isinstance(old_collate.get("run_id"), str):
-                attempts.setdefault(old_collate["run_id"], old_collate)
+            if isinstance(old_collate, dict):
+                for run_id, record in _collate_run_ids(old_collate):
+                    attempts.setdefault(run_id, record)
 
     spent = 0.0
     unpriced = 0
@@ -1295,10 +1421,30 @@ def _run_receipt_spend(
     return spent, unpriced
 
 
+def _collate_run_ids(collate: dict) -> list[tuple[str, dict]]:
+    """Every priced run a collate receipt carries: its own run (a prose
+    collate) and/or both order runs (a ranking collate)."""
+    ids: list[tuple[str, dict]] = []
+    if isinstance(collate.get("run_id"), str):
+        ids.append((collate["run_id"], collate))
+    for order in collate.get("orders") or []:
+        if isinstance(order, dict) and isinstance(order.get("run_id"), str):
+            ids.append((order["run_id"], order))
+    return ids
+
+
 def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
     collate = (prior_result or {}).get("collate")
     if not isinstance(collate, dict) or collate.get("ok") is not True:
         return False
+    if collate.get("rank"):
+        orders = collate.get("orders")
+        if not isinstance(orders, list) or len(orders) != 2:
+            return False
+        run_ids = [order.get("run_id") for order in orders if isinstance(order, dict)]
+        if len(run_ids) != 2 or not all(isinstance(run_id, str) and run_id for run_id in run_ids):
+            return False
+        return isinstance(collate.get("strongest"), str) and bool(collate["strongest"])
     answer = collate.get("answer_path")
     return _artifact_matches(
         answer if isinstance(answer, str) else None,
@@ -1720,19 +1866,6 @@ def _execute_mission(
                 if lane.name in sink_names and lane.name not in selected_set
             )
             ok = other_sinks_ok and quorum["met"]
-            final_fleets = {
-                lane.attempts[-1].get("fleet")
-                for lane in lane_results
-                if lane.name in selected_set and lane.attempts
-            }
-            if len(final_fleets) == 1 and all(
-                lane.attempts and lane.attempts[-1].get("spawned")
-                for lane in lane_results
-                if lane.name in selected_set
-            ):
-                fleet = next(iter(final_fleets))
-                note = f"quorum lanes all run on {fleet}; heterogeneous judges tally better"
-                notes.append(note)
     else:
         sinks_ok = [lane.ok for lane in lane_results if lane.name in sink_names]
         ok = all(sinks_ok) if mission.require == "all" else any(sinks_ok)
@@ -1745,6 +1878,14 @@ def _execute_mission(
     if interrupted:
         ok = False  # whatever landed, the mission did not run to its end
 
+    self_judging_notes = (
+        [
+            f"self-judging allowed by the mission: {judge} judges {judged} on {vendor}"
+            for judge, judged, vendor in _self_judging_findings(mission)
+        ]
+        if mission.self_judging == "allow"
+        else []
+    )
     duration = time.monotonic() - started
     report_path = mission_dir / "report.md"
     resume_entry: dict | None = None
@@ -1778,6 +1919,7 @@ def _execute_mission(
         report_path=str(report_path),
         quorum=quorum,
         notes=notes,
+        self_judging=self_judging_notes,
         dry_run=dry_run,
         interrupted=interrupted,
         resumes=resumes,
@@ -1948,19 +2090,10 @@ def _lane_answer(lane: LaneResult, limit: int) -> str:
     return f"(no answer; error: {last.get('error') or 'none recorded'})"
 
 
-def _run_collate(
-    mission: Mission,
-    lanes: list[LaneResult],
-    ledger: Ledger,
-    mission_dir: Path,
-    base: Path,
-) -> dict:
-    col = mission.collate
-    assert col is not None
-    why = ledger.blocker()
-    if why:
-        return {"ok": False, "error": f"{why}; collate not started", "cost_usd": None}
-
+def _collate_body(mission: Mission, lanes: list[LaneResult], col: Collate) -> str:
+    """The shared preamble: the original prompt and every lane's result, in
+    the given order. A prose collate appends its free-form instructions to
+    this; a ranking collate appends the ranking contract instead."""
     original = mission.prompt or mission.lanes[0].attempts[0].prompt
     parts = [
         "You are collating the results of a mission that sent one prompt to several "
@@ -1987,8 +2120,26 @@ def _run_collate(
                 f"\n#### What this lane actually changed (against {against})\n\n"
                 f"```diff\n{patch}\n```\n"
             )
-    parts.append(f"\n## Instructions\n\n{col.instructions.strip()}\n")
-    prompt = "".join(parts)
+    return "".join(parts)
+
+
+def _run_collate(
+    mission: Mission,
+    lanes: list[LaneResult],
+    ledger: Ledger,
+    mission_dir: Path,
+    base: Path,
+) -> dict:
+    col = mission.collate
+    assert col is not None
+    if col.rank:
+        return _run_rank_collate(mission, lanes, col, ledger, mission_dir, base)
+    why = ledger.blocker()
+    if why:
+        return {"ok": False, "error": f"{why}; collate not started", "cost_usd": None}
+
+    instructions = f"\n## Instructions\n\n{col.instructions.strip()}\n"
+    prompt = _collate_body(mission, lanes, col) + instructions
     (mission_dir / "collate-prompt.txt").write_text(prompt)
 
     result = dispatch(
@@ -2015,6 +2166,119 @@ def _run_collate(
         "tokens": summary.get("tokens"),
         "error": summary.get("error"),
     }
+
+
+def _parse_rank_answer(
+    text: str, names: list[str], ok: bool, error: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """A ranking answer, fail-closed: (strongest, reason, invalid-reason)."""
+    if not ok or not text.strip():
+        return None, None, error or "dispatch returned no answer"
+    # Same tolerance as a verdict: a judge that wraps its object in a
+    # sentence has still answered, and the last complete object is taken.
+    raw, problem = _answer_object(text)
+    if problem or raw is None:
+        return None, None, problem or "answer JSON must be an object"
+    extra = sorted(set(raw) - {"strongest", "reason"})
+    if extra:
+        return None, None, f"unknown field {extra[0]!r}"
+    missing = [key for key in ("strongest", "reason") if key not in raw]
+    if missing:
+        return None, None, f"missing field {missing[0]!r}"
+    strongest, reason = raw["strongest"], raw["reason"]
+    if not isinstance(strongest, str) or strongest not in names:
+        return None, None, f"unknown lane name {strongest!r}"
+    if not isinstance(reason, str):
+        return None, None, "reason must be a string"
+    return strongest, reason, None
+
+
+def _run_rank_collate(
+    mission: Mission,
+    lanes: list[LaneResult],
+    col: Collate,
+    ledger: Ledger,
+    mission_dir: Path,
+    base: Path,
+) -> dict:
+    """A comparative judge, dispatched once per lane order (position bias in
+    a judge is systematic, not a rare failure mode); agreement names a
+    winner, and any disagreement or invalid order escalates instead of
+    picking one."""
+    why = ledger.blocker()
+    if why:
+        return {
+            "ok": False,
+            "error": f"{why}; collate not started",
+            "cost_usd": None,
+            "rank": True,
+            "strongest": None,
+            "orders": [],
+        }
+    names = [lane.name for lane in lanes]
+    schema_path = mission_dir / "collate-rank.schema.json"
+    schema_path.write_text(json.dumps(_rank_schema(names), indent=2))
+
+    records: list[dict] = []
+    total_cost = 0.0
+    any_cost = False
+    total_tokens = 0
+    fleet = model = None
+    for label, ordered in (("forward", lanes), ("reverse", list(reversed(lanes)))):
+        ordered_names = [lane.name for lane in ordered]
+        prompt = _collate_body(mission, ordered, col) + _rank_contract(ordered_names)
+        (mission_dir / f"collate-prompt-{label}.txt").write_text(prompt)
+        result = dispatch(
+            col.spec(
+                mission.cwd,
+                prompt,
+                cap_usd=_tighter(col.cap_usd, ledger.remaining()),
+                schema=str(schema_path),
+            ),
+            isolate=True,
+            home=base,
+        )
+        ledger.add(result)
+        summary = result.summary()
+        fleet, model = result.fleet, result.model
+        total_tokens += int(summary.get("tokens") or 0)
+        if summary.get("cost_usd") is not None:
+            total_cost += float(summary["cost_usd"])
+            any_cost = True
+        answer_text = (
+            Path(result.answer_path).read_text(errors="replace") if result.answer_path else ""
+        )
+        strongest, reason, invalid = _parse_rank_answer(
+            answer_text, names, result.ok, summary.get("error")
+        )
+        records.append(
+            {"run_id": result.run_id, "strongest": strongest, "reason": reason, "invalid": invalid}
+        )
+
+    out = {
+        "rank": True,
+        "fleet": fleet,
+        "model": model,
+        "orders": records,
+        "cost_usd": round(total_cost, 6) if any_cost else None,
+        "tokens": total_tokens,
+    }
+    invalid_at = next((i for i, r in enumerate(records, 1) if r["invalid"]), None)
+    if invalid_at is not None:
+        out["ok"] = False
+        out["strongest"] = None
+        out["error"] = f"judge order {invalid_at} invalid: {records[invalid_at - 1]['invalid']}"
+        return out
+    a, b = records[0]["strongest"], records[1]["strongest"]
+    if a != b:
+        out["ok"] = False
+        out["strongest"] = None
+        out["error"] = f"judge disagreed across orders: {a} vs {b}"
+        return out
+    out["ok"] = True
+    out["strongest"] = a
+    out["error"] = None
+    return out
 
 
 def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = None) -> str:
@@ -2080,6 +2344,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             lines.append(_attempt_report_row(lane, a))
     for note in result.notes:
         lines += ["", f"**Note**: {note}"]
+    for note in result.self_judging:
+        lines += ["", f"**Note**: {note}"]
     if result.interrupted:
         lines += [
             "",
@@ -2128,7 +2394,23 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         lines += ["", _lane_answer(lane, REPORT_MAX_CHARS)]
     if result.collate:
         lines += ["", "## Collated", ""]
-        if result.collate.get("answer_path"):
+        if result.collate.get("rank"):
+            if result.collate.get("ok") and result.collate.get("strongest"):
+                strongest = result.collate["strongest"]
+                reason = next(
+                    (
+                        order.get("reason")
+                        for order in result.collate.get("orders") or []
+                        if order.get("strongest") == strongest
+                    ),
+                    None,
+                )
+                lines.append(f"Strongest lane: {strongest}" + (f": {reason}" if reason else ""))
+            else:
+                lines.append(
+                    f"(collate escalated: {result.collate.get('error')})"
+                )
+        elif result.collate.get("answer_path"):
             lines.append(Path(result.collate["answer_path"]).read_text(errors="replace").strip())
         else:
             lines.append(f"(collate failed: {result.collate.get('error')})")
