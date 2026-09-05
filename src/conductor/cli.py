@@ -177,6 +177,8 @@ def cmd_prices(args: argparse.Namespace) -> int:
 
 def cmd_mission(args: argparse.Namespace) -> int:
     try:
+        if args.answer and not args.resume:
+            raise MissionInvalid("--answer needs --resume")
         if args.resume:
             if Path(args.resume).name != args.resume or args.resume in {".", ".."}:
                 raise MissionInvalid("--resume must be a mission directory name")
@@ -197,6 +199,7 @@ def cmd_mission(args: argparse.Namespace) -> int:
                 home=home,
                 dry_run=args.dry_run,
                 resume_dir=mission_dir,
+                answer=args.answer,
             )
         else:
             mission = load_mission(args.file)
@@ -205,6 +208,10 @@ def cmd_mission(args: argparse.Namespace) -> int:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
     print(json.dumps(result.summary(), indent=2))
+    if result.paused and "answer" not in result.paused:
+        # An `answer` already on `paused` (the operator said `stop`) is a
+        # resolved, terminal result, not a mission still waiting on one.
+        return 4
     return 0 if result.ok else 1
 
 
@@ -217,6 +224,15 @@ def cmd_missions(args: argparse.Namespace) -> int:
     rows = []
     for path in entries[: args.limit]:
         result_file = path / "result.json"
+        paused = False
+        pause_file = path / "pause.json"
+        if pause_file.is_file():
+            try:
+                pause_doc = json.loads(pause_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                pause_doc = None
+            if isinstance(pause_doc, dict):
+                paused = pause_doc.get("answer") is None
         if not result_file.is_file():
             rows.append(
                 {
@@ -224,6 +240,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                     "status": "incomplete",
                     "resumes": 0,
                     "running": (path / "running.json").is_file(),
+                    "paused": paused,
                 }
             )
             continue
@@ -238,6 +255,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "resumes": len(data.get("resumes") or []),
                 "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),
+                "paused": paused,
             }
         )
     print(json.dumps(rows, indent=2))
@@ -593,6 +611,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mission.add_argument(
         "--dry-run", action="store_true", help="validate and record argv, spawn nothing"
+    )
+    p_mission.add_argument(
+        "--answer",
+        choices=("continue", "stop"),
+        help="answer a mission paused at a pause.before lane or pause.spend_usd threshold; "
+        "needs --resume",
     )
     p_mission.set_defaults(func=cmd_mission)
 
