@@ -310,14 +310,21 @@ pipeline; everything else is unchanged.
      "test": "pytest -q", "commit": "feat: refactor parser per spec"},
     {"name": "review", "fleet": "claude", "model": "opus", "mode": "read",
      "base": "build",
-     "prompt": "Review this change against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nList concrete defects; say NO_DEFECTS if none."},
+     "prompt": "Review this change against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nReport anything that could cause incorrect behavior, a test failure, or a misleading result; omit style and naming. Per item: file and line, what goes wrong, one sentence of consequence, confidence 1-10. If nothing meets that bar reply exactly NO_FINDINGS. Either answer is complete. Put the entire review in this reply."},
     {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
      "base": "build", "needs": ["review"], "resume": "build", "no_op_ok": true,
      "test": "pytest -q", "commit": "fix: address cross-vendor review",
-     "prompt": "A reviewer from another vendor found:\n{{lanes.review.answer}}\nFix every real one; change nothing if there are none."}
+     "prompt": "A reviewer from another vendor reported:\n{{lanes.review.answer}}\nFor each item, first reproduce it (a failing test or a demonstrated wrong result); fix only what reproduces. If the review says NO_FINDINGS or nothing reproduces, change nothing and say so."}
   ]
 }
 ```
+
+Review prompts carry no quota. "Find the defects" manufactures findings and
+"be conservative" makes current models silently drop real ones, so every
+review, judge, and collate prompt states a consequence threshold, says that an
+empty result is a complete answer, asks for a citation and a confidence per
+item, and demands the whole review in the final reply. The rules and their
+evidence are in `AGENTS.md`.
 
 - `needs`: lanes that must have ended **ok** before this one starts. If one
   of them did not, this lane is skipped with the reason, and so is anything
@@ -387,20 +394,20 @@ data is safe to tally or paste.
     {"name": "build", "fleet": "codex", "model": "sol", "mode": "write",
      "test": "pytest -q", "commit": "feat: implement the spec"},
     {"name": "review-claude", "fleet": "claude", "model": "opus", "base": "build",
-     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nAnswer each criterion from the diff; cite the hunk. A verdict with every criterion passing is a complete, expected answer.",
      "verdict": [
        {"id": "correct", "question": "Does the change implement every requirement?"},
        {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
      ]},
     {"name": "review-codex", "fleet": "codex", "model": "sol", "base": "build",
-     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nAnswer each criterion from the diff; cite the hunk. A verdict with every criterion passing is a complete, expected answer.",
      "verdict": [
        {"id": "correct", "question": "Does the change implement every requirement?"},
        {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
      ]},
     {"name": "review-gemini", "fleet": "antigravity", "model": "gemini-3.8-flash",
      "base": "build",
-     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}",
+     "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nAnswer each criterion from the diff; cite the hunk. A verdict with every criterion passing is a complete, expected answer.",
      "verdict": [
        {"id": "correct", "question": "Does the change implement every requirement?"},
        {"id": "tested", "question": "Do focused tests pin the changed behavior?"}
