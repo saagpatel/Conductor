@@ -1239,7 +1239,10 @@ def dispatch(
             attestation_file = run_dir / "attestation.json"
             attestation_file.write_text(json.dumps(envelope, indent=2))
             result.attestation_path = str(attestation_file)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
+            # RuntimeError: the key helper lost a first-use race and never saw
+            # a complete key. Either way the dispatch is done; only its
+            # attestation is missing, and the receipt says so.
             reason = f"attestation not written: {exc}"
             print(reason, file=sys.stderr)
             if result.error is None:

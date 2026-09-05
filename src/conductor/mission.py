@@ -1120,7 +1120,7 @@ class _ReceiptChain:
             (self.dir / "chain.json").write_text(
                 json.dumps({"mission_id": self.mission_id, "links": self.links}, indent=2)
             )
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             self.error = f"receipt chain link for lane '{lane_result.name}' not written: {exc}"
 
     def to_result(self) -> dict | None:
