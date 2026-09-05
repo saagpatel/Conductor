@@ -45,7 +45,7 @@ from pathlib import Path
 
 from .fleets import DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
-from .verdicts import Criterion, parse_checklist, render_verdict
+from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import git_run
 
@@ -2174,12 +2174,11 @@ def _parse_rank_answer(
     """A ranking answer, fail-closed: (strongest, reason, invalid-reason)."""
     if not ok or not text.strip():
         return None, None, error or "dispatch returned no answer"
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        return None, None, "answer is not valid JSON"
-    if not isinstance(raw, dict):
-        return None, None, "answer JSON must be an object"
+    # Same tolerance as a verdict: a judge that wraps its object in a
+    # sentence has still answered, and the last complete object is taken.
+    raw, problem = _answer_object(text)
+    if problem or raw is None:
+        return None, None, problem or "answer JSON must be an object"
     extra = sorted(set(raw) - {"strongest", "reason"})
     if extra:
         return None, None, f"unknown field {extra[0]!r}"
@@ -2406,9 +2405,7 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                     ),
                     None,
                 )
-                lines.append(
-                    f"Strongest lane: {strongest}" + (f" — {reason}" if reason else "")
-                )
+                lines.append(f"Strongest lane: {strongest}" + (f": {reason}" if reason else ""))
             else:
                 lines.append(
                     f"(collate escalated: {result.collate.get('error')})"

@@ -335,3 +335,13 @@ def test_readme_documents_judge_hygiene():
     assert '"rank": true' in section
     assert "judge disagreed across orders" in section
     assert "judge order" in section
+
+
+def test_rank_answer_accepts_an_object_wrapped_in_prose():
+    from conductor.mission import _parse_rank_answer
+
+    text = 'Both lanes are close. {"strongest": "a", "reason": "a has the test"} is my call.'
+    assert _parse_rank_answer(text, ["a", "b"], True, None) == ("a", "a has the test", None)
+    assert _parse_rank_answer("no object here", ["a", "b"], True, None)[2] == (
+        "answer contains no valid JSON object"
+    )
