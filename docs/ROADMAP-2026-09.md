@@ -22,6 +22,7 @@ orchestrators. Sources are linked where a claim rests on one.
 | A5 signed lane receipts | 0.17.0 | Shape A, in parallel with C2 | $8.92 |
 | C2 pause primitive | 0.18.0 | Shape A, in parallel with A5 | $8.24 |
 | B2 cache-friendly prompts | 0.19.0 | Shape A, one of three in parallel, salvaged | $7.13 |
+| B3 cheap-first cascade | 0.20.0 | Shape A, one of three in parallel | $7.79 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
