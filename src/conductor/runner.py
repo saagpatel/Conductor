@@ -402,6 +402,7 @@ def _clean_gate(
     timeout: int,
     stop: Callable[[], bool],
     worktree: Path,
+    env: dict[str, str] | None = None,
 ) -> dict:
     """Run the gate at the base commit with only non-test changes transplanted."""
     exclusions = [f":(exclude,glob){pattern}" for pattern in patterns]
@@ -413,6 +414,7 @@ def _clean_gate(
         timeout=timeout,
         stop=stop,
         worktree=worktree,
+        env=env,
     )
 
 
@@ -425,6 +427,7 @@ def _reproduce_gate(
     timeout: int,
     stop: Callable[[], bool],
     worktree: Path,
+    env: dict[str, str] | None = None,
 ) -> dict:
     """The mirror image of `_clean_gate`: run the gate at the base commit
     with only the test-surface change transplanted in, everything else left
@@ -439,6 +442,7 @@ def _reproduce_gate(
         timeout=timeout,
         stop=stop,
         worktree=worktree,
+        env=env,
     )
 
 
@@ -451,6 +455,7 @@ def _transplant_gate(
     timeout: int,
     stop: Callable[[], bool],
     worktree: Path,
+    env: dict[str, str] | None = None,
 ) -> dict:
     """Run the gate at the base commit with only the selected changes
     transplanted, through a temporary index so the fleet's own index is
@@ -476,13 +481,13 @@ def _transplant_gate(
     try:
         with tempfile.TemporaryDirectory(prefix="conductor-clean-index-") as temp_dir:
             index = Path(temp_dir) / "index"
-            env = os.environ.copy()
-            env["GIT_INDEX_FILE"] = str(index)
+            git_env = os.environ.copy()
+            git_env["GIT_INDEX_FILE"] = str(index)
             try:
                 seeded = subprocess.run(
                     ["git", "read-tree", base_sha],
                     cwd=root,
-                    env=env,
+                    env=git_env,
                     capture_output=True,
                     timeout=60,
                     check=False,
@@ -502,7 +507,7 @@ def _transplant_gate(
                 staged = subprocess.run(
                     ["git", "add", "-A"],
                     cwd=root,
-                    env=env,
+                    env=git_env,
                     capture_output=True,
                     timeout=60,
                     check=False,
@@ -529,7 +534,7 @@ def _transplant_gate(
                         *pathspecs,
                     ],
                     cwd=root,
-                    env=env,
+                    env=git_env,
                     capture_output=True,
                     timeout=60,
                     check=False,
@@ -569,7 +574,7 @@ def _transplant_gate(
                 )
 
         outcome = run_tests(
-            str(worktree / relative_cwd), command, timeout=timeout, stop=stop
+            str(worktree / relative_cwd), command, timeout=timeout, stop=stop, env=env
         ).to_dict()
         outcome.update(worktree=str(worktree), patch_bytes=len(patch))
         return outcome
@@ -605,6 +610,7 @@ def _reproduce_receipt(
     fleet_errored: bool,
     home: Path,
     run_id: str,
+    env: dict[str, str] | None = None,
 ) -> tuple[dict, str | None]:
     """Reproduce before fix: a `stage: fix` write dispatch must show its own
     check failing on the base before it may land. Runs the caller's gate
@@ -649,6 +655,7 @@ def _reproduce_receipt(
         timeout=GATE_TIMEOUT,
         stop=stop_requested,
         worktree=home / "worktrees" / f"{run_id}-reproduce",
+        env=env,
     )
     if outcome.get("interrupted"):
         return (
@@ -720,6 +727,32 @@ def clear_stop() -> None:
     _STOP.clear()
 
 
+def _operator_global_excludes(worktree: str) -> Path | None:
+    """The operator's own global excludes file, read before any per-lane
+    `core.excludesFile` override replaces it.
+
+    `git config --get core.excludesFile` is queried before the worktree
+    scope is ever written, so it can only resolve to a repo- or user-level
+    value -- global config, or (Git's fallback when nothing is configured)
+    `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`, whichever
+    exists.
+    """
+    configured = git_run(worktree, "config", "--get", "core.excludesFile")
+    if configured.returncode == 0 and configured.stdout.strip():
+        path = Path(configured.stdout.strip()).expanduser()
+        if path.is_file():
+            return path
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    candidates = []
+    if xdg_config:
+        candidates.append(Path(xdg_config) / "git" / "ignore")
+    candidates.append(Path.home() / ".config" / "git" / "ignore")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _apply_include(
     spec: Spec, iso: worktrees.Isolation, home: Path, run_id: str
 ) -> tuple[list[str], list[str], Path | None]:
@@ -728,10 +761,13 @@ def _apply_include(
 
     A worktree-scoped `core.excludesFile` does the keeping, never the shared
     `info/exclude`: every worktree of one repo shares that file, so writing
-    to it would leak this lane's include pattern into the next one. Returns
-    the paths actually copied, notes for paths missing from the checkout,
-    and the external exclude-list file's path (or None if nothing was
-    copied), which the caller removes when the dispatch ends.
+    to it would leak this lane's include pattern into the next one. The file
+    is seeded with the operator's own global excludes before the include
+    patterns are appended, so setting it does not shadow whatever the
+    operator already globally ignores for the run's duration. Returns the
+    paths actually copied, notes for paths missing from the checkout, and
+    the external exclude-list file's path (or None if nothing was copied),
+    which the caller removes when the dispatch ends.
 
     Raises DispatchRefused for a path Git already tracks: copying it would
     smuggle an uncommitted edit past the base commit a reviewer diffs
@@ -752,10 +788,20 @@ def _apply_include(
     if not to_copy:
         return included, notes, None
 
+    # `extensions.worktreeConfig` is a one-time repository setting, like
+    # `.git/worktrees` itself: once another lane has enabled it, leaving it
+    # on is required, not just harmless, because a concurrent lane's own
+    # worktree-scoped config depends on it staying enabled.
+    git_run(iso.worktree, "config", "extensions.worktreeConfig", "true")
+    global_excludes = _operator_global_excludes(iso.worktree)
+    exclude_lines = []
+    if global_excludes is not None:
+        exclude_lines.append(global_excludes.read_text())
+    exclude_lines.append("\n".join(to_copy) + "\n")
+
     exclude_file = home / "worktrees" / f"{run_id}-include-exclude"
     exclude_file.parent.mkdir(parents=True, exist_ok=True)
-    exclude_file.write_text("\n".join(to_copy) + "\n")
-    git_run(iso.worktree, "config", "extensions.worktreeConfig", "true")
+    exclude_file.write_text("\n".join(exclude_lines))
     git_run(iso.worktree, "config", "--worktree", "core.excludesFile", str(exclude_file))
     for rel in to_copy:
         source = Path(iso.repo) / rel
@@ -973,351 +1019,369 @@ def dispatch(
                 )
             return _bail(f"setup failed: exit {setup_outcome.exit_code}")
 
-    before = GitState.capture(spec.cwd)
     try:
-        surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
-    except ValueError as exc:
-        return _bail(f"test surface refused: {exc}")
-    started = time.monotonic()
-    error: str | None = None
-    timed_out = False
-    capped = False
-    interrupted = False
-    cancelled = False
-    breaker_reason: str | None = None
-    breaker: Breaker | None = None
-    exit_code: int | None = None
-    budget = (
-        Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap) if spec.cap_usd is not None else None
-    )
-    # The watcher follows the fleet's running usage whether or not there is a
-    # cap: it is also the only price a run that conductor kills can get.
-    watcher = (
-        Watcher(
-            spec.fleet,
-            model_id,
-            stdout_path,
-            spec.cap_usd if fleet.cap == "watcher" else None,
-        )
-        if spec.fleet in {"claude", "codex", "antigravity"}
-        else None
-    )
-
-    with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
-        proc: subprocess.Popen | None = None
+        before = GitState.capture(spec.cwd)
         try:
-            if stop_requested():
-                raise Interrupted("stop requested before the fleet was spawned")
-            proc = subprocess.Popen(
-                argv,
-                cwd=spec.cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=out,
-                stderr=err,
-                start_new_session=True,
-                env=env,
+            surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
+        except ValueError as exc:
+            return _bail(f"test surface refused: {exc}")
+        started = time.monotonic()
+        error: str | None = None
+        timed_out = False
+        capped = False
+        interrupted = False
+        cancelled = False
+        breaker_reason: str | None = None
+        breaker: Breaker | None = None
+        exit_code: int | None = None
+        budget = (
+            Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap)
+            if spec.cap_usd is not None
+            else None
+        )
+        # The watcher follows the fleet's running usage whether or not there is a
+        # cap: it is also the only price a run that conductor kills can get.
+        watcher = (
+            Watcher(
+                spec.fleet,
+                model_id,
+                stdout_path,
+                spec.cap_usd if fleet.cap == "watcher" else None,
             )
-            _register_live_group(proc.pid)
-            if (
-                spec.stall_timeout
-                or spec.loop_limit
-                or spec.max_tool_calls
-                or spec.tool_idle_timeout
-            ):
-                breaker = Breaker(
-                    spec.fleet,
-                    stdout_path,
-                    stall_s=spec.stall_timeout,
-                    loop_limit=spec.loop_limit,
-                    max_tool_calls=spec.max_tool_calls,
-                    idle_s=spec.tool_idle_timeout,
+            if spec.fleet in {"claude", "codex", "antigravity"}
+            else None
+        )
+
+        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+            proc: subprocess.Popen | None = None
+            try:
+                if stop_requested():
+                    raise Interrupted("stop requested before the fleet was spawned")
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=spec.cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err,
+                    start_new_session=True,
+                    env=env,
                 )
-        except OSError as exc:
-            error = f"cannot spawn {fleet.binary}: {exc}"
-        except Interrupted as exc:
-            interrupted = True
-            error = f"interrupted: {exc}"
-        if proc is not None:
-            exit_code, timed_out, capped, interrupted, breaker_reason = _wait(
-                proc,
-                timeout,
-                watcher,
-                breaker,
-                run_dir=run_dir,
-                stdout_path=stdout_path,
-                started=started,
-                cancel=cancel,
-            )
-            # `_wait` folds a per-dispatch cancel into `interrupted` (same poll,
-            # same kill); this is the only place that tells the two apart, so
-            # the receipt says which one actually ended the run.
-            cancelled = interrupted and cancel is not None and cancel.is_set()
-            if cancelled:
-                interrupted = False
-            if timed_out:
-                error = f"timed out after {timeout}s; process group killed"
-            elif cancelled:
-                error = f"cancelled: {cancel_reason}"
-            elif interrupted:
-                error = "interrupted: stop requested; process group killed"
-            elif capped:
-                assert watcher is not None and watcher.usage is not None  # over_cap saw a figure
-                error = (
-                    f"budget cap hit: ${watcher.usage.cost_usd:.4f} estimated against a "
-                    f"${spec.cap_usd:.4f} cap; process group killed"
-                )
-            elif breaker_reason is not None:
-                error = f"{breaker_reason}; process group killed"
-
-    duration = time.monotonic() - started
-    breaker_state = breaker.to_dict() if breaker is not None else None
-
-    # The fleet's own envelope first: a fleet that says it failed (on any
-    # exit code) must not have its work committed as if it had succeeded.
-    output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
-    resumed: dict | None = None
-    resume_note: str | None = None
-    if spec.resume is not None:
-        resume_ok = output.session_id == spec.resume
-        resumed = {
-            "requested": spec.resume,
-            "ok": resume_ok,
-            "session_id": output.session_id,
-        }
-        if resume_ok:
-            resume_note = f"resumed session {spec.resume}"
-        else:
-            got = output.session_id or "none"
-            resume_note = f"resume failed: fleet reported session {got}, requested {spec.resume}"
-            # The guard must not hide the timeout, stop, cap, or spawn failure
-            # that explains why the fleet could not report the requested id.
-            if error is None:
-                error = resume_note
-    answer = output.answer
-    if not answer and spec_with_paths.last_message:
-        # Codex writes its final message to the -o file; if the event stream
-        # gave nothing (an older binary, a crash mid-stream) that file is the
-        # next best evidence.
-        answer = _read(Path(spec_with_paths.last_message)).strip()
-    checklist_verdict = parse_verdict(answer, criteria) if criteria is not None else None
-    if checklist_verdict is not None:
-        (run_dir / "verdict.json").write_text(json.dumps(checklist_verdict.to_dict(), indent=2))
-        if (
-            checklist_verdict.invalid
-            and error is None
-            and not (spec.mode == "read" and not answer)
-        ):
-            error = f"verdict invalid: {checklist_verdict.invalid}"
-
-    surface_state: dict | None = None
-    if surface_before is not None:
-        try:
-            surface_after = test_surface(spec.cwd, spec.test_surface)
-        except ValueError:
-            # A fleet that deleted its desk must still get a receipt and a
-            # release attempt; the vanished tracked test files are observable.
-            surface_after = missing_surface(surface_before)
-        surface_state = _surface_result(spec.test_policy, surface_before, surface_after)
-    forbid_touched = bool(
-        surface_state and surface_state["touched"] and spec.test_policy == "forbid"
-    )
-    forbid_error = None
-    if forbid_touched:
-        forbid_error = (
-            "test surface changed under policy forbid: "
-            + ", ".join(surface_state["changed"])
-        )
-
-    reproduce_state, reproduce_error = _reproduce_receipt(
-        spec,
-        before=before,
-        surface_before=surface_before,
-        surface_state=surface_state,
-        test_command=test_command,
-        timed_out=timed_out,
-        error=error,
-        exit_code=exit_code,
-        fleet_errored=bool(output.error),
-        home=base,
-        run_id=run_id,
-    )
-    if reproduce_error is not None:
-        # A fix that reproduces nothing must not land: no commit, and its
-        # ordinary gate (own or clean) is skipped below, same as any other
-        # error caught before this point.
-        error = reproduce_error
-        if reproduce_state.get("interrupted"):
-            interrupted = True
-
-    # Commit before the Git verdict is taken, so it describes the state
-    # the caller is actually left with.
-    commit: CommitOutcome | None = None
-    if (
-        commit_message
-        and not forbid_touched
-        and not timed_out
-        and error is None
-        and exit_code == 0
-        and not output.error
-    ):
-        commit = commit_work(spec.cwd, commit_message)
-    # A fleet's self-commit is landed work even when conductor was not asked
-    # to commit it. Only a descendant on the same branch belongs to this run:
-    # treating a checkout of an existing branch as a commit would reset that
-    # branch's unrelated history when the gate fails.
-    self_commit = None
-    if commit is None or (not commit.committed and commit.reason == "nothing to commit"):
-        self_commit = _self_commit_sha(spec.cwd, before)
-    if self_commit:
-        commit = CommitOutcome(
-            attempted=commit is not None,
-            committed=True,
-            sha=self_commit,
-            reason="the fleet committed its own work",
-        )
-
-    tests: TestOutcome | None = None
-    if test_command and not timed_out and error is None:
-        tests = run_tests(
-            spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested, env=env
-        )
-        if tests.interrupted:
-            interrupted = True
-            error = "interrupted: stop requested during the gate; process group killed"
-    if surface_state is not None and spec.test_policy == "clean":
-        if not surface_state["touched"]:
-            surface_state["clean_gate"] = {
-                "ran": False,
-                "reason": "test surface unchanged",
-            }
-        elif not test_command:
-            surface_state["clean_gate"] = {"ran": False, "reason": "no gate set"}
-        elif not before.head:
-            surface_state["clean_gate"] = {
-                "ran": False,
-                "reason": "no base commit to re-run against",
-            }
-        elif tests is None or not _gate_passed(tests.to_dict(), None):
-            surface_state["clean_gate"] = {
-                "ran": False,
-                "reason": "lane gate failed",
-            }
-        else:
-            surface_state["clean_gate"] = _clean_gate(
-                spec.cwd,
-                base_sha=before.head,
-                patterns=surface_before.patterns,
-                command=test_command,
-                timeout=GATE_TIMEOUT,
-                stop=stop_requested,
-                worktree=base / "worktrees" / f"{run_id}-clean",
-            )
-            clean_gate = surface_state["clean_gate"]
-            if clean_gate.get("interrupted"):
+                _register_live_group(proc.pid)
+                if (
+                    spec.stall_timeout
+                    or spec.loop_limit
+                    or spec.max_tool_calls
+                    or spec.tool_idle_timeout
+                ):
+                    breaker = Breaker(
+                        spec.fleet,
+                        stdout_path,
+                        stall_s=spec.stall_timeout,
+                        loop_limit=spec.loop_limit,
+                        max_tool_calls=spec.max_tool_calls,
+                        idle_s=spec.tool_idle_timeout,
+                    )
+            except OSError as exc:
+                error = f"cannot spawn {fleet.binary}: {exc}"
+            except Interrupted as exc:
                 interrupted = True
-                error = "interrupted: stop requested during the clean gate; process group killed"
+                error = f"interrupted: {exc}"
+            if proc is not None:
+                exit_code, timed_out, capped, interrupted, breaker_reason = _wait(
+                    proc,
+                    timeout,
+                    watcher,
+                    breaker,
+                    run_dir=run_dir,
+                    stdout_path=stdout_path,
+                    started=started,
+                    cancel=cancel,
+                )
+                # `_wait` folds a per-dispatch cancel into `interrupted` (same poll,
+                # same kill); this is the only place that tells the two apart, so
+                # the receipt says which one actually ended the run.
+                cancelled = interrupted and cancel is not None and cancel.is_set()
+                if cancelled:
+                    interrupted = False
+                if timed_out:
+                    error = f"timed out after {timeout}s; process group killed"
+                elif cancelled:
+                    error = f"cancelled: {cancel_reason}"
+                elif interrupted:
+                    error = "interrupted: stop requested; process group killed"
+                elif capped:
+                    # over_cap saw a figure
+                    assert watcher is not None and watcher.usage is not None
+                    error = (
+                        f"budget cap hit: ${watcher.usage.cost_usd:.4f} estimated against a "
+                        f"${spec.cap_usd:.4f} cap; process group killed"
+                    )
+                elif breaker_reason is not None:
+                    error = f"{breaker_reason}; process group killed"
 
-    if commit and commit.committed and not _gate_passed(
-        tests.to_dict() if tests else None, surface_state
-    ):
-        # A branch must never carry a commit that failed whichever gate
-        # counts; the work stays staged in the tree for the kept worktree.
-        commit = uncommit(spec.cwd, commit, before.head)
+        duration = time.monotonic() - started
+        breaker_state = breaker.to_dict() if breaker is not None else None
 
-    if forbid_touched:
-        if commit and commit.committed:
+        # The fleet's own envelope first: a fleet that says it failed (on any
+        # exit code) must not have its work committed as if it had succeeded.
+        output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+        resumed: dict | None = None
+        resume_note: str | None = None
+        if spec.resume is not None:
+            resume_ok = output.session_id == spec.resume
+            resumed = {
+                "requested": spec.resume,
+                "ok": resume_ok,
+                "session_id": output.session_id,
+            }
+            if resume_ok:
+                resume_note = f"resumed session {spec.resume}"
+            else:
+                got = output.session_id or "none"
+                resume_note = (
+                    f"resume failed: fleet reported session {got}, requested {spec.resume}"
+                )
+                # The guard must not hide the timeout, stop, cap, or spawn failure
+                # that explains why the fleet could not report the requested id.
+                if error is None:
+                    error = resume_note
+        answer = output.answer
+        if not answer and spec_with_paths.last_message:
+            # Codex writes its final message to the -o file; if the event stream
+            # gave nothing (an older binary, a crash mid-stream) that file is the
+            # next best evidence.
+            answer = _read(Path(spec_with_paths.last_message)).strip()
+        checklist_verdict = parse_verdict(answer, criteria) if criteria is not None else None
+        if checklist_verdict is not None:
+            (run_dir / "verdict.json").write_text(json.dumps(checklist_verdict.to_dict(), indent=2))
+            if (
+                checklist_verdict.invalid
+                and error is None
+                and not (spec.mode == "read" and not answer)
+            ):
+                error = f"verdict invalid: {checklist_verdict.invalid}"
+
+        surface_state: dict | None = None
+        if surface_before is not None:
+            try:
+                surface_after = test_surface(spec.cwd, spec.test_surface)
+            except ValueError:
+                # A fleet that deleted its desk must still get a receipt and a
+                # release attempt; the vanished tracked test files are observable.
+                surface_after = missing_surface(surface_before)
+            surface_state = _surface_result(spec.test_policy, surface_before, surface_after)
+        forbid_touched = bool(
+            surface_state and surface_state["touched"] and spec.test_policy == "forbid"
+        )
+        forbid_error = None
+        if forbid_touched:
+            forbid_error = (
+                "test surface changed under policy forbid: "
+                + ", ".join(surface_state["changed"])
+            )
+
+        reproduce_state, reproduce_error = _reproduce_receipt(
+            spec,
+            before=before,
+            surface_before=surface_before,
+            surface_state=surface_state,
+            test_command=test_command,
+            timed_out=timed_out,
+            error=error,
+            exit_code=exit_code,
+            fleet_errored=bool(output.error),
+            home=base,
+            run_id=run_id,
+            env=env,
+        )
+        if reproduce_error is not None:
+            # A fix that reproduces nothing must not land: no commit, and its
+            # ordinary gate (own or clean) is skipped below, same as any other
+            # error caught before this point.
+            error = reproduce_error
+            if reproduce_state.get("interrupted"):
+                interrupted = True
+
+        # Commit before the Git verdict is taken, so it describes the state
+        # the caller is actually left with.
+        commit: CommitOutcome | None = None
+        if (
+            commit_message
+            and not forbid_touched
+            and not timed_out
+            and error is None
+            and exit_code == 0
+            and not output.error
+        ):
+            commit = commit_work(spec.cwd, commit_message)
+        # A fleet's self-commit is landed work even when conductor was not asked
+        # to commit it. Only a descendant on the same branch belongs to this run:
+        # treating a checkout of an existing branch as a commit would reset that
+        # branch's unrelated history when the gate fails.
+        self_commit = None
+        if commit is None or (not commit.committed and commit.reason == "nothing to commit"):
+            self_commit = _self_commit_sha(spec.cwd, before)
+        if self_commit:
+            commit = CommitOutcome(
+                attempted=commit is not None,
+                committed=True,
+                sha=self_commit,
+                reason="the fleet committed its own work",
+            )
+
+        tests: TestOutcome | None = None
+        if test_command and not timed_out and error is None:
+            tests = run_tests(
+                spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested, env=env
+            )
+            if tests.interrupted:
+                interrupted = True
+                error = "interrupted: stop requested during the gate; process group killed"
+        if surface_state is not None and spec.test_policy == "clean":
+            if not surface_state["touched"]:
+                surface_state["clean_gate"] = {
+                    "ran": False,
+                    "reason": "test surface unchanged",
+                }
+            elif not test_command:
+                surface_state["clean_gate"] = {"ran": False, "reason": "no gate set"}
+            elif not before.head:
+                surface_state["clean_gate"] = {
+                    "ran": False,
+                    "reason": "no base commit to re-run against",
+                }
+            elif tests is None or not _gate_passed(tests.to_dict(), None):
+                surface_state["clean_gate"] = {
+                    "ran": False,
+                    "reason": "lane gate failed",
+                }
+            else:
+                surface_state["clean_gate"] = _clean_gate(
+                    spec.cwd,
+                    base_sha=before.head,
+                    patterns=surface_before.patterns,
+                    command=test_command,
+                    timeout=GATE_TIMEOUT,
+                    stop=stop_requested,
+                    worktree=base / "worktrees" / f"{run_id}-clean",
+                    env=env,
+                )
+                clean_gate = surface_state["clean_gate"]
+                if clean_gate.get("interrupted"):
+                    interrupted = True
+                    error = (
+                        "interrupted: stop requested during the clean gate; "
+                        "process group killed"
+                    )
+
+        if commit and commit.committed and not _gate_passed(
+            tests.to_dict() if tests else None, surface_state
+        ):
+            # A branch must never carry a commit that failed whichever gate
+            # counts; the work stays staged in the tree for the kept worktree.
             commit = uncommit(spec.cwd, commit, before.head)
-        error = forbid_error
 
-    if reproduce_error is not None and commit and commit.committed:
-        # A fix that never reproduced anything must not land, even when the
-        # fleet committed its own work directly instead of leaving it staged
-        # for conductor's own commit_work to pick up.
-        commit = uncommit(spec.cwd, commit, before.head)
+        if forbid_touched:
+            if commit and commit.committed:
+                commit = uncommit(spec.cwd, commit, before.head)
+            error = forbid_error
 
-    after = GitState.capture(spec.cwd)
-    git_verdict = compare(spec.cwd, before, after)
-    git_verdict.notes.extend(output.notes)
-    if resume_note:
-        git_verdict.notes.append(resume_note)
-    if surface_state and surface_state["touched"]:
-        changed = surface_state["changed"]
-        git_verdict.notes.append(
-            f"test surface changed: {len(changed)} file(s): {', '.join(changed[:10])}"
-        )
-        if spec.test_policy == "clean" and not test_command:
-            git_verdict.notes.append("test surface changed with no gate to re-run")
-    if commit and commit.deletions:
-        git_verdict.notes.append(
-            f"commit removed {len(commit.deletions)} file(s): {', '.join(commit.deletions[:10])}"
-        )
-    if commit and not commit.committed and commit.reason.startswith("gate failed"):
-        git_verdict.notes.append(commit.reason)
-    diff_path: str | None = None
-    if git_verdict.checked and not git_verdict.no_op and before.head:
-        # The patch is the evidence a judge should see; the answer is a claim.
-        patch = diff_since(spec.cwd, before.head)
-        if patch:
-            (run_dir / "diff.patch").write_text(patch)
-            diff_path = str(run_dir / "diff.patch")
+        if reproduce_error is not None and commit and commit.committed:
+            # A fix that never reproduced anything must not land, even when the
+            # fleet committed its own work directly instead of leaving it staged
+            # for conductor's own commit_work to pick up.
+            commit = uncommit(spec.cwd, commit, before.head)
 
-    # The answer goes to its own file so a caller can read it without wading
-    # through a transcript, and usage is recorded now, while the evidence is
-    # still on disk.
-    answer_path: str | None = None
-    if answer:
-        answer_file = run_dir / "answer.txt"
-        answer_file.write_text(answer)
-        answer_path = str(answer_file)
-
-    usage = output.usage
-    if usage is None and watcher is not None:
-        # The stream ended without a final figure (conductor killed the run,
-        # or the fleet crashed); the watcher's last reading is the only
-        # price this run will get.
-        usage = watcher.poll()
-    if usage is not None and usage.cost_usd is None:
-        estimated = prices.estimate(
-            model_id,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-        )
-        if estimated is not None:
-            usage.cost_usd = estimated
-            usage.cost_basis = "estimated"
-    usage_dict = usage.to_dict() if usage is not None else None
-    if budget is not None:
-        budget.settle(
-            usage.cost_usd if usage else None,
-            killed=capped or breaker_reason is not None,
-            # A cancel is not the cap firing either: another lane winning says
-            # nothing about this one's spend.
-            interrupted=interrupted or cancelled,
-            fleet_status=output.status,
-        )
-        if watcher is not None and watcher.usage is None:
+        after = GitState.capture(spec.cwd)
+        git_verdict = compare(spec.cwd, before, after)
+        git_verdict.notes.extend(output.notes)
+        if resume_note:
+            git_verdict.notes.append(resume_note)
+        if surface_state and surface_state["touched"]:
+            changed = surface_state["changed"]
             git_verdict.notes.append(
-                "budget watcher saw no running usage; cap checked after the run"
+                f"test surface changed: {len(changed)} file(s): {', '.join(changed[:10])}"
             )
+            if spec.test_policy == "clean" and not test_command:
+                git_verdict.notes.append("test surface changed with no gate to re-run")
+        if commit and commit.deletions:
+            deleted = ", ".join(commit.deletions[:10])
+            git_verdict.notes.append(f"commit removed {len(commit.deletions)} file(s): {deleted}")
+        if commit and not commit.committed and commit.reason.startswith("gate failed"):
+            git_verdict.notes.append(commit.reason)
+        diff_path: str | None = None
+        if git_verdict.checked and not git_verdict.no_op and before.head:
+            # The patch is the evidence a judge should see; the answer is a claim.
+            patch = diff_since(spec.cwd, before.head)
+            if patch:
+                (run_dir / "diff.patch").write_text(patch)
+                diff_path = str(run_dir / "diff.patch")
 
-    # Teardown runs after the gate and the commit decision, ok or not: the
-    # work is already judged, so its own outcome is a note, never a reason
-    # to flip the verdict.
-    teardown_outcome: TestOutcome | None = None
-    if spec.teardown:
-        teardown_outcome = run_tests(
-            spec.cwd, spec.teardown, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
-        )
-        if teardown_outcome.timed_out:
-            git_verdict.notes.append("teardown timed out")
-        elif teardown_outcome.interrupted:
-            git_verdict.notes.append(
-                "teardown interrupted: stop requested during teardown; process group killed"
+        # The answer goes to its own file so a caller can read it without wading
+        # through a transcript, and usage is recorded now, while the evidence is
+        # still on disk.
+        answer_path: str | None = None
+        if answer:
+            answer_file = run_dir / "answer.txt"
+            answer_file.write_text(answer)
+            answer_path = str(answer_file)
+
+        usage = output.usage
+        if usage is None and watcher is not None:
+            # The stream ended without a final figure (conductor killed the run,
+            # or the fleet crashed); the watcher's last reading is the only
+            # price this run will get.
+            usage = watcher.poll()
+        if usage is not None and usage.cost_usd is None:
+            estimated = prices.estimate(
+                model_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
             )
-        elif teardown_outcome.exit_code != 0:
-            git_verdict.notes.append(f"teardown failed: exit {teardown_outcome.exit_code}")
+            if estimated is not None:
+                usage.cost_usd = estimated
+                usage.cost_basis = "estimated"
+        usage_dict = usage.to_dict() if usage is not None else None
+        if budget is not None:
+            budget.settle(
+                usage.cost_usd if usage else None,
+                killed=capped or breaker_reason is not None,
+                # A cancel is not the cap firing either: another lane winning says
+                # nothing about this one's spend.
+                interrupted=interrupted or cancelled,
+                fleet_status=output.status,
+            )
+            if watcher is not None and watcher.usage is None:
+                git_verdict.notes.append(
+                    "budget watcher saw no running usage; cap checked after the run"
+                )
+
+        # Teardown runs after the gate and the commit decision, ok or not: the
+        # work is already judged, so its own outcome is a note, never a reason
+        # to flip the verdict.
+        teardown_outcome: TestOutcome | None = None
+        if spec.teardown:
+            teardown_outcome = run_tests(
+                spec.cwd, spec.teardown, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
+            )
+            if teardown_outcome.timed_out:
+                git_verdict.notes.append("teardown timed out")
+            elif teardown_outcome.interrupted:
+                git_verdict.notes.append(
+                    "teardown interrupted: stop requested during teardown; process group killed"
+                )
+            elif teardown_outcome.exit_code != 0:
+                git_verdict.notes.append(f"teardown failed: exit {teardown_outcome.exit_code}")
+    except BaseException:
+        ports_mod.release(base, claimed_ports)
+        if include_exclude_file is not None:
+            include_exclude_file.unlink(missing_ok=True)
+        if iso is not None:
+            worktrees.release(iso)
+        raise
+
 
     ports_mod.release(base, claimed_ports)
     if include_exclude_file is not None:

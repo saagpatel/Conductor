@@ -13,7 +13,10 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from conductor import ports as ports_mod
+from conductor import runner as runner_mod
 from conductor.cli import build_parser, main
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict
@@ -64,6 +67,28 @@ def test_ports_are_released_after_a_killed_run(repo, home, fake_fleet):
         home=home,
     )
     assert result.timed_out is True
+    assert list((home / "ports").iterdir()) == []
+
+
+def test_lane_resources_are_released_when_dispatch_raises_mid_run(
+    repo, home, fake_fleet, monkeypatch
+):
+    """Ports (and the include exclude file) must be released on every path,
+    per spec item 1 -- including a crash inside dispatch's own bookkeeping,
+    not just the ordinary success and refusal paths."""
+    fake_fleet(["sh", "-c", "echo work > new.txt"])
+
+    def boom(cwd, before, after):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runner_mod, "compare", boom)
+
+    with pytest.raises(RuntimeError):
+        dispatch(
+            Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", ports=1),
+            home=home,
+        )
+
     assert list((home / "ports").iterdir()) == []
 
 
@@ -216,6 +241,35 @@ def test_teardown_runs_even_when_the_gate_failed_and_does_not_change_ok(
     assert (repo / "teardown-ran.txt").exists()
 
 
+def test_clean_gate_receives_the_lane_env(repo, home, fake_fleet):
+    """The clean gate re-runs the lane's own gate command at the base
+    commit through `_transplant_gate`; per spec item 1 it must see the same
+    CONDUCTOR_PORT_* env as the lane gate and the fleet, not conductor's own
+    inherited environment."""
+    (repo / "app.txt").write_text("bad\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "check.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "ok = Path('app.txt').read_text() == 'good\\n' and 'CONDUCTOR_PORT_1' in os.environ\n"
+        "raise SystemExit(0 if ok else 1)\n"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed check"], cwd=repo, check=True)
+    fake_fleet(
+        ["sh", "-c", "echo good > app.txt; printf '# harmless test edit\\n' >> tests/check.py"]
+    )
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", ports=1),
+        home=home,
+        test_command="python3 tests/check.py",
+        commit_message="genuine source fix",
+    )
+    assert result.tests["exit_code"] == 0
+    assert result.test_surface["clean_gate"]["exit_code"] == 0
+    assert result.ok is True
+
+
 # --- include -------------------------------------------------------------
 
 
@@ -263,6 +317,42 @@ def test_a_missing_include_path_is_a_note_not_a_failure(repo, home, fake_fleet):
     assert result.ok is True
     assert result.lane_env["included"] == []
     assert any("nope.txt does not exist" in note for note in result.git_verdict["notes"])
+
+
+def test_include_preserves_the_operators_global_excludes(
+    repo, home, fake_fleet, monkeypatch, tmp_path, git_out
+):
+    """The worktree-scoped core.excludesFile that keeps an included path
+    untracked must not shadow the operator's own global excludes; per the
+    lead note it should be seeded with those patterns first. A build
+    artifact the operator globally ignores (never named in `include`) must
+    stay untracked in the worktree too."""
+    global_ignore = tmp_path / "global-gitignore"
+    global_ignore.write_text("operator-ignored.txt\n")
+    global_gitconfig = tmp_path / "gitconfig-global"
+    global_gitconfig.write_text(f"[core]\n\texcludesFile = {global_ignore}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_gitconfig))
+
+    (repo / "include-me.txt").write_text("payload\n")
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "echo ignored > operator-ignored.txt; echo work > new.txt; "
+            "git add -A && git commit -qm work",
+        ]
+    )
+    result = dispatch(
+        Spec(
+            fleet="claude", prompt="inc", cwd=str(repo), mode="write", include=["include-me.txt"]
+        ),
+        isolate=True,
+        home=home,
+    )
+    assert result.ok is True
+    tree = git_out(repo, "ls-tree", "-r", "--name-only", result.isolation["branch"])
+    assert "operator-ignored.txt" not in tree
+    assert "new.txt" in tree
 
 
 def test_include_without_isolation_is_a_note(repo, home, fake_fleet):

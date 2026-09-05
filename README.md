@@ -791,8 +791,16 @@ by pointing a worktree-scoped `core.excludesFile` at it, never the shared
 `info/exclude` that every worktree of one repo shares (writing there would
 leak this lane's pattern into the next one): the diff and the commit never
 carry an included path, while the test-surface pin, which deliberately
-ignores exclude rules, still sees it like any other untracked file.
-Included paths are recorded as `lane_env.included`.
+ignores exclude rules, still sees it like any other untracked file. That
+file is seeded with the operator's own global excludes (`git config --get
+core.excludesFile`, else `$XDG_CONFIG_HOME/git/ignore`, else
+`~/.config/git/ignore`, whichever exists) before the include paths are
+appended, so setting it for the run does not un-ignore whatever the
+operator already globally ignores; `extensions.worktreeConfig`, once turned
+on to make the per-worktree override possible, is left on rather than
+unset at release, the same way `.git/worktrees` itself outlives any one
+worktree -- a concurrent lane's own worktree-scoped config depends on it
+staying enabled. Included paths are recorded as `lane_env.included`.
 
 `ports`, `setup`, `teardown`, and `include` are attempt keys, cascading
 mission to lane to fallback like `test`. `conductor dispatch` gains `--ports
