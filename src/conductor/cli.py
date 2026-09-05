@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest, prices
+from .errors import error_kind
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
 from .mission import STAGES, Mission, MissionInvalid, load_mission, run_mission
@@ -261,6 +263,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "report": data.get("report_path"),
                 "paused": paused,
                 "escalation": data.get("escalation"),
+                "errors": data.get("errors"),
             }
         )
     print(json.dumps(rows, indent=2))
@@ -417,6 +420,21 @@ def _is_pid_alive(pid: object) -> bool:
         return False
 
 
+_RESULT_FIELDS = {f.name for f in dataclasses.fields(Result)}
+
+
+def _kind_from_legacy_receipt(data: dict) -> str | None:
+    """`kind` is computed, not stored, so a receipt written before it existed
+    (no `kind` key on disk at all) must still classify here instead of
+    reading back as `null`. Rebuild just enough of a `Result` from the raw
+    receipt fields to run it back through `error_kind`."""
+    try:
+        result = Result(**{k: v for k, v in data.items() if k in _RESULT_FIELDS})
+    except TypeError:
+        return None
+    return error_kind(result)
+
+
 def cmd_runs(args: argparse.Namespace) -> int:
     """List recent dispatches. The run directory is the audit trail."""
     runs_dir = conductor_home() / "runs"
@@ -482,6 +500,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
             {
                 "run_id": data["run_id"],
                 "ok": data.get("ok"),
+                "kind": data["kind"] if "kind" in data else _kind_from_legacy_receipt(data),
                 "fleet": data["fleet"],
                 "model": data["model"],
                 "session_id": data.get("session_id"),
