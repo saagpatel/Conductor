@@ -193,7 +193,7 @@ def tool_events(fleet: str, text: str) -> list[str]:
 
 
 class Breaker:
-    """Incrementally watch one fleet stdout file for three runaway shapes."""
+    """Incrementally watch one fleet stdout file for runaway shapes."""
 
     def __init__(
         self,
@@ -203,12 +203,14 @@ class Breaker:
         stall_s: int | None,
         loop_limit: int | None,
         max_tool_calls: int | None,
+        idle_s: int | None = None,
     ) -> None:
         self.fleet = fleet
         self.stdout_path = stdout_path
         self.stall_s = stall_s or None
         self.loop_limit = loop_limit or None
         self.max_tool_calls = max_tool_calls or None
+        self.idle_s = idle_s or None
         self.signatures: list[str] = []
         self.tripped: str | None = None
         self._offset = 0
@@ -216,6 +218,7 @@ class Breaker:
         self._seen_calls: set[str] = set()
         self._last_size = self._size()
         self._last_change = time.monotonic()
+        self._last_tool = time.monotonic()
 
     def _size(self) -> int:
         try:
@@ -252,9 +255,10 @@ class Breaker:
             self._partial = b""
         complete = "\n".join(part.decode(errors="replace") for part in parts)
         if complete:
-            self.signatures.extend(
-                _new_signatures(self.fleet, complete, self._seen_calls)
-            )
+            new_sigs = _new_signatures(self.fleet, complete, self._seen_calls)
+            if new_sigs:
+                self.signatures.extend(new_sigs)
+                self._last_tool = now
 
     def check(self, *, final: bool = False) -> str | None:
         """Return and remember the first breaker reason, or None."""
@@ -264,6 +268,8 @@ class Breaker:
         self._read(now, final=final)
         if self.stall_s is not None and now - self._last_change >= self.stall_s:
             self.tripped = f"stalled: no output for {self.stall_s}s"
+        elif self.idle_s is not None and now - self._last_tool >= self.idle_s:
+            self.tripped = f"idle: no tool call for {self.idle_s}s"
         elif (
             self.loop_limit is not None
             and len(self.signatures) >= self.loop_limit
@@ -281,8 +287,10 @@ class Breaker:
         return self.tripped
 
     def to_dict(self) -> dict[str, int | float | str | None]:
+        now = time.monotonic()
         return {
             "tool_calls": len(self.signatures),
-            "last_output_age_s": max(0.0, time.monotonic() - self._last_change),
+            "last_output_age_s": max(0.0, now - self._last_change),
+            "last_tool_call_age_s": max(0.0, now - self._last_tool),
             "tripped": self.tripped,
         }

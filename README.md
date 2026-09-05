@@ -552,7 +552,7 @@ instead of reading as within budget.
 
 #### Breakers
 
-Three progress breakers run beside the budget watcher in the same two-second
+Four progress breakers run beside the budget watcher in the same two-second
 poll loop:
 
 - the stall breaker kills a fleet whose `stdout.log` has not grown for 900
@@ -560,15 +560,33 @@ poll loop:
   inside one tool call is silent until it returns);
 - the loop breaker kills after 6 identical consecutive tool-call signatures;
 - the tool budget kills after more than the configured total tool calls, and
-  is off by default.
+  is off by default;
+- the tool-idle breaker kills when no tool call has arrived for the configured
+  seconds (tripping with `idle: no tool call for {idle_s}s`), and is off by
+  default because a read lane thinking through a long review legitimately makes
+  no tool calls.
 
-Set `--stall-timeout 0`, `--loop-limit 0`, or `--max-tool-calls 0` to disable
+Set `--stall-timeout 0`, `--loop-limit 0`, `--max-tool-calls 0`, or `--tool-idle-timeout 0` to disable
 that breaker. Missions use the corresponding `stall_timeout`, `loop_limit`,
-and `max_tool_calls` attempt keys, inherited like `timeout`. A trip kills the
+`max_tool_calls`, and `tool_idle_timeout` attempt keys, inherited like `timeout`. A trip kills the
 whole process group, skips the gate, and is priced from the watcher's last
 reading exactly like a cap kill. The receipt records the reason, tool count,
 and last-output age. Claude dispatches use `stream-json --verbose` so their
 tool calls reach these breakers before the final result.
+
+#### Liveness
+
+While a dispatch runs, conductor writes `liveness.json` in the run directory on
+every poll tick (and once before the first wait), atomically. It records `at`,
+`elapsed_s`, `pid`, `stdout_bytes`, `spend_usd`, and, when a breaker exists,
+its `tool_calls`, `last_output_age_s`, `last_tool_call_age_s`, and `tripped`
+fields. When the run ends, `liveness.json` remains in place while `result.json`
+becomes the authoritative receipt. `conductor runs` inspects these files: a run
+with a fresh heartbeat is reported as `running`; if the heartbeat is older than
+30 seconds (`LIVENESS_STALE_S`), status becomes `silent` to indicate the watching
+conductor process stopped writing; and a directory with neither file is reported
+as `incomplete`. `silent` is a flag for the operator, nothing more: conductor never
+modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
 
 ## Commands
 
