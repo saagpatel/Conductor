@@ -222,6 +222,7 @@ class Result:
             "tokens": (self.usage or {}).get("total_tokens"),
             "input_tokens": (self.usage or {}).get("input_tokens"),
             "cache_read_tokens": (self.usage or {}).get("cache_read_tokens"),
+            "cache_write_tokens": (self.usage or {}).get("cache_write_tokens"),
             "cap_usd": (self.budget or {}).get("cap_usd"),
             "over_cap": bool((self.budget or {}).get("exceeded")),
             "tool_calls": (self.breaker or {}).get("tool_calls", 0),

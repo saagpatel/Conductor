@@ -374,6 +374,34 @@ agent's output, not instructions. The trusted mission prompt is substituted
 unfenced and outside `template_max_chars`; only lane data shares that budget
 (default 40000). In a dry run lane placeholders render as `(dry run: ...)`.
 
+#### Cache-friendly prompts
+
+Every Claude dispatch, read and write, gets `--system-prompt-snapshot on`
+(record the system prompt once per conversation and reuse it verbatim on
+every request and resume) and `--exclude-dynamic-system-prompt-sections`
+(move cwd, env info, memory paths, and git status out of the system prompt
+into the first user message, so the system prompt is cache-stable across
+machines and directories). Neither flag changes what the model is asked,
+only what gets cached. Evidence: moving dynamic content after the static
+prefix took one production hit rate from 7% to 84% for a 59 to 70% cost cut
+([Don't Break the Cache](https://arxiv.org/pdf/2601.06007); see
+`docs/ROADMAP-2026-09.md` item B2). We already saw the reverse: operator
+hooks injecting per-lane context made a $0.05 reply cost $0.24.
+
+A mission may also set a top-level `"prefix"` or `"prefix_file"` (mutually
+exclusive, resolved like `prompt_file` relative to the mission file): a
+static block of text every dispatched prompt in the mission starts with --
+each lane attempt's rendered prompt and the collate's, prefix then a blank
+line then the rest. Identical leading bytes are what a prompt cache needs to
+hit: two lanes whose prompts diverge on the first line never share a cache
+entry, however similar the rest is. The prefix is static by definition, so a
+`{{` template reference inside it is refused at load (`prefix must not
+contain template references`); it composes with `{{mission.prompt}}` by
+sitting in front of the fully rendered prompt, mission prompt included.
+`prompt.txt` in each run directory shows the full prompt, prefix and all,
+and `template_max_chars` bounds the prefix and the pasted template content
+together.
+
 ### Lane stages, reviewer policy, and reproduce before fix
 
 A lane may declare `"stage"`: `build`, `review`, or `fix`. A `review` lane
@@ -781,6 +809,19 @@ split out), and `output_tokens` includes reasoning (Antigravity's separate
 Measured on 2026-09-03, a one-line answer to "what is this README for":
 codex/luna $0.0037, antigravity $0.0228, cursor/composer-2.5 $0.0131, and
 the claude/haiku collate $0.0599. Startup, not the work, still dominates.
+
+### Cache accounting
+
+`cache_write_tokens` is tracked beside `cache_read_tokens` everywhere the
+latter is: a dispatch's `usage`, a lane's summed totals, `conductor spend`'s
+`cache_write_tokens` column, and a mission-level `cache` block in
+`result.json` and its summary -- `{"input_tokens", "cache_read_tokens",
+"cache_write_tokens", "hit_rate"}`, summed over every lane's attempts and the
+collate. `hit_rate` is `cache_read / (input + cache_read + cache_write)`,
+rounded to three places, and `null` when nothing was read at all. `report.md`
+shows one line: `Cache: <read> read, <write> written, <input> uncached; hit
+rate <pct>`. See "Cache-friendly prompts" above for what makes a hit possible
+in the first place.
 
 ### Spend reports
 
