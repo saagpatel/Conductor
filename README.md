@@ -391,7 +391,7 @@ data is safe to tally or paste.
   "concurrency": 3,
   "require": {"pass": 2, "of": ["review-claude", "review-codex", "review-gemini"]},
   "lanes": [
-    {"name": "build", "fleet": "codex", "model": "sol", "mode": "write",
+    {"name": "build", "fleet": "cursor", "model": "grok-4.6", "mode": "write",
      "test": "pytest -q", "commit": "feat: implement the spec"},
     {"name": "review-claude", "fleet": "claude", "model": "opus", "base": "build",
      "prompt": "Review the build against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nAnswer each criterion from the diff; cite the hunk. A verdict with every criterion passing is a complete, expected answer.",
@@ -426,6 +426,44 @@ after a valid dissent and reads exactly which criteria failed through the
 fenced, budgeted verdict templates. An invalid reviewer blocks a dependent
 lane; when there is no such dependency it simply counts as not passing the
 quorum. The quorum also requires every sink outside its `of` list to be ok.
+
+#### Judge hygiene: vendor span, self-judging, and ranking
+
+A quorum's `of` names at most three lanes — three judges with a dissent slot
+tally better than five. Three lanes need that dissent slot: `pass` must be
+at most 2, so no verdict is unanimous by construction. Two-lane quorums keep
+the old rule (`pass` may equal the length of `of`). A quorum's lanes, over
+every attempt including fallbacks, must also span at least two vendors
+(`anthropic`, `openai`, `google`, `xai`, `cursor`); a quorum confined to one
+vendor is refused at load, because a disagreement within one vendor's family
+is not the independent evidence a disagreement across vendors is.
+
+A judge never scores its own vendor. At load, conductor refuses a verdict
+lane whose `base` could end up on the same vendor as the lane itself — any
+attempt's fleet/model against any attempt of the base, fallbacks included,
+since which attempt is final is not known yet — and refuses a `collate` that
+shares a vendor with any attempt of any lane it would collate over (every
+lane in the mission). Both refusals name the two lanes. Set
+`"self_judging": "allow"` at the mission's top level to lift them when
+self-judging is deliberate; the mission result and `report.md` then carry a
+note per pair, `self-judging allowed by the mission: <judge> judges <lane>
+on <vendor>`. Any other value for `self_judging` is refused.
+
+`collate` also takes `"rank": true` to become a comparative judge instead of
+a free-form synthesis. It asks for exactly one JSON object,
+`{"strongest": "<lane name>", "reason": "<one sentence>"}`, with the
+generated schema's `strongest` enum restricted to the mission's lane names.
+Position in the prompt is itself a bias a judge cannot see past, so
+conductor dispatches the ranking collate twice — once with the lanes in
+mission order, once reversed — and prices and records both
+(`collate.orders`). Agreement across the two orders sets `collate.strongest`
+to the winner and the reason given; any disagreement, or an answer naming an
+unknown lane or that is not valid JSON, sets `collate.strongest` to null and
+the mission not ok (`judge disagreed across orders: <a> vs <b>`, or
+`judge order <n> invalid: <reason>`) — a split decision escalates to the
+operator rather than being resolved by picking one order's answer. `rank` needs at
+least two lanes and, like any structured-output request, is refused at load
+on a fleet with no schema flag (Cursor).
 
 A pipeline is judged on its outputs: `require` applies to the lanes nothing
 else depends on, so `build ok, fix failed` is a failed pipeline whatever

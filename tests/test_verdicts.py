@@ -269,19 +269,55 @@ def test_cli_refuses_verdict_with_schema_or_cursor(tmp_path, monkeypatch, capsys
     assert match in capsys.readouterr().err
 
 
+def claude_envelope(answer: str) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": answer,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+    )
+
+
+def antigravity_envelope(answer: str) -> str:
+    return json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": answer,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }
+    )
+
+
+def _stream_for(fleet: str, answer: str) -> str:
+    """Fleet-shaped stdout, so a quorum lane can be given a fleet other than
+    codex without the runner failing to parse it (parsing is keyed on
+    `spec.fleet`, not content)."""
+    if fleet == "claude":
+        return claude_envelope(answer)
+    if fleet == "antigravity":
+        return antigravity_envelope(answer)
+    return codex_stream(answer)
+
+
 def mission_streams(monkeypatch: pytest.MonkeyPatch, outcomes: dict[str, str], seen: list[str]):
     def build(spec: Spec) -> list[str]:
         seen.append(spec.prompt)
         key = spec.prompt.split()[0]
-        return ["sh", "-c", f"printf %s {shlex.quote(codex_stream(outcomes[key]))}"]
+        return ["sh", "-c", f"printf %s {shlex.quote(_stream_for(spec.fleet, outcomes[key]))}"]
 
     monkeypatch.setattr(runner_mod, "build_argv", build)
 
 
-def review_lane(name: str) -> dict:
+def review_lane(name: str, fleet: str = "codex") -> dict:
     return {
         "name": name,
-        "fleet": "codex",
+        "fleet": fleet,
         "prompt": name.upper(),
         "verdict": [
             {"id": "correct", "question": "Does it implement the spec?"},
@@ -314,7 +350,9 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(repo, home, tmp_pa
         },
         seen,
     )
-    reviews = [review_lane(name) for name in ("r1", "r2", "r3")]
+    # r1 is on a different vendor than r2/r3 (and the collate is a third):
+    # A3 refuses a quorum or a collate confined to one vendor.
+    reviews = [review_lane("r1", fleet="claude"), review_lane("r2"), review_lane("r3")]
     raw = {
         "cwd": str(repo),
         "concurrency": 1,
@@ -328,7 +366,7 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(repo, home, tmp_pa
             },
         ],
         "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
-        "collate": {"fleet": "codex"},
+        "collate": {"fleet": "antigravity"},
     }
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
     report = Path(result.report_path).read_text()
@@ -345,7 +383,6 @@ def test_mission_quorum_templates_reports_and_stores_verdicts(repo, home, tmp_pa
     assert "Structured verdict:\nverdict: pass (2/2 ok)" in collate_prompt
     assert "| lane | attempt | ok | verdict |" in report
     assert "Quorum: 2 of 3 passed (need 2)" in report
-    assert "quorum lanes all run on codex; heterogeneous judges tally better" in report
     assert "### Verdict" in report
     saved_result = json.loads(Path(result.mission_dir, "result.json").read_text())
     assert saved_result["require"] == expected_require
@@ -374,7 +411,7 @@ def test_mission_quorum_counts_only_valid_passing_verdicts(
     mission_streams(monkeypatch, answers, seen)
     raw = {
         "cwd": str(repo),
-        "lanes": [review_lane(name) for name in ("r1", "r2", "r3")],
+        "lanes": [review_lane("r1", fleet="claude"), review_lane("r2"), review_lane("r3")],
         "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
     }
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
@@ -390,7 +427,7 @@ def test_mission_quorum_treats_an_invalid_lane_as_not_passing(repo, home, tmp_pa
     )
     raw = {
         "cwd": str(repo),
-        "lanes": [review_lane(name) for name in ("r1", "r2", "r3")],
+        "lanes": [review_lane("r1", fleet="claude"), review_lane("r2"), review_lane("r3")],
         "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
     }
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
@@ -402,7 +439,7 @@ def test_mission_quorum_treats_an_invalid_lane_as_not_passing(repo, home, tmp_pa
 def test_quorum_dry_run_validates_without_claiming_votes(repo, home, tmp_path):
     raw = {
         "cwd": str(repo),
-        "lanes": [review_lane(name) for name in ("r1", "r2", "r3")],
+        "lanes": [review_lane("r1", fleet="claude"), review_lane("r2"), review_lane("r3")],
         "require": {"pass": 2, "of": ["r1", "r2", "r3"]},
     }
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home, dry_run=True)

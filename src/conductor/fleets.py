@@ -29,6 +29,10 @@ from .verdicts import Criterion
 EFFORTS = ("cheap", "standard", "hard", "max")
 MODES = ("read", "write")
 TEST_POLICIES = ("clean", "allow", "forbid")
+# The company behind a model, independent of which fleet dispatches it. A
+# fleet can carry more than one vendor (cursor resells Grok and runs its own
+# Composer); a judge scoring a lane on its own vendor is what A3 refuses.
+VENDORS = ("anthropic", "openai", "google", "xai", "cursor")
 
 # Per-mode default wall-clock caps. No fleet has a native cap; an agent that
 # loses its way will happily spin until something outside it says stop.
@@ -51,15 +55,16 @@ class Model:
 
     name: str
     resolve: dict[str, str]
+    vendor: str
     note: str = ""
 
     def id_for(self, effort: str) -> str:
         return self.resolve[effort]
 
 
-def _flat(name: str, model_id: str, note: str = "") -> Model:
+def _flat(name: str, model_id: str, vendor: str, note: str = "") -> Model:
     """A model whose id does not change with effort."""
-    return Model(name=name, resolve={e: model_id for e in EFFORTS}, note=note)
+    return Model(name=name, resolve={e: model_id for e in EFFORTS}, vendor=vendor, note=note)
 
 
 @dataclass(frozen=True)
@@ -86,6 +91,13 @@ class Fleet:
             f"Permitted on this fleet: {allowed}. "
             f"{_why_refused(self.name, wanted)}"
         )
+
+
+def model_vendor(fleet: str, model: str | None) -> str:
+    """The vendor behind one dispatch, resolving the fleet's default model
+    when `model` is None. Raises DispatchRefused for an unknown fleet or
+    model, the same as any other off-policy dispatch."""
+    return FLEETS[fleet].model(model).vendor
 
 
 def _why_refused(fleet: str, model: str) -> str:
@@ -121,9 +133,9 @@ FLEETS: dict[str, Fleet] = {
         default_model="sonnet",
         cap="native",
         models=(
-            _flat("opus", "claude-opus-5"),
-            _flat("sonnet", "claude-sonnet-5"),
-            _flat("haiku", "claude-haiku-4-5"),
+            _flat("opus", "claude-opus-5", "anthropic"),
+            _flat("sonnet", "claude-sonnet-5", "anthropic"),
+            _flat("haiku", "claude-haiku-4-5", "anthropic"),
         ),
     ),
     "codex": Fleet(
@@ -133,9 +145,9 @@ FLEETS: dict[str, Fleet] = {
         default_model="terra",
         cap="watcher",
         models=(
-            _flat("terra", "gpt-5.6-terra"),
-            _flat("sol", "gpt-5.6-sol"),
-            _flat("luna", "gpt-5.6-luna"),
+            _flat("terra", "gpt-5.6-terra", "openai"),
+            _flat("sol", "gpt-5.6-sol", "openai"),
+            _flat("luna", "gpt-5.6-luna", "openai"),
         ),
     ),
     "antigravity": Fleet(
@@ -153,6 +165,7 @@ FLEETS: dict[str, Fleet] = {
                     "hard": "gemini-3.8-flash-high",
                     "max": "gemini-3.8-flash-high",
                 },
+                vendor="google",
                 note="max collapses to high; Antigravity's ladder stops there",
             ),
             Model(
@@ -163,6 +176,7 @@ FLEETS: dict[str, Fleet] = {
                     "hard": "gemini-3.7-flash-high",
                     "max": "gemini-3.7-flash-high",
                 },
+                vendor="google",
                 note="fallback if 3.8 is unavailable",
             ),
         ),
@@ -182,10 +196,12 @@ FLEETS: dict[str, Fleet] = {
                     "hard": "cursor-grok-4.6-high",
                     "max": "cursor-grok-4.6-xhigh",
                 },
+                vendor="xai",
             ),
             _flat(
                 "composer-2.5",
                 "composer-2.5",
+                "cursor",
                 note="no effort ladder; effort is ignored",
             ),
         ),

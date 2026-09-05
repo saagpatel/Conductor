@@ -351,6 +351,10 @@ def test_a_never_spawned_attempt_does_not_poison_the_budget_or_stop_collate(
                 {"name": "ran", "fleet": "claude", "mode": "read", "isolate": False},
             ],
             "collate": {"fleet": "claude"},
+            # This test is about budget/spawn accounting, not vendor
+            # diversity; the collate sharing claude's vendor with the lanes
+            # would otherwise be refused at load (A3 self-judging).
+            "self_judging": "allow",
         },
         base_dir=tmp_path,
     )
