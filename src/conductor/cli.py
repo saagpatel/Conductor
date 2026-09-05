@@ -110,6 +110,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             test_policy=args.test_policy,
             test_surface=args.test_surface,
             stage=args.stage,
+            ports=args.ports,
+            setup=args.setup,
+            teardown=args.teardown,
+            include=args.include,
         )
         result = dispatch(
             spec,
@@ -581,6 +585,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run in a fresh git worktree on branch conductor/<run_id>; the worktree is "
         "removed afterwards if clean, kept and reported if it holds uncommitted work",
+    )
+    p_dispatch.add_argument(
+        "--ports",
+        type=int,
+        default=0,
+        metavar="N",
+        help="claim N free TCP ports before spawning; exported as CONDUCTOR_PORT_1.. and "
+        "CONDUCTOR_PORTS to the fleet, --setup, --teardown, and the gate",
+    )
+    p_dispatch.add_argument(
+        "--setup",
+        metavar="CMD",
+        help="shell command run in the worktree before the fleet spawns; a nonzero exit, "
+        "a timeout, or a stop request means the fleet is never spawned",
+    )
+    p_dispatch.add_argument(
+        "--teardown",
+        metavar="CMD",
+        help="shell command run after the gate, ok or not; its outcome is a note, never a "
+        "reason to flip the verdict",
+    )
+    p_dispatch.add_argument(
+        "--include",
+        action="append",
+        metavar="PATH",
+        help="repeatable, repo-relative untracked path copied into the isolated worktree "
+        "before --setup; refused if Git already tracks it",
     )
     p_dispatch.add_argument("--dry-run", action="store_true", help="print argv, spawn nothing")
     p_dispatch.set_defaults(func=cmd_dispatch)

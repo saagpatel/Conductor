@@ -360,6 +360,7 @@ def run_tests(
     timeout: int = 900,
     *,
     stop: Callable[[], bool] | None = None,
+    env: dict[str, str] | None = None,
 ) -> TestOutcome:
     """Run the caller's own gate. Never piped: a pipeline's exit code is the
     last stage's, so a piped gate reports the pager's success, not the suite's.
@@ -371,6 +372,9 @@ def run_tests(
     the same way: a 15-minute suite must not outlive the operator's Ctrl-C.
     Output goes to a temporary file, not a pipe, so a chatty suite cannot
     block on a full pipe while conductor is not reading.
+
+    `env` is the environment the command runs with; `None` (the default)
+    inherits conductor's own, exactly as before this parameter existed.
     """
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
         try:
@@ -381,6 +385,7 @@ def run_tests(
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env=env,
             )
         except OSError as exc:
             return TestOutcome(ran=True, tail=f"gate could not start: {exc}")

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,9 +30,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest, prices, worktrees
+from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
-from .fleets import FLEETS, Spec, build_argv
+from .fleets import FLEETS, DispatchRefused, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
 from .paths import conductor_home
@@ -55,6 +57,7 @@ from .verify import (
 
 TAIL_LINES = 20
 GATE_TIMEOUT = 900
+SETUP_TIMEOUT = 600
 
 
 def _slug(text: str, limit: int = 32, default: str = "run") -> str:
@@ -106,6 +109,10 @@ class Result:
     fleet_error: str | None = None
     session_id: str | None = None
     resumed: dict | None = None
+    # C4: {"ports": [<int>], "setup": <TestOutcome dict or null>,
+    # "teardown": <TestOutcome dict or null>, "included": [<path>]}, set only
+    # when the dispatch actually used one of ports/setup/teardown/include.
+    lane_env: dict | None = None
     error: str | None = None
     dry_run: bool = False
     no_op_ok: bool = False  # a write that may legitimately change nothing
@@ -226,6 +233,7 @@ class Result:
             "over_cap": bool((self.budget or {}).get("exceeded")),
             "tool_calls": (self.breaker or {}).get("tool_calls", 0),
             "breaker": (self.breaker or {}).get("tripped"),
+            "ports": (self.lane_env or {}).get("ports", []),
             "answer_path": self.answer_path,
             "diff_path": self.diff_path,
             "attestation_path": self.attestation_path,
@@ -712,6 +720,55 @@ def clear_stop() -> None:
     _STOP.clear()
 
 
+def _apply_include(
+    spec: Spec, iso: worktrees.Isolation, home: Path, run_id: str
+) -> tuple[list[str], list[str], Path | None]:
+    """Copy `spec.include`'s untracked, repo-relative paths into the
+    worktree and keep them untracked there too.
+
+    A worktree-scoped `core.excludesFile` does the keeping, never the shared
+    `info/exclude`: every worktree of one repo shares that file, so writing
+    to it would leak this lane's include pattern into the next one. Returns
+    the paths actually copied, notes for paths missing from the checkout,
+    and the external exclude-list file's path (or None if nothing was
+    copied), which the caller removes when the dispatch ends.
+
+    Raises DispatchRefused for a path Git already tracks: copying it would
+    smuggle an uncommitted edit past the base commit a reviewer diffs
+    against.
+    """
+    included: list[str] = []
+    notes: list[str] = []
+    to_copy: list[str] = []
+    for rel in spec.include or []:
+        source = Path(iso.repo) / rel
+        if not source.exists():
+            notes.append(f"include: {rel} does not exist in the checkout")
+            continue
+        tracked = git_run(iso.repo, "ls-files", "--error-unmatch", "--", rel)
+        if tracked.returncode == 0:
+            raise DispatchRefused(f"include: {rel} is tracked; the worktree already has it")
+        to_copy.append(rel)
+    if not to_copy:
+        return included, notes, None
+
+    exclude_file = home / "worktrees" / f"{run_id}-include-exclude"
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+    exclude_file.write_text("\n".join(to_copy) + "\n")
+    git_run(iso.worktree, "config", "extensions.worktreeConfig", "true")
+    git_run(iso.worktree, "config", "--worktree", "core.excludesFile", str(exclude_file))
+    for rel in to_copy:
+        source = Path(iso.repo) / rel
+        dest = Path(iso.worktree) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, dest)
+        included.append(rel)
+    return included, notes, exclude_file
+
+
 def dispatch(
     spec: Spec,
     *,
@@ -835,16 +892,92 @@ def dispatch(
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
+    # C4: per-lane include, ports, and setup, in that order -- include needs
+    # no port, and setup's env needs whatever ports were claimed. All three
+    # run before `before` is captured, so a fixture setup writes (a seeded
+    # scratch DB, an installed dependency) become part of the baseline
+    # instead of misread as the fleet's own work.
+    claimed_ports: list[int] = []
+    included_paths: list[str] = []
+    lane_notes: list[str] = []
+    include_exclude_file: Path | None = None
+    setup_outcome: TestOutcome | None = None
+    lane_env_used = bool(spec.ports or spec.setup or spec.teardown or spec.include)
+
+    def _lane_env(teardown_outcome: TestOutcome | None = None) -> dict | None:
+        if not lane_env_used:
+            return None
+        return {
+            "ports": list(claimed_ports),
+            "setup": setup_outcome.to_dict() if setup_outcome is not None else None,
+            "teardown": teardown_outcome.to_dict() if teardown_outcome is not None else None,
+            "included": list(included_paths),
+        }
+
+    def _bail(error: str) -> Result:
+        ports_mod.release(base, claimed_ports)
+        if include_exclude_file is not None:
+            include_exclude_file.unlink(missing_ok=True)
+        if iso is not None:
+            worktrees.release(iso)
+        result = _refused_result(
+            run_id,
+            spec,
+            model_id,
+            timeout,
+            run_dir,
+            iso,
+            error,
+            extra_notes=lane_notes,
+            lane_env=_lane_env(),
+        )
+        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        return result
+
+    if spec.include:
+        if iso is not None and iso.active:
+            try:
+                included_paths, notes, include_exclude_file = _apply_include(
+                    spec, iso, base, run_id
+                )
+                lane_notes.extend(notes)
+            except DispatchRefused as exc:
+                return _bail(str(exc))
+        else:
+            lane_notes.append("include ignored: dispatch is not isolated")
+
+    if spec.ports:
+        claimed_ports, port_error = ports_mod.claim(spec.ports, base, run_id)
+        if port_error is not None:
+            return _bail(port_error)
+
+    worktree_env = iso.worktree if (iso is not None and iso.active) else spec.cwd
+    env = dict(os.environ)
+    env["CONDUCTOR_RUN_ID"] = run_id
+    env["CONDUCTOR_WORKTREE"] = worktree_env
+    for index, port in enumerate(claimed_ports, start=1):
+        env[f"CONDUCTOR_PORT_{index}"] = str(port)
+    if claimed_ports:
+        env["CONDUCTOR_PORTS"] = ",".join(str(port) for port in claimed_ports)
+
+    if spec.setup:
+        setup_outcome = run_tests(
+            spec.cwd, spec.setup, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
+        )
+        if not setup_outcome.passed:
+            if setup_outcome.timed_out:
+                return _bail("setup timed out")
+            if setup_outcome.interrupted:
+                return _bail(
+                    "interrupted: stop requested during setup; process group killed"
+                )
+            return _bail(f"setup failed: exit {setup_outcome.exit_code}")
+
     before = GitState.capture(spec.cwd)
     try:
         surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
     except ValueError as exc:
-        if iso is not None:
-            worktrees.release(iso)
-        error = f"test surface refused: {exc}"
-        result = _refused_result(run_id, spec, model_id, timeout, run_dir, iso, error)
-        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
-        return result
+        return _bail(f"test surface refused: {exc}")
     started = time.monotonic()
     error: str | None = None
     timed_out = False
@@ -882,6 +1015,7 @@ def dispatch(
                 stdout=out,
                 stderr=err,
                 start_new_session=True,
+                env=env,
             )
             _register_live_group(proc.pid)
             if (
@@ -1045,7 +1179,7 @@ def dispatch(
     tests: TestOutcome | None = None
     if test_command and not timed_out and error is None:
         tests = run_tests(
-            spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested
+            spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested, env=env
         )
         if tests.interrupted:
             interrupted = True
@@ -1168,12 +1302,34 @@ def dispatch(
                 "budget watcher saw no running usage; cap checked after the run"
             )
 
+    # Teardown runs after the gate and the commit decision, ok or not: the
+    # work is already judged, so its own outcome is a note, never a reason
+    # to flip the verdict.
+    teardown_outcome: TestOutcome | None = None
+    if spec.teardown:
+        teardown_outcome = run_tests(
+            spec.cwd, spec.teardown, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
+        )
+        if teardown_outcome.timed_out:
+            git_verdict.notes.append("teardown timed out")
+        elif teardown_outcome.interrupted:
+            git_verdict.notes.append(
+                "teardown interrupted: stop requested during teardown; process group killed"
+            )
+        elif teardown_outcome.exit_code != 0:
+            git_verdict.notes.append(f"teardown failed: exit {teardown_outcome.exit_code}")
+
+    ports_mod.release(base, claimed_ports)
+    if include_exclude_file is not None:
+        include_exclude_file.unlink(missing_ok=True)
     if iso is not None:
         worktrees.release(iso)
         if iso.active:
             git_verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")
         else:
             git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
+    if lane_notes:
+        git_verdict.notes.extend(lane_notes)
 
     base_commit, tip_commit = _commit_bounds(before, after, commit, iso)
     result = Result(
@@ -1210,6 +1366,7 @@ def dispatch(
         fleet_error=output.error,
         session_id=output.session_id,
         resumed=resumed,
+        lane_env=_lane_env(teardown_outcome),
         error=error,
         no_op_ok=no_op_ok,
         interrupted=interrupted,
@@ -1414,6 +1571,9 @@ def _refused_result(
     run_dir: Path,
     iso: worktrees.Isolation | None,
     error: str,
+    *,
+    extra_notes: list[str] | None = None,
+    lane_env: dict | None = None,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
     return Result(
@@ -1432,8 +1592,9 @@ def _refused_result(
         stderr_path=str(run_dir / "stderr.log"),
         tail="(not spawned)",
         spawned=False,
-        git_verdict=GitVerdict(checked=False, notes=[error]).to_dict(),
+        git_verdict=GitVerdict(checked=False, notes=[error, *(extra_notes or [])]).to_dict(),
         isolation=iso.to_dict() if iso is not None else None,
+        lane_env=lane_env,
         error=error,
     )
 

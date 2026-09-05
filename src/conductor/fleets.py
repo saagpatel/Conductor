@@ -246,6 +246,12 @@ class Spec:
     # a staged pipeline. A "fix" dispatch in write mode is the only one that
     # triggers runner.dispatch's reproduce-before-fix gate.
     stage: str | None = None
+    # C4: per-lane setup, teardown, and port allocation. A worktree isolates
+    # files, not ports, sockets, scratch databases, or gitignored config.
+    ports: int = 0  # free TCP ports to claim before the fleet spawns
+    setup: str | None = None  # shell command run before the fleet spawns
+    teardown: str | None = None  # shell command run after the gate, always
+    include: list[str] | None = None  # untracked repo-relative paths to copy in
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -309,6 +315,24 @@ class Spec:
                 continue
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise DispatchRefused(f"{name} must be positive; 0 or null disables")
+        if isinstance(self.ports, bool) or not isinstance(self.ports, int) or self.ports < 0:
+            raise DispatchRefused("ports must be a non-negative integer")
+        if self.setup is not None and not isinstance(self.setup, str):
+            raise DispatchRefused("setup must be a string")
+        if self.teardown is not None and not isinstance(self.teardown, str):
+            raise DispatchRefused("teardown must be a string")
+        if self.include is not None and (
+            not isinstance(self.include, list)
+            or not all(isinstance(item, str) for item in self.include)
+        ):
+            raise DispatchRefused("include must be a list of strings")
+        for path in self.include or []:
+            p = PurePosixPath(path)
+            if not path or "\0" in path or p.is_absolute() or ".." in p.parts:
+                raise DispatchRefused(
+                    "include paths must be non-empty repo-relative paths "
+                    f"without '..': {path!r}"
+                )
 
     def _validate_cap(self) -> None:
         """A cap conductor cannot enforce is refused, not silently ignored.
