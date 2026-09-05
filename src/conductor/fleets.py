@@ -379,7 +379,12 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         "--setting-sources",
         "project",
     ]
-    argv += ["--permission-mode", "acceptEdits" if spec.mode == "write" else "plan"]
+    # Write mode bypasses permissions outright. `acceptEdits` auto-approves
+    # Edit/Write but still refuses Bash beyond `pwd`/`ls`, so a build lane
+    # could edit and never run its gate: Haiku edited blind and reported
+    # success, Sonnet stopped after eight refused pytest calls (live
+    # 2026-09-04). The worktree is the sandbox, as it is for every fleet.
+    argv += ["--permission-mode", "bypassPermissions" if spec.mode == "write" else "plan"]
     if spec.schema:
         # Claude Code wants the schema text, not a path: a path is rejected
         # with "--json-schema is not valid JSON". Verified live 2026-09-03.

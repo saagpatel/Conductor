@@ -115,7 +115,11 @@ def test_read_mode_is_read_only_on_every_fleet():
 
 
 def test_write_mode_auto_approves_because_nobody_is_watching():
-    assert "acceptEdits" in build_argv(spec(fleet="claude", mode="write"))
+    claude = build_argv(spec(fleet="claude", mode="write"))
+    assert "bypassPermissions" in claude
+    # acceptEdits refuses Bash, so a build lane could never run its own
+    # tests: Haiku edited blind, Sonnet stopped and asked. Live 2026-09-04.
+    assert "acceptEdits" not in claude
     assert "workspace-write" in build_argv(spec(fleet="codex", mode="write"))
     assert "--dangerously-skip-permissions" in build_argv(spec(fleet="antigravity", mode="write"))
     assert "--force" in build_argv(spec(fleet="cursor", mode="write"))
