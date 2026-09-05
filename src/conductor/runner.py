@@ -94,6 +94,13 @@ class Result:
     answer_path: str | None = None
     diff_path: str | None = None
     attestation_path: str | None = None
+    # The same bounds the signed attestation carries, recorded here too so a
+    # verifier can compare against this receipt directly instead of
+    # re-deriving them from `isolation`/`commit`, which is only correct for
+    # an isolated or landed dispatch (A5 review: a non-isolated read lane's
+    # real HEAD was read back as a mismatch otherwise).
+    base_commit: str | None = None
+    tip_commit: str | None = None
     isolation: dict | None = None
     fleet_status: str | None = None
     fleet_error: str | None = None
@@ -296,6 +303,28 @@ def _gate_summary(
     }
 
 
+def _commit_bounds(
+    before: GitState,
+    after: GitState,
+    commit: CommitOutcome | None,
+    iso: worktrees.Isolation | None,
+) -> tuple[str | None, str | None]:
+    """The base and tip commit a dispatch actually ran between, on whichever
+    evidence exists: a landed commit's sha, else the isolated worktree's
+    tip, else the cwd's own HEAD after the run, so a fleet that deletes its
+    working tree still yields a receipt (both fields null). This is the one
+    place that derives them, so the signed statement and the plain receipt
+    (`Result.base_commit`/`tip_commit`) can never disagree with each other."""
+    tip_commit = None
+    if commit is not None and commit.committed:
+        tip_commit = commit.sha or None
+    elif iso is not None and iso.tip_sha:
+        tip_commit = iso.tip_sha
+    elif after.head:
+        tip_commit = after.head
+    return before.head or None, tip_commit
+
+
 def _lane_receipt_statement(
     *,
     run_id: str,
@@ -304,10 +333,8 @@ def _lane_receipt_statement(
     mode: str,
     stage: str | None,
     cwd: str,
-    before: GitState,
-    after: GitState,
-    commit: CommitOutcome | None,
-    iso: worktrees.Isolation | None,
+    base_commit: str | None,
+    tip_commit: str | None,
     diff_path: str | None,
     surface_state: dict | None,
     tests_dict: dict | None,
@@ -317,17 +344,7 @@ def _lane_receipt_statement(
     error: str | None,
 ) -> dict:
     """The statement A5 signs into `attestation.json`: what conductor can
-    check about this one dispatch without trusting the fleet's own report.
-    `tip_commit` prefers a landed commit, then the isolated worktree's tip,
-    then the cwd's own HEAD after the run, so a fleet that deletes its
-    working tree still gets a receipt (with both fields null)."""
-    tip_commit = None
-    if commit is not None and commit.committed:
-        tip_commit = commit.sha or None
-    elif iso is not None and iso.tip_sha:
-        tip_commit = iso.tip_sha
-    elif after.head:
-        tip_commit = after.head
+    check about this one dispatch without trusting the fleet's own report."""
     test_surface = (
         {
             "digest_before": surface_state["digest_before"],
@@ -345,7 +362,7 @@ def _lane_receipt_statement(
         "mode": mode,
         "stage": stage,
         "cwd": cwd,
-        "base_commit": before.head or None,
+        "base_commit": base_commit,
         "tip_commit": tip_commit,
         "source_diff_sha256": attest.file_sha256(diff_path) if diff_path else None,
         "test_surface": test_surface,
@@ -1158,6 +1175,7 @@ def dispatch(
         else:
             git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
 
+    base_commit, tip_commit = _commit_bounds(before, after, commit, iso)
     result = Result(
         run_id=run_id,
         fleet=spec.fleet,
@@ -1185,6 +1203,8 @@ def dispatch(
         breaker=breaker_state,
         answer_path=answer_path,
         diff_path=diff_path,
+        base_commit=base_commit,
+        tip_commit=tip_commit,
         isolation=iso.to_dict() if iso is not None else None,
         fleet_status=output.status,
         fleet_error=output.error,
@@ -1203,10 +1223,8 @@ def dispatch(
             mode=spec.mode,
             stage=spec.stage,
             cwd=spec.cwd,
-            before=before,
-            after=after,
-            commit=commit,
-            iso=iso,
+            base_commit=base_commit,
+            tip_commit=tip_commit,
             diff_path=diff_path,
             surface_state=surface_state,
             tests_dict=tests.to_dict() if tests else None,

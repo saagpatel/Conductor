@@ -276,15 +276,13 @@ def _verify_run_attestation(
         return problems
     if statement.get("ok") != result_data.get("ok"):
         problems.append(f"run '{run_id}': attestation ok disagrees with result.json")
-    isolation = result_data.get("isolation") or {}
-    expected_base = isolation.get("base_sha") or None
-    if statement.get("base_commit") != expected_base:
+    # Compare against the receipt's own `base_commit`/`tip_commit`, not a
+    # reconstruction from `isolation`/`commit`: those are only set for an
+    # isolated or landed dispatch, so a non-isolated read lane's real HEAD
+    # would otherwise read back as a mismatch that never happened.
+    if statement.get("base_commit") != result_data.get("base_commit"):
         problems.append(f"run '{run_id}': attestation base_commit disagrees with result.json")
-    commit = result_data.get("commit") or {}
-    expected_tip = commit.get("sha") or None if commit.get("committed") else None
-    if expected_tip is None:
-        expected_tip = isolation.get("tip_sha") or None
-    if statement.get("tip_commit") != expected_tip:
+    if statement.get("tip_commit") != result_data.get("tip_commit"):
         problems.append(f"run '{run_id}': attestation tip_commit disagrees with result.json")
     expected_digest = attest.file_sha256(run_dir / "diff.patch")
     if statement.get("source_diff_sha256") != expected_digest:

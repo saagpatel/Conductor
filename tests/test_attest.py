@@ -387,6 +387,28 @@ def _three_lane_mission(repo, home, monkeypatch, tmp_path):
     return run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
 
 
+def test_cli_attest_verifies_a_non_isolated_read_lane(repo, home, monkeypatch, tmp_path, capsys):
+    """A read lane may opt out of isolation (`isolate: false`); its
+    attestation's `base_commit`/`tip_commit` are then the shared checkout's
+    own HEAD, not an isolation worktree's `base_sha`/`tip_sha` or a landed
+    commit's sha. `conductor attest` must not read that as tampering."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: ["sh", "-c", "echo looked around"])
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {"name": "look", "fleet": "claude", "mode": "read", "isolate": False, "prompt": "LOOK"}
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.lanes[0]["ok"] is True
+
+    assert main(["attest", result.mission_id]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is True
+    assert out["links"][0]["problems"] == []
+
+
 def test_cli_attest_verifies_an_untouched_mission(repo, home, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
