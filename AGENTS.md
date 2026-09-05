@@ -62,7 +62,9 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
    The clean gate reruns the original tests against the new source; when the new source refuses a
    shape the old fixtures build, both builders were right and both were rejected. The lead then reads
-   every edit to an existing test.
+   every edit to an existing test. The same holds for a fix lane that re-records or rewrites test fixtures:
+   the clean gate runs the base tree's tests against the new fixtures and fails (C7's fix was salvaged
+   from its kept worktree for exactly this).
 4. **Every spec says: keep existing call signatures working** (new parameters as keywords with
    defaults). The first Sonnet build changed one and the clean gate rejected a green run.
 5. **Reviewers that run the suite pass `--basetemp` under `$TMPDIR`.** A read lane that leaves pytest
