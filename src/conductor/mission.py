@@ -79,6 +79,10 @@ _INHERITED = (
     "no_op_ok",
     "schema",
     "verdict",
+    "ports",
+    "setup",
+    "teardown",
+    "include",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
 
@@ -174,6 +178,10 @@ class Attempt:
     no_op_ok: bool = False
     test_policy: str = "clean"
     test_surface: list[str] | None = None
+    ports: int = 0
+    setup: str | None = None
+    teardown: str | None = None
+    include: list[str] | None = None
 
     def spec(
         self,
@@ -207,6 +215,10 @@ class Attempt:
             test_policy=self.test_policy,
             test_surface=self.test_surface,
             stage=stage,
+            ports=self.ports,
+            setup=self.setup,
+            teardown=self.teardown,
+            include=self.include,
         )
 
     def isolated(self) -> bool:
@@ -1082,6 +1094,19 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
         not isinstance(surface, list) or not all(isinstance(item, str) for item in surface)
     ):
         raise MissionInvalid(f"{where}: test_surface must be a list of strings")
+    for key in ("setup", "teardown"):
+        if fields.get(key) is not None and not isinstance(fields[key], str):
+            raise MissionInvalid(f"{where}: {key} must be a string")
+    include = fields.get("include")
+    if include is not None and (
+        not isinstance(include, list) or not all(isinstance(item, str) for item in include)
+    ):
+        raise MissionInvalid(f"{where}: include must be a list of strings")
+    ports = fields.get("ports")
+    if ports is not None and (
+        isinstance(ports, bool) or not isinstance(ports, int) or ports < 0
+    ):
+        raise MissionInvalid(f"{where}: ports must be a non-negative integer")
     for key in ("isolate", "no_op_ok"):
         if fields.get(key) is not None and not isinstance(fields[key], bool):
             raise MissionInvalid(f"{where}: {key} must be true or false")
@@ -1118,6 +1143,10 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             no_op_ok=bool(fields.get("no_op_ok", False)),
             test_policy=str(fields.get("test_policy", "clean")),
             test_surface=list(surface) if surface is not None else None,
+            ports=int(ports) if ports is not None else 0,
+            setup=fields.get("setup"),
+            teardown=fields.get("teardown"),
+            include=list(include) if include is not None else None,
         )
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"{where}: {exc}") from exc

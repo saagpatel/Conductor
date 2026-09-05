@@ -303,6 +303,71 @@ def _plan_repo(
     return RepoPlan(repo, items)
 
 
+def _port_items(home: Path, protected_runs: set[str]) -> list[Item]:
+    """One item per port claim file, live or stale.
+
+    A claim file is created before the fleet spawns and removed when the
+    dispatch ends (runner.dispatch's own cleanup); one still on disk means
+    either the run is still going or it crashed hard enough to skip its own
+    cleanup. Liveness is the same "no result.json yet" check that protects a
+    run's worktree and branch, so a claim is never reclaimed while its run
+    could still be using the port.
+    """
+    items: list[Item] = []
+    ports_dir = home / "ports"
+    if not ports_dir.is_dir():
+        return items
+    for claim_file in sorted(p for p in ports_dir.iterdir() if p.is_file()):
+        try:
+            run_id = claim_file.read_text().strip()
+        except OSError:
+            run_id = ""
+        if run_id and _run_in_progress(home, run_id, protected_runs):
+            items.append(
+                Item(
+                    "",
+                    "port",
+                    "keep",
+                    "run in progress (no result.json)",
+                    name=run_id,
+                    path=str(claim_file),
+                )
+            )
+        else:
+            items.append(
+                Item(
+                    "",
+                    "port",
+                    "remove",
+                    "run completed" if run_id else "claim file unreadable",
+                    name=run_id,
+                    path=str(claim_file),
+                )
+            )
+    return items
+
+
+def _apply_port_remove(item: Item, home: Path, protected_runs: set[str]) -> bool:
+    """Recheck liveness immediately before deleting, same as a worktree remove."""
+    if item.name and _run_in_progress(home, item.name, protected_runs):
+        item.action = "keep"
+        item.reason = "run in progress (no result.json)"
+        item.done = True
+        return False
+    path = Path(item.path)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        item.done = False
+        item.error = str(exc)
+        return True
+    item.done = not path.exists()
+    if not item.done:
+        item.error = "claim file remains after remove"
+        return True
+    return False
+
+
 def _audit_items(home: Path) -> list[Item]:
     items: list[Item] = []
     for plural, kind in (("runs", "run"), ("missions", "mission")):
@@ -350,6 +415,7 @@ def build_plan(
             _plan_repo(repo, (home / "worktrees").resolve(), older_than, now, protected_runs)
         )
     notices.extend(_audit_items(home))
+    notices.extend(_port_items(home, protected_runs))
     return plans, notices
 
 
@@ -509,7 +575,10 @@ def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
             if item.action == "keep":
                 item.done = True
     for item in notices:
-        item.done = True
+        if item.kind == "port" and item.action == "remove":
+            failed = _apply_port_remove(item, home, protected_runs) or failed
+        else:
+            item.done = True
     return failed
 
 
