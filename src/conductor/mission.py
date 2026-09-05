@@ -2229,144 +2229,146 @@ def _execute_mission(
             if lane.name not in done:
                 settle(fresh_lane_result(lane, skipped="paused: operator answered stop"))
         pause_park = dict(stop_answer)
-    else:
-        answered_lanes, answered_spend = (
-            _answered_pause_points(mission_dir) if mission.pause and not dry_run else (set(), False)
-        )
-        pause_info: dict | None = None
+    # Either way the scheduler below runs over what is still undecided: nothing,
+    # after an operator's stop; every lane the resume did not keep otherwise.
 
-        # The scheduler: a lane starts when every lane it needs has ended ok;
-        # it is skipped the moment one of them ends otherwise. Skips propagate
-        # to a fixed point before waiting again, so a three-deep chain behind a
-        # failure ends immediately and nothing can wait forever (cycles are
-        # refused at load).
-        pending = [lane for lane in mission.lanes if lane.name not in resume.kept]
-        running: dict[Future[LaneResult], Lane] = {}
+    answered_lanes, answered_spend = (
+        _answered_pause_points(mission_dir) if mission.pause and not dry_run else (set(), False)
+    )
+    pause_info: dict | None = None
 
-        def _fire_early_cancel(winner: str) -> None:
-            """The moment one sink passes: cancel every other lane, running or
-            not yet started, and let the scheduler start nothing new."""
-            if cancel_state["winner"] is not None:
-                return
-            cancel_state["winner"] = winner
-            reason = f"cancelled: lane {winner} already passed"
-            for lane in list(pending):
-                pending.remove(lane)
-                cancel_state["cancelled"].append(lane.name)
-                settle(fresh_lane_result(lane, skipped=reason))
-            for lane in running.values():
-                cancel_reasons[lane.name] = reason
-                cancel_state["cancelled"].append(lane.name)
-                event = lane_cancel_events.get(lane.name)
-                if event is not None:
-                    event.set()
+    # The scheduler: a lane starts when every lane it needs has ended ok;
+    # it is skipped the moment one of them ends otherwise. Skips propagate
+    # to a fixed point before waiting again, so a three-deep chain behind a
+    # failure ends immediately and nothing can wait forever (cycles are
+    # refused at load).
+    pending = [lane for lane in mission.lanes if lane.name not in done]
+    running: dict[Future[LaneResult], Lane] = {}
 
-        with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
-            while pending or running:
-                progressed = True
-                while progressed:
-                    progressed = False
-                    for lane in list(pending):
-                        if stop_requested():
-                            # Running lanes end at their next poll; nothing new starts.
-                            pending.remove(lane)
-                            settle(
-                                fresh_lane_result(
-                                    lane,
-                                    skipped="interrupted: stop requested; not started",
-                                )
-                            )
-                            continue
-                        if pause_info is not None:
-                            # The mission already parked this run; every lane
-                            # still pending settles the same way, whether or
-                            # not it was the one that triggered the park.
-                            pending.remove(lane)
-                            settle(
-                                fresh_lane_result(
-                                    lane,
-                                    skipped=f"paused: {pause_info['reason']}; not started",
-                                )
-                            )
-                            continue
-                        if any(need not in done for need in lane.needs):
-                            continue
+    def _fire_early_cancel(winner: str) -> None:
+        """The moment one sink passes: cancel every other lane, running or
+        not yet started, and let the scheduler start nothing new."""
+        if cancel_state["winner"] is not None:
+            return
+        cancel_state["winner"] = winner
+        reason = f"cancelled: lane {winner} already passed"
+        for lane in list(pending):
+            pending.remove(lane)
+            cancel_state["cancelled"].append(lane.name)
+            settle(fresh_lane_result(lane, skipped=reason))
+        for lane in running.values():
+            cancel_reasons[lane.name] = reason
+            cancel_state["cancelled"].append(lane.name)
+            event = lane_cancel_events.get(lane.name)
+            if event is not None:
+                event.set()
+
+    with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
+        while pending or running:
+            progressed = True
+            while progressed:
+                progressed = False
+                for lane in list(pending):
+                    if stop_requested():
+                        # Running lanes end at their next poll; nothing new starts.
                         pending.remove(lane)
-                        progressed = True
-                        bad = [need for need in lane.needs if not done[need].ok]
-                        if bad:
-                            settle(
-                                fresh_lane_result(
-                                    lane,
-                                    skipped=f"needs {', '.join(bad)}, which was not ok",
-                                )
-                            )
-                            continue
-                        fired = (
-                            None
-                            if dry_run
-                            else _check_pause(
-                                mission.pause,
-                                lane.name,
-                                ledger,
-                                answered_lanes=answered_lanes,
-                                answered_spend=answered_spend,
+                        settle(
+                            fresh_lane_result(
+                                lane,
+                                skipped="interrupted: stop requested; not started",
                             )
                         )
-                        if fired is not None:
-                            pause_info = fired
-                            settle(
-                                fresh_lane_result(
-                                    lane,
-                                    skipped=f"paused: {fired['reason']}; not started",
-                                )
+                        continue
+                    if pause_info is not None:
+                        # The mission already parked this run; every lane
+                        # still pending settles the same way, whether or
+                        # not it was the one that triggered the park.
+                        pending.remove(lane)
+                        settle(
+                            fresh_lane_result(
+                                lane,
+                                skipped=f"paused: {pause_info['reason']}; not started",
                             )
-                            continue
-                        lane_cancel_events[lane.name] = threading.Event()
-                        running[pool.submit(run_lane, lane)] = lane
-                if not running:
-                    break
-                finished, _ = wait(running, return_when=FIRST_COMPLETED)
-                for future in finished:
-                    running.pop(future)
-                    result = future.result()
-                    settle(result)
-                    if (
-                        mission.early_cancel
-                        and cancel_state["winner"] is None
-                        and result.name in sink_names
-                        and result.ok
-                    ):
-                        _fire_early_cancel(result.name)
+                        )
+                        continue
+                    if any(need not in done for need in lane.needs):
+                        continue
+                    pending.remove(lane)
+                    progressed = True
+                    bad = [need for need in lane.needs if not done[need].ok]
+                    if bad:
+                        settle(
+                            fresh_lane_result(
+                                lane,
+                                skipped=f"needs {', '.join(bad)}, which was not ok",
+                            )
+                        )
+                        continue
+                    fired = (
+                        None
+                        if dry_run
+                        else _check_pause(
+                            mission.pause,
+                            lane.name,
+                            ledger,
+                            answered_lanes=answered_lanes,
+                            answered_spend=answered_spend,
+                        )
+                    )
+                    if fired is not None:
+                        pause_info = fired
+                        settle(
+                            fresh_lane_result(
+                                lane,
+                                skipped=f"paused: {fired['reason']}; not started",
+                            )
+                        )
+                        continue
+                    lane_cancel_events[lane.name] = threading.Event()
+                    running[pool.submit(run_lane, lane)] = lane
+            if not running:
+                break
+            finished, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in finished:
+                running.pop(future)
+                result = future.result()
+                settle(result)
+                if (
+                    mission.early_cancel
+                    and cancel_state["winner"] is None
+                    and result.name in sink_names
+                    and result.ok
+                ):
+                    _fire_early_cancel(result.name)
 
-        if pause_info is not None and not stop_requested():
-            # A stop that arrives while a lane already dispatched before the
-            # park is still finishing is handled as an ordinary interrupt,
-            # not a parked mission waiting on an operator answer: nothing
-            # here is written and `interrupted` (below) carries the result.
-            prior_pause = _json_object(mission_dir / "pause.json") or {}
-            (mission_dir / "pause.json").write_text(
-                json.dumps(
-                    {
-                        "kind": pause_info["kind"],
-                        "lane": pause_info["lane"],
-                        "spent_usd": pause_info["spent_usd"],
-                        "threshold": pause_info["threshold"],
-                        "asked_at": datetime.now(UTC).isoformat(),
-                        "question": pause_info["question"],
-                        "answer": None,
-                        "answers": prior_pause.get("answers") or [],
-                    },
-                    indent=2,
-                )
+    if pause_info is not None and not stop_requested():
+        # A stop that arrives while a lane already dispatched before the
+        # park is still finishing is handled as an ordinary interrupt,
+        # not a parked mission waiting on an operator answer: nothing
+        # here is written and `interrupted` (below) carries the result.
+        prior_pause = _json_object(mission_dir / "pause.json") or {}
+        (mission_dir / "pause.json").write_text(
+            json.dumps(
+                {
+                    "kind": pause_info["kind"],
+                    "lane": pause_info["lane"],
+                    "spent_usd": pause_info["spent_usd"],
+                    "threshold": pause_info["threshold"],
+                    "asked_at": datetime.now(UTC).isoformat(),
+                    "question": pause_info["question"],
+                    "answer": None,
+                    "answers": prior_pause.get("answers") or [],
+                },
+                indent=2,
             )
-            pause_park = {
-                "kind": pause_info["kind"],
-                "lane": pause_info["lane"],
-                "spent_usd": pause_info["spent_usd"],
-                "threshold": pause_info["threshold"],
-                "question": pause_info["question"],
-            }
+        )
+        pause_park = {
+            "kind": pause_info["kind"],
+            "lane": pause_info["lane"],
+            "spent_usd": pause_info["spent_usd"],
+            "threshold": pause_info["threshold"],
+            "question": pause_info["question"],
+        }
     lane_results = [done[lane.name] for lane in mission.lanes]
     # B5 mechanical ranking: bytes and gate results, no model judgment, over
     # the sink lanes that were actually dispatched (not skipped or cancelled).
