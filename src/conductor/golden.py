@@ -20,6 +20,7 @@ live vendors."
 
 from __future__ import annotations
 
+import base64
 import dataclasses as _dc
 import difflib
 import hashlib
@@ -44,16 +45,28 @@ DEFAULT_MAX_BYTES = 3_000_000
 # are considered; each only when it exists. argv.json, stderr.log, and
 # liveness.json are never copied -- argv is reconstructible from the spec,
 # stderr is empty on every real run so far, and liveness is a heartbeat with
-# nothing to replay.
+# nothing to replay. attestation.json is never copied either: its DSSE
+# payload is base64 over the real run's paths (unscrubbable without breaking
+# the signature) and the signature itself cannot be verified without the
+# operator's key, so a copy would be both unscrubbed and unverifiable, and
+# nothing in replay reads it beyond hashing it into a throwaway chain.
 RUN_FILES = (
     "result.json",
     "stdout.log",
     "prompt.txt",
     "answer.txt",
     "diff.patch",
-    "attestation.json",
 )
 MISSION_FILES = ("mission.json", "result.json", "report.md")
+
+# stdout.log is never the fixture's own filename: the operator's global git
+# excludes drop every `*.log` path from `git add` silently, so a fixture
+# using that name looks committed (the working tree still has it) but never
+# actually lands in the repo. The fixture stores it as stdout.jsonl -- an
+# accurate name, since the content is NDJSON -- and replay restores it to
+# stdout.log when it recreates a run directory, matching what a live run
+# actually writes.
+_FIXTURE_STDOUT_NAME = "stdout.jsonl"
 
 _ELIDE_LIMIT = 512
 _SECRET_KEY_WORDS = ("TOKEN", "SECRET", "KEY", "PASSWORD")
@@ -64,6 +77,7 @@ _ENV_SECRET_RE = re.compile(
 _BEARER_RE = re.compile(r"Bearer\s+\S+")
 _TOKEN_PREFIX_RE = re.compile(r"(?:sk-|xai-|ghp_|AIza)[A-Za-z0-9_-]{16,}")
 _NONCE_RE = re.compile(r"\[[0-9a-f]{6}\]")
+_BASE64_RUN_RE = re.compile(r"[A-Za-z0-9+/=]{64,}")
 _TOKEN_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -127,10 +141,41 @@ def scrub_json_text(text: str, replacements: list[tuple[str, str]]) -> str:
     return json.dumps(_scrub_json_value(obj, replacements), indent=2)
 
 
+def _pattern_hits(text: str, patterns: list[tuple[str, str]]) -> list[str]:
+    """Which of the scrub's patterns -- a real path or a secret shape --
+    appear anywhere in `text`, by name."""
+    hits: list[str] = []
+    for needle, name in patterns:
+        if needle and needle in text:
+            hits.append(name)
+    if _ENV_SECRET_RE.search(text):
+        hits.append("env secret")
+    if _BEARER_RE.search(text):
+        hits.append("bearer token")
+    if _TOKEN_PREFIX_RE.search(text):
+        hits.append("prefixed token")
+    return hits
+
+
+def _decode_base64_runs(line: str) -> list[str]:
+    """Every run of 64+ base64 alphabet characters on the line, decoded as
+    text where that succeeds. A DSSE envelope (attestation.json's shape)
+    carries its statement this way, unreadable to a plain-text scan."""
+    decoded: list[str] = []
+    for candidate in _BASE64_RUN_RE.findall(line):
+        padded = candidate + "=" * (-len(candidate) % 4)
+        try:
+            decoded.append(base64.b64decode(padded, validate=False).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+    return decoded
+
+
 def scrub_guard(path: str | Path) -> list[str]:
     """Every occurrence in a fixture directory of the user's home path, the
     conductor home, or any of the scrub's secret patterns, as
-    `file:line: <pattern name>`; empty when clean."""
+    `file:line: <pattern name>`, including one hiding inside a base64-encoded
+    run (`file:line: <pattern name> (base64)`); empty when clean."""
     from .paths import conductor_home
 
     path = Path(path)
@@ -146,15 +191,11 @@ def scrub_guard(path: str | Path) -> list[str]:
             continue
         rel = file.relative_to(path)
         for line_no, line in enumerate(text.splitlines(), start=1):
-            for needle, name in patterns:
-                if needle and needle in line:
-                    findings.append(f"{rel}:{line_no}: {name}")
-            if _ENV_SECRET_RE.search(line):
-                findings.append(f"{rel}:{line_no}: env secret")
-            if _BEARER_RE.search(line):
-                findings.append(f"{rel}:{line_no}: bearer token")
-            if _TOKEN_PREFIX_RE.search(line):
-                findings.append(f"{rel}:{line_no}: prefixed token")
+            for name in _pattern_hits(line, patterns):
+                findings.append(f"{rel}:{line_no}: {name}")
+            for decoded in _decode_base64_runs(line):
+                for name in _pattern_hits(decoded, patterns):
+                    findings.append(f"{rel}:{line_no}: {name} (base64)")
     return findings
 
 
@@ -353,7 +394,7 @@ def record(
                     original = src.read_text(errors="replace")
                     elided = elide_stream(original)
                     _verify_elision(fleet, original, elided, run_id)
-                    (run_dst / name).write_text(scrub_text(elided, replacements))
+                    (run_dst / _FIXTURE_STDOUT_NAME).write_text(scrub_text(elided, replacements))
                 elif name.endswith(".json"):
                     _copy_json(src, run_dst / name, replacements)
                 else:
@@ -514,7 +555,10 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
         dst.mkdir(parents=True, exist_ok=True)
         recorded_stdout = ""
         for name in RUN_FILES:
-            file_src = src / name
+            # stdout.log is stored in the fixture as stdout.jsonl (never a
+            # .log name, see RUN_FILES above); the recreated run directory
+            # gets the live convention name back.
+            file_src = src / (_FIXTURE_STDOUT_NAME if name == "stdout.log" else name)
             if not file_src.is_file():
                 continue
             text = restore(file_src.read_text())
@@ -569,9 +613,9 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
             "stdout_path": str(dst / "stdout.log"),
             "answer_path": str(dst / "answer.txt") if (dst / "answer.txt").is_file() else None,
             "diff_path": str(dst / "diff.patch") if (dst / "diff.patch").is_file() else None,
-            "attestation_path": (
-                str(dst / "attestation.json") if (dst / "attestation.json").is_file() else None
-            ),
+            # attestation.json is never in the fixture (see RUN_FILES above),
+            # so the recreated run directory never gets one either.
+            "attestation_path": None,
             "cwd": cwd,
         }
         return Result.from_dict({**recorded_result, **overrides})

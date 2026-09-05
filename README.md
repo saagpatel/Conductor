@@ -1099,13 +1099,23 @@ a routing or template change is testable without spending on live vendors."
 directory and every run it dispatched into `DIR`: `mission.json`,
 `result.json`, `report.md`, `lanes/*.json`, `pause.json` when present, and
 for every run id any lane's attempts name, `runs/<run_id>/result.json`,
-`stdout.log`, `prompt.txt`, `answer.txt`, `diff.patch`, and
-`attestation.json`, each only when it exists. `argv.json`, `stderr.log`, and
-`liveness.json` are never copied. `golden.json` is the manifest: format,
-the source mission id, the fixture's own name, when it was recorded, the
-conductor version, the fleets it exercises, the placeholder names, and a
-sha256 per file. `expected.json` holds the mission's `projection` (below) at
-record time.
+`stdout.jsonl`, `prompt.txt`, `answer.txt`, and `diff.patch`, each only when
+it exists. A run's transcript is stored as `stdout.jsonl`, never
+`stdout.log`: an operator's global git excludes routinely drop every
+`*.log` path from `git add` silently, and a fixture using that name would
+look committed while never actually landing in the repo. Replay restores it
+to `stdout.log` when it recreates a run directory, matching what a live run
+writes. `argv.json`, `stderr.log`, `liveness.json`, and `attestation.json`
+are never copied: argv is reconstructible from the spec, stderr is empty on
+every real run so far, liveness is a heartbeat with nothing to replay, and
+attestation's DSSE payload is base64 over the real run's paths (unscrubbable
+without breaking the signature) with a signature that cannot be verified
+without the operator's key -- a copy would be both unscrubbed and
+unverifiable, and nothing in replay reads it beyond hashing it into a
+throwaway chain. `golden.json` is the manifest: format, the source mission
+id, the fixture's own name, when it was recorded, the conductor version,
+the fleets it exercises, the placeholder names, and a sha256 per file.
+`expected.json` holds the mission's `projection` (below) at record time.
 
 ### Scrubbing
 
@@ -1122,11 +1132,15 @@ become `<redacted>`. `golden.scrub_guard(path)` re-scans a fixture directory
 for the user's home path, the conductor home, or any of those secret
 patterns, as `file:line: <pattern name>`; empty when clean, which
 `conductor golden record` and `conductor golden check` both leave a fixture
-in.
+in. It also decodes any run of 64 or more base64 characters on a line and
+scans the decoded text the same way, reporting `file:line: <pattern name>
+(base64)` -- the shape a DSSE envelope like `attestation.json` carries a
+statement in, invisible to a plain-text scan, and part of why that file is
+never copied into a fixture at all.
 
 ### Eliding a transcript
 
-`stdout.log` is elided so a multi-megabyte transcript stays small and
+`stdout.jsonl` is elided so a multi-megabyte transcript stays small and
 readable without changing what the parser sees: per JSON line, any string
 value longer than 512 characters becomes `<elided N chars
 sha256=<12 hex chars>>`, except the keys `result`, `response`, and `error`
@@ -1149,7 +1163,8 @@ builds exactly that dispatcher: it loads `mission.json` (with `<cwd>`
 mapped back to `cwd`) through the ordinary snapshot loader, and for the
 k-th call on a lane returns the k-th recorded run in that lane's
 `lanes/<name>.json` (`previous_attempts` then `attempts`) -- copying its
-files into `home/runs/<run_id>/`, re-parsing its `stdout.log`, and recording
+files into `home/runs/<run_id>/` (`stdout.jsonl` restored to `stdout.log`),
+re-parsing that transcript, and recording
 a difference for any of the same five fields that disagree with what was
 recorded, or for a rendered prompt (template nonces normalized) that no
 longer matches `prompt.txt`. A call past the recorded count is itself a

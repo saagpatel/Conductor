@@ -9,16 +9,14 @@
     "mission.json": "3208b0403e1054e280e918239ee8fdcd47d659bf025f2e46dee39e945d626cb3",
     "report.md": "f6b6adff515e84fb3222163994b0181a49085a61fae3588ba7e25ad0cdf11466",
     "result.json": "3caf311d6c3b9c191e65fda0f1fce4705d3402070670b1aedadcaf2c9fc2dcfb",
-    "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/attestation.json": "906d5389b2ba4f8a22554c8117cf24902b89aa0d289d18d905294c6a43e4db4b",
     "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "35b42e223f1316c8012bc3bbb765d7b65e76b57da81ff47f2bebadce18a9cd15",
     "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "b1ccbbd232155f027164315b05c544d7268fcec2e24a7a461b31978159ade655",
     "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/result.json": "a0fd16dc5c8334987cb88588549ea6fe8aef2f45578511dc2bda4df56f5bf830",
-    "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/stdout.log": "0cde33bd68374333f3158168411375316799281c30fb8d1d434fccd2d79de184",
-    "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/attestation.json": "d92bd2ac9721593faf9e905e60abb6d5d470ba2ce7e90dc986f0c272c0f65cc4",
+    "runs/20260905T171417Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "0cde33bd68374333f3158168411375316799281c30fb8d1d434fccd2d79de184",
     "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "3b6d946d12aa64e61aa6614a61c53122d57bada78710c23b70cb897e70354ac0",
     "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "b1ccbbd232155f027164315b05c544d7268fcec2e24a7a461b31978159ade655",
     "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/result.json": "e64ab0b59669322cf824985942bf93253df5ce8ba10dde19d6a86869387172fd",
-    "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/stdout.log": "f23a0348d205873c720d316aaef698314fd8e35925a6d79dbb00d14ddecaf18c"
+    "runs/20260905T173342Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "f23a0348d205873c720d316aaef698314fd8e35925a6d79dbb00d14ddecaf18c"
   },
   "fleets": [
     "claude"
@@ -31,5 +29,5 @@
     "<cwd>",
     "<user>"
   ],
-  "recorded_at": "2026-09-05T19:22:30.949503Z"
+  "recorded_at": "2026-09-05T20:05:43.342694Z"
 }

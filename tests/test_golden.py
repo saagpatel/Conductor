@@ -6,6 +6,7 @@ and replaying a fixture here costs nothing and needs no CLI installed.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -92,6 +93,22 @@ def test_scrub_json_redacts_a_secret_shaped_key(tmp_path):
     scrubbed = json.loads(golden.scrub_json_text(json.dumps(obj), []))
     assert scrubbed["api_key"] == "<redacted>"
     assert scrubbed["note"] == "fine"
+
+
+def test_scrub_guard_decodes_a_base64_blob_and_finds_the_user_home(tmp_path):
+    # A DSSE-style payload: real secrets base64-encoded inside a JSON field,
+    # the way attestation.json carries its statement. Plain-text scanning
+    # never sees these; scrub_guard must decode and re-scan.
+    secret = f"cwd was {Path.home()}/repo, API_TOKEN=abc123def456ghi789"
+    encoded = base64.b64encode(secret.encode()).decode()
+    fixture_dir = tmp_path / "fixture"
+    fixture_dir.mkdir()
+    (fixture_dir / "blob.json").write_text(json.dumps({"payload": encoded}))
+
+    findings = golden.scrub_guard(fixture_dir)
+    assert any("(base64)" in f for f in findings)
+    assert any("user home" in f for f in findings)
+    assert any("env secret" in f for f in findings)
 
 
 # --- elision -------------------------------------------------------------
@@ -316,6 +333,32 @@ def test_record_then_check_is_clean(repo, home, monkeypatch, tmp_path):
     fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
     assert golden.scrub_guard(fixture) == []
     assert golden.check(fixture) == []
+
+
+def test_recorded_fixture_never_contains_a_dot_log_file(repo, home, monkeypatch, tmp_path):
+    # The operator's global git excludes drop every `*.log` path, silently,
+    # from any `git add`. A fixture file with that extension looks committed
+    # (the record-time gate passes against the working tree) but never
+    # actually lands in the repo, so a later, fresh checkout replays against
+    # a fixture missing its transcripts. No fixture file may use it.
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    log_files = sorted(p.relative_to(fixture) for p in fixture.rglob("*.log"))
+    assert log_files == []
+
+
+def test_recorded_fixture_excludes_attestation_json(repo, home, monkeypatch, tmp_path):
+    # attestation.json's DSSE payload is base64 over the real run paths and
+    # its signature cannot be verified without the operator's key, so a
+    # scrubbed copy would be both unscrubbed and unverifiable. It is never
+    # copied into a fixture.
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    run_dirs = list((home / "runs").iterdir())
+    assert any((d / "attestation.json").is_file() for d in run_dirs), (
+        "test setup: expected the smoke mission to produce a real attestation.json"
+    )
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    assert list(fixture.rglob("attestation.json")) == []
 
 
 def test_check_reports_a_rendered_prompt_difference_after_a_template_edit(
