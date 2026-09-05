@@ -98,6 +98,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "self_judging",
     "policy",
     "early_cancel",
+    "pause",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -273,6 +274,11 @@ class Mission:
     # Under require: any, cancel every other lane the moment one sink passes
     # its gate (B5). Refused at load unless require is "any".
     early_cancel: bool = False
+    # C2: {"before": [<lane name>, ...], "spend_usd": <number or None>}. Mission
+    # data, never a fleet's request -- see _check_pause and run_mission's answer
+    # handling. Refused when neither key carries anything (validated at parse
+    # time, in mission_from_dict).
+    pause: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -329,6 +335,7 @@ class Mission:
         self._validate_graph(seen)
         self._validate_quorum(seen)
         self._validate_policy()
+        self._validate_pause(seen)
         if self.collate:
             if self.collate.rank and len(self.lanes) < 2:
                 raise MissionInvalid("collate rank needs at least two lanes")
@@ -398,6 +405,22 @@ class Mission:
                         f"lane '{lane.name}' ({attempt.label()}) is on vendor '{vendor}'; "
                         f"policy allows {', '.join(allowed)} for stage {lane.stage}"
                     )
+
+    def _validate_pause(self, names: set[str]) -> None:
+        """C2: `pause.before` names real lanes, and `pause.spend_usd` leaves
+        room under `max_cost_usd` for the operator to actually see the pause
+        before the ledger itself would have refused the next dispatch."""
+        if self.pause is None:
+            return
+        unknown = [name for name in self.pause["before"] if name not in names]
+        if unknown:
+            raise MissionInvalid(f"pause.before names unknown lane '{unknown[0]}'")
+        spend_usd = self.pause["spend_usd"]
+        if spend_usd is not None:
+            if spend_usd <= 0:
+                raise MissionInvalid("pause.spend_usd must be positive")
+            if self.max_cost_usd is not None and spend_usd >= self.max_cost_usd:
+                raise MissionInvalid("pause.spend_usd must be below max_cost_usd")
 
     def _validate_quorum(self, names: set[str]) -> None:
         if not isinstance(self.require, dict):
@@ -529,6 +552,7 @@ class Mission:
             "self_judging",
             "policy",
             "early_cancel",
+            "pause",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -596,6 +620,7 @@ class Mission:
             "self_judging": raw["self_judging"],
             "policy": raw["policy"],
             "early_cancel": raw["early_cancel"],
+            "pause": raw["pause"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -836,6 +861,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     early_cancel = raw.get("early_cancel", False)
     if not isinstance(early_cancel, bool):
         raise MissionInvalid("early_cancel must be true or false")
+    pause = _parse_pause(raw.get("pause"))
     mission = Mission(
         name=name,
         cwd=cwd,
@@ -850,9 +876,34 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         self_judging=self_judging,
         policy=policy,
         early_cancel=early_cancel,
+        pause=pause,
     )
     mission.validate()
     return mission
+
+
+def _parse_pause(raw_pause: object) -> dict | None:
+    if raw_pause is None:
+        return None
+    if not isinstance(raw_pause, dict):
+        raise MissionInvalid("pause must be an object")
+    unknown = sorted(set(raw_pause) - {"before", "spend_usd"})
+    if unknown:
+        raise MissionInvalid(f"pause: unknown field(s) {', '.join(unknown)}")
+    before_raw = raw_pause.get("before")
+    if before_raw is not None and (
+        not isinstance(before_raw, list) or not all(isinstance(n, str) for n in before_raw)
+    ):
+        raise MissionInvalid("pause.before must be a list of lane names")
+    before = list(before_raw) if before_raw else []
+    spend_raw = raw_pause.get("spend_usd")
+    try:
+        spend_usd = float(spend_raw) if spend_raw is not None else None
+    except (TypeError, ValueError) as exc:
+        raise MissionInvalid(f"pause.spend_usd must be a number: {exc}") from exc
+    if not before and spend_usd is None:
+        raise MissionInvalid("pause needs 'before', 'spend_usd', or both")
+    return {"before": before, "spend_usd": spend_usd}
 
 
 def _lane_graph_fields(
@@ -1181,6 +1232,9 @@ class MissionResult:
     early_cancel: dict | None = None
     # The dispatched sink lanes, best first, on bytes and gate results alone.
     ranking: list[dict] = field(default_factory=list)
+    # C2: set when this run parked on a pause point, or when it just settled
+    # an operator's `--answer stop`; None while the mission is not paused.
+    paused: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1222,6 +1276,7 @@ class MissionResult:
                 else None
             ),
             "quorum": self.quorum,
+            "paused": self.paused,
             "notes": self.notes,
             "resumes": self.resumes,
             "resumed_from": self.resumed_from,
@@ -1258,6 +1313,64 @@ def _rendered_verdict(verdict: dict | None) -> str:
     if verdict is None:
         return "(no verdict)"
     return render_verdict(ChecklistVerdict(**verdict))
+
+
+def _check_pause(
+    pause: dict | None,
+    lane_name: str,
+    ledger: Ledger,
+    *,
+    answered_lanes: set[str],
+    answered_spend: bool,
+) -> dict | None:
+    """Whether this about-to-start lane should park the mission instead:
+    `pause.before` first, then `pause.spend_usd`, mirroring the order the
+    operator declared them in. None once a pause point has been answered
+    `continue` (`_execute_mission` reads that history from `pause.json`)."""
+    if not pause:
+        return None
+    if lane_name in pause["before"] and lane_name not in answered_lanes:
+        return {
+            "kind": "lane",
+            "lane": lane_name,
+            "spent_usd": None,
+            "threshold": None,
+            "reason": f"lane {lane_name} is a pause point",
+            "question": f"Lane '{lane_name}' is a pause point; continue the mission?",
+        }
+    threshold = pause["spend_usd"]
+    if threshold is not None and not answered_spend:
+        spent = ledger.to_dict()["spent_usd"]
+        if spent >= threshold:
+            return {
+                "kind": "spend",
+                "lane": None,
+                "spent_usd": spent,
+                "threshold": threshold,
+                "reason": f"spend ${spent:.4f} reached pause.spend_usd ${threshold:.4f}",
+                "question": (
+                    f"Spend ${spent:.4f} reached pause.spend_usd ${threshold:.4f}; "
+                    "continue the mission?"
+                ),
+            }
+    return None
+
+
+def _answered_pause_points(mission_dir: Path) -> tuple[set[str], bool]:
+    """Which pause points already have a `continue` answer on record: a named
+    lane's pause fires at most once, and the spend pause fires at most once
+    per mission, across as many resumes as it takes."""
+    doc = _json_object(mission_dir / "pause.json")
+    answered_lanes: set[str] = set()
+    answered_spend = False
+    for record in (doc or {}).get("answers") or []:
+        if not isinstance(record, dict) or record.get("answer") != "continue":
+            continue
+        if record.get("kind") == "lane" and isinstance(record.get("lane"), str):
+            answered_lanes.add(record["lane"])
+        elif record.get("kind") == "spend":
+            answered_spend = True
+    return answered_lanes, answered_spend
 
 
 def _tighter(*caps: float | None) -> float | None:
@@ -1682,12 +1795,16 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     )
 
 
+_PAUSE_RECORD_FIELDS = ("kind", "lane", "spent_usd", "threshold", "asked_at", "question")
+
+
 def run_mission(
     mission: Mission,
     *,
     home: Path | None = None,
     dry_run: bool = False,
     resume_dir: Path | None = None,
+    answer: str | None = None,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
@@ -1707,6 +1824,32 @@ def run_mission(
         if not (mission_dir / "mission.json").is_file():
             raise MissionInvalid(f"mission '{mission_dir.name}' has no mission.json snapshot")
         mission_id = mission_dir.name
+
+    # C2: a paused mission is refused before the running lock is taken, so an
+    # unanswered pause never claims the lock and blocks a later, answered
+    # resume. A dry run rehearses without needing or recording an answer.
+    stop_answer: dict | None = None
+    if resume_dir is not None and not dry_run:
+        pause_path = mission_dir / "pause.json"
+        pause_doc = _json_object(pause_path)
+        if pause_doc is not None and pause_doc.get("answer") is None:
+            if answer is None:
+                raise MissionInvalid(
+                    f"mission '{mission_id}' is paused: {pause_doc.get('question')}; "
+                    "resume with --answer continue or --answer stop"
+                )
+            if answer not in ("continue", "stop"):
+                raise MissionInvalid(f"--answer must be 'continue' or 'stop', got {answer!r}")
+            resolved = {key: pause_doc.get(key) for key in _PAUSE_RECORD_FIELDS}
+            resolved["answer"] = answer
+            resolved["answered_at"] = datetime.now(UTC).isoformat()
+            pause_doc["answer"] = answer
+            pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
+            pause_path.write_text(json.dumps(pause_doc, indent=2))
+            if answer == "stop":
+                stop_answer = resolved
+        elif answer is not None:
+            raise MissionInvalid(f"mission '{mission_id}' is not paused")
 
     running, lock_notes = _acquire_running_lock(mission_dir)
     try:
@@ -1733,6 +1876,7 @@ def run_mission(
             mission_dir=mission_dir,
             resume=resume,
             is_resume=resume_dir is not None,
+            stop_answer=stop_answer,
         )
     finally:
         try:
@@ -1750,6 +1894,7 @@ def _execute_mission(
     mission_dir: Path,
     resume: _ResumePlan,
     is_resume: bool,
+    stop_answer: dict | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -1975,77 +2120,152 @@ def _execute_mission(
                 json.dumps(lane_result.verdict, indent=2)
             )
 
-    # The scheduler: a lane starts when every lane it needs has ended ok;
-    # it is skipped the moment one of them ends otherwise. Skips propagate
-    # to a fixed point before waiting again, so a three-deep chain behind a
-    # failure ends immediately and nothing can wait forever (cycles are
-    # refused at load).
-    pending = [lane for lane in mission.lanes if lane.name not in resume.kept]
-    running: dict[Future[LaneResult], Lane] = {}
+    # C2: the pause primitive. `pause_park` becomes this run's paused-result
+    # payload the moment either the stop-answer short circuit below, or the
+    # scheduler's own pause-point check, decides nothing more may start.
+    pause_park: dict | None = None
 
-    def _fire_early_cancel(winner: str) -> None:
-        """The moment one sink passes: cancel every other lane, running or
-        not yet started, and let the scheduler start nothing new."""
-        if cancel_state["winner"] is not None:
-            return
-        cancel_state["winner"] = winner
-        reason = f"cancelled: lane {winner} already passed"
-        for lane in list(pending):
-            pending.remove(lane)
-            cancel_state["cancelled"].append(lane.name)
-            settle(fresh_lane_result(lane, skipped=reason))
-        for lane in running.values():
-            cancel_reasons[lane.name] = reason
-            cancel_state["cancelled"].append(lane.name)
-            event = lane_cancel_events.get(lane.name)
-            if event is not None:
-                event.set()
+    if stop_answer is not None:
+        # The operator answered `stop`: nothing is dispatched at all, kept
+        # lanes stay kept, and everything else settles paused.
+        for lane in mission.lanes:
+            if lane.name not in done:
+                settle(fresh_lane_result(lane, skipped="paused: operator answered stop"))
+        pause_park = dict(stop_answer)
+    else:
+        answered_lanes, answered_spend = (
+            _answered_pause_points(mission_dir) if mission.pause and not dry_run else (set(), False)
+        )
+        pause_info: dict | None = None
 
-    with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
-        while pending or running:
-            progressed = True
-            while progressed:
-                progressed = False
-                for lane in list(pending):
-                    if stop_requested():
-                        # Running lanes end at their next poll; nothing new starts.
+        # The scheduler: a lane starts when every lane it needs has ended ok;
+        # it is skipped the moment one of them ends otherwise. Skips propagate
+        # to a fixed point before waiting again, so a three-deep chain behind a
+        # failure ends immediately and nothing can wait forever (cycles are
+        # refused at load).
+        pending = [lane for lane in mission.lanes if lane.name not in resume.kept]
+        running: dict[Future[LaneResult], Lane] = {}
+
+        def _fire_early_cancel(winner: str) -> None:
+            """The moment one sink passes: cancel every other lane, running or
+            not yet started, and let the scheduler start nothing new."""
+            if cancel_state["winner"] is not None:
+                return
+            cancel_state["winner"] = winner
+            reason = f"cancelled: lane {winner} already passed"
+            for lane in list(pending):
+                pending.remove(lane)
+                cancel_state["cancelled"].append(lane.name)
+                settle(fresh_lane_result(lane, skipped=reason))
+            for lane in running.values():
+                cancel_reasons[lane.name] = reason
+                cancel_state["cancelled"].append(lane.name)
+                event = lane_cancel_events.get(lane.name)
+                if event is not None:
+                    event.set()
+
+        with ThreadPoolExecutor(max_workers=mission.concurrency) as pool:
+            while pending or running:
+                progressed = True
+                while progressed:
+                    progressed = False
+                    for lane in list(pending):
+                        if stop_requested():
+                            # Running lanes end at their next poll; nothing new starts.
+                            pending.remove(lane)
+                            settle(
+                                fresh_lane_result(
+                                    lane,
+                                    skipped="interrupted: stop requested; not started",
+                                )
+                            )
+                            continue
+                        if pause_info is not None:
+                            # The mission already parked this run; every lane
+                            # still pending settles the same way, whether or
+                            # not it was the one that triggered the park.
+                            pending.remove(lane)
+                            settle(
+                                fresh_lane_result(
+                                    lane,
+                                    skipped=f"paused: {pause_info['reason']}; not started",
+                                )
+                            )
+                            continue
+                        if any(need not in done for need in lane.needs):
+                            continue
                         pending.remove(lane)
-                        settle(
-                            fresh_lane_result(
-                                lane,
-                                skipped="interrupted: stop requested; not started",
+                        progressed = True
+                        bad = [need for need in lane.needs if not done[need].ok]
+                        if bad:
+                            settle(
+                                fresh_lane_result(
+                                    lane,
+                                    skipped=f"needs {', '.join(bad)}, which was not ok",
+                                )
+                            )
+                            continue
+                        fired = (
+                            None
+                            if dry_run
+                            else _check_pause(
+                                mission.pause,
+                                lane.name,
+                                ledger,
+                                answered_lanes=answered_lanes,
+                                answered_spend=answered_spend,
                             )
                         )
-                        continue
-                    if any(need not in done for need in lane.needs):
-                        continue
-                    pending.remove(lane)
-                    progressed = True
-                    bad = [need for need in lane.needs if not done[need].ok]
-                    if bad:
-                        settle(
-                            fresh_lane_result(
-                                lane,
-                                skipped=f"needs {', '.join(bad)}, which was not ok",
+                        if fired is not None:
+                            pause_info = fired
+                            settle(
+                                fresh_lane_result(
+                                    lane,
+                                    skipped=f"paused: {fired['reason']}; not started",
+                                )
                             )
-                        )
-                    else:
+                            continue
                         lane_cancel_events[lane.name] = threading.Event()
                         running[pool.submit(run_lane, lane)] = lane
-            if not running:
-                break
-            finished, _ = wait(running, return_when=FIRST_COMPLETED)
-            for future in finished:
-                running.pop(future)
-                result = future.result()
-                settle(result)
-                if (
-                    mission.early_cancel
-                    and cancel_state["winner"] is None
-                    and result.name in sink_names
-                    and result.ok
-                ):
-                    _fire_early_cancel(result.name)
+                if not running:
+                    break
+                finished, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    running.pop(future)
+                    result = future.result()
+                    settle(result)
+                    if (
+                        mission.early_cancel
+                        and cancel_state["winner"] is None
+                        and result.name in sink_names
+                        and result.ok
+                    ):
+                        _fire_early_cancel(result.name)
+
+        if pause_info is not None:
+            prior_pause = _json_object(mission_dir / "pause.json") or {}
+            (mission_dir / "pause.json").write_text(
+                json.dumps(
+                    {
+                        "kind": pause_info["kind"],
+                        "lane": pause_info["lane"],
+                        "spent_usd": pause_info["spent_usd"],
+                        "threshold": pause_info["threshold"],
+                        "asked_at": datetime.now(UTC).isoformat(),
+                        "question": pause_info["question"],
+                        "answer": None,
+                        "answers": prior_pause.get("answers") or [],
+                    },
+                    indent=2,
+                )
+            )
+            pause_park = {
+                "kind": pause_info["kind"],
+                "lane": pause_info["lane"],
+                "spent_usd": pause_info["spent_usd"],
+                "threshold": pause_info["threshold"],
+                "question": pause_info["question"],
+            }
     lane_results = [done[lane.name] for lane in mission.lanes]
     # B5 mechanical ranking: bytes and gate results, no model judgment, over
     # the sink lanes that were actually dispatched (not skipped or cancelled).
@@ -2061,7 +2281,9 @@ def _execute_mission(
         if isinstance(prior_collates, list)
         else []
     )
-    if mission.collate and resume.collate == "kept":
+    if pause_park is not None:
+        pass  # C2: a parked mission runs no collate, kept or fresh.
+    elif mission.collate and resume.collate == "kept":
         prior_collate = (resume.prior_result or {}).get("collate")
         collate_out = dict(prior_collate) if isinstance(prior_collate, dict) else None
     elif mission.collate:
@@ -2125,6 +2347,8 @@ def _execute_mission(
     interrupted = stop_requested()
     if interrupted:
         ok = False  # whatever landed, the mission did not run to its end
+    if pause_park is not None:
+        ok = False  # waiting on the operator is not a passing mission either
 
     self_judging_notes = (
         [
@@ -2175,6 +2399,7 @@ def _execute_mission(
         previous_collates=previous_collates,
         early_cancel=early_cancel_out,
         ranking=ranking,
+        paused=pause_park,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -2655,6 +2880,12 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             "",
             "**Interrupted**: a stop was requested; lanes still running were killed "
             "and lanes not yet started were skipped.",
+        ]
+    if result.paused:
+        lines += [
+            "",
+            f"**Paused**: {result.paused['question']} Resume with: "
+            f"conductor mission --resume {result.mission_id} --answer continue|stop",
         ]
     if result.budget.get("exceeded"):
         lines += ["", f"**Budget exceeded**: {json.dumps(result.budget)}"]
