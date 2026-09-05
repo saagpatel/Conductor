@@ -86,6 +86,7 @@ class Result:
     verdict: dict | None = None
     tests: dict | None = None
     test_surface: dict | None = None
+    reproduce: dict | None = None
     commit: dict | None = None
     usage: dict | None = None
     budget: dict | None = None
@@ -272,8 +273,13 @@ def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
 
 
 def _git_failure(detail: str, *, worktree: Path, patch_bytes: int = 0) -> dict:
+    # `infra_error` marks a failure in the transplant machinery itself (worktree
+    # add, read-tree, apply, ...) rather than in the gate command it was meant
+    # to run. A caller that treats "the gate command exited nonzero" as meaningful
+    # evidence (the reproduce gate, in particular: exit nonzero there normally
+    # means the check reproduces the bug) must not read this the same way.
     outcome = TestOutcome(ran=True, exit_code=1, tail=detail).to_dict()
-    outcome.update(worktree=str(worktree), patch_bytes=patch_bytes)
+    outcome.update(worktree=str(worktree), patch_bytes=patch_bytes, infra_error=True)
     return outcome
 
 
@@ -288,6 +294,59 @@ def _clean_gate(
     worktree: Path,
 ) -> dict:
     """Run the gate at the base commit with only non-test changes transplanted."""
+    exclusions = [f":(exclude,glob){pattern}" for pattern in patterns]
+    return _transplant_gate(
+        cwd,
+        base_sha=base_sha,
+        pathspecs=[".", *exclusions],
+        command=command,
+        timeout=timeout,
+        stop=stop,
+        worktree=worktree,
+    )
+
+
+def _reproduce_gate(
+    cwd: str,
+    *,
+    base_sha: str,
+    patterns: list[str],
+    command: str,
+    timeout: int,
+    stop: Callable[[], bool],
+    worktree: Path,
+) -> dict:
+    """The mirror image of `_clean_gate`: run the gate at the base commit
+    with only the test-surface change transplanted in, everything else left
+    at the base. A fix lane's reproduce step needs the new or changed check
+    alone, isolated from whatever source the fix also touched."""
+    pathspecs = [f":(glob){pattern}" for pattern in patterns]
+    return _transplant_gate(
+        cwd,
+        base_sha=base_sha,
+        pathspecs=pathspecs,
+        command=command,
+        timeout=timeout,
+        stop=stop,
+        worktree=worktree,
+    )
+
+
+def _transplant_gate(
+    cwd: str,
+    *,
+    base_sha: str,
+    pathspecs: list[str],
+    command: str,
+    timeout: int,
+    stop: Callable[[], bool],
+    worktree: Path,
+) -> dict:
+    """Run the gate at the base commit with only the selected changes
+    transplanted, through a temporary index so the fleet's own index is
+    never touched. `pathspecs` picks the selection: `.` plus excludes keeps
+    everything but the test surface (`_clean_gate`); the surface's own globs
+    alone keep only the test surface (`_reproduce_gate`)."""
     top = git_run(cwd, "rev-parse", "--show-toplevel")
     if top.returncode != 0:
         return _git_failure("git worktree add failed: repository root vanished", worktree=worktree)
@@ -347,7 +406,6 @@ def _clean_gate(
                     worktree=worktree,
                 )
 
-            exclusions = [f":(exclude,glob){pattern}" for pattern in patterns]
             try:
                 diff = subprocess.run(
                     [
@@ -358,8 +416,7 @@ def _clean_gate(
                         "-M",
                         base_sha,
                         "--",
-                        ".",
-                        *exclusions,
+                        *pathspecs,
                     ],
                     cwd=root,
                     env=env,
@@ -410,6 +467,105 @@ def _clean_gate(
         # The clean tree is conductor's scratch evidence, never the fleet's
         # only copy of work, so even a failed gate cannot leave it for gc.
         git_run(root, "worktree", "remove", "--force", str(worktree), timeout=60)
+
+
+def _reproduce_skip(verdict: str, reason: str) -> dict:
+    """A reproduce receipt for a dispatch that never ran the reproduce gate."""
+    return {
+        "ran": False,
+        "exit_code": None,
+        "timed_out": False,
+        "tail": reason,
+        "worktree": "",
+        "patch_bytes": 0,
+        "verdict": verdict,
+    }
+
+
+def _reproduce_receipt(
+    spec: Spec,
+    *,
+    before: GitState,
+    surface_before: Surface | None,
+    surface_state: dict | None,
+    test_command: str | None,
+    timed_out: bool,
+    error: str | None,
+    exit_code: int | None,
+    fleet_errored: bool,
+    home: Path,
+    run_id: str,
+) -> tuple[dict, str | None]:
+    """Reproduce before fix: a `stage: fix` write dispatch must show its own
+    check failing on the base before it may land. Runs the caller's gate
+    against the base commit with only the test-surface change transplanted
+    in and requires it to fail there; a base run that passes, or a fix with
+    no test-surface change at all, means there is nothing reproduced and the
+    fix must not land. Returns the receipt block and, when the fix must be
+    refused, the error string (`None` when it may proceed to its ordinary
+    gate, and for every case the ordinary no-op and mode/stage handling
+    already covers).
+    """
+    if spec.stage != "fix":
+        return _reproduce_skip("skipped", "stage is not fix"), None
+    if spec.mode != "write":
+        return _reproduce_skip("skipped", "mode is read"), None
+    if timed_out or error is not None or exit_code != 0 or fleet_errored:
+        return _reproduce_skip("skipped", "dispatch did not complete cleanly"), None
+    moved = not compare(spec.cwd, before, GitState.capture(spec.cwd)).no_op
+    if not moved:
+        return _reproduce_skip("skipped", "the fleet made no changes"), None
+    if not test_command:
+        return (
+            _reproduce_skip("no-check", "no gate set"),
+            "fix without a reproducing check: no gate set",
+        )
+    if not before.head:
+        return (
+            _reproduce_skip("no-check", "no base commit to re-run against"),
+            "fix without a reproducing check: no base commit to re-run against",
+        )
+    if surface_state is None or not surface_state["touched"]:
+        return (
+            _reproduce_skip("no-check", "no test-surface change"),
+            "fix without a reproducing check: no test-surface change",
+        )
+    assert surface_before is not None  # surface_state implies it was captured
+    outcome = _reproduce_gate(
+        spec.cwd,
+        base_sha=before.head,
+        patterns=surface_before.patterns,
+        command=test_command,
+        timeout=GATE_TIMEOUT,
+        stop=stop_requested,
+        worktree=home / "worktrees" / f"{run_id}-reproduce",
+    )
+    if outcome.get("interrupted"):
+        return (
+            {**outcome, "verdict": "skipped"},
+            "interrupted: stop requested during the reproduce gate; process group killed",
+        )
+    if outcome.get("infra_error"):
+        # The transplant itself failed (worktree add, read-tree, apply, ...);
+        # the gate command never ran, so a nonzero exit here is not evidence
+        # that anything was reproduced.
+        return (
+            {**outcome, "verdict": "no-check"},
+            "fix without a reproducing check: reproduce gate could not run: "
+            + outcome.get("tail", ""),
+        )
+    if outcome.get("timed_out"):
+        # A gate that never finished proves nothing either way.
+        return (
+            {**outcome, "verdict": "no-check"},
+            "fix without a reproducing check: reproduce gate timed out",
+        )
+    if _gate_passed(outcome, None):
+        return (
+            {**outcome, "verdict": "not-reproduced"},
+            "reproduce gate passed on the base: the check does not reproduce the finding",
+        )
+    return {**outcome, "verdict": "reproduced"}, None
 
 
 # Set by the CLI's signal handlers. Every wait loop polls it, so a stop
@@ -717,6 +873,27 @@ def dispatch(
             + ", ".join(surface_state["changed"])
         )
 
+    reproduce_state, reproduce_error = _reproduce_receipt(
+        spec,
+        before=before,
+        surface_before=surface_before,
+        surface_state=surface_state,
+        test_command=test_command,
+        timed_out=timed_out,
+        error=error,
+        exit_code=exit_code,
+        fleet_errored=bool(output.error),
+        home=base,
+        run_id=run_id,
+    )
+    if reproduce_error is not None:
+        # A fix that reproduces nothing must not land: no commit, and its
+        # ordinary gate (own or clean) is skipped below, same as any other
+        # error caught before this point.
+        error = reproduce_error
+        if reproduce_state.get("interrupted"):
+            interrupted = True
+
     # Commit before the Git verdict is taken, so it describes the state
     # the caller is actually left with.
     commit: CommitOutcome | None = None
@@ -796,6 +973,12 @@ def dispatch(
         if commit and commit.committed:
             commit = uncommit(spec.cwd, commit, before.head)
         error = forbid_error
+
+    if reproduce_error is not None and commit and commit.committed:
+        # A fix that never reproduced anything must not land, even when the
+        # fleet committed its own work directly instead of leaving it staged
+        # for conductor's own commit_work to pick up.
+        commit = uncommit(spec.cwd, commit, before.head)
 
     after = GitState.capture(spec.cwd)
     git_verdict = compare(spec.cwd, before, after)
@@ -889,6 +1072,7 @@ def dispatch(
         verdict=checklist_verdict.to_dict() if checklist_verdict is not None else None,
         tests=tests.to_dict() if tests else None,
         test_surface=surface_state,
+        reproduce=reproduce_state,
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
         budget=budget.to_dict() if budget is not None else None,

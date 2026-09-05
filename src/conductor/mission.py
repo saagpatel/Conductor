@@ -43,13 +43,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .fleets import DispatchRefused, Spec, model_vendor
+from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import git_run
 
 REQUIRE = ("all", "any")
+# A lane's place in a pipeline. "review" lanes are read mode, "build" and
+# "fix" lanes are write mode; a lane may leave stage unset and be none of
+# these. A stage is also what a mission's `policy` restricts by vendor.
+STAGES = ("build", "review", "fix")
+_STAGE_MODE = {"build": "write", "review": "read", "fix": "write"}
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # Fields an attempt may set, in the order they cascade mission -> lane -> attempt.
@@ -80,7 +85,7 @@ _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "too
 # would otherwise silently turn a dependent lane into a root.
 _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
 _FALLBACK_KEYS = _ATTEMPT_KEYS
-_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "resume", "branch"}
+_LANE_KEYS = _ATTEMPT_KEYS | {"name", "fallback", "needs", "base", "resume", "branch", "stage"}
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
     "cwd",
@@ -91,6 +96,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "max_cost_usd",
     "template_max_chars",
     "self_judging",
+    "policy",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -160,9 +166,12 @@ class Attempt:
         cap_usd: float | None = None,
         prompt: str | None = None,
         resume: str | None = None,
+        stage: str | None = None,
     ) -> Spec:
         """The dispatch; `cap_usd` overrides the attempt's own (the mission
-        ledger passes what it has left) and `prompt` the rendered template."""
+        ledger passes what it has left), `prompt` the rendered template, and
+        `stage` the lane's pipeline stage (item 4's reproduce gate reads it
+        off the Spec, not the mission)."""
         return Spec(
             fleet=self.fleet,
             prompt=self.prompt if prompt is None else prompt,
@@ -181,6 +190,7 @@ class Attempt:
             cap_usd=self.cap_usd if cap_usd is None else cap_usd,
             test_policy=self.test_policy,
             test_surface=self.test_surface,
+            stage=stage,
         )
 
     def isolated(self) -> bool:
@@ -205,6 +215,8 @@ class Lane:
     # land, so a deliverable is `refactor/x`, not a timestamp. Refused at
     # mission start if it already exists in the repo.
     branch: str | None = None
+    # This lane's place in a build/review/fix pipeline (STAGES), or None.
+    stage: str | None = None
 
 
 @dataclass
@@ -252,6 +264,9 @@ class Mission:
     # Lifts the self-vendor refusal (see _self_judging_findings): a judge
     # never scores its own vendor unless the mission says so explicitly.
     self_judging: str | None = None
+    # Per-stage vendor allowlist: {"<stage>": {"vendors": [<vendor id>, ...]}}.
+    # Only stages named here are restricted; see _validate_policy.
+    policy: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -286,15 +301,26 @@ class Mission:
                 if lane.branch in branches:
                     raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
                 branches.add(lane.branch)
+            if lane.stage is not None and lane.stage not in STAGES:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': stage must be one of {', '.join(STAGES)}, "
+                    f"got {lane.stage!r}"
+                )
             for attempt in lane.attempts:
                 if attempt.mode == "write" and not attempt.isolated():
                     raise MissionInvalid(f"lane '{lane.name}': write lanes must isolate")
+                if lane.stage in _STAGE_MODE and attempt.mode != _STAGE_MODE[lane.stage]:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': stage '{lane.stage}' lanes must be "
+                        f"{_STAGE_MODE[lane.stage]} mode"
+                    )
                 try:
                     attempt.spec(self.cwd).validate()
                 except DispatchRefused as exc:
                     raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
         self._validate_graph(seen)
         self._validate_quorum(seen)
+        self._validate_policy()
         if self.collate:
             if self.collate.rank and len(self.lanes) < 2:
                 raise MissionInvalid("collate rank needs at least two lanes")
@@ -329,6 +355,39 @@ class Mission:
                 "set self_judging: allow to permit this, or route one of them to a "
                 "different vendor"
             )
+
+    def _validate_policy(self) -> None:
+        """A4: reviewer direction is a policy, not a free choice. Evidence
+        (docs/ROADMAP-2026-09.md A4): Claude reviewing Codex lifted pass rate
+        71.6% -> 89.7%; Codex reviewing Claude dropped it 91.4% -> 82.8%.
+        `policy` restricts which vendors may run a staged lane, per stage."""
+        if self.policy is None:
+            return
+        declared = {lane.stage for lane in self.lanes if lane.stage is not None}
+        for stage, rule in self.policy.items():
+            if stage not in STAGES:
+                raise MissionInvalid(
+                    f"policy: unknown stage {stage!r}; known: {', '.join(STAGES)}"
+                )
+            unknown_vendors = [v for v in rule["vendors"] if v not in VENDORS]
+            if unknown_vendors:
+                raise MissionInvalid(
+                    f"policy for stage '{stage}': unknown vendor {unknown_vendors[0]!r}; "
+                    f"known: {', '.join(VENDORS)}"
+                )
+            if stage not in declared:
+                raise MissionInvalid(f"policy names stage '{stage}' but no lane declares it")
+        for lane in self.lanes:
+            if lane.stage is None or lane.stage not in self.policy:
+                continue
+            allowed = self.policy[lane.stage]["vendors"]
+            for attempt in lane.attempts:
+                vendor = model_vendor(attempt.fleet, attempt.model)
+                if vendor not in allowed:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}' ({attempt.label()}) is on vendor '{vendor}'; "
+                        f"policy allows {', '.join(allowed)} for stage {lane.stage}"
+                    )
 
     def _validate_quorum(self, names: set[str]) -> None:
         if not isinstance(self.require, dict):
@@ -458,6 +517,7 @@ class Mission:
             "template_max_chars",
             "snapshot_version",
             "self_judging",
+            "policy",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -470,7 +530,7 @@ class Mission:
             raise MissionInvalid("mission snapshot lanes must be a list")
 
         lanes: list[dict] = []
-        lane_keys = {"name", "attempts", "needs", "base", "resume", "branch"}
+        lane_keys = {"name", "attempts", "needs", "base", "resume", "branch", "stage"}
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
             if not isinstance(raw_lane, dict):
@@ -499,6 +559,7 @@ class Mission:
                 "base": raw_lane["base"],
                 "resume": raw_lane["resume"],
                 "branch": raw_lane["branch"],
+                "stage": raw_lane["stage"],
                 **checked[0],
                 "fallback": checked[1:],
             }
@@ -522,6 +583,7 @@ class Mission:
             "prompt": raw["prompt"],
             "template_max_chars": raw["template_max_chars"],
             "self_judging": raw["self_judging"],
+            "policy": raw["policy"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -550,8 +612,9 @@ def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
 
 def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
     """Every (judge, judged, vendor) pair where a judge could score a lane on
-    its own vendor: a verdict lane against its `base`, and the collate
-    against any lane it collates over (every lane in the mission).
+    its own vendor: a verdict lane or a `stage: review` lane against its
+    `base`, and the collate against any lane it collates over (every lane in
+    the mission).
 
     "Could" rather than "does": which attempt of a lane ends up final is not
     known at load time, so a shared vendor on any attempt (fallbacks
@@ -560,7 +623,8 @@ def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
     by_name = {lane.name: lane for lane in mission.lanes}
     findings: list[tuple[str, str, str]] = []
     for lane in mission.lanes:
-        if lane.base is None or not any(a.verdict is not None for a in lane.attempts):
+        judges = lane.stage == "review" or any(a.verdict is not None for a in lane.attempts)
+        if lane.base is None or not judges:
             continue
         judged = by_name.get(lane.base)
         if judged is None:
@@ -692,6 +756,9 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         lane_branch = raw_lane.get("branch")
         if lane_branch is not None and not isinstance(lane_branch, str):
             raise MissionInvalid(f"lane {i}: branch must be a string")
+        lane_stage = raw_lane.get("stage")
+        if lane_stage is not None and not isinstance(lane_stage, str):
+            raise MissionInvalid(f"lane {i}: stage must be a string")
         lanes.append(
             Lane(
                 name=lane_name,
@@ -700,6 +767,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 base=lane_base,
                 resume=lane_resume,
                 branch=lane_branch,
+                stage=lane_stage,
             )
         )
 
@@ -738,6 +806,20 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     self_judging = raw.get("self_judging")
     if self_judging is not None and not isinstance(self_judging, str):
         raise MissionInvalid("self_judging must be a string")
+    policy = raw.get("policy")
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise MissionInvalid("policy must be an object")
+        for stage_key, rule in policy.items():
+            if not isinstance(rule, dict) or set(rule) != {"vendors"}:
+                raise MissionInvalid(
+                    f"policy for stage '{stage_key}' must be an object with only 'vendors'"
+                )
+            vendors = rule["vendors"]
+            if not isinstance(vendors, list) or not all(isinstance(v, str) for v in vendors):
+                raise MissionInvalid(
+                    f"policy for stage '{stage_key}': vendors must be a list of strings"
+                )
     mission = Mission(
         name=name,
         cwd=cwd,
@@ -750,6 +832,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         prompt=str(defaults["prompt"]) if defaults.get("prompt") else None,
         template_max_chars=template_max,
         self_judging=self_judging,
+        policy=policy,
     )
     mission.validate()
     return mission
@@ -959,6 +1042,7 @@ class LaneResult:
     skipped: str | None = None
     needs: list[str] = field(default_factory=list)
     base: str | None = None
+    stage: str | None = None  # this lane's declared pipeline stage, if any
     base_sha: str = ""  # the commit this lane's worktree started from
     tip_sha: str = ""  # where its final attempt's worktree ended up
     clean: bool | None = None  # and whether everything there was committed
@@ -1037,7 +1121,7 @@ class LaneResult:
             value = raw.get(key, 0)
             if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
                 raise ValueError(f"lane receipt {key} must be a non-negative number")
-        for key in ("answer_path", "diff_path", "skipped", "base", "session_id"):
+        for key in ("answer_path", "diff_path", "skipped", "base", "session_id", "stage"):
             if raw.get(key) is not None and not isinstance(raw[key], str):
                 raise ValueError(f"lane receipt {key} must be a string or null")
         for key in ("base_sha", "tip_sha", "branch", "test_touched", "breaker"):
@@ -1590,6 +1674,7 @@ def _execute_mission(
             ok=False,
             needs=list(lane.needs),
             base=lane.base,
+            stage=lane.stage,
             skipped=skipped,
         )
         if old is not None:
@@ -1670,6 +1755,7 @@ def _execute_mission(
                     cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
                     prompt=prompt,
                     resume=resume_id,
+                    stage=lane.stage,
                 ),
                 dry_run=dry_run,
                 test_command=attempt.test,
@@ -1688,6 +1774,7 @@ def _execute_mission(
             summary = result.summary()
             summary["test_surface"] = result.test_surface
             summary["verdict_data"] = result.verdict
+            summary["reproduce"] = result.reproduce
             summary["lane"] = lane.name
             summary["attempt"] = attempt.label()
             summary["resume"] = resume_state
@@ -2358,6 +2445,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         lines += ["", f"**Budget unverifiable**: {json.dumps(result.budget)}"]
     for lane in lanes:
         lines += ["", f"## Lane `{lane.name}`", ""]
+        if lane.stage:
+            lines.append(f"- stage: {lane.stage}")
         if lane.needs:
             lines.append(f"- needs: {', '.join(lane.needs)}")
         if lane.base:

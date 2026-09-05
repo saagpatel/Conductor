@@ -242,6 +242,10 @@ class Spec:
     tool_idle_timeout: int | None = None  # no tool call before kill; 0 disables
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
     test_policy: str = "clean"
+    # A pipeline stage (mission.STAGES: build, review, fix), or None outside
+    # a staged pipeline. A "fix" dispatch in write mode is the only one that
+    # triggers runner.dispatch's reproduce-before-fix gate.
+    stage: str | None = None
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:

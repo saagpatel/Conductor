@@ -311,7 +311,7 @@ pipeline; everything else is unchanged.
     {"name": "review", "fleet": "claude", "model": "opus", "mode": "read",
      "base": "build",
      "prompt": "Review this change against the spec.\n{{mission.prompt}}\n{{lanes.build.diff}}\nReport anything that could cause incorrect behavior, a test failure, or a misleading result; omit style and naming. Per item: file and line, what goes wrong, one sentence of consequence, confidence 1-10. If nothing meets that bar reply exactly NO_FINDINGS. Either answer is complete. Put the entire review in this reply."},
-    {"name": "fix", "fleet": "codex", "model": "sol", "mode": "write",
+    {"name": "fix", "stage": "fix", "fleet": "codex", "model": "sol", "mode": "write",
      "base": "build", "needs": ["review"], "resume": "build", "no_op_ok": true,
      "test": "pytest -q", "commit": "fix: address cross-vendor review",
      "prompt": "A reviewer from another vendor reported:\n{{lanes.review.answer}}\nFor each item, first reproduce it (a failing test or a demonstrated wrong result); fix only what reproduces. If the review says NO_FINDINGS or nothing reproduces, change nothing and say so."}
@@ -373,6 +373,69 @@ lane value is fenced with a per-render random nonce and labelled as another
 agent's output, not instructions. The trusted mission prompt is substituted
 unfenced and outside `template_max_chars`; only lane data shares that budget
 (default 40000). In a dry run lane placeholders render as `(dry run: ...)`.
+
+### Lane stages, reviewer policy, and reproduce before fix
+
+A lane may declare `"stage"`: `build`, `review`, or `fix`. A `review` lane
+must be read mode; a `build` or `fix` lane must be write mode. Any other
+mode for a staged lane, or any stage string outside those three, is refused
+at load with the lane named.
+
+A mission may also set a top-level `"policy"` object naming which vendors
+may run each stage:
+
+```json
+{
+  "policy": {
+    "review": {"vendors": ["anthropic", "google"]}
+  }
+}
+```
+
+Every attempt of a lane with that stage, fallbacks included, must be on an
+allowed vendor; the first one that is not is refused by name: `lane
+'<name>' (<attempt>) is on vendor '<v>'; policy allows <list> for stage
+<stage>`. Reviewer direction is a policy rather than a free choice because
+it is not a wash which vendor reviews which: in one controlled study,
+Claude reviewing Codex lifted pass rate 71.6% → 89.7%, while Codex reviewing
+Claude dropped it 91.4% → 82.8% ([arXiv 2607.21656](https://arxiv.org/abs/2607.21656);
+see `docs/ROADMAP-2026-09.md` item A4). A `policy` entry naming an unknown
+stage, an unknown vendor id, or a stage no lane declares is refused at load,
+so a typo cannot silently allow everything.
+
+A `stage: review` lane with a `base` is judge hygiene's business too (see
+below): it is treated exactly like a verdict lane even with no `verdict`
+checklist of its own, refused if it could share a vendor with its base, and
+lifted the same way with `self_judging: allow`.
+
+#### Reproduce before fix
+
+A `fix` lane must show its own check failing before it may edit. When a
+`stage: fix` write dispatch's fleet has changed the test surface, conductor
+adds a detached worktree at the base commit — the mirror image of the clean
+gate above, `include` pathspecs instead of `exclude` through the same
+temporary index — transplants only the test-surface change into it, and
+runs the gate there. That run must **fail**: a check that already fails
+against the unfixed base is the reproduction, and only then does the fix's
+own gate (or the clean gate, per `test_policy`) run and have to pass.
+
+Three outcomes besides a normal reproduction:
+
+- the fleet changed source but never touched the test surface: refused
+  without attempting a base run, no commit, ordinary gate skipped —
+  `fix without a reproducing check: no test-surface change`;
+- the base run **passes**: the new or changed check reproduces nothing, no
+  commit, ordinary gate skipped —
+  `reproduce gate passed on the base: the check does not reproduce the finding`;
+- the fleet changed nothing at all: this gate has nothing to do with it; the
+  existing no-op handling applies unchanged.
+
+The receipt gains a `reproduce` block: `ran`, `exit_code`, `timed_out`,
+`tail`, `worktree`, `patch_bytes`, and `verdict` — `reproduced`,
+`not-reproduced`, `no-check`, or `skipped` (reason in `tail`) for every
+dispatch that is not a `stage: fix` write, including a plain dispatch with
+no stage at all. The reproduce worktree is always removed once the gate
+ends, exactly like the clean gate's.
 
 ### Structured review and a 2-of-3 quorum
 

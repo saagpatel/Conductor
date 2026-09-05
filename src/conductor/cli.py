@@ -15,7 +15,7 @@ from pathlib import Path
 from . import prices
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
-from .mission import Mission, MissionInvalid, load_mission, run_mission
+from .mission import STAGES, Mission, MissionInvalid, load_mission, run_mission
 from .paths import conductor_home
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
@@ -109,6 +109,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             cap_usd=args.cap_usd,
             test_policy=args.test_policy,
             test_surface=args.test_surface,
+            stage=args.stage,
         )
         result = dispatch(
             spec,
@@ -407,6 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dispatch.add_argument("--test", help="gate to run after the dispatch, in --cwd")
     p_dispatch.add_argument("--test-policy", choices=TEST_POLICIES, default="clean")
+    p_dispatch.add_argument(
+        "--stage",
+        choices=sorted(STAGES),
+        help="pipeline stage; a 'fix' dispatch in write mode runs the reproduce-before-fix gate",
+    )
     p_dispatch.add_argument(
         "--test-surface",
         action="append",
