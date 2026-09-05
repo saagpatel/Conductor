@@ -223,6 +223,7 @@ class Spec:
     stall_timeout: int | None = 900  # silence before conductor kills the fleet; 0 disables
     loop_limit: int | None = 6  # identical consecutive tool calls; 0 disables
     max_tool_calls: int | None = None  # total tool-call ceiling; 0 disables
+    tool_idle_timeout: int | None = None  # no tool call before kill; 0 disables
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
     test_policy: str = "clean"
 
@@ -282,6 +283,7 @@ class Spec:
             ("stall_timeout", self.stall_timeout),
             ("loop_limit", self.loop_limit),
             ("max_tool_calls", self.max_tool_calls),
+            ("tool_idle_timeout", self.tool_idle_timeout),
         ):
             if value is None or value == 0:
                 continue

@@ -615,13 +615,19 @@ def dispatch(
                 start_new_session=True,
             )
             _register_live_group(proc.pid)
-            if spec.stall_timeout or spec.loop_limit or spec.max_tool_calls:
+            if (
+                spec.stall_timeout
+                or spec.loop_limit
+                or spec.max_tool_calls
+                or spec.tool_idle_timeout
+            ):
                 breaker = Breaker(
                     spec.fleet,
                     stdout_path,
                     stall_s=spec.stall_timeout,
                     loop_limit=spec.loop_limit,
                     max_tool_calls=spec.max_tool_calls,
+                    idle_s=spec.tool_idle_timeout,
                 )
         except OSError as exc:
             error = f"cannot spawn {fleet.binary}: {exc}"
@@ -630,7 +636,13 @@ def dispatch(
             error = f"interrupted: {exc}"
         if proc is not None:
             exit_code, timed_out, capped, interrupted, breaker_reason = _wait(
-                proc, timeout, watcher, breaker
+                proc,
+                timeout,
+                watcher,
+                breaker,
+                run_dir=run_dir,
+                stdout_path=stdout_path,
+                started=started,
             )
             if timed_out:
                 error = f"timed out after {timeout}s; process group killed"
@@ -914,11 +926,59 @@ def _self_commit_sha(cwd: str, before: GitState) -> str | None:
     return sha if ancestor.returncode == 0 else None
 
 
+LIVENESS_STALE_S: int = 30
+
+
+def _write_liveness(
+    run_dir: Path,
+    pid: int,
+    stdout_path: Path,
+    started: float,
+    watcher: Watcher | None,
+    breaker: Breaker | None,
+) -> None:
+    now_utc = datetime.now(UTC)
+    at_str = now_utc.isoformat().replace("+00:00", "Z")
+    elapsed_s = round(max(0.0, time.monotonic() - started), 1)
+    try:
+        stdout_bytes = stdout_path.stat().st_size
+    except OSError:
+        stdout_bytes = 0
+
+    spend_usd: float | None = None
+    if watcher is not None:
+        usage = watcher.poll()
+        if usage is not None and usage.cost_usd is not None:
+            spend_usd = usage.cost_usd
+
+    heartbeat: dict[str, object] = {
+        "at": at_str,
+        "elapsed_s": elapsed_s,
+        "pid": pid,
+        "stdout_bytes": stdout_bytes,
+        "spend_usd": spend_usd,
+    }
+    if breaker is not None:
+        heartbeat.update(breaker.to_dict())
+
+    tmp_file = run_dir / f"liveness.tmp.{os.getpid()}"
+    target_file = run_dir / "liveness.json"
+    try:
+        tmp_file.write_text(json.dumps(heartbeat, indent=2))
+        os.replace(tmp_file, target_file)
+    except OSError:
+        pass
+
+
 def _wait(
     proc: subprocess.Popen,
     timeout: int,
     watcher: Watcher | None,
     breaker: Breaker | None,
+    *,
+    run_dir: Path | None = None,
+    stdout_path: Path | None = None,
+    started: float | None = None,
 ) -> tuple[int | None, bool, bool, bool, str | None]:
     """Wait for the fleet, in short polls so the budget watcher and a stop
     request get a look in. Returns (exit_code, timed_out, over_cap,
@@ -930,6 +990,11 @@ def _wait(
     while its shell child keeps running and keeps editing the tree. The
     group is conductor's own (start_new_session), so nothing else is hit.
     """
+    start_time = started if started is not None else time.monotonic()
+    out_path = stdout_path or (run_dir / "stdout.log" if run_dir else None)
+    if run_dir is not None and out_path is not None:
+        _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
+
     deadline = time.monotonic() + timeout
     timed_out = over_cap = interrupted = False
     breaker_reason: str | None = None
@@ -948,14 +1013,24 @@ def _wait(
             break
         if watcher is not None and watcher.over_cap():
             over_cap = True
+            if run_dir is not None and out_path is not None:
+                _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
             break
         if breaker is not None and (breaker_reason := breaker.check()) is not None:
+            if run_dir is not None and out_path is not None:
+                _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
             break
-    if not (timed_out or over_cap or interrupted) and breaker is not None:
+    if (
+        not (timed_out or over_cap or interrupted)
+        and breaker is not None
+        and breaker_reason is None
+    ):
         # Fast runs may finish between polls. Parse their final complete lines
         # so receipts still count tools and a just-completed runaway is not
         # allowed to evade the ceiling by exiting in the same two-second tick.
         breaker_reason = breaker.check(final=True)
+    if run_dir is not None and out_path is not None:
+        _write_liveness(run_dir, proc.pid, out_path, start_time, watcher, breaker)
     _kill_live_group(proc.pid)
     proc.wait()
     return proc.returncode, timed_out, over_cap, interrupted, breaker_reason

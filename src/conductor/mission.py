@@ -62,6 +62,7 @@ _INHERITED = (
     "stall_timeout",
     "loop_limit",
     "max_tool_calls",
+    "tool_idle_timeout",
     "test",
     "test_policy",
     "test_surface",
@@ -72,7 +73,7 @@ _INHERITED = (
     "schema",
     "verdict",
 )
-_BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls"})
+_BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
 
 # Every key a mission file may use, per object. A typo (`need` for `needs`)
 # would otherwise silently turn a dependent lane into a root.
@@ -137,6 +138,7 @@ class Attempt:
     stall_timeout: int | None = 600
     loop_limit: int | None = 6
     max_tool_calls: int | None = None
+    tool_idle_timeout: int | None = None
     test: str | None = None
     commit: str | None = None
     schema: str | None = None
@@ -168,6 +170,7 @@ class Attempt:
             stall_timeout=self.stall_timeout,
             loop_limit=self.loop_limit,
             max_tool_calls=self.max_tool_calls,
+            tool_idle_timeout=self.tool_idle_timeout,
             schema=self.schema,
             verdict=self.verdict,
             resume=resume,
@@ -711,6 +714,7 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
             stall_timeout=_breaker_value(fields, "stall_timeout", 600),
             loop_limit=_breaker_value(fields, "loop_limit", 6),
             max_tool_calls=_breaker_value(fields, "max_tool_calls", None),
+            tool_idle_timeout=_breaker_value(fields, "tool_idle_timeout", None),
             test=fields.get("test"),
             commit=fields.get("commit"),
             schema=fields.get("schema"),

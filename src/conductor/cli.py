@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices
@@ -101,6 +102,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             stall_timeout=args.stall_timeout,
             loop_limit=args.loop_limit,
             max_tool_calls=args.max_tool_calls,
+            tool_idle_timeout=args.tool_idle_timeout,
             schema=args.schema,
             verdict=criteria,
             resume=args.resume,
@@ -241,6 +243,23 @@ def cmd_missions(args: argparse.Namespace) -> int:
     return 0
 
 
+LIVENESS_STALE_S: int = 30
+
+
+def _is_pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def cmd_runs(args: argparse.Namespace) -> int:
     """List recent dispatches. The run directory is the audit trail."""
     runs_dir = conductor_home() / "runs"
@@ -252,6 +271,49 @@ def cmd_runs(args: argparse.Namespace) -> int:
     for path in entries[: args.limit]:
         result_file = path / "result.json"
         if not result_file.is_file():
+            liveness_file = path / "liveness.json"
+            if liveness_file.is_file():
+                try:
+                    live = json.loads(liveness_file.read_text())
+                except (OSError, json.JSONDecodeError):
+                    rows.append({"run_id": path.name, "status": "incomplete"})
+                    continue
+                if not isinstance(live, dict):
+                    rows.append({"run_id": path.name, "status": "incomplete"})
+                    continue
+                at_str = live.get("at")
+                heartbeat_age = 0.0
+                if isinstance(at_str, str):
+                    try:
+                        heartbeat_dt = datetime.fromisoformat(at_str.replace("Z", "+00:00"))
+                        if heartbeat_dt.tzinfo is None:
+                            heartbeat_dt = heartbeat_dt.replace(tzinfo=UTC)
+                        heartbeat_age = max(
+                            0.0, (datetime.now(UTC) - heartbeat_dt).total_seconds()
+                        )
+                    except ValueError:
+                        pass
+                status = "silent" if heartbeat_age > LIVENESS_STALE_S else "running"
+                has_breaker = "tool_calls" in live
+                rows.append(
+                    {
+                        "run_id": path.name,
+                        "status": status,
+                        "heartbeat_age_s": round(heartbeat_age, 1),
+                        "elapsed_s": live.get("elapsed_s"),
+                        "pid": live.get("pid"),
+                        "pid_alive": _is_pid_alive(live.get("pid")),
+                        "spend_usd": live.get("spend_usd"),
+                        "tool_calls": live.get("tool_calls") if has_breaker else None,
+                        "last_output_age_s": (
+                            live.get("last_output_age_s") if has_breaker else None
+                        ),
+                        "last_tool_call_age_s": (
+                            live.get("last_tool_call_age_s") if has_breaker else None
+                        ),
+                    }
+                )
+                continue
             rows.append({"run_id": path.name, "status": "incomplete"})
             continue
         data = json.loads(result_file.read_text())
@@ -316,6 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="N",
         help="kill after more than N tool calls; 0 disables",
+    )
+    p_dispatch.add_argument(
+        "--tool-idle-timeout",
+        type=int,
+        metavar="SECONDS",
+        help="kill after this many seconds without a tool call; 0 disables",
     )
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
     p_dispatch.add_argument("--resume", metavar="SESSION_ID", help="resume a fleet session")
