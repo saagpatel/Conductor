@@ -554,6 +554,12 @@ def _reproduce_receipt(
             "fix without a reproducing check: reproduce gate could not run: "
             + outcome.get("tail", ""),
         )
+    if outcome.get("timed_out"):
+        # A gate that never finished proves nothing either way.
+        return (
+            {**outcome, "verdict": "no-check"},
+            "fix without a reproducing check: reproduce gate timed out",
+        )
     if _gate_passed(outcome, None):
         return (
             {**outcome, "verdict": "not-reproduced"},

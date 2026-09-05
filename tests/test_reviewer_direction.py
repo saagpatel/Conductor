@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
@@ -403,3 +404,119 @@ def test_readme_documents_lane_stages_policy_and_reproduce_before_fix():
     )
     assert "not-reproduced" in section and "no-check" in section and "reproduced" in section
     assert "self_judging: allow" in section
+
+
+# --- 5. what the cross-vendor review found, pinned ---------------------------
+
+
+def _fix_with_a_reproducing_check(repo: Path, fake_fleet) -> str:
+    """A fleet command that fixes app.txt and adds a check failing on the base."""
+    (repo / "app.txt").write_text("bad\n")
+    base = _commit(repo)
+    check_script = (
+        "import pathlib, sys\n"
+        "sys.exit(0 if pathlib.Path('app.txt').read_text() == 'good\\n' else 1)\n"
+    )
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "echo good > app.txt && mkdir -p tests && printf '%s' "
+            + shlex.quote(check_script)
+            + " > tests/check.py",
+        ]
+    )
+    return base
+
+
+def _gate_outcome(worktree: Path, **changes) -> dict:
+    outcome = {
+        "ran": True,
+        "exit_code": None,
+        "timed_out": False,
+        "interrupted": False,
+        "tail": "",
+        "worktree": str(worktree),
+        "patch_bytes": 0,
+    }
+    outcome.update(changes)
+    return outcome
+
+
+@pytest.mark.parametrize(
+    "outcome, error",
+    [
+        (
+            lambda wt: runner_mod._git_failure("git worktree add failed: boom", worktree=wt),
+            "fix without a reproducing check: reproduce gate could not run: "
+            "git worktree add failed: boom",
+        ),
+        (
+            lambda wt: _gate_outcome(wt, timed_out=True),
+            "fix without a reproducing check: reproduce gate timed out",
+        ),
+    ],
+)
+def test_a_reproduce_gate_that_could_not_run_is_not_a_reproduction(
+    repo, home, fake_fleet, monkeypatch, git_out, outcome, error
+):
+    base = _fix_with_a_reproducing_check(repo, fake_fleet)
+    monkeypatch.setattr(runner_mod, "_reproduce_gate", lambda cwd, **kw: outcome(kw["worktree"]))
+
+    result = dispatch(
+        _spec(repo, stage="fix", test_policy="allow"),
+        home=home,
+        test_command="python tests/check.py",
+        commit_message="fix: attempted",
+    )
+
+    assert result.reproduce["verdict"] == "no-check"
+    assert result.error == error
+    assert result.ok is False
+    assert result.commit is None
+    assert git_out(repo, "rev-parse", "HEAD") == base
+
+
+def test_a_stop_during_the_reproduce_gate_marks_the_run_interrupted(
+    repo, home, fake_fleet, monkeypatch, git_out
+):
+    base = _fix_with_a_reproducing_check(repo, fake_fleet)
+    monkeypatch.setattr(
+        runner_mod,
+        "_reproduce_gate",
+        lambda cwd, **kw: _gate_outcome(kw["worktree"], interrupted=True),
+    )
+
+    result = dispatch(
+        _spec(repo, stage="fix", test_policy="allow"),
+        home=home,
+        test_command="python tests/check.py",
+        commit_message="fix: attempted",
+    )
+
+    assert result.interrupted is True
+    assert result.error.startswith("interrupted: stop requested during the reproduce gate")
+    assert result.ok is False
+    assert git_out(repo, "rev-parse", "HEAD") == base
+
+
+def test_a_fleet_self_commit_of_a_refused_fix_is_undone(repo, home, fake_fleet, git_out):
+    (repo / "app.txt").write_text("bad\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "check.py").write_text("raise SystemExit(1)\n")
+    base = _commit(repo)
+    fake_fleet(
+        ["sh", "-c", "echo good > app.txt && git add -A && git commit -q -m 'fleet: own commit'"]
+    )
+
+    result = dispatch(
+        _spec(repo, stage="fix"),
+        home=home,
+        test_command="python tests/check.py",
+        commit_message="fix: attempted",
+    )
+
+    assert result.reproduce["verdict"] == "no-check"
+    assert result.ok is False
+    assert git_out(repo, "rev-parse", "HEAD") == base
+    assert "app.txt" in git_out(repo, "status", "--porcelain")
