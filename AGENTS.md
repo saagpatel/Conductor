@@ -88,6 +88,11 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    and the mission never starts. A mission already running is unaffected (its modules are loaded), so
    merging while lanes run is fine; launching is not. Three parallel missions merged in series worked
    (B2, B3, C4); the lead's merge and salvage time, not the fleet spend, was the cost that grew.
+10. **A cascade is for small items, and every Claude build cap gets a dollar for the summary.** Sonnet
+   at medium under $4 could not build a five-item spec (C5: escalation rate 1.0, $4 bought nothing);
+   put the cascade on one- or two-item specs and fix lanes. Claude stops itself at exactly the cap and
+   its final summary costs, so a green build was lost for five cents twice in one day: cap = estimate
+   from rule 2, plus one dollar.
 
 ## Reviewer prompts: no quotas, ever
 

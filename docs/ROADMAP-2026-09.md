@@ -24,11 +24,12 @@ orchestrators. Sources are linked where a claim rests on one.
 | B2 cache-friendly prompts | 0.19.0 | Shape A, one of three in parallel, salvaged | $7.13 |
 | B3 cheap-first cascade | 0.20.0 | Shape A, one of three in parallel | $7.79 |
 | C4 per-lane setup, teardown, ports, includes | 0.21.0 | Shape A, one of three in parallel, review rerun | $11.88 |
+| C5 structured error kinds | 0.22.0 | Shape A on 0.21.0 with cascade, prefix, ports live; salvaged | $14.78 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
-order; the second merge was the lead's. B2, B3, and C4 ran as three missions at once and merged in that order. Next candidates: C5
-structured error kinds, C6 background lanes, C7 the golden-mission suite, then Phase D.
+order; the second merge was the lead's. B2, B3, and C4 ran as three missions at once and merged in that order. C5 ran on 0.21.0 with the
+new features engaged. Next candidates: C6 background lanes, C7 the golden-mission suite, then Phase D.
 
 ## What conductor is, in one paragraph
 
