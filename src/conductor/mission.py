@@ -1584,23 +1584,12 @@ def _gate_exit(lane: LaneResult) -> int | None:
 
 
 def _cascade_target_lanes(mission: Mission) -> list[Lane]:
-    """Lanes the mission's cascade rule targets: build-stage lanes when the
-    mission uses stages at all, otherwise every write lane -- the same rule
-    `mission_from_dict` used to decide where to prepend the cascade attempt.
-    A lane that opted out with `cascade: false` at load time is not
-    distinguishable from here (that choice is not persisted past load) and
-    is still counted; only its absent cascade attempt would tell the two
-    apart, and no attempt at all is not ambiguous with the escalation stats
-    this feeds -- an opted-out lane's own first attempt is simply its real
-    primary, and "did the first attempt pass" reads the same either way."""
+    """Lanes the cascade attempt was actually prepended to at load. A lane
+    that opted out with `cascade: false` has no cheap attempt, so its own
+    primary must not be counted as one (cross-vendor review of B3)."""
     if mission.cascade is None:
         return []
-    staged = any(lane.stage is not None for lane in mission.lanes)
-    return [
-        lane
-        for lane in mission.lanes
-        if (lane.stage == "build" if staged else lane.attempts[0].mode == "write")
-    ]
+    return [lane for lane in mission.lanes if lane.cascaded]
 
 
 def _cascade_label(cascade: dict) -> str:

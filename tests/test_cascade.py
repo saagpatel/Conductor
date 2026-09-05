@@ -309,3 +309,28 @@ def test_readme_documents_the_cascade_and_its_escalation_block():
     assert "cut cost 31% at 0.91 micro-F1" in section and "UCCI" in section
     assert "Is Escalation Worth" in section and "arxiv.org/pdf/2605.06350" in section
     assert "docs/ROADMAP-2026-09.md" in section and "item B3" in section
+
+
+def test_escalation_counts_only_lanes_the_cascade_actually_reached(tmp_path):
+    """Cross-vendor review of B3: an opted-out lane's own primary is not a
+    cheap attempt, so it must not count toward the escalation block."""
+    from conductor.mission import LaneResult, _escalation_summary
+
+    raw = {
+        "prompt": "x",
+        "cascade": {"fleet": "codex"},
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write"},
+            {"name": "b", "fleet": "claude", "mode": "write", "cascade": False},
+        ],
+    }
+    m = mission_from_dict(raw, base_dir=tmp_path)
+    assert [lane.cascaded for lane in m.lanes] == [True, False]
+    results = [
+        LaneResult(name="a", ok=True, attempts=[{"ok": True, "cost_usd": 0.1}]),
+        LaneResult(name="b", ok=True, attempts=[{"ok": True, "cost_usd": 5.0}]),
+    ]
+    esc = _escalation_summary(m, results)
+    assert esc["lanes"] == 1
+    assert esc["cheap_ok"] == 1
+    assert esc["cascade_usd"] == 0.1
