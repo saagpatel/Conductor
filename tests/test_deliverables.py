@@ -1,0 +1,417 @@
+"""E1: deliverable verdicts.
+
+A lane's product can be a file, not just its reply. `Spec.deliverable`
+(fleets.py) declares it, `runner.dispatch` checks it on the filesystem after
+the fleet exits, a read lane may move exactly that one file, and a
+downstream lane can read it through `{{lanes.<name>.deliverable}}`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from conductor import golden as golden_mod
+from conductor.cli import build_parser, cmd_dispatch
+from conductor.errors import error_kind
+from conductor.fleets import DispatchRefused, Spec, build_argv
+from conductor.mission import LaneResult, Mission, _render, mission_from_dict, run_mission
+from conductor.runner import dispatch
+
+
+def spec(**kw) -> Spec:
+    base = dict(fleet="claude", prompt="do the thing", cwd="/tmp")
+    base.update(kw)
+    return Spec(**base)
+
+
+def spec_for(repo: Path, **kw) -> Spec:
+    base = dict(fleet="claude", prompt="test deliverable", cwd=str(repo))
+    base.update(kw)
+    return Spec(**base)
+
+
+# --- Spec.validate() refusals (item 1) --------------------------------------
+
+
+def test_deliverable_must_be_an_object():
+    with pytest.raises(DispatchRefused, match="deliverable must be an object"):
+        build_argv(spec(deliverable="report.txt"))
+
+
+def test_deliverable_unknown_field_is_refused():
+    with pytest.raises(DispatchRefused, match="unknown field"):
+        build_argv(spec(deliverable={"path": "a.txt", "bogus": 1}))
+
+
+def test_deliverable_missing_path_is_refused():
+    with pytest.raises(DispatchRefused, match="non-empty 'path'"):
+        build_argv(spec(deliverable={}))
+
+
+def test_deliverable_empty_path_is_refused():
+    with pytest.raises(DispatchRefused, match="non-empty 'path'"):
+        build_argv(spec(deliverable={"path": ""}))
+
+
+def test_deliverable_absolute_path_is_refused():
+    with pytest.raises(DispatchRefused, match="not absolute"):
+        build_argv(spec(deliverable={"path": "/etc/passwd"}))
+
+
+def test_deliverable_dotdot_path_is_refused():
+    with pytest.raises(DispatchRefused, match="must not contain '..'"):
+        build_argv(spec(deliverable={"path": "../escape.txt"}))
+
+
+def test_deliverable_path_resolving_outside_cwd_is_refused(tmp_path):
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (cwd / "link").symlink_to(outside)
+    with pytest.raises(DispatchRefused, match="resolves outside cwd"):
+        build_argv(spec(cwd=str(cwd), deliverable={"path": "link/file.txt"}))
+
+
+def test_deliverable_schema_unreadable_is_refused(tmp_path):
+    with pytest.raises(DispatchRefused, match="schema file unreadable"):
+        build_argv(
+            spec(deliverable={"path": "a.txt", "schema": str(tmp_path / "missing.json")})
+        )
+
+
+def test_deliverable_schema_not_json_is_refused(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(DispatchRefused, match="schema file is not valid JSON"):
+        build_argv(spec(deliverable={"path": "a.txt", "schema": str(bad)}))
+
+
+# --- conductor dispatch CLI flags (item 1) ----------------------------------
+
+
+def test_cli_dispatch_deliverable_flags_reach_the_spec(repo, home, tmp_path, monkeypatch):
+    import conductor.cli as cli_mod
+    from conductor import runner as real_runner
+
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dispatch",
+            "hello",
+            "--fleet",
+            "claude",
+            "--cwd",
+            str(repo),
+            "--mode",
+            "read",
+            "--deliverable",
+            "out.json",
+            "--deliverable-schema",
+            str(schema),
+            "--dry-run",
+        ]
+    )
+    captured: dict = {}
+    real_dispatch = real_runner.dispatch
+
+    def capturing(spec_arg, **kwargs):
+        captured["spec"] = spec_arg
+        kwargs["dry_run"] = True
+        kwargs["home"] = home
+        return real_dispatch(spec_arg, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "dispatch", capturing)
+    rc = cmd_dispatch(args)
+    assert rc == 0
+    assert captured["spec"].deliverable == {"path": "out.json", "schema": str(schema)}
+
+
+def test_cli_dispatch_deliverable_schema_without_deliverable_is_refused(repo, tmp_path, capsys):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dispatch",
+            "hello",
+            "--fleet",
+            "claude",
+            "--cwd",
+            str(repo),
+            "--deliverable-schema",
+            str(schema),
+        ]
+    )
+    rc = cmd_dispatch(args)
+    assert rc == 3
+    out = json.loads(capsys.readouterr().err)
+    assert "--deliverable-schema needs --deliverable" in out["refused"]
+
+
+# --- the mission key (item 2) ------------------------------------------------
+
+
+def test_deliverable_inherits_from_mission_and_lane_overrides(repo, tmp_path):
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "deliverable": {"path": "default.json"},
+        "lanes": [
+            {"name": "a", "fleet": "claude"},
+            {"name": "b", "fleet": "claude", "deliverable": {"path": "b.json"}},
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert mission.lanes[0].attempts[0].deliverable == {"path": "default.json"}
+    assert mission.lanes[1].attempts[0].deliverable == {"path": "b.json"}
+
+
+def test_deliverable_schema_resolves_relative_to_the_mission_file(repo, tmp_path):
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    (specs_dir / "schema.json").write_text(json.dumps({"type": "object"}))
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "lanes": [
+            {"fleet": "claude", "deliverable": {"path": "out.json", "schema": "schema.json"}}
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=specs_dir)
+    resolved = mission.lanes[0].attempts[0].deliverable["schema"]
+    assert resolved == str((specs_dir / "schema.json").resolve())
+
+
+def test_deliverable_snapshot_round_trips(repo, home, tmp_path):
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "lanes": [{"fleet": "claude", "deliverable": {"path": "out.json"}}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home, dry_run=True)
+    snapshot = json.loads(Path(result.mission_dir, "mission.json").read_text())
+    reloaded = Mission.from_snapshot(snapshot)
+    assert reloaded.to_dict() == mission.to_dict() == snapshot
+
+
+def test_backfill_snapshot_fills_the_missing_deliverable_default(repo, tmp_path):
+    raw = {"prompt": "x", "cwd": str(repo), "lanes": [{"fleet": "claude"}]}
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    snapshot = mission.to_dict()
+    for attempt in snapshot["lanes"][0]["attempts"]:
+        del attempt["deliverable"]
+    backfilled = golden_mod._backfill_snapshot(snapshot)
+    reloaded = Mission.from_snapshot(backfilled)
+    assert reloaded.lanes[0].attempts[0].deliverable is None
+
+
+# --- through the fake fleet (item 3 and 4) -----------------------------------
+
+_OK_ANSWER = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "looked around",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+)
+_EMPTY_ANSWER = json.dumps(
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+)
+
+
+def test_read_lane_writes_its_deliverable_and_passes(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", f"echo out > report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable == {
+        "path": "report.txt",
+        "exists": True,
+        "bytes": 4,
+        "parsed": None,
+        "ok": True,
+        "reason": None,
+    }
+    assert result.git_verdict["deliverable_only"] is True
+    assert error_kind(result) is None
+
+
+def test_read_lane_deliverable_plus_another_file_fails_moved_bytes(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", f"echo out > report.txt; echo extra > other.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is False
+    assert result.failure() == "read dispatch moved bytes"
+    assert result.deliverable["ok"] is True
+    assert not result.git_verdict.get("deliverable_only")
+
+
+def test_read_lane_that_writes_nothing_fails_deliverable_missing_not_no_answer(
+    repo, home, fake_fleet
+):
+    fake_fleet(["sh", "-c", f"echo '{_EMPTY_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.failure() == "deliverable missing: report.txt"
+    assert error_kind(result) == "deliverable"
+
+
+def test_deliverable_empty_file_fails(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "touch report.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.failure() == "deliverable empty: report.txt"
+
+
+def test_deliverable_non_json_under_schema_fails_to_parse(repo, home, fake_fleet, tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    fake_fleet(["sh", "-c", "echo 'not json' > record.json"])
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert result.failure() == "deliverable does not parse: record.json"
+
+
+def test_deliverable_json_missing_required_key_fails_schema(repo, home, fake_fleet, tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object", "required": ["name"]}))
+    fake_fleet(["sh", "-c", "printf '%s' '{}' > record.json"])
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert (
+        result.failure() == "deliverable does not match schema: missing required property 'name'"
+    )
+
+
+def test_deliverable_json_wrong_typed_property_fails_schema(repo, home, fake_fleet, tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object", "properties": {"count": {"type": "integer"}}}))
+    fake_fleet(["sh", "-c", "printf '%s' '{\"count\": \"nope\"}' > record.json"])
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert (
+        result.failure()
+        == "deliverable does not match schema: property 'count' must be of type integer"
+    )
+
+
+def test_write_lane_deliverable_is_ordinary_bytes_part_of_the_diff(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo done > report.txt && git add -A && git commit -qm work"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable["ok"] is True
+    assert result.diff_path is not None
+
+
+def test_dry_run_records_deliverable_as_declared_and_unchecked(repo, home):
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), dry_run=True, home=home
+    )
+    assert result.deliverable == {
+        "path": "report.txt",
+        "exists": None,
+        "bytes": None,
+        "parsed": None,
+        "ok": None,
+        "reason": None,
+    }
+    assert result.ok is True
+
+
+def test_deliverable_missing_does_not_mask_a_more_fundamental_failure(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "exit 3"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "missing.txt"}), home=home
+    )
+    assert result.failure() == "exit code 3"
+    assert error_kind(result) == "exit"
+
+
+# --- {{lanes.<name>.deliverable}} template (item 2) --------------------------
+
+
+def test_deliverable_template_renders_into_a_downstream_prompt(tmp_path):
+    deliverable_file = tmp_path / "upstream-deliverable"
+    deliverable_file.write_text("upstream product")
+    mission = mission_from_dict(
+        {
+            "prompt": "root",
+            "cwd": str(tmp_path),
+            "lanes": [
+                {"name": "a", "fleet": "codex"},
+                {
+                    "name": "b",
+                    "fleet": "codex",
+                    "needs": ["a"],
+                    "prompt": "{{lanes.a.deliverable}}",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    rendered = _render(
+        mission.lanes[1].attempts[0].prompt,
+        mission,
+        {"a": LaneResult("a", True, deliverable_path=str(deliverable_file))},
+        dry_run=False,
+    )
+    assert "upstream product" in rendered
+
+
+def test_deliverable_template_is_empty_when_the_lane_left_none(tmp_path):
+    mission = mission_from_dict(
+        {
+            "prompt": "root",
+            "cwd": str(tmp_path),
+            "lanes": [
+                {"name": "a", "fleet": "codex"},
+                {
+                    "name": "b",
+                    "fleet": "codex",
+                    "needs": ["a"],
+                    "prompt": "{{lanes.a.deliverable}}",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    rendered = _render(
+        mission.lanes[1].attempts[0].prompt,
+        mission,
+        {"a": LaneResult("a", True)},
+        dry_run=False,
+    )
+    assert rendered == "(none)"

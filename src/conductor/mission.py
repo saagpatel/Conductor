@@ -87,6 +87,7 @@ _INHERITED = (
     "teardown",
     "include",
     "agent",
+    "deliverable",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
 
@@ -184,7 +185,7 @@ TEMPLATE_MAX_CHARS = 40_000
 # The template grammar, closed: a lane's answer or diff, or the mission's
 # own prompt. Anything else between double braces is refused at load.
 _TEMPLATE = re.compile(
-    r"\{\{\s*(?:lanes\.([A-Za-z0-9._-]+)\.(answer|diff|test_touched|verdict)"
+    r"\{\{\s*(?:lanes\.([A-Za-z0-9._-]+)\.(answer|diff|test_touched|verdict|deliverable)"
     r"|(mission\.prompt))\s*\}\}"
 )
 _ANY_BRACES = re.compile(r"\{\{[^{}]*\}\}")
@@ -224,6 +225,10 @@ class Attempt:
     # D3: an inline persona for this attempt; cascades like `schema`. See
     # fleets.Spec.agent for the shape and its validation.
     agent: dict | None = None
+    # E1: this attempt's product, a file rather than (or beside) its reply;
+    # cascades like `schema`, whose `schema` key resolves relative to the
+    # mission file the same way. See fleets.Spec.deliverable for the shape.
+    deliverable: dict | None = None
     # C5: which of the previous attempt's error `KINDS` this fallback answers;
     # None (every fallback but a hand-set one) means every kind, as before.
     on: list[str] | None = None
@@ -268,6 +273,7 @@ class Attempt:
             include=self.include,
             taint=taint,
             agent=self.agent,
+            deliverable=self.deliverable,
         )
 
     def isolated(self) -> bool:
@@ -895,7 +901,7 @@ def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
             raise MissionInvalid(
                 f"lane '{where}': unknown template {raw}; use {{{{lanes.<name>.answer}}}}, "
                 "{{lanes.<name>.diff}}, {{lanes.<name>.test_touched}}, "
-                "{{lanes.<name>.verdict}}, or {{mission.prompt}}"
+                "{{lanes.<name>.verdict}}, {{lanes.<name>.deliverable}}, or {{mission.prompt}}"
             )
         refs.append((m.group(1) or "", m.group(2) or "", bool(m.group(3))))
     return refs
@@ -1367,6 +1373,13 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
             raise MissionInvalid(f"agent_file is not valid JSON: {exc}") from exc
     if "schema" in raw and raw["schema"]:
         out["schema"] = str((base_dir / str(raw["schema"])).expanduser().resolve())
+    raw_deliverable = raw.get("deliverable")
+    if isinstance(raw_deliverable, dict) and raw_deliverable.get("schema"):
+        resolved_deliverable = dict(raw_deliverable)
+        resolved_deliverable["schema"] = str(
+            (base_dir / str(resolved_deliverable["schema"])).expanduser().resolve()
+        )
+        out["deliverable"] = resolved_deliverable
     return out
 
 
@@ -1420,6 +1433,8 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             raise MissionInvalid(f"{where}: {key} must be positive; 0 or null disables")
     if fields.get("agent") is not None and not isinstance(fields["agent"], dict):
         raise MissionInvalid(f"{where}: agent must be an object")
+    if fields.get("deliverable") is not None and not isinstance(fields["deliverable"], dict):
+        raise MissionInvalid(f"{where}: deliverable must be an object")
     verdict = None
     if "verdict" in fields:
         try:
@@ -1453,6 +1468,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             teardown=fields.get("teardown"),
             include=list(include) if include is not None else None,
             agent=fields.get("agent"),
+            deliverable=fields.get("deliverable"),
             on=validated_on,
         )
     except (TypeError, ValueError) as exc:
@@ -1646,6 +1662,10 @@ class LaneResult:
     attempts: list[dict] = field(default_factory=list)
     answer_path: str | None = None
     diff_path: str | None = None
+    # E1: a persisted copy of the final attempt's deliverable, beside
+    # answers/ and diffs/, so a downstream lane's {{lanes.<name>.deliverable}}
+    # can read it even after the run's own worktree is gone.
+    deliverable_path: str | None = None
     cost_usd: float = 0.0
     unpriced_attempts: int = 0
     tokens: int = 0
@@ -1747,7 +1767,15 @@ class LaneResult:
             value = raw.get(key, 0)
             if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
                 raise ValueError(f"lane receipt {key} must be a non-negative number")
-        for key in ("answer_path", "diff_path", "skipped", "base", "session_id", "stage"):
+        for key in (
+            "answer_path",
+            "diff_path",
+            "deliverable_path",
+            "skipped",
+            "base",
+            "session_id",
+            "stage",
+        ):
             if raw.get(key) is not None and not isinstance(raw[key], str):
                 raise ValueError(f"lane receipt {key} must be a string or null")
         for key in ("base_sha", "tip_sha", "branch", "test_touched", "breaker"):
@@ -2291,6 +2319,10 @@ def _trusted_lane(
         return False
     if not _artifact_matches(result.diff_path, mission_dir / "diffs" / f"{lane.name}.patch"):
         return False
+    if not _artifact_matches(
+        result.deliverable_path, mission_dir / "deliverables" / f"{lane.name}-deliverable"
+    ):
+        return False
     if result.verdict is not None and not (
         mission_dir / "verdicts" / f"{lane.name}.json"
     ).is_file():
@@ -2632,6 +2664,8 @@ def _execute_mission(
     answers_dir.mkdir(exist_ok=True)
     diffs_dir = mission_dir / "diffs"
     diffs_dir.mkdir(exist_ok=True)
+    deliverables_dir = mission_dir / "deliverables"
+    deliverables_dir.mkdir(exist_ok=True)
     lanes_dir = mission_dir / "lanes"
     lanes_dir.mkdir(exist_ok=True)
     verdicts_dir = mission_dir / "verdicts"
@@ -2804,6 +2838,9 @@ def _execute_mission(
             # when the fallback produced none.
             out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
             out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
+            out.deliverable_path = _keep(
+                result.deliverable_path, deliverables_dir / f"{lane.name}-deliverable"
+            )
             iso = result.isolation or {}
             if not dry_run:
                 out.base_sha = iso.get("base_sha") or ""
@@ -3470,7 +3507,12 @@ def _render(template: str, mission: Mission, done: dict[str, LaneResult], *, dry
         if which == "verdict":
             value = _rendered_verdict(lane.verdict if lane else None)
             return paste(label, value, note)
-        path = (lane.answer_path if which == "answer" else lane.diff_path) if lane else None
+        path_by_which = {
+            "answer": lane.answer_path if lane else None,
+            "diff": lane.diff_path if lane else None,
+            "deliverable": lane.deliverable_path if lane else None,
+        }
+        path = path_by_which[which]
         value = Path(path).read_text(errors="replace").strip() if path else ""
         return paste(label, value, note)
 

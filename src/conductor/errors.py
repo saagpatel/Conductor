@@ -20,7 +20,13 @@ if TYPE_CHECKING:
 
 # Checked in this order; first match wins. A cap kill that also timed out is
 # `cap`, not `timeout`; a fleet error that also mentions a rate limit is
-# `rate_limit`, not `fleet_error`.
+# `rate_limit`, not `fleet_error`. One exception to "checked in this order":
+# `deliverable` sits beside `agent` here -- both are conductor's own checks,
+# never a fleet's -- but is actually tested for later (see `error_kind`,
+# after `gate`), mirroring `Result.failure()`'s own order: a run that never
+# really finished (interrupted, capped, timed out, gated, rate-limited) must
+# classify as whatever ended it, not as "deliverable" merely because the
+# file also happens to be missing.
 KINDS: tuple[str, ...] = (
     "interrupted",
     "cancelled",
@@ -30,6 +36,7 @@ KINDS: tuple[str, ...] = (
     "setup",
     "refused",
     "agent",
+    "deliverable",
     "rate_limit",
     "transport",
     "refusal",
@@ -149,7 +156,17 @@ def _no_op(result: Result) -> bool:
 
 def _read_moved_bytes(result: Result) -> bool:
     verdict = result.git_verdict or {}
-    return result.mode == "read" and bool(verdict.get("checked")) and not verdict.get("no_op")
+    return (
+        result.mode == "read"
+        and bool(verdict.get("checked"))
+        and not verdict.get("no_op")
+        and not verdict.get("deliverable_only")
+    )
+
+
+def _deliverable_failed(result: Result) -> bool:
+    deliverable = result.deliverable
+    return bool(deliverable and deliverable.get("ok") is False)
 
 
 def _no_answer(result: Result) -> bool:
@@ -205,6 +222,8 @@ def error_kind(result: Result) -> str | None:
         return "exit"
     if _gate_failed(result):
         return "gate"
+    if _deliverable_failed(result):
+        return "deliverable"
     if _no_op(result):
         return "no_op"
     if _read_moved_bytes(result):

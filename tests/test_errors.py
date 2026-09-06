@@ -253,6 +253,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "setup",
         "refused",
         "agent",
+        "deliverable",
         "rate_limit",
         "transport",
         "refusal",

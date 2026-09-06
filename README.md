@@ -254,10 +254,60 @@ cannot quietly turn a dependent lane into a root.
 
 Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
 `timeout`, `stall_timeout`, `loop_limit`, `max_tool_calls`, `test`, `test_policy`,
-`test_surface`, `commit`, `isolate`, `cap_usd`, `no_op_ok`, `schema`, and `verdict`.
+`test_surface`, `commit`, `isolate`, `cap_usd`, `no_op_ok`, `schema`, `verdict`,
+and `deliverable`.
 `test_policy` is `clean` (the default),
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
+
+### Deliverables: a file as the verdict
+
+A lane's product is sometimes a file, not a reply: a report a research lane
+writes, a document a generator produces, a JSON record a lane hands the next
+stage. `deliverable` on an attempt (mission-level, per-lane, per-fallback,
+cascading like `schema`) names it: `{"path": "report.md"}`, or
+`{"path": "record.json", "schema": "record.schema.json"}` to also require it
+to validate; `schema` resolves relative to the mission file, like
+`Spec.schema` does. `conductor dispatch` takes `--deliverable PATH` and
+`--deliverable-schema FILE`. `path` must be repo-relative, contain no `..`
+component, and resolve inside `cwd`; a `schema` must be a readable JSON
+file, parsed at load time like `Spec.schema` is.
+
+Conductor checks the declared path on the filesystem of the lane's actual
+working tree (its worktree when isolated) after the fleet exits and before
+the gate -- never through `git status`, because an operator's own global
+excludes can hide an untracked file from Git entirely, which is exactly how
+one fixture's own deliverable went missing from its receipt (C7). The
+verdict lands on `Result.deliverable`: `{"path", "exists", "bytes",
+"parsed", "ok", "reason"}`. A missing file, an empty file, or (when
+`schema` was set) a file that is not valid JSON or does not satisfy the
+schema each sink `ok` and give `Result.failure()` one of `deliverable
+missing: <path>`, `deliverable empty: <path>`, `deliverable does not parse:
+<path>`, or `deliverable does not match schema: <detail>`; the check runs
+after the exit-code and fleet-error checks and before the moved-bytes
+checks. The schema check is deliberately narrow, the same shape as a
+verdict checklist's own contract: every name in `required` is present, and
+every present property whose schema declares a `type` (string, number,
+integer, boolean, array, or object) has a value of that type -- not a
+general JSON Schema validator. On a dry run the deliverable is recorded as
+declared (`ok: null`) and not checked. `errors.KINDS` gains `deliverable`
+for the four failures above.
+
+A write lane's deliverable is ordinary bytes, gated the same way any other
+change is. A read lane is normally held to no bytes moved at all;
+declaring a deliverable lifts that by exactly the deliverable's own path:
+when the only difference between the before and after manifests is that
+one file (added or modified), the "read dispatch moved bytes" check passes
+and `Result.git_verdict` carries `deliverable_only: true`. Any other
+change -- a second file, a commit, a branch move -- still fails as it
+always has. A read lane that declares a deliverable and neither moves any
+bytes nor writes the file fails with `deliverable missing`, not with the
+generic "read dispatch returned no answer".
+
+A downstream lane reads an upstream one's deliverable the way it reads its
+answer: `{{lanes.<name>.deliverable}}` renders the file's text, fenced and
+budgeted like `{{lanes.<name>.answer}}`, empty when the lane declared none
+or left none behind.
 
 ### Cheap-first cascade
 
@@ -325,10 +375,14 @@ now also classifies as exactly one of a fixed set of kinds, checked in this
 order, first match wins:
 
 ```
-interrupted, cancelled, cap, breaker, timeout, setup, refused, agent,
+interrupted, cancelled, cap, breaker, timeout, setup, refused, agent, deliverable,
 rate_limit, transport, refusal, fleet_error, exit, gate, no_op, read_moved_bytes,
 no_answer, commit, unknown
 ```
+
+(`deliverable` is listed here beside `agent` -- both are conductor's own
+checks, not a fleet's -- but is actually tested for later, after `gate`, to
+match `Result.failure()`'s own order: see "Deliverables" above.)
 
 A cap kill that also timed out is `cap`, not `timeout`; a fleet error that
 also mentions a rate limit is `rate_limit`, not `fleet_error`. `kind` is
