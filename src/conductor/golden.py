@@ -346,6 +346,9 @@ def _backfill_snapshot(mission_raw: dict) -> dict:
         lane.setdefault("human", False)
         # E6: no recording before this field existed ever ran a script lane.
         lane.setdefault("script", False)
+        # E3: no recording before this field existed ever ran an
+        # untrusted-output lane.
+        lane.setdefault("untrusted_output", False)
         for attempt in lane.get("attempts") or []:
             if isinstance(attempt, dict):
                 for key, default in _ATTEMPT_FIELD_DEFAULTS.items():
