@@ -116,6 +116,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             setup=args.setup,
             teardown=args.teardown,
             include=args.include,
+            taint=args.taint,
         )
         result = dispatch(
             spec,
@@ -264,6 +265,9 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "paused": paused,
                 "escalation": data.get("escalation"),
                 "errors": data.get("errors"),
+                "tainted": [
+                    lane["name"] for lane in data.get("lanes", []) if lane.get("tainted")
+                ],
             }
         )
     print(json.dumps(rows, indent=2))
@@ -272,10 +276,13 @@ def cmd_missions(args: argparse.Namespace) -> int:
 
 def _verify_run_attestation(
     home: Path, run_id: str, link_statement: dict, key: bytes
-) -> list[str]:
+) -> tuple[list[str], dict | None]:
     """Whether one mission link's run still checks out: its attestation.json
     is unmoved and verifies, and it agrees with the run's own result.json
-    and diff.patch on the few things the mission link claims about it."""
+    and diff.patch on the few things the mission link claims about it.
+
+    Returns the problems found and the run's own attestation `taint` field
+    (D2), so `cmd_attest` can show it whether or not the run verifies."""
     problems: list[str] = []
     run_dir = home / "runs" / run_id
     attestation_file = run_dir / "attestation.json"
@@ -283,23 +290,24 @@ def _verify_run_attestation(
     actual_sha = attest.file_sha256(attestation_file)
     if actual_sha is None:
         problems.append(f"run '{run_id}': attestation.json is missing")
-        return problems
+        return problems, None
     if expected_sha is not None and actual_sha != expected_sha:
         problems.append(f"run '{run_id}': attestation.json sha256 disagrees with the mission link")
     try:
         envelope = json.loads(attestation_file.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         problems.append(f"run '{run_id}': attestation.json unreadable: {exc}")
-        return problems
+        return problems, None
     statement, reason = attest.verify(envelope, key)
     if statement is None:
         problems.append(f"run '{run_id}': attestation signature: {reason}")
-        return problems
+        return problems, None
+    taint = statement.get("taint")
     try:
         result_data = json.loads((run_dir / "result.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
         problems.append(f"run '{run_id}': result.json unreadable: {exc}")
-        return problems
+        return problems, taint
     if statement.get("ok") != result_data.get("ok"):
         problems.append(f"run '{run_id}': attestation ok disagrees with result.json")
     # Compare against the receipt's own `base_commit`/`tip_commit`, not a
@@ -313,7 +321,7 @@ def _verify_run_attestation(
     expected_digest = attest.file_sha256(run_dir / "diff.patch")
     if statement.get("source_diff_sha256") != expected_digest:
         problems.append(f"run '{run_id}': attestation source_diff_sha256 disagrees with diff.patch")
-    return problems
+    return problems, taint
 
 
 def _invalid(reason: str) -> None:
@@ -359,6 +367,7 @@ def cmd_attest(args: argparse.Namespace) -> int:
         path_str = entry.get("path") if isinstance(entry, dict) else None
         problems: list[str] = []
         run_id: str | None = None
+        run_taint: dict | None = None
         actual_sha: str | None = None
         link_path = Path(path_str) if isinstance(path_str, str) else None
         if link_path is None or not link_path.is_file():
@@ -381,12 +390,16 @@ def cmd_attest(args: argparse.Namespace) -> int:
                         problems.append("previous does not match the prior link")
                     run_id = statement.get("run_id")
                     if isinstance(run_id, str):
-                        problems.extend(_verify_run_attestation(home, run_id, statement, key))
+                        run_problems, run_taint = _verify_run_attestation(
+                            home, run_id, statement, key
+                        )
+                        problems.extend(run_problems)
         results.append(
             {
                 "index": index,
                 "lane": lane,
                 "run_id": run_id,
+                "taint": run_taint,
                 "verified": not problems,
                 "problems": problems,
             }
@@ -508,6 +521,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "no_op": git_verdict.get("no_op"),
                 "duration_s": round(data.get("duration_s", 0), 1),
                 "tool_calls": (data.get("breaker") or {}).get("tool_calls", 0),
+                "taint": data.get("taint") is not None,
             }
         )
     print(json.dumps(rows, indent=2))
@@ -672,6 +686,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="repeatable, repo-relative untracked path copied into the isolated worktree "
         "before --setup; refused if Git already tracks it",
+    )
+    p_dispatch.add_argument(
+        "--taint",
+        action="store_true",
+        help="this dispatch handles text pulled from outside the operator's trust; "
+        "claude only, runs with a tool deny list (no web, no subagents, no push)",
     )
     p_dispatch.add_argument("--dry-run", action="store_true", help="print argv, spawn nothing")
     p_dispatch.set_defaults(func=cmd_dispatch)

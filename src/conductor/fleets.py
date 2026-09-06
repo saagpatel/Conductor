@@ -38,6 +38,23 @@ VENDORS = ("anthropic", "openai", "google", "xai", "cursor")
 # loses its way will happily spin until something outside it says stop.
 DEFAULT_TIMEOUT = {"read": 600, "write": 1200}
 
+# D2: what a tainted Claude dispatch may not use, headless. Every entry closes
+# one path an instruction hiding in quoted outside text (an issue, a PR, a web
+# page) could otherwise use to do damage beyond misleading this one dispatch's
+# own answer or diff.
+TAINT_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "WebFetch",  # network egress: exfiltrate repo contents, fetch a second-stage payload
+    "WebSearch",  # network egress, same risk as WebFetch
+    "Task",  # a subagent inherits the tainted context without inheriting this deny list
+    "Agent",  # Claude Code's other subagent-spawning name; same risk as Task
+    "Bash(curl *)",  # network egress via the shell
+    "Bash(wget *)",  # network egress via the shell
+    "Bash(git push *)",  # push rights: an injected instruction must not publish anything
+    "Bash(gh *)",  # push rights and network egress via the GitHub CLI
+    "Bash(ssh *)",  # remote command execution and network egress
+    "Bash(scp *)",  # file exfiltration over the network
+)
+
 
 class DispatchRefused(ValueError):
     """A dispatch that violates routing policy. Raised before anything spawns."""
@@ -252,6 +269,10 @@ class Spec:
     setup: str | None = None  # shell command run before the fleet spawns
     teardown: str | None = None  # shell command run after the gate, always
     include: list[str] | None = None  # untracked repo-relative paths to copy in
+    # D2: this dispatch handles text pulled from outside the operator's trust
+    # (an issue, a PR, a web page). Opt-in, never inferred; enforced with a
+    # Claude tool deny list because no other fleet exposes one headless.
+    taint: bool = False
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -303,6 +324,15 @@ class Spec:
             )
         if self.schema:
             self._validate_schema()
+        # D2: only Claude Code exposes a headless tool deny list
+        # (--disallowedTools); antigravity and cursor have nothing to enforce
+        # taint with, so a tainted dispatch on either is refused, not run
+        # unguarded.
+        if self.taint and self.fleet != "claude":
+            raise DispatchRefused(
+                f"taint is enforceable on the claude fleet only: {self.fleet} exposes no "
+                "tool deny list headless"
+            )
         if self.cap_usd is not None:
             self._validate_cap()
         for name, value in (
@@ -452,6 +482,10 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         argv += ["--max-budget-usd", _usd_arg(spec.cap_usd)]
     if spec.resume is not None:
         argv += ["--resume", spec.resume]
+    if spec.taint:
+        # D2: one name per argv element; the CLI also accepts a comma-joined
+        # string, but a list of exact names cannot be reassembled wrong.
+        argv += ["--disallowedTools", *TAINT_DISALLOWED_TOOLS]
     return argv
 
 
