@@ -236,41 +236,16 @@ def test_ranking_collate_agreement_yields_a_strongest_lane_and_two_priced_orders
 def test_ranking_collate_disagreement_escalates_instead_of_choosing(
     repo, home, monkeypatch, tmp_path
 ):
-    calls = {"antigravity": 0}
-    answers = [{"strongest": "a", "reason": "x"}, {"strongest": "b", "reason": "y"}]
-
     def build(spec: Spec) -> list[str]:
         if spec.fleet == "claude":
             return shell(claude_envelope("a answer"))
         if spec.fleet == "codex":
             return shell(codex_stream("b answer"))
-        calls["antigravity"] += 1
-        return shell(antigravity_envelope(json.dumps(answers[calls["antigravity"] - 1])))
-
-    monkeypatch.setattr(runner_mod, "build_argv", build)
-    mission = mission_from_dict(rank_mission_raw(repo), base_dir=tmp_path)
-    result = run_mission(mission, home=home)
-    assert result.ok is False
-    assert result.collate["ok"] is False
-    assert result.collate["strongest"] is None
-    assert result.collate["error"] == "judge disagreed across orders: a vs b"
-
-
-def test_ranking_collate_an_invalid_order_is_reported_and_not_ok(
-    repo, home, monkeypatch, tmp_path
-):
-    calls = {"antigravity": 0}
-
-    def build(spec: Spec) -> list[str]:
-        if spec.fleet == "claude":
-            return shell(claude_envelope("a answer"))
-        if spec.fleet == "codex":
-            return shell(codex_stream("b answer"))
-        calls["antigravity"] += 1
-        if calls["antigravity"] == 1:
-            answer = {"strongest": "a", "reason": "x"}
-        else:
-            answer = {"strongest": "nonexistent-lane", "reason": "y"}
+        # E4 dispatches both lane orders in parallel, so a shared call
+        # counter can no longer tell forward from reverse deterministically;
+        # the rendered prompt itself can.
+        forward = "strongest: a, b?" in spec.prompt
+        answer = {"strongest": "a", "reason": "x"} if forward else {"strongest": "b", "reason": "y"}
         return shell(antigravity_envelope(json.dumps(answer)))
 
     monkeypatch.setattr(runner_mod, "build_argv", build)
@@ -279,7 +254,38 @@ def test_ranking_collate_an_invalid_order_is_reported_and_not_ok(
     assert result.ok is False
     assert result.collate["ok"] is False
     assert result.collate["strongest"] is None
-    assert result.collate["error"] == "judge order 2 invalid: unknown lane name 'nonexistent-lane'"
+    assert result.collate["error"] == "judges disagreed: a=1, b=1"
+
+
+def test_ranking_collate_an_invalid_order_is_reported_and_not_ok(
+    repo, home, monkeypatch, tmp_path
+):
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "claude":
+            return shell(claude_envelope("a answer"))
+        if spec.fleet == "codex":
+            return shell(codex_stream("b answer"))
+        # E4 dispatches both lane orders in parallel, so a shared call
+        # counter can no longer tell forward from reverse deterministically;
+        # the rendered prompt itself can.
+        forward = "strongest: a, b?" in spec.prompt
+        answer = (
+            {"strongest": "a", "reason": "x"}
+            if forward
+            else {"strongest": "nonexistent-lane", "reason": "y"}
+        )
+        return shell(antigravity_envelope(json.dumps(answer)))
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(rank_mission_raw(repo), base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    assert result.ok is False
+    assert result.collate["ok"] is False
+    assert result.collate["strongest"] is None
+    assert (
+        result.collate["error"]
+        == "judge 1 order 2 invalid: unknown lane name 'nonexistent-lane'"
+    )
 
 
 def test_ranking_collate_refuses_cursor_at_load(repo, tmp_path):
@@ -333,15 +339,17 @@ def test_readme_documents_judge_hygiene():
     assert '"self_judging": "allow"' in section
     assert "self-judging allowed by the mission" in section
     assert '"rank": true' in section
-    assert "judge disagreed across orders" in section
-    assert "judge order" in section
+    assert "judges disagreed: <lane>=<n>, <lane>=<n>" in section
+    assert "judge <j> order <k> invalid" in section
+    assert "collate.judges[<i>]" in section
+    assert "collate.tally" in section
 
 
 def test_rank_answer_accepts_an_object_wrapped_in_prose():
     from conductor.mission import _parse_rank_answer
 
     text = 'Both lanes are close. {"strongest": "a", "reason": "a has the test"} is my call.'
-    assert _parse_rank_answer(text, ["a", "b"], True, None) == ("a", "a has the test", None)
+    assert _parse_rank_answer(text, ["a", "b"], True, None) == ("a", "a has the test", None, None)
     assert _parse_rank_answer("no object here", ["a", "b"], True, None)[2] == (
         "answer contains no valid JSON object"
     )

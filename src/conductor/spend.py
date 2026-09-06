@@ -219,8 +219,9 @@ def _mission_runs(data: dict[str, object]) -> set[str]:
 
 
 def _collate_run_ids(collate: dict[str, object]) -> set[str]:
-    """A collate's priced runs: its own run (a prose collate) and/or both
-    order runs (a ranking collate)."""
+    """A collate's priced runs: its own run (a prose collate), both order
+    runs (a ranking collate's judge 1), and, in a judge sitting (E4), every
+    extra judge's own two order runs."""
     run_ids: set[str] = set()
     if isinstance(collate.get("run_id"), str):
         run_ids.add(collate["run_id"])
@@ -229,6 +230,16 @@ def _collate_run_ids(collate: dict[str, object]) -> set[str]:
         for order in orders:
             if isinstance(order, dict) and isinstance(order.get("run_id"), str):
                 run_ids.add(order["run_id"])
+    judges = collate.get("judges")
+    if isinstance(judges, list):
+        for judge in judges:
+            if not isinstance(judge, dict):
+                continue
+            judge_orders = judge.get("orders")
+            if isinstance(judge_orders, list):
+                for order in judge_orders:
+                    if isinstance(order, dict) and isinstance(order.get("run_id"), str):
+                        run_ids.add(order["run_id"])
     return run_ids
 
 

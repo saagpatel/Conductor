@@ -159,7 +159,11 @@ _COLLATE_KEYS = {
     "include_diffs",
     "rank",
     "candidates",
+    "judges",
 }
+# E4: one extra judge in a rank sitting -- fleet required, everything else
+# defaults the way the collate's own judge 1 does.
+_JUDGE_KEYS = {"fleet", "model", "effort", "timeout", "cap_usd"}
 # D1: a dedicated resolver lane's keys, the collate's minus what makes no
 # sense for a write dispatch (schema, include_diffs, rank, candidates) plus
 # `commit`, the resolver's commit message.
@@ -355,6 +359,43 @@ class Lane:
 
 
 @dataclass
+class Judge:
+    """E4: one extra judge in a rank sitting (judges[i], i >= 0, meaning judge
+    i + 2 overall -- the collate's own fleet/model is judge 1). Dispatched in
+    both lane orders alongside every other judge; unanimity across every
+    judge and every order names the winner. `cap_usd` defaults to the
+    collate's own when the mission does not set one per judge."""
+
+    fleet: str
+    model: str | None = None
+    effort: str = "standard"
+    timeout: int | None = None
+    cap_usd: float | None = None
+
+    def spec(
+        self,
+        cwd: str,
+        prompt: str,
+        *,
+        cap_usd: float | None = None,
+        schema: str | None = None,
+        taint: bool = False,
+    ) -> Spec:
+        return Spec(
+            fleet=self.fleet,
+            prompt=prompt,
+            cwd=cwd,
+            model=self.model,
+            effort=self.effort,
+            mode="read",
+            timeout=self.timeout,
+            schema=schema,
+            cap_usd=self.cap_usd if cap_usd is None else cap_usd,
+            taint=taint,
+        )
+
+
+@dataclass
 class Collate:
     fleet: str
     model: str | None = None
@@ -367,6 +408,9 @@ class Collate:
     include_diffs: bool = True  # the judge sees each lane's patch, not just its prose
     rank: bool = False  # comparative judge: dispatched twice, both lane orders
     candidates: int = 0  # judge only the top N sinks of the mechanical ranking; 0 = every lane
+    # E4: judges 2..M of a rank sitting; judge 1 is this Collate's own
+    # fleet/model. Refused at load unless `rank` is true.
+    judges: list[Judge] = field(default_factory=list)
 
     def spec(
         self,
@@ -596,6 +640,15 @@ class Mission:
                         self.collate.spec(
                             self.cwd, prompt, schema=schema_path, taint=collate_tainted
                         ).validate()
+                        for i, judge in enumerate(self.collate.judges):
+                            try:
+                                judge.spec(
+                                    self.cwd, prompt, schema=schema_path, taint=collate_tainted
+                                ).validate()
+                            except DispatchRefused as exc:
+                                raise MissionInvalid(
+                                    f"collate judges[{i}]: {exc}"
+                                ) from exc
                     finally:
                         os.unlink(schema_path)
                 else:
@@ -1029,16 +1082,23 @@ def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
         for vendor in sorted(judge_vendors & judged_vendors):
             findings.append((lane.name, lane.base, vendor))
     if mission.collate is not None:
-        collate_vendor = model_vendor(mission.collate.fleet, mission.collate.model)
-        for lane in mission.lanes:
-            lane_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
-            if collate_vendor in lane_vendors:
-                findings.append(("collate", lane.name, collate_vendor))
+        judge_labels = [("collate", mission.collate.fleet, mission.collate.model)] + [
+            (f"collate.judges[{i}]", judge.fleet, judge.model)
+            for i, judge in enumerate(mission.collate.judges)
+        ]
+        for label, fleet, model in judge_labels:
+            judge_vendor = model_vendor(fleet, model)
+            for lane in mission.lanes:
+                lane_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
+                if judge_vendor in lane_vendors:
+                    findings.append((label, lane.name, judge_vendor))
     return findings
 
 
 def _rank_schema(lane_names: list[str]) -> dict:
-    """The fleet-facing JSON Schema for a two-order ranking collate."""
+    """The fleet-facing JSON Schema for a two-order ranking collate. `scores`
+    (E4) is optional and never required -- a judge that only names a
+    strongest lane has still answered."""
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1046,6 +1106,14 @@ def _rank_schema(lane_names: list[str]) -> dict:
         "properties": {
             "strongest": {"type": "string", "enum": list(lane_names)},
             "reason": {"type": "string"},
+            "scores": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    name: {"type": "integer", "minimum": 1, "maximum": 10}
+                    for name in lane_names
+                },
+            },
         },
     }
 
@@ -1057,6 +1125,7 @@ def _rank_contract(lane_names: list[str]) -> str:
     return (
         "\n\n## Conductor ranking verdict\n\n"
         f"Which lane's result is strongest: {names}?\n\n"
+        "A score from 1 to 10 per lane is welcome and optional.\n\n"
         "Your final answer must be exactly one JSON object matching this schema:\n"
         f"{schema}\n"
     )
@@ -1243,6 +1312,37 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             raise MissionInvalid("collate needs a fleet")
         schema = raw_collate.get("schema")
         cap = raw_collate.get("cap_usd", defaults.get("cap_usd"))
+        rank = bool(raw_collate.get("rank", False))
+        raw_judges = raw_collate.get("judges")
+        # A round-tripped snapshot's collate always carries "judges" (asdict
+        # emits the dataclass default `[]`), so only a genuinely non-empty
+        # list needs rank -- an empty one is indistinguishable from "unset"
+        # and must replay a non-rank collate exactly as it always has.
+        if raw_judges is not None and not isinstance(raw_judges, list):
+            raise MissionInvalid("collate judges must be a list")
+        if raw_judges and not rank:
+            raise MissionInvalid("collate judges need rank")
+        judges: list[Judge] = []
+        if raw_judges:
+            for idx, raw_judge in enumerate(raw_judges):
+                if not isinstance(raw_judge, dict):
+                    raise MissionInvalid(f"collate judges[{idx}] must be an object")
+                _reject_unknown(raw_judge, _JUDGE_KEYS, f"collate judges[{idx}]")
+                if "fleet" not in raw_judge:
+                    raise MissionInvalid(f"collate judges[{idx}] needs a fleet")
+                judge_cap = raw_judge.get("cap_usd", cap)
+                try:
+                    judges.append(
+                        Judge(
+                            fleet=str(raw_judge["fleet"]),
+                            model=raw_judge.get("model"),
+                            effort=str(raw_judge.get("effort", "standard")),
+                            timeout=raw_judge.get("timeout"),
+                            cap_usd=float(judge_cap) if judge_cap is not None else None,
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise MissionInvalid(f"collate judges[{idx}]: {exc}") from exc
         try:
             collate = Collate(
                 fleet=str(raw_collate["fleet"]),
@@ -1254,8 +1354,9 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
                 cap_usd=float(cap) if cap is not None else None,
                 include_diffs=bool(raw_collate.get("include_diffs", True)),
-                rank=bool(raw_collate.get("rank", False)),
+                rank=rank,
                 candidates=int(raw_collate.get("candidates", 0)),
+                judges=judges,
             )
         except (TypeError, ValueError) as exc:
             raise MissionInvalid(f"collate: {exc}") from exc
@@ -2784,13 +2885,20 @@ def _run_receipt_spend(
 
 def _collate_run_ids(collate: dict) -> list[tuple[str, dict]]:
     """Every priced run a collate receipt carries: its own run (a prose
-    collate) and/or both order runs (a ranking collate)."""
+    collate), both order runs (a ranking collate's judge 1), and, in a
+    judge sitting (E4), every extra judge's own two order runs."""
     ids: list[tuple[str, dict]] = []
     if isinstance(collate.get("run_id"), str):
         ids.append((collate["run_id"], collate))
     for order in collate.get("orders") or []:
         if isinstance(order, dict) and isinstance(order.get("run_id"), str):
             ids.append((order["run_id"], order))
+    for judge in collate.get("judges") or []:
+        if not isinstance(judge, dict):
+            continue
+        for order in judge.get("orders") or []:
+            if isinstance(order, dict) and isinstance(order.get("run_id"), str):
+                ids.append((order["run_id"], order))
     return ids
 
 
@@ -2799,12 +2907,20 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
     if not isinstance(collate, dict) or collate.get("ok") is not True:
         return False
     if collate.get("rank"):
-        orders = collate.get("orders")
-        if not isinstance(orders, list) or len(orders) != 2:
+
+        def two_run_ids(orders: object) -> bool:
+            if not isinstance(orders, list) or len(orders) != 2:
+                return False
+            run_ids = [order.get("run_id") for order in orders if isinstance(order, dict)]
+            return len(run_ids) == 2 and all(
+                isinstance(run_id, str) and run_id for run_id in run_ids
+            )
+
+        if not two_run_ids(collate.get("orders")):
             return False
-        run_ids = [order.get("run_id") for order in orders if isinstance(order, dict)]
-        if len(run_ids) != 2 or not all(isinstance(run_id, str) and run_id for run_id in run_ids):
-            return False
+        for judge in collate.get("judges") or []:
+            if not isinstance(judge, dict) or not two_run_ids(judge.get("orders")):
+                return False
         return isinstance(collate.get("strongest"), str) and bool(collate["strongest"])
     answer = collate.get("answer_path")
     return _artifact_matches(
@@ -4372,27 +4488,155 @@ def _run_collate(
 
 def _parse_rank_answer(
     text: str, names: list[str], ok: bool, error: str | None
-) -> tuple[str | None, str | None, str | None]:
-    """A ranking answer, fail-closed: (strongest, reason, invalid-reason)."""
+) -> tuple[str | None, str | None, str | None, dict[str, int] | None]:
+    """A ranking answer, fail-closed: (strongest, reason, invalid-reason,
+    scores). `scores` (E4) is optional on the answer; when present every key
+    must be a candidate lane name and every value an integer 1 to 10, or the
+    whole order is invalid the same as a malformed `strongest`."""
     if not ok or not text.strip():
-        return None, None, error or "dispatch returned no answer"
+        return None, None, error or "dispatch returned no answer", None
     # Same tolerance as a verdict: a judge that wraps its object in a
     # sentence has still answered, and the last complete object is taken.
     raw, problem = _answer_object(text)
     if problem or raw is None:
-        return None, None, problem or "answer JSON must be an object"
-    extra = sorted(set(raw) - {"strongest", "reason"})
+        return None, None, problem or "answer JSON must be an object", None
+    extra = sorted(set(raw) - {"strongest", "reason", "scores"})
     if extra:
-        return None, None, f"unknown field {extra[0]!r}"
+        return None, None, f"unknown field {extra[0]!r}", None
     missing = [key for key in ("strongest", "reason") if key not in raw]
     if missing:
-        return None, None, f"missing field {missing[0]!r}"
+        return None, None, f"missing field {missing[0]!r}", None
     strongest, reason = raw["strongest"], raw["reason"]
     if not isinstance(strongest, str) or strongest not in names:
-        return None, None, f"unknown lane name {strongest!r}"
+        return None, None, f"unknown lane name {strongest!r}", None
     if not isinstance(reason, str):
-        return None, None, "reason must be a string"
-    return strongest, reason, None
+        return None, None, "reason must be a string", None
+    scores: dict[str, int] | None = None
+    if "scores" in raw:
+        raw_scores = raw["scores"]
+        if not isinstance(raw_scores, dict):
+            return None, None, "scores must be an object", None
+        unknown_lanes = sorted(set(raw_scores) - set(names))
+        if unknown_lanes:
+            return None, None, f"unknown lane name {unknown_lanes[0]!r} in scores", None
+        for lane_name, value in raw_scores.items():
+            if isinstance(value, bool) or not isinstance(value, int) or not (1 <= value <= 10):
+                return (
+                    None,
+                    None,
+                    f"score for {lane_name!r} must be an integer 1 to 10",
+                    None,
+                )
+        scores = dict(raw_scores)
+    return strongest, reason, None, scores
+
+
+def _sorted_votes(votes: dict[str, int]) -> list[tuple[str, int]]:
+    """Descending count, then name -- the order the disagreement message and
+    the tally's votes row both read in."""
+    return sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _build_rank_tally(
+    names: list[str],
+    all_orders: list[tuple[dict, dict]],
+    fleet_model_by_judge: list[tuple[str | None, str | None]],
+) -> dict:
+    """E4: one row per judge (its forward and reverse pick, whether the two
+    agree, and its mean score per candidate), a vote tally, and the overall
+    agreement -- built once so the receipt, `tally.json`, and `tally.md` all
+    read the same numbers."""
+    votes: dict[str, int] = dict.fromkeys(names, 0)
+    any_invalid = False
+    judge_rows: list[dict] = []
+    for j_idx, (forward, reverse) in enumerate(all_orders):
+        if forward["invalid"] or reverse["invalid"]:
+            any_invalid = True
+        for record in (forward, reverse):
+            if record["strongest"] is not None:
+                votes[record["strongest"]] += 1
+        agrees = (
+            forward["invalid"] is None
+            and reverse["invalid"] is None
+            and forward["strongest"] == reverse["strongest"]
+        )
+        fleet, model = fleet_model_by_judge[j_idx]
+        scores_by_lane: dict[str, float | None] = {}
+        for name in names:
+            values = [
+                record["scores"][name]
+                for record in (forward, reverse)
+                if record.get("scores") and name in record["scores"]
+            ]
+            scores_by_lane[name] = (sum(values) / len(values)) if values else None
+        judge_rows.append(
+            {
+                "judge": j_idx + 1,
+                "fleet": fleet,
+                "model": model,
+                "forward": forward["strongest"],
+                "reverse": reverse["strongest"],
+                "agrees": agrees,
+                "scores": scores_by_lane,
+            }
+        )
+    mean_scores: dict[str, float | None] = {}
+    for name in names:
+        values = [
+            record["scores"][name]
+            for forward, reverse in all_orders
+            for record in (forward, reverse)
+            if record.get("scores") and name in record["scores"]
+        ]
+        mean_scores[name] = (sum(values) / len(values)) if values else None
+    total_votes = sum(votes.values())
+    if any_invalid:
+        agreement = "invalid"
+    elif total_votes > 0 and max(votes.values()) == total_votes:
+        agreement = "unanimous"
+    else:
+        agreement = "split"
+    return {
+        "candidates": list(names),
+        "votes": votes,
+        "judges": judge_rows,
+        "agreement": agreement,
+        "mean_scores": mean_scores,
+    }
+
+
+def _tally_markdown(tally: dict) -> str:
+    """One table: a row per judge, a final votes row, a footer naming the
+    overall agreement. `conductor golden check` never reads this file --
+    only the receipt's own `tally` dict is compared -- so its shape is free
+    to change without a fixture backfill."""
+    names = tally["candidates"]
+    header = ["judge", "fleet", "model", "forward", "reverse", "agrees", *names]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "|" + "|".join("---" for _ in header) + "|",
+    ]
+
+    def score_cell(value: float | None) -> str:
+        return "" if value is None else f"{value:.1f}"
+
+    for row in tally["judges"]:
+        cells = [
+            str(row["judge"]),
+            row["fleet"] or "",
+            row["model"] or "",
+            row["forward"] or "",
+            row["reverse"] or "",
+            "yes" if row["agrees"] else "no",
+            *(score_cell(row["scores"].get(name)) for name in names),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
+    votes = tally["votes"]
+    vote_cells = ["**votes**", "", "", "", "", "", *(str(votes.get(name, 0)) for name in names)]
+    lines.append("| " + " | ".join(vote_cells) + " |")
+    lines.append("")
+    lines.append(f"Agreement: {tally['agreement']}")
+    return "\n".join(lines) + "\n"
 
 
 def _run_rank_collate(
@@ -4407,13 +4651,17 @@ def _run_rank_collate(
     tainted: bool = False,
     collisions: dict | None = None,
 ) -> dict:
-    """A comparative judge, dispatched once per lane order (position bias in
-    a judge is systematic, not a rare failure mode); agreement names a
-    winner, and any disagreement or invalid order escalates instead of
-    picking one. `lanes` is already whatever `candidates` left the judge to
-    see; the schema enum and both orders cover only those lanes."""
+    """A sitting of M judges (E4; judge 1 is the collate's own fleet/model,
+    judges 2..M are `col.judges`), each dispatched once per lane order
+    (position bias in a judge is systematic, not a rare failure mode) --
+    2M dispatches, fanned out in parallel under the mission's own
+    concurrency cap. Unanimity across every judge and both of its orders
+    names a winner; any invalid order or any disagreement escalates instead
+    of picking one. `lanes` is already whatever `candidates` left the judges
+    to see; the schema enum and every order cover only those lanes."""
     omitted = omitted or []
     candidate_names = [lane.name for lane in lanes] if col.candidates else None
+    judges: list[Collate | Judge] = [col, *col.judges]
     why = ledger.blocker()
     if why:
         return {
@@ -4423,6 +4671,8 @@ def _run_rank_collate(
             "rank": True,
             "strongest": None,
             "orders": [],
+            "judges": [],
+            "tally": None,
             "candidates": candidate_names,
             "tainted": tainted,
         }
@@ -4430,15 +4680,13 @@ def _run_rank_collate(
     schema_path = mission_dir / "collate-rank.schema.json"
     schema_path.write_text(json.dumps(_rank_schema(names), indent=2))
 
-    records: list[dict] = []
-    total_cost = 0.0
-    any_cost = False
-    total_tokens = 0
-    total_input_tokens = 0
-    total_cache_read = 0
-    total_cache_write = 0
-    fleet = model = None
-    for label, ordered in (("forward", lanes), ("reverse", list(reversed(lanes)))):
+    from . import prompts as prompts_mod
+
+    rank_contract_version = prompts_mod.prompt_versions()["rank_contract"]
+    orders = (("forward", lanes), ("reverse", list(reversed(lanes))))
+
+    def dispatch_one(judge_index: int, label: str, ordered: list[LaneResult]) -> dict:
+        judge = judges[judge_index]
         ordered_names = [lane.name for lane in ordered]
         prompt = _with_prefix(
             mission,
@@ -4446,69 +4694,161 @@ def _run_rank_collate(
             + _omitted_note(omitted)
             + _rank_contract(ordered_names),
         )
-        (mission_dir / f"collate-prompt-{label}.txt").write_text(prompt)
-        from . import prompts as prompts_mod
-
+        # Judge 1 keeps today's plain names; judges 2..M (col.judges[i],
+        # i = judge_index - 1) get an index suffix so their prompts never
+        # collide with judge 1's or each other's.
+        suffix = "" if judge_index == 0 else f"-{judge_index - 1}"
+        (mission_dir / f"collate-prompt-{label}{suffix}.txt").write_text(prompt)
         result = dispatch(
-            col.spec(
+            judge.spec(
                 mission.cwd,
                 prompt,
-                cap_usd=_tighter(col.cap_usd, ledger.remaining()),
+                cap_usd=_tighter(judge.cap_usd, ledger.remaining()),
                 schema=str(schema_path),
                 taint=tainted,
             ),
             isolate=True,
             home=base,
-            prompt_versions={"rank_contract": prompts_mod.prompt_versions()["rank_contract"]},
+            prompt_versions={"rank_contract": rank_contract_version},
         )
         ledger.add(result)
         summary = result.summary()
-        fleet, model = result.fleet, result.model
-        total_tokens += int(summary.get("tokens") or 0)
-        total_input_tokens += int(summary.get("input_tokens") or 0)
-        total_cache_read += int(summary.get("cache_read_tokens") or 0)
-        total_cache_write += int(summary.get("cache_write_tokens") or 0)
-        if summary.get("cost_usd") is not None:
-            total_cost += float(summary["cost_usd"])
-            any_cost = True
         answer_text = (
             Path(result.answer_path).read_text(errors="replace") if result.answer_path else ""
         )
-        strongest, reason, invalid = _parse_rank_answer(
+        strongest, reason, invalid, scores = _parse_rank_answer(
             answer_text, names, result.ok, summary.get("error")
         )
-        records.append(
-            {"run_id": result.run_id, "strongest": strongest, "reason": reason, "invalid": invalid}
+        return {
+            "judge_index": judge_index,
+            "label": label,
+            "fleet": result.fleet,
+            "model": result.model,
+            "record": {
+                "run_id": result.run_id,
+                "strongest": strongest,
+                "reason": reason,
+                "invalid": invalid,
+                "scores": scores,
+            },
+            "summary": summary,
+        }
+
+    jobs = [
+        (judge_index, label, ordered)
+        for judge_index in range(len(judges))
+        for label, ordered in orders
+    ]
+    with ThreadPoolExecutor(max_workers=mission.concurrency) as executor:
+        futures = [executor.submit(dispatch_one, *job) for job in jobs]
+        outputs = [future.result() for future in futures]
+
+    by_judge: dict[int, dict[str, dict]] = {i: {} for i in range(len(judges))}
+    fleet_model_by_judge: list[tuple[str | None, str | None]] = [(None, None)] * len(judges)
+    for out in outputs:
+        by_judge[out["judge_index"]][out["label"]] = out
+        fleet_model_by_judge[out["judge_index"]] = (out["fleet"], out["model"])
+
+    def judge_totals(judge_index: int) -> tuple[float | None, int, int, int, int]:
+        total_cost = 0.0
+        any_cost = False
+        tokens = input_tokens = cache_read = cache_write = 0
+        for label in ("forward", "reverse"):
+            summary = by_judge[judge_index][label]["summary"]
+            tokens += int(summary.get("tokens") or 0)
+            input_tokens += int(summary.get("input_tokens") or 0)
+            cache_read += int(summary.get("cache_read_tokens") or 0)
+            cache_write += int(summary.get("cache_write_tokens") or 0)
+            if summary.get("cost_usd") is not None:
+                total_cost += float(summary["cost_usd"])
+                any_cost = True
+        cost = round(total_cost, 6) if any_cost else None
+        return (cost, tokens, input_tokens, cache_read, cache_write)
+
+    totals = [judge_totals(i) for i in range(len(judges))]
+    total_cost = 0.0
+    any_cost = False
+    total_tokens = total_input = total_cache_read = total_cache_write = 0
+    for cost, tokens, input_tokens, cache_read, cache_write in totals:
+        if cost is not None:
+            total_cost += cost
+            any_cost = True
+        total_tokens += tokens
+        total_input += input_tokens
+        total_cache_read += cache_read
+        total_cache_write += cache_write
+
+    primary_orders = (
+        by_judge[0]["forward"]["record"],
+        by_judge[0]["reverse"]["record"],
+    )
+    all_orders: list[tuple[dict, dict]] = [primary_orders]
+    extra_judges_out: list[dict] = []
+    for judge_index in range(1, len(judges)):
+        order_pair = (
+            by_judge[judge_index]["forward"]["record"],
+            by_judge[judge_index]["reverse"]["record"],
         )
+        all_orders.append(order_pair)
+        cost, tokens, input_tokens, cache_read, cache_write = totals[judge_index]
+        fleet, model = fleet_model_by_judge[judge_index]
+        extra_judges_out.append(
+            {
+                "fleet": fleet,
+                "model": model,
+                "orders": list(order_pair),
+                "cost_usd": cost,
+                "tokens": tokens,
+                "input_tokens": input_tokens,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+            }
+        )
+
+    tally = _build_rank_tally(names, all_orders, fleet_model_by_judge)
+    (mission_dir / "tally.json").write_text(json.dumps(tally, indent=2))
+    (mission_dir / "tally.md").write_text(_tally_markdown(tally))
 
     out = {
         "rank": True,
-        "fleet": fleet,
-        "model": model,
-        "orders": records,
+        "fleet": fleet_model_by_judge[0][0],
+        "model": fleet_model_by_judge[0][1],
+        "orders": list(primary_orders),
+        "judges": extra_judges_out,
+        "tally": tally,
         "cost_usd": round(total_cost, 6) if any_cost else None,
         "tokens": total_tokens,
-        "input_tokens": total_input_tokens,
+        "input_tokens": total_input,
         "cache_read_tokens": total_cache_read,
         "cache_write_tokens": total_cache_write,
         "candidates": candidate_names,
         "tainted": tainted,
     }
-    invalid_at = next((i for i, r in enumerate(records, 1) if r["invalid"]), None)
+
+    invalid_at = None
+    for j_idx, (forward, reverse) in enumerate(all_orders, start=1):
+        for k_idx, record in ((1, forward), (2, reverse)):
+            if record["invalid"]:
+                invalid_at = (j_idx, k_idx, record["invalid"])
+                break
+        if invalid_at:
+            break
     if invalid_at is not None:
+        j_idx, k_idx, reason = invalid_at
         out["ok"] = False
         out["strongest"] = None
-        out["error"] = f"judge order {invalid_at} invalid: {records[invalid_at - 1]['invalid']}"
+        out["error"] = f"judge {j_idx} order {k_idx} invalid: {reason}"
         return out
-    a, b = records[0]["strongest"], records[1]["strongest"]
-    if a != b:
-        out["ok"] = False
-        out["strongest"] = None
-        out["error"] = f"judge disagreed across orders: {a} vs {b}"
+
+    if tally["agreement"] == "unanimous":
+        out["ok"] = True
+        out["strongest"] = next(name for name, count in tally["votes"].items() if count > 0)
+        out["error"] = None
         return out
-    out["ok"] = True
-    out["strongest"] = a
-    out["error"] = None
+    out["ok"] = False
+    out["strongest"] = None
+    vote_desc = ", ".join(f"{name}={count}" for name, count in _sorted_votes(tally["votes"]))
+    out["error"] = f"judges disagreed: {vote_desc}"
     return out
 
 
@@ -4838,6 +5178,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 lines.append(
                     f"(collate escalated: {result.collate.get('error')})"
                 )
+            tally = result.collate.get("tally")
+            if tally:
+                lines += ["", _tally_markdown(tally).rstrip("\n")]
         elif result.collate.get("answer_path"):
             lines.append(Path(result.collate["answer_path"]).read_text(errors="replace").strip())
         else:
