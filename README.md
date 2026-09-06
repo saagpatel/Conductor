@@ -803,7 +803,12 @@ rule 2) writes a follow-on mission there: `shape.shape_a_followon`, the
 same Shape A shape as `conductor shape a` except there is no build lane --
 the kept worktree, already at the lead's commit, is the mission's `cwd`
 directly, so the two review lanes and the fix lane need no `base` and the
-fix lane has nothing to `resume`. `--emit` is refused when the gate is red,
+fix lane has nothing to `resume`. The mission prompt is the original spec
+plus one paragraph naming the salvage commit; the review prompts point at
+`git show <sha>` rather than carrying the diff, because a diff pasted into
+a prompt is scanned as a template and a change to conductor's own prompt
+text carries template syntax in its context lines. The diff is written
+beside the mission file as `<name>-diff.patch` for the lead. `--emit` is refused when the gate is red,
 and `emit()` itself is refused when the kept worktree is still dirty or its
 HEAD still equals `base_sha` -- either way nothing has actually been
 committed yet, so the follow-on would review the wrong thing.

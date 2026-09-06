@@ -232,7 +232,12 @@ def test_emit_writes_a_loadable_no_build_followon_mission_with_the_diff_in_its_p
     caps = cap_arithmetic(1, 1)
     out = home / "followon.json"
     mission_dict = emit(
-        result, out, test=result.test_command, caps=caps, name="salvage-followon"
+        result,
+        out,
+        test=result.test_command,
+        caps=caps,
+        name="salvage-followon",
+        spec_prompt="Add {{mission.prompt}}-free spec text about app.py",
     )
 
     assert out.is_file()
@@ -244,7 +249,15 @@ def test_emit_writes_a_loadable_no_build_followon_mission_with_the_diff_in_its_p
     assert names == {"review-gemini", "review-grok", "fix"}
     assert "build" not in names
     assert mission.cwd == str(Path(result.worktree).resolve())
-    assert "app.py" in mission.prompt
+    # The spec leads the mission prompt; the diff is never pasted into a
+    # prompt (it is scanned as a template there) but written beside the file.
+    assert mission.prompt.startswith("Add {{mission.prompt}}-free spec text about app.py")
+    assert "<diff>" not in mission.prompt
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=result.worktree, capture_output=True, text=True
+    ).stdout.strip()
+    assert f"git show {head}" in mission.lanes[0].attempts[0].prompt
+    assert "app.py" in (home / "salvage-followon-diff.patch").read_text()
     assert all(lane_obj.base is None for lane_obj in mission.lanes)
     fix_lane = next(lane_obj for lane_obj in mission.lanes if lane_obj.name == "fix")
     assert fix_lane.resume is None
@@ -309,3 +322,15 @@ def test_cli_salvage_json_matches_the_written_receipt_exactly(
     on_disk = json.loads(receipts[0].read_text())
     assert printed == on_disk
     assert "recorded_at" in printed
+
+
+def test_emit_loads_when_the_salvaged_change_carries_template_syntax(repo, home, fake_fleet):
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="exit 1")
+    result = salvage(home, mission_id, lane)
+    (Path(result.worktree) / "prompts.py").write_text('X = "{{lanes.build.diff}}"\n')
+    _commit_the_salvage(result.worktree)
+    out = home / "followon.json"
+    emit(result, out, test=result.test_command, caps=cap_arithmetic(1, 1), name="tpl")
+    mission = mission_from_dict(json.loads(out.read_text()), base_dir=out.parent, source=str(out))
+    assert "{{lanes.build.diff}}" not in mission.prompt
+    assert "{{lanes.build.diff}}" in (home / "tpl-diff.patch").read_text()

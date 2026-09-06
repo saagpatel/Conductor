@@ -323,6 +323,8 @@ def shape_a_followon(
     branch: str = "",
     fix_commit: str = "",
     mission_dir: Path | None = None,
+    spec_prompt: str = "",
+    base_sha: str = "",
 ) -> dict:
     """E23: the review-and-fix mission for a salvage the lead has already
     committed by hand (AGENTS.md rule 6). Identical in shape to `shape_a`
@@ -331,15 +333,18 @@ def shape_a_followon(
     `base` to build on and the fix lane has nothing to `resume`. The two
     review prompts are `GEMINI_REVIEW_PROMPT` and `GROK_READ_ONLY_PROMPT`
     (never the suite-running one -- there is no build lane's session for
-    Grok to fall back to reproducing by hand), with `{{lanes.build.diff}}`
-    resolved eagerly to `diff` since there is no build lane to render it from;
-    `{{mission.prompt}}` still renders live, to the paragraph below.
-
-    `mission_dir` is accepted for the same reason `shape_a`'s is (the caller
-    may want mission-relative bookkeeping); every path this function itself
-    writes is already absolute, so it goes unused here.
+    Grok to fall back to reproducing by hand), with the `<change>` block
+    pointing at the commit itself (`git show <sha>` in the working directory)
+    instead of a pasted `{{lanes.build.diff}}`: a diff pasted into a prompt
+    is scanned as a template, and a change that touches conductor's own
+    prompt constants carries template syntax in its context lines, so the
+    mission would never load. `diff` is written beside the mission file as
+    `<name>-diff.patch` for the lead (or nowhere, when `mission_dir` is None)
+    and is never part of a prompt. `spec_prompt`, when given, is the original
+    mission's prompt (the spec) and leads the mission prompt, so reviewers
+    judge against the same text the build did; `{{mission.prompt}}` renders
+    live to that.
     """
-    del mission_dir
     worktree = Path(worktree).expanduser().resolve()
     if not (worktree / ".git").exists():
         raise ShapeInvalid(f"worktree is not a git checkout: {worktree}")
@@ -357,15 +362,24 @@ def shape_a_followon(
         raise ShapeInvalid("--branch must be a name outside conductor/")
     fix_commit = fix_commit or f"fix({scope}): address cross-vendor review of {mission_name}"
 
-    mission_prompt = (
+    salvage_note = (
         f"This change is already committed at {salvage_sha}, the HEAD of the worktree named "
         "as this mission's cwd: conductor's own clean gate rejected the original build "
-        "lane's run, and the lead read the diff below, gated it by hand, and committed it. "
-        f"Review or fix the change as it stands; the fix lane lands on branch '{branch}'.\n\n"
-        f"<diff>\n{diff}\n</diff>"
+        "lane's run, and the lead read the diff, gated it by hand, and committed it. "
+        f"Review or fix the change as it stands; the fix lane lands on branch '{branch}'."
     )
-    gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", diff)
-    grok_prompt = GROK_READ_ONLY_PROMPT.replace("{{lanes.build.diff}}", diff)
+    mission_prompt = f"{spec_prompt.rstrip()}\n\n{salvage_note}" if spec_prompt else salvage_note
+    change_block = (
+        f"The change is commit {salvage_sha}, HEAD of this working directory"
+        + (f" (its parent is {base_sha})" if base_sha else "")
+        + f". Read it with `git show {salvage_sha}`."
+    )
+    gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", change_block)
+    grok_prompt = GROK_READ_ONLY_PROMPT.replace("{{lanes.build.diff}}", change_block)
+    if mission_dir is not None:
+        patch_path = Path(mission_dir).expanduser().resolve() / f"{mission_name}-diff.patch"
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(diff)
 
     return {
         "name": mission_name,

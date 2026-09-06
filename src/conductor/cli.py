@@ -502,6 +502,8 @@ def cmd_salvage(args: argparse.Namespace) -> int:
             return 3
         try:
             caps = shape.cap_arithmetic(args.items, args.modules, scheduler=args.scheduler)
+            snapshot = json.loads((home / "missions" / mission_id / "mission.json").read_text())
+            spec_prompt = snapshot.get("prompt") if isinstance(snapshot, dict) else None
             salvage_mod.emit(
                 result,
                 Path(args.emit),
@@ -511,8 +513,9 @@ def cmd_salvage(args: argparse.Namespace) -> int:
                 branch=args.branch or "",
                 fix_commit=args.fix_commit or "",
                 about=args.about,
+                spec_prompt=spec_prompt if isinstance(spec_prompt, str) else "",
             )
-        except (salvage_mod.SalvageInvalid, shape.ShapeInvalid, MissionInvalid) as exc:
+        except (salvage_mod.SalvageInvalid, shape.ShapeInvalid, MissionInvalid, OSError) as exc:
             _invalid(str(exc))
             return 3
         print(f"conductor mission {args.emit}")

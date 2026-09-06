@@ -234,9 +234,12 @@ def emit(
     branch: str = "",
     fix_commit: str = "",
     about: str | None = None,
+    spec_prompt: str = "",
 ) -> dict:
     """Write the follow-on review-and-fix mission for a salvage the lead has
-    already committed.
+    already committed. `spec_prompt` is the original mission's prompt (the
+    spec), read from its snapshot by the caller, so the reviewers judge the
+    salvage against the text the build was given.
 
     Refused (never writes `out`) when the kept worktree's HEAD still equals
     `base_sha` (nothing has been committed there yet) or the worktree is
@@ -269,6 +272,8 @@ def emit(
         branch=branch,
         fix_commit=fix_commit,
         mission_dir=out.parent,
+        spec_prompt=spec_prompt,
+        base_sha=result.base_sha,
     )
     try:
         mission: Mission = mission_from_dict(mission_dict, base_dir=out.parent, source=str(out))
