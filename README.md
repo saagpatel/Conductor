@@ -1277,6 +1277,48 @@ unreadable receipts are counted as skipped on the total row, and dry runs
 are excluded and counted there too: a rehearsal spends nothing, and folding
 it into "unpriced" made 25 of the first 43 receipts read as unverified spend.
 
+#### Ledger report
+
+`conductor report` turns the same durable receipts into the figures behind
+AGENTS.md's Shape A rules, so the lead can check the prose against the
+bytes instead of re-deriving it from `conductor spend` and `conductor runs`
+by hand. `--since`, `--until`, and `--json` work exactly as they do for
+`conductor spend`; a bad window exits 2 the same way. Every dry run is
+excluded, as in `conductor spend`.
+
+Every dispatch's receipt now carries `stage` (the pipeline stage it ran as:
+`build`, `review`, `fix`, or `null`), `lane`, and `mission` (which mission
+lane made it, and that mission's id; both `null` for a plain `conductor
+dispatch`). A receipt written before this field existed carries none of the
+three; `conductor report` joins it back to its mission snapshot under
+`$CONDUCTOR_HOME/missions` to recover its lane and stage, the same way
+`conductor spend --by mission` already joins a run to its mission name.
+
+The report has five sections, in this order:
+
+- **Vendor and stage**: runs, ok count, cost, unpriced runs, mean and
+  median duration, cap misses (`kind == "cap"`), gate failures
+  (`kind == "gate"`), and mean tool calls, grouped by the vendor behind the
+  model (`fleets.py`) and the pipeline stage (the fleet name in place of an
+  unrecognized vendor, `null` stage for a dispatch outside a staged
+  pipeline).
+- **Error kinds**: count and cost per `errors.error_kind`.
+- **Reviewer finding rate**: among `stage: review` dispatches that wrote an
+  answer, the share whose answer is not exactly `NO_FINDINGS`, per vendor.
+- **Missions**: cost, whether the mission was ok, how many lanes it
+  declared, and whether any lane hit its cap.
+- **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
+  vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
+  and fix stages, how many runs were killed at their cap after their own
+  gate had already passed -- a green run lost at the cap, the case the rule
+  was written for). A figure with nothing to compute from reads `n/a`,
+  never `0`, so a missing stage is never mistaken for a clean one.
+
+What it does not report: a salvage's own rate. AGENTS.md rule 6's salvage
+path is the lead reading a kept worktree's diff and gating it by hand; that
+work leaves no dispatch receipt, so nothing under `$CONDUCTOR_HOME/runs`
+could ever count it.
+
 ### Per-dispatch caps
 
 `--cap-usd` (or `cap_usd` in a mission) bounds one dispatch in dollars, the
@@ -1479,6 +1521,8 @@ conductor golden check tests/golden/c5-build-cascade-capped --update
 - `conductor prices`: the effective price table after overrides
 - `conductor spend`: summarize cost and tokens by day, fleet, model, mission,
   or run
+- `conductor report`: the ledger report -- AGENTS.md's Shape A rules as
+  numbers, computed from the same receipts
 - `conductor gc`: plan safe worktree, `conductor/*` branch, and stale
   port-claim cleanup; pass `--apply` to execute it
 - `conductor attest MISSION_ID`: verify a mission's signed receipt chain on
