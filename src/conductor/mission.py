@@ -23,6 +23,11 @@ is checked at load time, before a token is spent.
 Field inheritance is the only clever thing here: an attempt inherits from its
 lane, a lane from the mission, so the common case is one prompt, one cwd,
 one mode, and a list of fleets.
+
+A mission's `cwd` is only the default: any lane, or one of its own attempts,
+may name a different repository (E26), and that lane's dispatch, its branch
+creation and rename, and the collisions it can conflict on all follow its
+own resolved cwd rather than the mission's.
 """
 
 from __future__ import annotations
@@ -68,6 +73,7 @@ _INHERITED = (
     "model",
     "effort",
     "mode",
+    "cwd",
     "prompt",
     "timeout",
     "stall_timeout",
@@ -212,6 +218,10 @@ class Attempt:
     model: str | None = None
     effort: str = "standard"
     mode: str = "read"
+    # E26: this attempt's own repository; cascades like `schema`, resolved at
+    # parse time the same way the mission-level `cwd` is. None (the common
+    # case) means the mission's cwd -- see `effective_cwd`.
+    cwd: str | None = None
     prompt: str = ""
     timeout: int | None = None
     stall_timeout: int | None = 600
@@ -284,6 +294,10 @@ class Attempt:
             agent=self.agent,
             deliverable=self.deliverable,
         )
+
+    def effective_cwd(self, mission_cwd: str) -> str:
+        """E26: this attempt's own repository, or the mission's default."""
+        return self.cwd if self.cwd is not None else mission_cwd
 
     def isolated(self) -> bool:
         """Every lane isolates unless told otherwise. Write lanes must never
@@ -467,7 +481,9 @@ class Mission:
         if self.early_cancel and self.require != "any":
             raise MissionInvalid("early_cancel needs require: any")
         seen: set[str] = set()
-        branches: set[str] = set()
+        # E26: a branch name only collides with itself within the same
+        # repository -- two lanes landing in different cwds may share a name.
+        branches: dict[str, set[str]] = {}
         for lane in self.lanes:
             if not _LANE_NAME.fullmatch(lane.name):
                 raise MissionInvalid(
@@ -481,9 +497,10 @@ class Mission:
                     raise MissionInvalid(
                         f"lane '{lane.name}': branch must be a name outside conductor/"
                     )
-                if lane.branch in branches:
+                claimed = branches.setdefault(lane.attempts[0].effective_cwd(self.cwd), set())
+                if lane.branch in claimed:
                     raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
-                branches.add(lane.branch)
+                claimed.add(lane.branch)
                 if lane.tainted:
                     raise MissionInvalid(
                         f"lane '{lane.name}': a tainted lane never holds a deliverable "
@@ -503,7 +520,7 @@ class Mission:
                         f"{_STAGE_MODE[lane.stage]} mode"
                     )
                 try:
-                    attempt.spec(self.cwd, taint=lane.tainted).validate()
+                    attempt.spec(attempt.effective_cwd(self.cwd), taint=lane.tainted).validate()
                 except DispatchRefused as exc:
                     raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
                 # Spec.validate (above) has already confirmed `tools`, when
@@ -561,6 +578,12 @@ class Mission:
             if len(sinks) < 2:
                 raise MissionInvalid(
                     f"resolve needs at least two sink lanes, got {len(sinks)}"
+                )
+            sink_cwds = {sink.attempts[0].effective_cwd(self.cwd) for sink in sinks}
+            if len(sink_cwds) > 1:
+                raise MissionInvalid(
+                    "resolve: sink lanes span more than one cwd; "
+                    "the resolver never crosses repositories"
                 )
             try:
                 self.resolve.spec(self.cwd, "resolve").validate()
@@ -1041,6 +1064,11 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         # A mission-level fleet would make every lane the same fleet; the
         # lanes list is where fleets belong.
         raise MissionInvalid("set fleet on each lane, not on the mission")
+    # E26: `cwd` above is Mission.cwd, a distinct field; it must not be baked
+    # into `defaults` as every lane's own starting cwd, or every attempt
+    # would carry a concrete value instead of the None sentinel
+    # `Attempt.effective_cwd` treats as "use the mission's".
+    defaults.pop("cwd", None)
 
     cascade_fields = _parse_cascade(raw.get("cascade"), base_dir)
 
@@ -1411,6 +1439,11 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
     for key in _INHERITED:
         if key in raw and (raw[key] is not None or key in _BREAKER_KEYS):
             out[key] = raw[key]
+    if raw.get("cwd"):
+        # E26: resolved exactly as the mission-level `cwd` is (relative to
+        # the mission file's directory, `expanduser`, `resolve`), so a lane
+        # or attempt that names its own repository is just as portable.
+        out["cwd"] = str((base_dir / Path(str(raw["cwd"])).expanduser()).resolve())
     if raw.get("prompt_file"):
         prompt_path = (base_dir / str(raw["prompt_file"])).expanduser().resolve()
         try:
@@ -1457,7 +1490,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
         raise MissionInvalid(f"{where}: fleet is required")
     if not str(fields.get("prompt", "")).strip():
         raise MissionInvalid(f"{where}: no prompt (set prompt or prompt_file on the mission)")
-    for key in ("model", "test", "commit", "schema", "test_policy"):
+    for key in ("model", "test", "commit", "schema", "test_policy", "cwd"):
         if fields.get(key) is not None and not isinstance(fields[key], str):
             raise MissionInvalid(f"{where}: {key} must be a string")
     surface = fields.get("test_surface")
@@ -1504,6 +1537,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             model=fields.get("model"),
             effort=str(fields.get("effort", "standard")),
             mode=str(fields.get("mode", "read")),
+            cwd=fields.get("cwd"),
             prompt=str(fields["prompt"]),
             timeout=int(fields["timeout"]) if fields.get("timeout") is not None else None,
             stall_timeout=_breaker_value(fields, "stall_timeout", 600),
@@ -1734,6 +1768,10 @@ class LaneResult:
     needs: list[str] = field(default_factory=list)
     base: str | None = None
     stage: str | None = None  # this lane's declared pipeline stage, if any
+    # E26: the effective cwd of the attempt that actually ran (or the last
+    # one dispatched, for a lane that failed every attempt); "" for a lane
+    # never dispatched at all.
+    cwd: str = ""
     base_sha: str = ""  # the commit this lane's worktree started from
     tip_sha: str = ""  # where its final attempt's worktree ended up
     clean: bool | None = None  # and whether everything there was committed
@@ -1834,7 +1872,7 @@ class LaneResult:
         ):
             if raw.get(key) is not None and not isinstance(raw[key], str):
                 raise ValueError(f"lane receipt {key} must be a string or null")
-        for key in ("base_sha", "tip_sha", "branch", "test_touched", "breaker"):
+        for key in ("base_sha", "tip_sha", "branch", "test_touched", "breaker", "cwd"):
             if key in raw and raw[key] is not None and not isinstance(raw[key], str):
                 raise ValueError(f"lane receipt {key} must be a string or null")
         if raw.get("clean") is not None and not isinstance(raw["clean"], bool):
@@ -2388,15 +2426,18 @@ def _trusted_lane(
         mission_dir / "verdicts" / f"{lane.name}.json"
     ).is_file():
         return False
+    # E26: the repository this receipt's commits actually landed in, not
+    # necessarily the mission's default.
+    repo = result.cwd or mission.cwd
     if result.tip_sha and result.tip_sha != result.base_sha:
-        commit = git_run(mission.cwd, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
+        commit = git_run(repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
         if commit.returncode != 0:
             return False
     if lane.branch:
         if not result.tip_sha or result.branch != lane.branch:
             return False
         branch = git_run(
-            mission.cwd,
+            repo,
             "rev-parse",
             "--verify",
             f"refs/heads/{lane.branch}^{{commit}}",
@@ -2784,6 +2825,7 @@ def _execute_mission(
                 out.tip_sha = old.tip_sha
                 out.clean = old.clean
                 out.branch = old.branch
+                out.cwd = old.cwd
         return out
 
     def run_lane(lane: Lane) -> LaneResult:
@@ -2824,8 +2866,10 @@ def _execute_mission(
             prompt = _with_prefix(
                 mission, _render(attempt.prompt, mission, done, dry_run=dry_run)
             )
+            # E26: this attempt's own repository, or the mission's default.
+            attempt_cwd = attempt.effective_cwd(mission.cwd)
             spec = attempt.spec(
-                mission.cwd,
+                attempt_cwd,
                 cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
                 prompt=prompt,
                 resume=resume_id,
@@ -2911,6 +2955,7 @@ def _execute_mission(
             out.deliverable_path = _keep(
                 result.deliverable_path, deliverables_dir / f"{lane.name}-deliverable"
             )
+            out.cwd = attempt_cwd
             iso = result.isolation or {}
             if not dry_run:
                 out.base_sha = iso.get("base_sha") or ""
@@ -3045,7 +3090,7 @@ def _execute_mission(
                         "nothing landed on top of the base"
                     )
                 else:
-                    made = git_run(mission.cwd, "branch", "--", lane.branch, out.tip_sha)
+                    made = git_run(out.cwd, "branch", "--", lane.branch, out.tip_sha)
                     if made.returncode != 0:
                         out.ok = False
                         error = f"branch '{lane.branch}' not claimed: {made.stderr.strip()}"
@@ -3063,7 +3108,7 @@ def _execute_mission(
                 out.branch = lane.branch
                 out.attempts[-1]["branch"] = lane.branch
             else:
-                why = _rename_branch(mission.cwd, out.branch, lane.branch)
+                why = _rename_branch(out.cwd, out.branch, lane.branch)
                 if why:
                     out.ok = False
                     error = f"branch '{lane.branch}' not claimed: {why}"
@@ -3305,13 +3350,28 @@ def _execute_mission(
         }
         if len(diffs) >= 2:
             overlap_out = collisions_mod.overlap(diffs)
-            clean_tips = {
-                lane.name: lane.tip_sha for lane in sink_lane_results if lane.tip_sha and lane.clean
-            }
+            # E26: a merge is only ever asked of git within one repository --
+            # sinks that landed in different cwds are never paired, even
+            # when both left a clean tip.
+            clean_lanes = [lane for lane in sink_lane_results if lane.tip_sha and lane.clean]
+            cwd_groups: dict[str, list[str]] = {}
+            for lane in clean_lanes:
+                cwd_groups.setdefault(lane.cwd or mission.cwd, []).append(lane.name)
+            tips_by_name = {lane.name: lane.tip_sha for lane in clean_lanes}
+            conflict_pairs: list[dict] = []
+            conflict_files: dict[str, list[list[str]]] = {}
+            for repo in sorted(cwd_groups):
+                names = cwd_groups[repo]
+                if len(names) < 2:
+                    continue
+                group_out = collisions_mod.merge_conflicts(
+                    repo, {name: tips_by_name[name] for name in names}
+                )
+                conflict_pairs.extend(group_out["pairs"])
+                for path, pairs in group_out["files"].items():
+                    conflict_files.setdefault(path, []).extend(pairs)
             conflicts_out = (
-                collisions_mod.merge_conflicts(mission.cwd, clean_tips)
-                if len(clean_tips) >= 2
-                else None
+                {"pairs": conflict_pairs, "files": conflict_files} if conflict_pairs else None
             )
             conflict_paths = {
                 path
@@ -3322,6 +3382,9 @@ def _execute_mission(
                 "overlap": overlap_out,
                 "conflicts": conflicts_out,
                 "hotspots": sorted(set(overlap_out["hotspots"]) | conflict_paths),
+                "groups": [
+                    {"cwd": repo, "lanes": sorted(cwd_groups[repo])} for repo in sorted(cwd_groups)
+                ],
             }
 
     collate_out: dict | None = None
@@ -3541,22 +3604,26 @@ def _check_branches(
     for lane in mission.lanes:
         if not lane.branch:
             continue
-        if git_run(mission.cwd, "check-ref-format", "--branch", lane.branch).returncode != 0:
+        # E26: the repository this lane will land in; a rerun's fallback may
+        # later name a different one, but nothing is known about that until
+        # it actually runs (see the lane-level cwd used post-dispatch).
+        repo = lane.attempts[0].effective_cwd(mission.cwd)
+        if git_run(repo, "check-ref-format", "--branch", lane.branch).returncode != 0:
             raise MissionInvalid(f"lane '{lane.name}': '{lane.branch}' is not a valid branch name")
         if lane.name in kept:
             continue
         # Local heads and every remote's tracking branches: a name that only
         # exists as origin/x would collide the moment the operator pushed.
-        remotes = git_run(mission.cwd, "remote").stdout.split()
+        remotes = git_run(repo, "remote").stdout.split()
         refs = [f"refs/heads/{lane.branch}"] + [f"refs/remotes/{r}/{lane.branch}" for r in remotes]
         for ref in refs:
-            current = git_run(mission.cwd, "rev-parse", "--verify", "--quiet", ref)
+            current = git_run(repo, "rev-parse", "--verify", "--quiet", ref)
             if current.returncode != 0:
                 continue
             old = previous.get(lane.name)
             previous_tip = old.tip_sha if old is not None else ""
             if ref == f"refs/heads/{lane.branch}" and previous_tip:
-                tip = git_run(mission.cwd, "rev-parse", "--verify", f"{ref}^{{commit}}")
+                tip = git_run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}")
                 if tip.returncode == 0 and tip.stdout.strip() == previous_tip:
                     if dry_run:
                         notes.append(
@@ -3564,7 +3631,7 @@ def _check_branches(
                             "before rerun"
                         )
                         continue
-                    deleted = git_run(mission.cwd, "branch", "-D", "--", lane.branch)
+                    deleted = git_run(repo, "branch", "-D", "--", lane.branch)
                     if deleted.returncode != 0:
                         detail = deleted.stderr.strip() or deleted.stdout.strip()
                         raise MissionInvalid(
@@ -3577,7 +3644,7 @@ def _check_branches(
                     continue
             raise MissionInvalid(
                 f"lane '{lane.name}': branch '{lane.branch}' already exists "
-                f"in {mission.cwd} ({ref})"
+                f"in {repo} ({ref})"
             )
 
 
@@ -4223,6 +4290,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         lines += ["", f"**Budget unverifiable**: {json.dumps(result.budget)}"]
     for lane in lanes:
         lines += ["", f"## Lane `{lane.name}`", ""]
+        if lane.cwd and lane.cwd != mission.cwd:
+            lines.append(f"- cwd: `{lane.cwd}`")
         if lane.stage:
             lines.append(f"- stage: {lane.stage}")
         if lane.needs:
