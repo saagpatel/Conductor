@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -54,6 +55,16 @@ TAINT_DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash(ssh *)",  # remote command execution and network egress
     "Bash(scp *)",  # file exfiltration over the network
 )
+
+# D3: an inline persona -- {"name", "description", "prompt", "tools": [...]}.
+# `tools`, when given, is an allow list; unlike D2's deny list, it is the only
+# field that is optional. Live-probed
+# (docs/research/2026-09-06-live-probe-inline-agents.md): Antigravity's
+# `--agent <name>` selects from a locally defined list and fails open on an
+# unknown name (exit 0, `status: SUCCESS`, no persona, nothing on stderr);
+# Cursor has no persona flag headless at all. Enforceable on Claude Code only.
+_AGENT_KEYS = frozenset({"name", "description", "prompt", "tools"})
+_AGENT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 
 
 class DispatchRefused(ValueError):
@@ -273,6 +284,10 @@ class Spec:
     # (an issue, a PR, a web page). Opt-in, never inferred; enforced with a
     # Claude tool deny list because no other fleet exposes one headless.
     taint: bool = False
+    # D3: an inline persona -- {"name", "description", "prompt",
+    # "tools": [...] (optional)}. Opt-in, never inferred; enforceable on
+    # Claude Code only (see _AGENT_KEYS above).
+    agent: dict | None = None
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -333,6 +348,17 @@ class Spec:
                 f"taint is enforceable on the claude fleet only: {self.fleet} exposes no "
                 "tool deny list headless"
             )
+        # D3: only Claude Code exposes an inline persona headless; agy's
+        # --agent selects from disk and fails open on an unknown name, and
+        # Cursor has no persona flag at all (see the comment above
+        # TAINT_DISALLOWED_TOOLS for the probe).
+        if self.agent is not None:
+            if self.fleet != "claude":
+                raise DispatchRefused(
+                    f"agent is enforceable on the claude fleet only: {self.fleet} selects "
+                    "agents from disk and ignores an unknown name"
+                )
+            self._validate_agent()
         if self.cap_usd is not None:
             self._validate_cap()
         for name, value in (
@@ -406,6 +432,31 @@ class Spec:
             raise DispatchRefused(f"schema file unreadable: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise DispatchRefused(f"schema file is not valid JSON: {exc}") from exc
+
+    def _validate_agent(self) -> None:
+        """D3: an inline persona's shape, checked before spawn so a typo in
+        `tools` or a malformed name fails here rather than as a Claude Code
+        stderr line after the fleet already started.
+        """
+        agent = self.agent
+        if not isinstance(agent, dict):
+            raise DispatchRefused("agent must be an object")
+        unknown = sorted(set(agent) - _AGENT_KEYS)
+        if unknown:
+            raise DispatchRefused(f"agent has unknown field(s): {', '.join(unknown)}")
+        for key in ("name", "description", "prompt"):
+            value = agent.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise DispatchRefused(f"agent needs a non-empty '{key}'")
+        name = agent["name"]
+        if not _AGENT_NAME.fullmatch(name):
+            raise DispatchRefused(f"agent name {name!r} must match {_AGENT_NAME.pattern}")
+        tools = agent.get("tools")
+        if tools is not None and (
+            not isinstance(tools, list)
+            or not all(isinstance(t, str) and t.strip() for t in tools)
+        ):
+            raise DispatchRefused("agent tools must be a list of non-empty strings")
 
     def resolved_timeout(self) -> int:
         return self.timeout if self.timeout is not None else DEFAULT_TIMEOUT[self.mode]
@@ -486,6 +537,24 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # D2: one name per argv element; the CLI also accepts a comma-joined
         # string, but a list of exact names cannot be reassembled wrong.
         argv += ["--disallowedTools", *TAINT_DISALLOWED_TOOLS]
+    if spec.agent:
+        # D3: --agents defines the persona for the session; --agent selects
+        # it for the main dispatch. One name, one compact JSON object, in
+        # both read and write mode; runner.dispatch asserts it actually took
+        # by reading the stream's own init event rather than trusting either
+        # flag (docs/research/2026-09-06-live-probe-inline-agents.md).
+        definition: dict = {
+            "description": spec.agent["description"],
+            "prompt": spec.agent["prompt"],
+        }
+        if spec.agent.get("tools") is not None:
+            definition["tools"] = list(spec.agent["tools"])
+        argv += [
+            "--agents",
+            json.dumps({spec.agent["name"]: definition}, separators=(",", ":")),
+            "--agent",
+            spec.agent["name"],
+        ]
     return argv
 
 

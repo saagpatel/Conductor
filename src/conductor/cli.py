@@ -93,6 +93,14 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             raise DispatchRefused(str(exc)) from exc
+        agent = None
+        if args.agent_file:
+            try:
+                agent = json.loads(Path(args.agent_file).read_text())
+            except OSError as exc:
+                raise DispatchRefused(f"agent file unreadable: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise DispatchRefused(f"agent file is not valid JSON: {exc}") from exc
         spec = Spec(
             fleet=args.fleet,
             prompt=prompt,
@@ -117,6 +125,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             teardown=args.teardown,
             include=args.include,
             taint=args.taint,
+            agent=agent,
         )
         result = dispatch(
             spec,
@@ -532,6 +541,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "duration_s": round(data.get("duration_s", 0), 1),
                 "tool_calls": (data.get("breaker") or {}).get("tool_calls", 0),
                 "taint": data.get("taint") is not None,
+                "agent": (data.get("agent") or {}).get("name"),
             }
         )
     print(json.dumps(rows, indent=2))
@@ -702,6 +712,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="this dispatch handles text pulled from outside the operator's trust; "
         "claude only, runs with a tool deny list (no web, no subagents, no push)",
+    )
+    p_dispatch.add_argument(
+        "--agent-file",
+        metavar="PATH",
+        help="JSON file holding an inline agent {name, description, prompt, tools}; "
+        "claude only, asserted against the run's own init event",
     )
     p_dispatch.add_argument("--dry-run", action="store_true", help="print argv, spawn nothing")
     p_dispatch.set_defaults(func=cmd_dispatch)

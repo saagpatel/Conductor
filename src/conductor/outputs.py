@@ -156,6 +156,31 @@ def _claude_cut_short(events: list[dict], text: str) -> FleetOutput:
     )
 
 
+def claude_init_event(text: str) -> dict | None:
+    """The first `system`/`init` event of a Claude stream, carrying the
+    session's real `agents` and `tools` lists.
+
+    D3 reads this directly rather than through `parse`'s result envelope: a
+    persona instruction can shape the model's first message and never reach
+    the final answer at all (the probe's own trap --
+    docs/research/2026-09-06-live-probe-inline-agents.md), so the init event
+    is the only env-independent evidence that an inline agent was applied.
+    """
+    try:
+        raw: object = json.loads(text)
+    except json.JSONDecodeError:
+        raw = None
+    events = (
+        [event for event in raw if isinstance(event, dict)]
+        if isinstance(raw, list)
+        else [event for event in map(json_line, text.splitlines()) if event is not None]
+    )
+    for event in events:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event
+    return None
+
+
 def claude_said(events: list[dict]) -> str:
     """Text Claude completed before a stream was cut short."""
     parts: list[str] = []

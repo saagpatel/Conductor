@@ -29,6 +29,7 @@ KINDS: tuple[str, ...] = (
     "timeout",
     "setup",
     "refused",
+    "agent",
     "rate_limit",
     "transport",
     "refusal",
@@ -186,6 +187,11 @@ def error_kind(result: Result) -> str | None:
         return "setup"
     if not result.spawned and result.error:
         return "refused"
+    # D3: the persona assertion writes its own `error` text directly on the
+    # receipt (never through `fleet_error`, since no fleet reports this --
+    # it is conductor's own check of the stream's init event).
+    if error_text.startswith("agent '") and " not applied: " in error_text:
+        return "agent"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):

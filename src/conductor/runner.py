@@ -35,7 +35,7 @@ from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .errors import error_kind
 from .fleets import FLEETS, TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv
-from .outputs import FleetOutput
+from .outputs import FleetOutput, claude_init_event
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -122,6 +122,12 @@ class Result:
     # D2: {"declared": True, "tools_denied": [...]} when spec.taint was set,
     # else None. Set by dispatch(), never inferred from anything a fleet said.
     taint: dict | None = None
+    # D3: {"name", "tools": [...] | None, "applied": True | False | None} when
+    # spec.agent was set, else None. `applied` is asserted from the stream's
+    # own init event, never from the fleet's answer (see claude_init_event);
+    # None means the run failed for an unrelated reason before the init
+    # event could settle the question either way.
+    agent: dict | None = None
 
     @property
     def gate_passed(self) -> bool:
@@ -294,6 +300,7 @@ class Result:
             "failure": self.failure(),
             "cancelled": self.cancelled,
             "taint": self.taint,
+            "agent": self.agent,
         }
 
 
@@ -384,6 +391,35 @@ def _commit_bounds(
     return before.head or None, tip_commit
 
 
+def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str | None]:
+    """D3: whether the stream's own init event proves the agent was applied.
+
+    Returns the receipt's `agent` dict and, when it was not applied, the
+    text `dispatch()` may use as the run's `error` (the caller decides
+    whether the run otherwise looks complete enough to surface it)."""
+    name = spec_agent["name"]
+    wanted_tools = spec_agent.get("tools")
+    receipt = {"name": name, "tools": wanted_tools, "applied": True}
+    if init_event is None:
+        return {**receipt, "applied": False}, f"agent '{name}' not applied: no init event"
+    agents = init_event.get("agents")
+    if not isinstance(agents, list) or name not in agents:
+        return (
+            {**receipt, "applied": False},
+            f"agent '{name}' not applied: not present in the init event's agents list",
+        )
+    if wanted_tools is not None:
+        actual = init_event.get("tools")
+        actual_set = set(actual) if isinstance(actual, list) else set()
+        if actual_set != set(wanted_tools):
+            return (
+                {**receipt, "applied": False},
+                f"agent '{name}' not applied: init tools {sorted(actual_set)} do not "
+                f"match {sorted(set(wanted_tools))}",
+            )
+    return receipt, None
+
+
 def _lane_receipt_statement(
     *,
     run_id: str,
@@ -402,6 +438,7 @@ def _lane_receipt_statement(
     ok: bool,
     error: str | None,
     taint: dict | None,
+    agent: dict | None,
 ) -> dict:
     """The statement A5 signs into `attestation.json`: what conductor can
     check about this one dispatch without trusting the fleet's own report."""
@@ -422,6 +459,7 @@ def _lane_receipt_statement(
         "mode": mode,
         "stage": stage,
         "taint": taint,
+        "agent": agent,
         "cwd": cwd,
         "base_commit": base_commit,
         "tip_commit": tip_commit,
@@ -1198,6 +1236,28 @@ def dispatch(
                 # that explains why the fleet could not report the requested id.
                 if error is None:
                     error = resume_note
+
+        agent_result: dict | None = None
+        if spec.agent is not None:
+            init_event = claude_init_event(_read(stdout_path))
+            agent_result, agent_problem = _agent_verdict(spec.agent, init_event)
+            if agent_problem is not None:
+                if init_event is None:
+                    # A stream cut short before its own init event is not, on
+                    # its own, evidence the persona failed to apply -- it is
+                    # usually just evidence of whatever else ended the run
+                    # early, and that reason must not be replaced.
+                    run_looks_complete = (
+                        exit_code == 0 and error is None and not output.error
+                    )
+                    if run_looks_complete:
+                        if error is None:
+                            error = agent_problem
+                    else:
+                        agent_result["applied"] = None
+                elif error is None:
+                    error = agent_problem
+
         answer = output.answer
         if not answer and spec_with_paths.last_message:
             # Codex writes its final message to the -o file; if the event stream
@@ -1493,6 +1553,7 @@ def dispatch(
             if spec.taint
             else None
         ),
+        agent=agent_result,
     )
     if result.spawned:
         statement = _lane_receipt_statement(
@@ -1512,6 +1573,7 @@ def dispatch(
             ok=result.ok,
             error=result.failure(),
             taint=result.taint,
+            agent=result.agent,
         )
         try:
             key = attest.receipt_key(base)
