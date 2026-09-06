@@ -80,7 +80,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 7. **Keep both reviewers.** Across seven runs Grok found real defects outside the diff's own lines every
    time it reported, and Gemini's answer was correct every time it wrote one (NO_FINDINGS on what the
    diff alone shows, or the same bug Grok found). Complementary, not redundant, and $0.70 to $1.00 for
-   the pair. **Grok's cap is $1.50 when the pasted diff is over 30 KB:** at $1.00 it twice finished a
+   the pair. **Grok's cap is $2.00 when it runs the suite on this repo, $1.50 when it reads only:** on D3 at $1.50
+   it finished a complete two-finding review at $1.96 after a five-minute suite; at $1.00 it twice finished a
    complete review a few cents over, which fails the lane and skips the fix (Cursor's cap is a verdict
    after the run).
 8. **A session restart kills a background mission.** Send conductor SIGINT (it writes an interrupted

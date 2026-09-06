@@ -28,6 +28,7 @@ orchestrators. Sources are linked where a claim rests on one.
 | C7 golden-mission suite | 0.23.0 | Shape A on 0.22.0, pause fired live; fix salvaged | $12.21 |
 | D2 taint tracking | 0.24.0 | Shape A on 0.23.0, in parallel with D1 | $13.17 |
 | D1 conflict-aware collate | 0.25.0 | Shape A on 0.23.0, in parallel with D2; fix salvaged | $11.17 |
+| D3 inline agent definitions | 0.26.0 | Probe, then Shape A on 0.25.0; fix as its own mission | $9.72 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
@@ -35,7 +36,7 @@ order; the second merge was the lead's. B2, B3, and C4 ran as three missions at 
 new features engaged. C6 was probed live and shelved (`docs/research/2026-09-05-live-probe-background-lanes.md`:
 `claude --bg` is an interactive session with no stream, `cursor-agent persist` needs tmux, agy has no
 background mode). C7 shipped on 0.22.0 as one mission plus a salvaged fix. D1 and D2 ran as two missions at once on
-0.23.0 and merged in the order D2, D1. Next: D3 (probe first), then D4 is the operator's decision.
+0.23.0 and merged in the order D2, D1. D3 was probed and built for the Claude fleet only. D4 is the operator's decision.
 
 ## What conductor is, in one paragraph
 
