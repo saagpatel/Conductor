@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import attest, golden, prices, prompts, shape
 from . import export as export_mod
+from . import forecast as forecast_mod
 from . import salvage as salvage_mod
 from .errors import error_kind
 from .fleets import (
@@ -741,6 +742,23 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
         return 3
     print(f"shape {shape.SHAPE_VERSION}: {len(mission.lanes)} lanes, mission '{mission.name}'")
     print(caps.render())
+    # E14: a low cap is easier to fix before the launch than after it, so
+    # this is printed against the real conductor home right here -- whether
+    # or not --dry-run is also given (that branch's own JSON carries the
+    # same block, via MissionResult.summary()).
+    fc = forecast_mod.forecast(mission, conductor_home())
+    print("forecast:")
+    for lane_fc in fc.lanes:
+        marker = " [warn]" if lane_fc.warn else ""
+        cap = "n/a" if lane_fc.cap_usd is None else f"${lane_fc.cap_usd:.2f}"
+        median = "n/a" if lane_fc.median_usd is None else f"${lane_fc.median_usd:.2f}"
+        p80 = "n/a" if lane_fc.p80_usd is None else f"${lane_fc.p80_usd:.2f}"
+        print(
+            f"  {lane_fc.lane}: cap {cap}, {lane_fc.runs} {lane_fc.vendor} runs, "
+            f"median {median}, p80 {p80}{marker}"
+        )
+    for warning in fc.warnings:
+        print(f"  warning: {warning}")
     print("prompt versions:")
     for prompt_name, version_id in sorted(prompts.prompt_versions().items()):
         print(f"  {prompt_name}: {version_id}")

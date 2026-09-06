@@ -871,6 +871,34 @@ one is a diff. `--inline` keeps every prompt inside the mission file. The
 `prefix` stays inline either way: it is a cache key, and `prefix_file`
 already exists for the operator.
 
+#### Cost forecast
+
+Before anything dispatches, `conductor shape a` (and `run_mission` itself,
+on a launch, a resume, and a dry run alike) compares each lane's cap
+against what the same vendor and pipeline stage has actually cost on this
+machine: `forecast.history` groups every priced, non-dry-run receipt under
+`$CONDUCTOR_HOME/runs` by `(vendor, stage)`, the same way `conductor
+report`'s vendor-and-stage rows do, and `forecast.forecast` reads each
+lane's own first-attempt cap against that history's 80th percentile
+(nearest-rank method) with a floor of three runs -- one unlucky run must
+never read as a trend, so a lane with fewer than three comparable runs on
+record gets no percentiles and no warning. A lane warns when it has a cap,
+at least three runs of history, and that cap sits under the 80th
+percentile:
+
+```
+lane 'build': cap $5.00 is under the $7.42 80th percentile of 12 anthropic build runs
+```
+
+This is a warning, never a refusal: the mission dispatches exactly as
+written either way. `conductor shape a` prints one line per lane after the
+cap arithmetic, and the mission's own result (`result.json`, and the
+`--dry-run` JSON summary) carries the same figures under `forecast` --
+`{"lanes": [...], "warnings": [...]}` -- with every warning also folded
+into the result's `notes`. Human and script lanes carry no cost history
+worth comparing and are skipped. A golden replay runs in a home with no
+run history at all, so its forecast is always empty.
+
 ### Salvage
 
 AGENTS.md rule 6: when a write lane's own gate is green but the clean gate
