@@ -27,6 +27,7 @@ orchestrators. Sources are linked where a claim rests on one.
 | C5 structured error kinds | 0.22.0 | Shape A on 0.21.0 with cascade, prefix, ports live; salvaged | $14.78 |
 | C7 golden-mission suite | 0.23.0 | Shape A on 0.22.0, pause fired live; fix salvaged | $12.21 |
 | D2 taint tracking | 0.24.0 | Shape A on 0.23.0, in parallel with D1 | $13.17 |
+| D1 conflict-aware collate | 0.25.0 | Shape A on 0.23.0, in parallel with D2; fix salvaged | $11.17 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that

@@ -93,8 +93,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 10. **A cascade is for small items, and every Claude build cap gets a dollar for the summary.** Sonnet
    at medium under $4 could not build a five-item spec (C5: escalation rate 1.0, $4 bought nothing);
    put the cascade on one- or two-item specs and fix lanes. Claude stops itself at exactly the cap and
-   its final summary costs, so a green build was lost for five cents twice in one day: cap = estimate
-   from rule 2, plus one dollar.
+   its final summary costs, so a green build was lost for five cents twice in one day and a green fix
+   for seven cents the next (D1): every Claude cap, build or fix, = estimate from rule 2, plus one dollar.
 
 ## Reviewer prompts: no quotas, ever
 
