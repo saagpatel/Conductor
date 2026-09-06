@@ -28,6 +28,7 @@ the cap rules in `AGENTS.md`.
 | E1 deliverable verdicts | 0.28.0 | Shape A on 0.26.0 via `conductor shape a`, in parallel with E11; merged after E11 | $11.94 |
 | E22 vendor CLI versions | 0.29.0 | Shape A on 0.28.0, one of three in parallel; fix lane stopped, two README sentences tidied by the lead | $4.81 |
 | E12 notifications | 0.30.0 | Shape A on 0.28.0, one of three in parallel; fix salvaged | $6.17 |
+| E25 clean-gate diagnosis | 0.31.0 | Shape A on 0.28.0, one of three in parallel; clean run end to end | $5.45 |
 
 ## What "general" means here
 
@@ -317,7 +318,7 @@ Groups are parallel where named; everything with the scheduler tax runs alone.
 - **Group 1, two in parallel, snapshot-disjoint:** E1 deliverables; E11 ledger report
   with `stage` on `Result`.
 - **Group 2, three in parallel, small and disjoint:** E12 notifications; E22 vendor
-  versions; E25 clean-gate diagnosis.
+  versions; E25 clean-gate diagnosis. Shipped 2026-09-06 as 0.29.0 to 0.31.0, $16.43.
 - **Group 3, two in parallel:** E23 salvage; E26 per-lane cwd. These discount every
   mission after them.
 - **Group 4, three in parallel:** E17 prompt versioning (nothing else that touches
