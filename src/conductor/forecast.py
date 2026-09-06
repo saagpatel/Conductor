@@ -124,9 +124,10 @@ def forecast(mission: Mission, home: Path, *, since: datetime | None = None) -> 
             and Decimal(str(cap_usd)) < p80_usd
         )
         if warn:
+            stage_label = stage if stage is not None else "unstaged"
             warnings.append(
                 f"lane '{lane.name}': cap ${cap_usd:.2f} is under the ${p80_usd:.2f} "
-                f"80th percentile of {runs} {vendor} {stage} runs"
+                f"80th percentile of {runs} {vendor} {stage_label} runs"
             )
         lanes.append(
             LaneForecast(

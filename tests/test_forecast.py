@@ -155,6 +155,14 @@ def test_forecast_warns_only_when_cap_is_under_p80(home: Path):
     assert forecast(high, home).warnings == []
 
 
+def test_forecast_names_an_unstaged_lane_as_unstaged_not_none(home: Path):
+    _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage=None)
+    mission = _mission([_lane("plain", cap_usd=5.0, stage=None)])
+    (warning,) = forecast(mission, home).warnings
+    assert warning.endswith("80th percentile of 5 anthropic unstaged runs")
+    assert "None" not in warning
+
+
 def test_forecast_skips_human_and_script_lanes(home: Path):
     _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage="build")
     mission = _mission(
