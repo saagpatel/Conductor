@@ -1883,6 +1883,69 @@ conductor process stopped writing; and a directory with neither file is reported
 as `incomplete`. `silent` is a flag for the operator, nothing more: conductor never
 modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
 
+### Rolling spend ceiling and unattended launches (E9)
+
+A mission's own `max_cost_usd` bounds what that one mission may spend; it says
+nothing about what conductor, across every other mission and standalone
+dispatch, has spent in the last hour. `run_mission` checks a second, rolling
+ceiling: the default is $10.00 over the last 60 minutes and $25.00 over the
+last 24 hours, summed from the run receipts under `<home>/runs` the same way
+`conductor spend` does. An unpriced run (no `usage.cost_usd`) still counts as
+a run, in `unpriced_hour`/`unpriced_day`, never as dollars; a free `script`
+(E6) run is priced at exactly $0.00 and so never inflates either bound. A
+mission file may override either bound:
+
+```json
+"ceiling": {"per_hour_usd": 5.0, "per_day_usd": null}
+```
+
+`null` disables that bound for this mission; the object must name both keys
+(a mission that names one and forgets the other would otherwise silently
+inherit a default it never saw). The check runs once, after `validate()` and
+before the running lock, on a launch and a resume alike (a resume starts
+dispatches too), and never on a dry run. Over a bound, the mission never
+starts:
+
+```
+spend ceiling: $10.42 in the last hour is over the $10.00 per-hour ceiling
+```
+
+A mission that passes carries what it saw at start on the result and in
+`result.json`:
+
+```json
+"ceiling": {
+  "per_hour_usd": 10.0, "per_day_usd": 25.0,
+  "hour_usd": 3.2, "day_usd": 11.6,
+  "unpriced_hour": 0, "unpriced_day": 1
+}
+```
+
+**`--unattended`** (`conductor mission FILE --unattended`, also with
+`--resume`) runs a mission only when it is safe to run with nobody reading:
+it refuses when the mission has a human lane (nobody to answer), a
+write-mode attempt on a `fix`-stage lane that `pause.before` does not name
+(nothing may land without a lead reading the review), a write-mode attempt
+on a lane with no stage at all (an unstaged write lane is a landing nobody
+reads), or a `resolve` block (the resolver writes). Build and adversarial
+write lanes, and every read lane, are allowed. The result carries
+`unattended: true`; the flag is a launch property, not a mission property,
+so the snapshot records nothing new for it.
+
+**The file lock.** Beside `running.json` (keyed by the mission run),
+`run_mission` claims `<home>/locks/<sha256 of the resolved mission source
+path, first 16 hex>.json` whenever the mission has a source file, with the
+same `{pid, started, host}` body and staleness rule as the running lock, plus
+the id of the mission now holding it. A second launch of the same file while
+the first is alive is refused, naming that mission id and the lock path; a
+stale lock (holder no longer alive) is replaced with a note, the same as a
+stale running lock. The lock releases when the mission returns, however it
+returns: normally, paused, interrupted, or by exception. A mission built in
+code with no source (as the test suite does) takes no file lock.
+
+Salvage is never automated: a kept worktree still needs a lead to gate it,
+read it, and commit it by hand before any review or fix mission runs against it.
+
 ## Golden missions
 
 A change to routing, a template, or `outputs.parse` used to be testable only

@@ -253,10 +253,13 @@ def cmd_mission(args: argparse.Namespace) -> int:
                 resume_dir=mission_dir,
                 answer=args.answer,
                 answer_file=args.answer_file,
+                unattended=args.unattended,
             )
         else:
             mission = load_mission(args.file)
-            result = run_mission(mission, home=conductor_home(), dry_run=args.dry_run)
+            result = run_mission(
+                mission, home=conductor_home(), dry_run=args.dry_run, unattended=args.unattended
+            )
     except MissionInvalid as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
@@ -956,6 +959,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mission.add_argument(
         "--dry-run", action="store_true", help="validate and record argv, spawn nothing"
+    )
+    p_mission.add_argument(
+        "--unattended",
+        action="store_true",
+        help="refuse to run unless it is safe with nobody reading: no human lane, no "
+        "unstaged write lane, no fix-stage write lane outside pause.before, no resolve",
     )
     answer_group = p_mission.add_mutually_exclusive_group()
     answer_group.add_argument(
