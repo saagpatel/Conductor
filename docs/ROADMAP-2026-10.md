@@ -38,6 +38,7 @@ the cap rules in `AGENTS.md`.
 | E7 human lanes | 0.38.0 | Shape A on 0.37.0, second of Group 5; build green inside the grace band; Grok's four findings all real, fix finished by hand from its kept worktree | $15.25 |
 | E4 judge sittings | 0.39.0 | Shape A on 0.38.0, first of Group 6; build green under cap; both reviewers NO_FINDINGS, no fix paid | $9.07 |
 | E6 script lanes | 0.40.0 | Shape A on 0.39.0, second of Group 6; build green under cap; Grok's three findings all real, fixed on the resumed thread | $16.32 |
+| E3 untrusted-output lanes | 0.41.0 | Shape A on 0.40.0, first of Group 7, in parallel with E9; build green under cap; both reviewers NO_FINDINGS, no fix paid | $4.81 |
 
 ## What "general" means here
 
