@@ -311,13 +311,18 @@ def test_collisions_are_grouped_by_repository(repo_a, repo_b, home, monkeypatch,
     result = run_mission(mission, home=home)
 
     assert result.ok is True
-    assert result.collisions["hotspots"] == ["shared.txt"]
+    # E19: a mission whose sinks span repositories prefixes every top-level
+    # hotspot `<cwd>:` so two repositories' same-named files never merge;
+    # each group keeps its own, unprefixed hotspot list (see below).
+    assert result.collisions["hotspots"] == [f"{repo_a.resolve()}:shared.txt"]
     assert result.collisions["conflicts"]["pairs"] == [
         {"lanes": ["a", "b"], "conflicts": ["shared.txt"]}
     ]
-    groups = {group["cwd"]: group["lanes"] for group in result.collisions["groups"]}
-    assert groups[str(repo_a.resolve())] == ["a", "b"]
-    assert groups[str(repo_b.resolve())] == ["c"]
+    groups = {group["cwd"]: group for group in result.collisions["groups"]}
+    assert groups[str(repo_a.resolve())]["lanes"] == ["a", "b"]
+    assert groups[str(repo_b.resolve())]["lanes"] == ["c"]
+    assert groups[str(repo_a.resolve())]["hotspots"] == ["shared.txt"]
+    assert groups[str(repo_b.resolve())]["hotspots"] == []
 
     saved = json.loads(Path(result.mission_dir, "result.json").read_text())
     assert saved["collisions"] == result.collisions

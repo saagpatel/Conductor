@@ -288,11 +288,15 @@ paired). A lane's receipt carries the `cwd` it actually ran in, and
 `report.md`'s per-lane section names it when it differs from the mission's.
 Two lanes may claim the same `branch` name as long as they land in different
 repositories -- the same name twice in the same repository is refused at
-load, as before. A mission's `resolve` lane always dispatches from the
-mission's own `cwd`, so it is refused at load when its sink lanes span more
-than one repository -- the resolver never crosses repositories. The three
-`notify` hooks (pause, end, breaker) likewise always run in the mission's
-own `cwd`, never a lane's.
+load, as before. `resolve` is refused at load when its sink lanes span more
+than one repository -- the resolver never crosses repositories -- and, since
+every sink then shares one repository, it dispatches, is gated, and (on a
+resume) has its committed tip checked in that repository, never the
+mission's own `cwd` when the two differ. The three `notify` hooks (pause,
+end, breaker) likewise always run in the mission's own `cwd`, never a
+lane's. See "Collisions across repositories" below for what a mission whose
+lanes span more than one repository does to `collisions` and the mission
+result.
 
 ### Deliverables: a file as the verdict
 
@@ -1428,6 +1432,65 @@ with the outcome, and `conductor missions` rows carry
 `"resolve": "ok" | "failed" | "skipped" | null`. The ledger's blocker rules
 apply before the resolver starts, exactly as they do before the collate.
 
+#### Collisions across repositories
+
+A mission whose lanes span more than one repository (per-lane `cwd`, E26)
+follows three rules, decided by the operator 2026-09-06: a collision is the
+same path in the same repository; each repository runs its own gate; the
+resolver never merges across repositories. `overlap` is computed per cwd
+group the same way `merge_conflicts` already was -- two sinks in different
+repositories are never paired, even when both touch a file of the same
+name.
+
+`collisions.groups` (already present for `merge_conflicts`) gains two
+fields per group: that repository's own `hotspots` and its own `overlap`,
+both unprefixed -- exactly the shape the mission-wide `hotspots`/`overlap`
+have on a single-repository mission:
+
+```json
+{
+  "overlap": {"files": {"shared.txt": ["a", "b"]}, "hotspots": ["shared.txt"], "lanes": {"a": 1, "b": 1}},
+  "conflicts": null,
+  "hotspots": ["shared.txt"],
+  "groups": [
+    {
+      "cwd": "/repo-a",
+      "lanes": ["a", "b"],
+      "hotspots": ["shared.txt"],
+      "overlap": {"files": {"shared.txt": ["a", "b"]}, "hotspots": ["shared.txt"], "lanes": {"a": 1, "b": 1}}
+    },
+    {"cwd": "/repo-b", "lanes": ["c"], "hotspots": [], "overlap": {"files": {}, "hotspots": [], "lanes": {"c": 0}}}
+  ]
+}
+```
+
+The moment a mission's sinks span more than one repository, the top-level
+`hotspots` and `overlap` become the union of every group's own, each path
+prefixed `<cwd>:` (the group's own repository, a colon, then the
+repo-relative path) so that two repositories' same-named files never merge
+into one hotspot:
+
+```json
+{"hotspots": ["/repo-a:shared.txt"], "overlap": {"files": {"/repo-a:shared.txt": ["a", "b"], "/repo-b:other.txt": ["c"]}, ...}}
+```
+
+A single-repository mission's top level is exactly its one group,
+unprefixed -- identical to what it produced before this. The collate's
+`## Collisions` section and the resolver's prompt each read only the group
+of the one repository they concern (the collate's own dispatch `cwd`; the
+resolver's is the single cwd its sinks share, already enforced at load), so
+neither ever sees another repository's paths, prefixed or not. The mission
+result gains `"repositories"`: every distinct repository (E26 `cwd`) the
+mission's lanes resolve to, sorted.
+
+A recorded golden fixture (see "Golden missions" below) gives every
+repository beyond the mission's own `cwd` its own placeholder, `<cwd2>`,
+`<cwd3>`, ..., in the order its lanes first name it. `golden.replay` (and
+`golden.check`) take a `cwds` argument mapping each extra placeholder to a
+real directory; a placeholder the caller does not name gets a fresh, empty
+repository under the replay's own temporary home instead, so a cross-repo
+fixture still replays with no arguments at all.
+
 ### Signed lane receipts
 
 Every spawned dispatch writes `attestation.json` beside its `result.json`: a
@@ -2136,11 +2199,17 @@ home directory (`Path.home()`) becomes `<user>`. Then secrets: any
 becomes `NAME=<redacted>`; `Bearer <token>` becomes `Bearer <redacted>`;
 JSON object values whose key contains those words become `<redacted>`; and
 `sk-`, `xai-`, `ghp_`, or `AIza`-prefixed tokens of 16 or more characters
-become `<redacted>`. `golden.scrub_guard(path)` re-scans a fixture directory
-for the user's home path, the conductor home, or any of those secret
-patterns, as `file:line: <pattern name>`; empty when clean, which
-`conductor golden record` and `conductor golden check` both leave a fixture
-in. It also decodes any run of 64 or more base64 characters on a line and
+become `<redacted>`. A cross-repo mission's other repositories (E26 `cwd`)
+each get their own `<cwd2>`, `<cwd3>`, ... placeholder, in the order they
+first appear in the mission's lanes -- see "Collisions across
+repositories", above. `golden.scrub_guard(path, extra=[(real, label), ...])`
+re-scans a fixture directory for the user's home path, the conductor home,
+any of `extra`'s own (path, label) pairs -- a mission's repositories, say,
+which `scrub_guard` has no way to recover from an already-scrubbed fixture
+on its own -- or any of those secret patterns, as `file:line: <pattern
+name>`; empty when clean, which `conductor golden record` and `conductor
+golden check` both leave a fixture in. It also decodes any run of 64 or
+more base64 characters on a line and
 scans the decoded text the same way, reporting `file:line: <pattern name>
 (base64)` -- the shape a DSSE envelope like `attestation.json` carries a
 statement in, invisible to a plain-text scan, and part of why that file is
@@ -2166,9 +2235,12 @@ live `runner.dispatch`: when set, every attempt calls `dispatcher(spec,
 lane=<name>, attempt=<label>, retry=<index or None>, dry_run=..., ...)`
 with the same keyword values the live path gets, and the branch-claiming
 step after a lane's attempt walk sets `branch` on the lane and its final
-attempt without touching git. `golden.replay(fixture_dir, *, home, cwd)`
-builds exactly that dispatcher: it loads `mission.json` (with `<cwd>`
-mapped back to `cwd`) through the ordinary snapshot loader, and for the
+attempt without touching git. `golden.replay(fixture_dir, *, home, cwd,
+cwds=None)` builds exactly that dispatcher: it loads `mission.json` (with
+`<cwd>` mapped back to `cwd`, and every `<cwd2>`, `<cwd3>`, ... a cross-repo
+fixture uses mapped back to `cwds`'s own real directory, or a fresh empty
+repository under `home` when `cwds` does not name it) through the ordinary
+snapshot loader, and for the
 k-th call on a lane returns the k-th recorded run in that lane's
 `lanes/<name>.json` (`previous_attempts` then `attempts`) -- copying its
 files into `home/runs/<run_id>/` (`stdout.jsonl` restored to `stdout.log`),
@@ -2215,7 +2287,8 @@ template change is allowed to move -- `ok`, `require`, `notes`, `errors`,
 (`lane`, `rank`, `ok`), the cache hit rate, and per lane and attempt the
 fields that describe what happened, never a path, a duration, a run id, a
 timestamp, or a dollar amount. `expected.json` pins that projection at
-record time. `conductor golden check [DIR ...]` replays each fixture (every
+record time. `golden.check(fixture_dir, *, update=False, cwds=None)` takes
+the same `cwds` as `replay`. `conductor golden check [DIR ...]` replays each fixture (every
 directory under `tests/golden/` of the current working directory that holds
 a `golden.json`, by default) into a fresh temporary home and a fresh
 temporary git repository, and prints every difference -- the replay's own,
