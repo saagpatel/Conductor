@@ -29,6 +29,7 @@ the cap rules in `AGENTS.md`.
 | E22 vendor CLI versions | 0.29.0 | Shape A on 0.28.0, one of three in parallel; fix lane stopped, two README sentences tidied by the lead | $4.81 |
 | E12 notifications | 0.30.0 | Shape A on 0.28.0, one of three in parallel; fix salvaged | $6.17 |
 | E25 clean-gate diagnosis | 0.31.0 | Shape A on 0.28.0, one of three in parallel; clean run end to end | $5.45 |
+| E26 per-lane cwd | 0.32.0 | Shape A on 0.31.0, in parallel with E23; both reviewers NO_FINDINGS, fix lane stopped, build tip landed by hand | $7.02 |
 
 ## What "general" means here
 
