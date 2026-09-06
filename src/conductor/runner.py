@@ -192,6 +192,26 @@ class Result:
                 return f"{label} interrupted"
             if counted.get("timed_out"):
                 return f"{label} timed out"
+            # E25: a clean gate that only fails because the diff itself
+            # touched the test surface is the trap AGENTS.md rule 3 exists
+            # for -- the base tree's tests ran against the new source, not a
+            # broken build. Name the touched files so that is not re-derived
+            # by hand from the receipt every time. `infra_error` (worktree
+            # add/read-tree/apply failing in `_git_failure`) means the gate
+            # command never ran at all, so it is excluded even when the
+            # surface was touched -- that failure has nothing to do with
+            # the fixtures the diff changed.
+            changed = (self.test_surface or {}).get("changed") or []
+            if (
+                clean.get("ran")
+                and not clean.get("infra_error")
+                and (self.test_surface or {}).get("touched")
+                and changed
+            ):
+                return (
+                    f"{label} exited {counted.get('exit_code')} after the diff touched "
+                    f"{len(changed)} test-surface files: {_test_surface_note(changed)}"
+                )
             return f"{label} exited {counted.get('exit_code')}"
         # E1: a declared deliverable that is missing, empty, unparsable, or
         # schema-invalid is checked after the process/fleet/gate checks above
@@ -383,6 +403,19 @@ def _surface_result(policy: str, before: Surface, after: Surface) -> dict:
         "touched": bool(changed),
         "changed": changed,
     }
+
+
+def _test_surface_note(changed: list[str]) -> str:
+    """`a, b, c` (sorted, at most five), then `, and M more` for the rest --
+    the touched-file list `Result.failure()` names on a clean-gate failure
+    the diff itself caused (E25)."""
+    paths = sorted(changed)
+    shown = paths[:5]
+    note = ", ".join(shown)
+    extra = len(paths) - len(shown)
+    if extra > 0:
+        note += f", and {extra} more"
+    return note
 
 
 _SCHEMA_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
