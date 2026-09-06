@@ -127,6 +127,7 @@ _LANE_KEYS = _ATTEMPT_KEYS | {
     "stage",
     "cascade",
     "taint",
+    "untrusted_output",
 }
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
@@ -360,6 +361,13 @@ class Lane:
     # D2: this lane quotes text from outside the operator's trust. Mission
     # input, never cascaded from the mission itself.
     taint: bool = False
+    # E3: this lane's own output (answer/diff/verdict/test_touched/deliverable)
+    # is untrusted -- a read lane that fetched the web, for instance. Mission
+    # input, never cascaded. Unlike `taint`, it does not weaken this lane's own
+    # tool set or dispatch state; it only makes this lane a taint *source* for
+    # whatever later lane references it (see mission_from_dict's propagation
+    # walk) or resumes its session.
+    untrusted_output: bool = False
     # D2: whether this lane is tainted, self-declared or inherited by
     # referencing a tainted lane's answer/diff/verdict/test_touched or by
     # resuming a tainted lane's session. Load-derived; see mission_from_dict.
@@ -650,7 +658,12 @@ class Mission:
             # than a template reference) slip an off-claude collate past load,
             # to fail later as an uncaught DispatchRefused out of run_mission.
             candidate_pool = self.sinks() if self.collate.candidates else self.lanes
-            tainted_lanes = [lane.name for lane in candidate_pool if lane.tainted]
+            # E3: an untrusted-output lane is a taint source for a collate the
+            # same way a tainted lane is, even though the lane itself is not
+            # tainted.
+            tainted_lanes = [
+                lane.name for lane in candidate_pool if lane.tainted or lane.untrusted_output
+            ]
             collate_tainted = bool(tainted_lanes)
             try:
                 if self.collate.rank:
@@ -955,6 +968,7 @@ class Mission:
             "taint_from",
             "human",
             "script",
+            "untrusted_output",
         }
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
@@ -981,6 +995,10 @@ class Mission:
                 raise MissionInvalid(f"mission snapshot lane {index} human must be true or false")
             if not isinstance(raw_lane["script"], bool):
                 raise MissionInvalid(f"mission snapshot lane {index} script must be true or false")
+            if not isinstance(raw_lane["untrusted_output"], bool):
+                raise MissionInvalid(
+                    f"mission snapshot lane {index} untrusted_output must be true or false"
+                )
             attempts = raw_lane["attempts"]
             if not isinstance(attempts, list) or not attempts:
                 raise MissionInvalid(
@@ -1021,6 +1039,7 @@ class Mission:
                 "branch": raw_lane["branch"],
                 "stage": raw_lane["stage"],
                 "taint": raw_lane["taint"],
+                "untrusted_output": raw_lane["untrusted_output"],
                 **primary_attempt,
                 "fallback": fallback_attempts,
                 "cascade": cascaded,
@@ -1249,6 +1268,11 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     # refused in _validate_graph), so one forward pass over `raw_lanes` in
     # mission order reaches a fixed point without a second pass.
     tainted_by_name: dict[str, tuple[bool, list[str]]] = {}
+    # E3: whether each already-processed lane declared `untrusted_output` --
+    # a second taint-source signal alongside `tainted_by_name`, consulted by
+    # the same forward pass since a later lane can only reference an earlier
+    # one.
+    untrusted_by_name: dict[str, bool] = {}
     for i, raw_lane in enumerate(raw_lanes):
         if not isinstance(raw_lane, dict):
             raise MissionInvalid(f"lane {i} must be an object")
@@ -1261,6 +1285,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             # so every downstream lane that reads its answer inherits taint
             # from it exactly the way it would from any other tainted lane.
             tainted_by_name[lane.name] = (True, list(lane.taint_from))
+            untrusted_by_name[lane.name] = False
             continue
         # E6: this lane's own declared fleet, before any fallback or cascade
         # attempt -- Lane.script, and the refusals below that make no sense
@@ -1298,6 +1323,12 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             raise MissionInvalid(f"lane {i}: taint must be true or false")
         if lane_is_script and lane_taint:
             raise MissionInvalid(f"{lane_where}: a script lane may not set taint")
+        # E3: allowed on a model or script lane (a script lane's own shell
+        # output can be exactly as untrusted); refused on a human lane, in
+        # `_human_lane`, since a human lane is already tainted at load.
+        lane_untrusted_output = raw_lane.get("untrusted_output", False)
+        if not isinstance(lane_untrusted_output, bool):
+            raise MissionInvalid(f"lane {i}: untrusted_output must be true or false")
         lane_cascade = raw_lane.get("cascade", True)
         if not isinstance(lane_cascade, bool):
             raise MissionInvalid(f"lane {i}: cascade must be true or false")
@@ -1341,13 +1372,20 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             for ref_lane, _ref_field, is_mission in _template_refs(attempt.prompt, lane_name):
                 if is_mission or ref_lane not in tainted_by_name:
                     continue
-                if tainted_by_name[ref_lane][0] and ref_lane not in taint_from:
+                # E3: a reference to an untrusted-output lane taints the
+                # referencing lane exactly like a reference to a tainted one.
+                if (
+                    tainted_by_name[ref_lane][0] or untrusted_by_name[ref_lane]
+                ) and ref_lane not in taint_from:
                     taint_from.append(ref_lane)
         if lane_resume is not None and lane_resume in tainted_by_name:
-            if tainted_by_name[lane_resume][0] and lane_resume not in taint_from:
+            if (
+                tainted_by_name[lane_resume][0] or untrusted_by_name[lane_resume]
+            ) and lane_resume not in taint_from:
                 taint_from.append(lane_resume)
         lane_tainted = lane_taint or bool(taint_from)
         tainted_by_name[lane_name] = (lane_tainted, taint_from)
+        untrusted_by_name[lane_name] = lane_untrusted_output
         lanes.append(
             Lane(
                 name=lane_name,
@@ -1362,6 +1400,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 tainted=lane_tainted,
                 taint_from=taint_from,
                 script=lane_is_script,
+                untrusted_output=lane_untrusted_output,
             )
         )
 
@@ -1939,6 +1978,14 @@ def _human_lane(
         raise MissionInvalid(f"{where}: a human lane may not set stage")
     if raw_lane.get("branch") is not None:
         raise MissionInvalid(f"{where}: a human lane may not set branch")
+    untrusted_output = raw_lane.get("untrusted_output", False)
+    if not isinstance(untrusted_output, bool):
+        raise MissionInvalid(f"{where}: untrusted_output must be true or false")
+    if untrusted_output:
+        # E3: a human lane is already tainted at load, always -- declaring it
+        # an untrusted-output *source* on top of that would be a no-op that
+        # only invites confusion, so it is refused here instead.
+        raise MissionInvalid(f"{where}: a human lane may not set untrusted_output")
     needs, lane_base, lane_resume = _lane_graph_fields(raw_lane, where=where)
     if lane_base is not None:
         raise MissionInvalid(f"{where}: a human lane may not set base")
@@ -2181,6 +2228,10 @@ class LaneResult:
     # D2: copied from the declared Lane at settle time.
     tainted: bool = False
     taint_from: list[str] = field(default_factory=list)
+    # E3: copied from the declared Lane at settle time. Unlike `tainted`,
+    # true here says nothing about how this lane itself ran -- only that its
+    # output is a taint source for whatever lane references it.
+    untrusted_output: bool = False
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -2280,6 +2331,8 @@ class LaneResult:
             and all(isinstance(item, str) for item in raw["taint_from"])
         ):
             raise ValueError("lane receipt taint_from must be a list of strings")
+        if "untrusted_output" in raw and not isinstance(raw["untrusted_output"], bool):
+            raise ValueError("lane receipt untrusted_output must be true or false")
         return cls(**raw)
 
 
@@ -2466,6 +2519,10 @@ def _taint_label(lane: LaneResult) -> str:
     if lane.taint_from:
         return f"yes (from {', '.join(lane.taint_from)})"
     return "yes"
+
+
+def _untrusted_output_label(lane: LaneResult) -> str:
+    return "yes" if lane.untrusted_output else "no"
 
 
 def _rendered_verdict(verdict: dict | None) -> str:
@@ -3366,6 +3423,7 @@ def _execute_mission(
             skipped=skipped,
             tainted=lane.tainted,
             taint_from=list(lane.taint_from),
+            untrusted_output=lane.untrusted_output,
         )
         if old is not None:
             out.previous_attempts = [*old.previous_attempts, *old.attempts]
@@ -4521,8 +4579,9 @@ def _run_collate(
     assert col is not None
     chosen, omitted = _collate_candidates(lanes, ranking, col.candidates)
     # D2: the collate's own Spec is tainted the moment any lane it actually
-    # sees is tainted, whether the judge reads prose or a ranking.
-    tainted = any(lane.tainted for lane in chosen)
+    # sees is tainted, whether the judge reads prose or a ranking. E3: an
+    # untrusted-output lane in the pool taints the collate the same way.
+    tainted = any(lane.tainted or lane.untrusted_output for lane in chosen)
     if col.rank:
         return _run_rank_collate(
             mission,
@@ -5072,7 +5131,7 @@ def _human_report_row(lane: LaneResult) -> str:
         label = f"human, answered {answered_at} ({length} chars)"
     return (
         f"| {lane.name} | {label} | {lane.ok} | | | | no | | | {_taint_label(lane)} | "
-        "| | | | - | no | |"
+        f"{_untrusted_output_label(lane)} | | | | | - | no | |"
     )
 
 
@@ -5086,6 +5145,7 @@ def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = Non
         f"{_verdict_label(attempt.get('verdict_data')) or ''} | {attempt['exit_code']} | "
         f"{attempt['no_op']} | {_test_touched(attempt.get('test_surface'))} | "
         f"{attempt['commits']} | {attempt.get('branch') or ''} | {_taint_label(lane)} | "
+        f"{_untrusted_output_label(lane)} | "
         f"{agent_name} | {cost} | {attempt.get('tokens') or ''} | {attempt.get('tool_calls', 0)} | "
         f"{_cached(attempt)} | {_resumed_label(attempt)} | {attempt['duration_s']} |"
     )
@@ -5149,8 +5209,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     lines += [
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
-        "taint | agent | cost_usd | tokens | tools | cached | resumed | dur_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "taint | untrusted_output | agent | cost_usd | tokens | tools | cached | resumed | "
+        "dur_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     human_lanes = {declared.name for declared in mission.lanes if declared.human}
     for lane in lanes:
@@ -5168,7 +5229,7 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             else:
                 lines.append(
                     f"| {lane.name} | (skipped) | False | | | | no | | | "
-                    f"{_taint_label(lane)} | | | | | - | no | |"
+                    f"{_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | no | |"
                 )
             continue
         if lane.kept and lane.attempts:
