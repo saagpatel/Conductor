@@ -490,7 +490,9 @@ def cmd_salvage(args: argparse.Namespace) -> int:
         _invalid(str(exc))
         return 3
 
-    passed = _runner_gate_passed(result.gate, None)
+    passed = _runner_gate_passed(result.gate, None) and _runner_gate_passed(
+        result.own_gate, None
+    )
     if args.json:
         # The receipt on disk, not `result.to_dict()`: the two differ
         # (`recorded_at` is only ever known once the receipt is written;
@@ -505,13 +507,15 @@ def cmd_salvage(args: argparse.Namespace) -> int:
         print("--- diff ---")
         print(result.diff)
         print(f"gate: {result.test_command}")
-        print(f"gate exit code: {result.gate.get('exit_code')}")
+        print(f"own gate exit code: {result.own_gate.get('exit_code')}")
+        print(result.own_gate.get("tail", ""))
+        print(f"clean gate exit code: {result.gate.get('exit_code')}")
         print(result.gate.get("tail", ""))
         print(f"receipt: {result.receipt_path}")
 
     if args.emit:
         if not passed:
-            _invalid("--emit refused: the gate is red")
+            _invalid("--emit refused: a gate is red")
             return 3
         try:
             caps = shape.cap_arithmetic(args.items, args.modules, scheduler=args.scheduler)

@@ -25,7 +25,7 @@ from pathlib import Path
 from . import attest, shape
 from .fleets import DEFAULT_TIMEOUT
 from .mission import LaneResult, Mission, MissionInvalid, mission_from_dict
-from .runner import _clean_gate
+from .runner import _clean_gate, _transplant_gate
 from .verify import diff_since, git_run
 
 
@@ -45,6 +45,11 @@ class SalvageResult:
     diff_sha256: str | None
     test_command: str
     gate: dict = field(default_factory=dict)
+    # The kept tree's own gate: the same transplant with everything included,
+    # test surface and all. The clean gate above restores the test surface
+    # from the base, so it never lints or runs a kept worktree's new tests;
+    # E17's salvage lost a review round to one long line for exactly that.
+    own_gate: dict = field(default_factory=dict)
     # Set after the receipt is written; not itself part of the receipt (the
     # timestamp in its name is not known before the write happens).
     receipt_path: str = ""
@@ -176,6 +181,15 @@ def _gather(
     head_sha = git_run(worktree, "rev-parse", "HEAD").stdout.strip()
 
     scratch = home / "salvage" / mission_id / lane
+    own_outcome = _transplant_gate(
+        str(worktree),
+        base_sha=base_sha,
+        pathspecs=["."],
+        command=test_command,
+        timeout=int(timeout),
+        stop=stop or (lambda: False),
+        worktree=scratch.with_name(f"{lane}-own"),
+    )
     outcome = _clean_gate(
         str(worktree),
         base_sha=base_sha,
@@ -197,6 +211,7 @@ def _gather(
         diff_sha256=diff_sha256,
         test_command=test_command,
         gate=outcome,
+        own_gate=own_outcome,
     )
 
 
@@ -204,6 +219,10 @@ def salvage(
     home: Path, mission_id: str, lane: str, *, stop: Callable[[], bool] | None = None
 ) -> SalvageResult:
     """Gate a kept lane's worktree from a scratch copy, and receipt the result.
+
+    Two gates: the tree's own (everything transplanted) and the clean gate
+    (test surface restored from the base). Both must pass for the salvage to
+    count as green; `cmd_salvage` reads both.
 
     Never commits, never writes into the kept worktree, and never touches its
     index -- `runner._clean_gate` already keeps that promise for its own

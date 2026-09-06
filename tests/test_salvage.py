@@ -86,6 +86,8 @@ def test_salvage_reruns_the_gate_from_a_scratch_copy_and_can_come_back_green(
     assert result.test_command == gate
     assert result.gate["ran"] is True
     assert result.gate["exit_code"] == 0
+    assert result.own_gate["ran"] is True
+    assert result.own_gate["exit_code"] == 0
     assert result.receipt_path and Path(result.receipt_path).is_file()
 
     receipt = json.loads(Path(result.receipt_path).read_text())
@@ -334,3 +336,27 @@ def test_emit_loads_when_the_salvaged_change_carries_template_syntax(repo, home,
     mission = mission_from_dict(json.loads(out.read_text()), base_dir=out.parent, source=str(out))
     assert "{{lanes.build.diff}}" not in mission.prompt
     assert "{{lanes.build.diff}}" in (home / "tpl-diff.patch").read_text()
+
+
+def test_salvage_runs_the_kept_trees_own_gate_beside_the_clean_gate(
+    repo, home, fake_fleet, monkeypatch
+):
+    """The clean gate restores the test surface from the base, so a kept
+    worktree's new test file is invisible to it; the own gate transplants
+    everything and is where that file is judged. A gate that fails only when
+    the new test file is present tells the two apart."""
+    mission_id, lane = _run_lane(
+        repo,
+        home,
+        fake_fleet,
+        edit="mkdir -p tests && echo x > tests/test_new.py && echo y >> app.py",
+        test="test ! -f tests/test_new.py",
+    )
+    result = salvage(home, mission_id, lane)
+    assert result.gate["exit_code"] == 0
+    assert result.own_gate["exit_code"] == 1
+    receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["own_gate"]["exit_code"] == 1
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    code = main(["salvage", mission_id, "--lane", lane])
+    assert code == 1

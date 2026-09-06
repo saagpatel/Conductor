@@ -831,12 +831,14 @@ It reads the lane's receipt and the mission snapshot, and refuses (exit 3)
 when the mission or lane does not exist, the lane was not kept, its
 recorded worktree is missing on disk or is not a git worktree of the
 mission's repository, or the lane's effective test command is empty. It
-then re-runs the clean gate from the kept worktree, in a fresh scratch copy
-under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/` -- never committing,
+then runs two gates from the kept worktree, each in a fresh scratch copy
+under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the tree's own gate
+(everything transplanted, new tests included) and the clean gate (test
+surface restored from the base) -- never committing,
 writing into, or touching the index of the kept worktree itself -- and
 prints the worktree, its base and HEAD shas, whether it is dirty, the
-recorded diff, and the gate's command, exit code, and tail. Exit 0 means
-the gate passed, 1 means it failed. Every call, refused or not, writes a
+recorded diff, and each gate's exit code and tail. Exit 0 means both
+gates passed, 1 means one failed. Every call, refused or not, writes a
 receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
 timestamp>.json` (except when the mission itself does not exist: a typo
 never conjures a mission directory); salvage is the lead's own act, not a
