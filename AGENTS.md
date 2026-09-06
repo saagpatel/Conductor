@@ -78,7 +78,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 6. **The salvage path is normal, not exceptional.** A kept worktree with a green own gate is a
    deliverable: gate it, read it, commit it, then run the review and fix lanes as a mission with
    `cwd` at that commit and the diff pasted into the mission prompt. Cost of the remainder: $1.50 to
-   $2.50.
+   $2.50. `conductor salvage MISSION_ID --lane NAME` runs the gate step and receipts it; `--emit`,
+   once the commit is made, writes that review-and-fix mission instead of by hand (README, "Salvage").
 7. **Keep both reviewers.** Across seven runs Grok found real defects outside the diff's own lines every
    time it reported, and Gemini's answer was correct every time it wrote one (NO_FINDINGS on what the
    diff alone shows, or the same bug Grok found). Complementary, not redundant, and $0.70 to $1.00 for

@@ -122,9 +122,12 @@ def _scan_missions(
         lanes = raw.get("lanes")
         lane_list = lanes if isinstance(lanes, list) else []
         ok = raw.get("ok")
+        salvage_dir = result_file.parent / "salvage"
+        salvaged = len(list(salvage_dir.glob("*.json"))) if salvage_dir.is_dir() else 0
         meta[mission] = {
             "ok": ok if isinstance(ok, bool) else None,
             "lanes": len(lane_list),
+            "salvaged": salvaged,
         }
         for lane_raw in lane_list:
             if not isinstance(lane_raw, dict):
@@ -287,6 +290,10 @@ class MissionRow:
     ok: bool | None = None
     lanes: int = 0
     capped: bool = False
+    # E23: salvage receipts under this mission's `salvage/` directory, 0 when
+    # it is absent -- `conductor salvage` never dispatches, so this is the
+    # only place a salvage shows up in the report at all.
+    salvaged: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -295,6 +302,7 @@ class MissionRow:
             "ok": self.ok,
             "lanes": self.lanes,
             "capped": self.capped,
+            "salvaged": self.salvaged,
         }
 
 
@@ -376,6 +384,9 @@ def _build_report(
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
         mission_row.lanes = meta.get("lanes", 0) if isinstance(meta.get("lanes"), int) else 0
+        mission_row.salvaged = (
+            meta.get("salvaged", 0) if isinstance(meta.get("salvaged"), int) else 0
+        )
 
     vendor_stage_rows = sorted(
         vendor_stage.values(), key=lambda r: (-r.cost_usd, r.vendor, r.stage or "")
@@ -510,9 +521,16 @@ def _print_report(rpt: Report) -> None:
     )
     _print_section(
         "Missions",
-        ("mission", "cost_usd", "ok", "lanes", "capped"),
+        ("mission", "cost_usd", "ok", "lanes", "capped", "salvaged"),
         [
-            (d["mission"], d["cost_usd"], _cell(d["ok"]), _cell(d["lanes"]), _cell(d["capped"]))
+            (
+                d["mission"],
+                d["cost_usd"],
+                _cell(d["ok"]),
+                _cell(d["lanes"]),
+                _cell(d["capped"]),
+                _cell(d["salvaged"]),
+            )
             for d in (row.to_dict() for row in rpt.missions)
         ],
     )
