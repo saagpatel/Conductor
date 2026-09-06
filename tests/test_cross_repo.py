@@ -195,6 +195,94 @@ def test_a_three_lane_mission_across_two_repositories_prefixes_top_level_hotspot
     assert saved["collisions"] == result.collisions
 
 
+def _make_repo_with_old_txt(path: Path) -> Path:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
+    (path / "old.txt").write_text("line1\nline2\nline3\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True)
+    return path
+
+
+def test_the_top_level_overlap_is_the_per_group_overlap_not_the_conflict_merged_hotspots(
+    repo_b, home, monkeypatch, tmp_path
+):
+    """A rename (lane a) plus an in-place edit of the same source line (lane
+    b) is a real git merge conflict on `new.txt` -- a path `touched_files`
+    credits to lane a alone (the rename's destination), so raw `overlap()`
+    never calls it a hotspot; only the per-group union with `conflicts` does.
+    `collisions.overlap` is supposed to be exactly the per-group `overlap`
+    blocks merged (prefixed), the same shape a single-repository mission's
+    `overlap` already is -- so a conflict-only path may show up in
+    `groups[i].hotspots` and the top-level `hotspots`, but never inside
+    `overlap.hotspots` itself."""
+    repo_a = _make_repo_with_old_txt(tmp_path / "repo-a")
+
+    def build(spec: Spec) -> list[str]:
+        token = _token(spec)
+        if token == "A":
+            return [
+                "sh",
+                "-c",
+                "git mv old.txt new.txt && printf 'line1\\nCHANGED-A\\nline3\\n' > new.txt",
+            ]
+        if token == "B":
+            return ["sh", "-c", "printf 'line1\\nCHANGED-B\\nline3\\n' > old.txt"]
+        return ["sh", "-c", "echo v3 > other.txt"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "prompt": "SPEC",
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "codex",
+                "mode": "write",
+                "prompt": "A",
+                "cwd": str(repo_a),
+                "commit": "feat: a",
+            },
+            {
+                "name": "b",
+                "fleet": "claude",
+                "mode": "write",
+                "prompt": "B",
+                "cwd": str(repo_a),
+                "commit": "feat: b",
+            },
+            {
+                "name": "c",
+                "fleet": "cursor",
+                "mode": "write",
+                "prompt": "C",
+                "cwd": str(repo_b),
+                "commit": "feat: c",
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+
+    assert result.ok is True
+    groups = {g["cwd"]: g for g in result.collisions["groups"]}
+    group_a = groups[str(repo_a.resolve())]
+    # Sanity: the conflict really does land on new.txt, not old.txt, and the
+    # per-group union hotspots (already correct) include it.
+    assert group_a["overlap"]["hotspots"] == ["old.txt"]
+    assert group_a["hotspots"] == ["new.txt", "old.txt"]
+
+    # The bug: collisions["overlap"] must be the per-group overlap blocks
+    # merged (prefixed) -- never the conflict-merged `hotspots`.
+    assert result.collisions["overlap"]["hotspots"] == [f"{repo_a.resolve()}:old.txt"]
+    # The separate top-level `hotspots` key is unaffected: it is still the
+    # union-with-conflicts, per group, prefixed.
+    assert result.collisions["hotspots"] == sorted(
+        [f"{repo_a.resolve()}:new.txt", f"{repo_a.resolve()}:old.txt"]
+    )
+
+
 # --- the judge and the resolver each see only their own repository -----------
 
 

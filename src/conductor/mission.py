@@ -4312,16 +4312,26 @@ def _execute_mission(
             if len(all_repos) > 1:
                 top_files: dict[str, list[str]] = {}
                 top_lanes: dict[str, int] = {}
+                top_overlap_hotspots: list[str] = []
                 for repo in all_repos:
                     repo_overlap = overlap_by_repo[repo]
                     for path, path_lanes in repo_overlap["files"].items():
                         top_files[f"{repo}:{path}"] = path_lanes
                     for lane_name, count in repo_overlap["lanes"].items():
                         top_lanes[lane_name] = top_lanes.get(lane_name, 0) + count
+                    # `overlap` is the per-group `overlap` blocks merged,
+                    # never the conflict-merged `hotspots` (a merge conflict
+                    # can land on a path -- a rename's destination, say --
+                    # that raw overlap() alone never calls a hotspot).
+                    top_overlap_hotspots.extend(f"{repo}:{h}" for h in repo_overlap["hotspots"])
                 top_hotspots = sorted(
                     f"{group['cwd']}:{h}" for group in groups_out for h in group["hotspots"]
                 )
-                top_overlap = {"files": top_files, "hotspots": top_hotspots, "lanes": top_lanes}
+                top_overlap = {
+                    "files": top_files,
+                    "hotspots": sorted(top_overlap_hotspots),
+                    "lanes": top_lanes,
+                }
             else:
                 top_overlap = groups_out[0]["overlap"]
                 top_hotspots = groups_out[0]["hotspots"]
