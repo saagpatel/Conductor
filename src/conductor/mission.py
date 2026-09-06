@@ -2613,6 +2613,27 @@ def _trusted_lane(
     """Whether a completed receipt is enough to skip every effect of a lane."""
     if result.name != lane.name:
         return False
+    if lane.human:
+        # E7: a human lane has no run receipt; its answer file (and declared
+        # deliverable) on disk is the whole record. The receipt's own
+        # `answer_path` must point at that file, the same artifact check
+        # every other lane's answer gets.
+        if result.ok is not True or result.attempts:
+            return False
+        if not _artifact_matches(
+            result.answer_path, mission_dir / "answers" / f"{lane.name}.txt"
+        ):
+            return False
+        if not (mission_dir / "answers" / f"{lane.name}.txt").is_file():
+            return False
+        deliverable = lane.attempts[0].deliverable
+        if deliverable is not None:
+            resolved = _human_deliverable_path(mission.cwd, deliverable["path"])
+            if not resolved.is_file():
+                return False
+            if not _artifact_matches(result.deliverable_path, resolved):
+                return False
+        return True
     if result.skipped is not None:
         # A lane cancelled because another sink already passed is a settled
         # outcome of a mission that succeeded, not unfinished work; rerunning
@@ -2829,7 +2850,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             # unanswered one is re-asked, the same as any lane that never
             # settled.
             answered = _human_lane_result(mission, lane, mission_dir)
-            if answered is not None:
+            if answered is not None and _trusted_lane(mission, mission_dir, lane, answered):
                 answered.kept = True
                 kept[lane.name] = answered
             else:
@@ -3081,6 +3102,18 @@ def _execute_mission(
     ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
     started = time.monotonic()
     done: dict[str, LaneResult] = dict(resume.kept)
+    # E7 (review finding): a kept human lane never goes through `settle` (it
+    # was never dispatched, so there is no run to wait on), but `settle` is
+    # the only other writer of `lanes/<lane>.json` -- without this, the
+    # on-disk receipt from the original park (`ok: false`, `skipped: "paused:
+    # waiting for the operator"`) would outlive the answer that resolved it,
+    # so anything reading it later (salvage, a golden recording, an
+    # inspector) would see the pause, not the answer.
+    for lane in mission.lanes:
+        if lane.human and lane.name in done:
+            (lanes_dir / f"{lane.name}.json").write_text(
+                json.dumps(done[lane.name].to_dict(), indent=2)
+            )
     sink_names = {lane.name for lane in mission.sinks()}
     # B5 early cancel: a per-lane cancel event, created the moment a lane is
     # dispatched, plus the reason it fired -- written before the event is set,
@@ -4705,11 +4738,18 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     if result.paused and "answer" not in result.paused:
         # An `answer` on `paused` means this is a resolved (`stop`) record,
         # not a mission still waiting on the operator; only the latter gets
-        # the resume line.
+        # the resume line. E7: a human pause's own answer forms are text or
+        # a file, never `continue` (refused: "a human lane needs an
+        # answer") -- the resume line must say so, not the lane/spend forms.
+        resume_forms = (
+            "--answer TEXT, --answer-file PATH, or --answer stop"
+            if result.paused["kind"] == "human"
+            else "--answer continue|stop"
+        )
         lines += [
             "",
             f"**Paused**: {result.paused['question']} Resume with: "
-            f"conductor mission --resume {result.mission_id} --answer continue|stop",
+            f"conductor mission --resume {result.mission_id} {resume_forms}",
         ]
     if result.budget.get("exceeded"):
         lines += ["", f"**Budget exceeded**: {json.dumps(result.budget)}"]

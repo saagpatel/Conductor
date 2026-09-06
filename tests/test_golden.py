@@ -547,6 +547,55 @@ def test_committed_fixture_is_clean_and_within_budget(fixture_dir):
     assert total < golden.DEFAULT_MAX_BYTES
 
 
+# --- E7: a human lane's deliverable through golden -------------------------
+
+
+def test_recorded_human_lane_deliverable_replays_as_answered(repo, home, monkeypatch, tmp_path):
+    """Review finding (Grok, item 3): a human lane's declared deliverable
+    lives in the repo, not under the mission directory, so nothing copied it
+    into the fixture; `_fresh_replay`'s checkout is empty, so the deliverable
+    read at replay time is always missing and the fixture freezes the lane
+    as skipped even though the real, recorded run answered it with the file
+    present. `expected.json` must match what actually happened, not what a
+    replay starved of the file falls back to."""
+    from conductor.mission import Mission
+
+    fake_fleets(monkeypatch, {"claude": say("built")})
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 1,
+        "lanes": [
+            {"name": "build", "fleet": "claude", "prompt": "BUILD"},
+            {
+                "name": "ask",
+                "fleet": "human",
+                "prompt": "Approve {{lanes.build.answer}}?",
+                "needs": ["build"],
+                "deliverable": {"path": "sign-off.txt"},
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is False and first.paused["kind"] == "human"
+
+    (repo / "sign-off.txt").write_text("signed\n")
+    snapshot = Mission.from_snapshot(
+        json.loads((Path(first.mission_dir) / "mission.json").read_text())
+    )
+    resumed = run_mission(
+        snapshot, home=home, resume_dir=Path(first.mission_dir), answer="approved"
+    )
+    assert resumed.ok is True
+
+    fixture = golden.record(Path(resumed.mission_dir), tmp_path / "fixture", home=home)
+    expected = json.loads((fixture / "expected.json").read_text())
+    assert expected["ok"] is True
+    ask_lane = next(lane for lane in expected["lanes"] if lane["name"] == "ask")
+    assert ask_lane["ok"] is True
+    assert golden.check(fixture) == []
+
+
 # --- README ----------------------------------------------------------------
 
 

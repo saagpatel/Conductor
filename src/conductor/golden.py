@@ -424,6 +424,21 @@ def record(
                 answer_src = mission_dir / "answers" / f"{name}.txt"
                 if answer_src.is_file():
                     _copy_text(answer_src, work_answers / f"{name}.txt", replacements)
+                # A declared deliverable lives in the lane's cwd, not under
+                # the mission directory -- `_fresh_replay`'s checkout starts
+                # empty, so without a copy here the fixture would freeze the
+                # lane as "deliverable missing" even though it was answered
+                # with the file present.
+                lane_receipt_src = mission_dir / "lanes" / f"{name}.json"
+                if lane_receipt_src.is_file():
+                    lane_receipt = json.loads(lane_receipt_src.read_text())
+                    deliverable_src = lane_receipt.get("deliverable_path")
+                    if isinstance(deliverable_src, str) and Path(deliverable_src).is_file():
+                        _copy_text(
+                            Path(deliverable_src),
+                            work_answers / f"{name}.deliverable",
+                            replacements,
+                        )
 
         work_runs = work / "runs"
         for run_id in run_ids:
@@ -570,6 +585,12 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
             answer_file = answers_dir / f"{lane.name}.txt"
             if answer_file.is_file():
                 human_answers[lane.name] = restore(answer_file.read_text())
+            deliverable = lane.attempts[0].deliverable
+            deliverable_file = answers_dir / f"{lane.name}.deliverable"
+            if deliverable is not None and deliverable_file.is_file():
+                dest = Path(cwd) / deliverable["path"]
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(restore(deliverable_file.read_text()))
 
     lane_recordings = _lane_recordings(fixture_dir)
     differences: list[str] = []

@@ -357,6 +357,21 @@ def test_human_lane_parks_the_mission_and_renders_the_ask(repo, home, monkeypatc
     assert result.notifications[0]["ok"] is True
 
 
+def test_report_resume_line_names_a_human_lanes_actual_answer_forms(
+    repo, home, monkeypatch, tmp_path
+):
+    """Review finding (Grok, item 4): a human pause's report.md must not tell
+    the operator to resume with `--answer continue|stop` -- `continue` is
+    refused on a human pause (`a human lane needs an answer`); the forms
+    that actually work are `--answer TEXT` and `--answer-file PATH`."""
+    by_prompt(monkeypatch, {"BUILD": ("built", None)})
+    mission = mission_from_dict(_pipeline(repo), base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    report = Path(result.report_path).read_text()
+    assert "--answer continue|stop" not in report
+    assert "--answer TEXT" in report or "--answer-file PATH" in report
+
+
 def test_answer_text_resumes_and_the_answer_is_fenced_downstream(
     repo, home, monkeypatch, tmp_path
 ):
@@ -399,6 +414,16 @@ def test_answer_text_resumes_and_the_answer_is_fenced_downstream(
     assert record["answered_at"]
     # The text itself is on disk once (answers/ask.txt), never a second time.
     assert "ship it" not in json.dumps(pause_doc)
+
+    # Review finding (Grok, item 2): the per-lane receipt file is the durable
+    # record salvage, golden recording, and any later inspector reads --
+    # `settle` is the only writer of it, but a kept human lane never goes
+    # through `settle`, so answering must not leave it saying the lane never
+    # started.
+    lane_receipt = json.loads((Path(resumed.mission_dir) / "lanes" / "ask.json").read_text())
+    assert lane_receipt["ok"] is True
+    assert lane_receipt["skipped"] is None
+    assert lane_receipt["answer_path"] == str(answer_path)
 
 
 def test_answer_file_resumes(repo, home, monkeypatch, tmp_path):
@@ -583,3 +608,33 @@ def test_readme_documents_human_lanes():
     assert "kind: \"human\"" in section
     assert "conductor mission --resume MISSION_ID --answer-file notes.txt" in section
     assert "never the text itself a second time" in section
+
+
+def test_answered_human_lane_is_trusted_through_trusted_lane_on_its_answer_file(
+    repo, home, monkeypatch, tmp_path
+):
+    """Grok's fourth E7 finding: the trust helper itself accepts an answered
+    human lane on its answer file, and rejects a receipt whose answer_path
+    points elsewhere or a lane whose answer file is gone."""
+    from conductor.mission import LaneResult, _trusted_lane
+
+    by_prompt(monkeypatch, {"BUILD": ("built", None)})
+    mission = mission_from_dict(_pipeline(repo), base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('used')}'"]
+    )
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="ok"
+    )
+    mission_dir = Path(resumed.mission_dir)
+    lane = next(lane for lane in mission.lanes if lane.name == "ask")
+    receipt = LaneResult.from_dict(json.loads((mission_dir / "lanes" / "ask.json").read_text()))
+    # The receipt on disk was rewritten by the answer (Grok's second finding).
+    assert receipt.ok is True and receipt.skipped is None
+    assert receipt.answer_path == str(mission_dir / "answers" / "ask.txt")
+    assert _trusted_lane(mission, mission_dir, lane, receipt) is True
+    elsewhere = LaneResult.from_dict({**receipt.to_dict(), "answer_path": str(tmp_path / "x")})
+    assert _trusted_lane(mission, mission_dir, lane, elsewhere) is False
+    (mission_dir / "answers" / "ask.txt").unlink()
+    assert _trusted_lane(mission, mission_dir, lane, receipt) is False
