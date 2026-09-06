@@ -2451,6 +2451,10 @@ class MissionResult:
     # resume, and a dry run alike. Every warning here is also appended to
     # `notes`; this block keeps the per-lane figures behind them.
     forecast: dict = field(default_factory=dict)
+    # E19: every distinct repository (E26 `cwd`) this mission's lanes
+    # resolve to, sorted -- a one-lane, one-repository mission gets exactly
+    # that one entry, same as it always implicitly ran in.
+    repositories: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -3271,7 +3275,11 @@ def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
         return False
     tip = resolve.get("tip")
     if tip:
-        commit = git_run(mission.cwd, "cat-file", "-e", f"{tip}^{{commit}}")
+        # E19: the resolver committed in the sinks' own repository (E26,
+        # enforced single by `Mission.validate`), never the mission's own
+        # cwd when the two differ.
+        resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
+        commit = git_run(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
         if commit.returncode != 0:
             return False
     return True
@@ -4229,55 +4237,110 @@ def _execute_mission(
             if kind:
                 errors_out[kind] = errors_out.get(kind, 0) + 1
 
-    # D1: every sink lane's diff and clean tip, so a mission-wide conflict
+    # D1/E19: every sink lane's diff and clean tip, so a mission-wide conflict
     # picture exists before the collate ever sees it. Skipped, like the
     # collate, once the mission has parked on a pause point: a hotspot
     # computed over half-finished sinks would be premature.
+    #
+    # E19: a collision is the same path in the same repository -- overlap
+    # (like merge_conflicts already did) is computed per cwd group, never
+    # across two sinks that landed in different repositories. Each group
+    # keeps its own, unprefixed `overlap`/`hotspots`; the top-level
+    # `overlap`/`hotspots` is the union of every group's, each path prefixed
+    # `<cwd>:` the moment more than one repository is involved, so two
+    # repositories' same-named files never merge into one hotspot. A
+    # single-repository mission's top level is exactly that one group,
+    # unprefixed -- identical to what this produced before E19.
     collisions_out: dict | None = None
     if pause_park is None and not dry_run:
         sink_lane_results = [lane for lane in lane_results if lane.name in sink_names]
-        diffs = {
-            lane.name: Path(lane.diff_path).read_text(errors="replace")
-            for lane in sink_lane_results
-            if lane.diff_path and Path(lane.diff_path).is_file()
-        }
-        if len(diffs) >= 2:
-            overlap_out = collisions_mod.overlap(diffs)
+        diffs_by_cwd: dict[str, dict[str, str]] = {}
+        for lane in sink_lane_results:
+            if lane.diff_path and Path(lane.diff_path).is_file():
+                repo = lane.cwd or mission.cwd
+                diffs_by_cwd.setdefault(repo, {})[lane.name] = Path(lane.diff_path).read_text(
+                    errors="replace"
+                )
+        if sum(len(group) for group in diffs_by_cwd.values()) >= 2:
             # E26: a merge is only ever asked of git within one repository --
             # sinks that landed in different cwds are never paired, even
             # when both left a clean tip.
             clean_lanes = [lane for lane in sink_lane_results if lane.tip_sha and lane.clean]
-            cwd_groups: dict[str, list[str]] = {}
+            conflict_cwd_groups: dict[str, list[str]] = {}
             for lane in clean_lanes:
-                cwd_groups.setdefault(lane.cwd or mission.cwd, []).append(lane.name)
+                conflict_cwd_groups.setdefault(lane.cwd or mission.cwd, []).append(lane.name)
             tips_by_name = {lane.name: lane.tip_sha for lane in clean_lanes}
+
+            all_repos = sorted(set(diffs_by_cwd) | set(conflict_cwd_groups))
             conflict_pairs: list[dict] = []
             conflict_files: dict[str, list[list[str]]] = {}
-            for repo in sorted(cwd_groups):
-                names = cwd_groups[repo]
-                if len(names) < 2:
-                    continue
-                group_out = collisions_mod.merge_conflicts(
-                    repo, {name: tips_by_name[name] for name in names}
+            overlap_by_repo: dict[str, dict] = {}
+            groups_out: list[dict] = []
+            for repo in all_repos:
+                repo_diffs = diffs_by_cwd.get(repo, {})
+                repo_overlap = (
+                    collisions_mod.overlap(repo_diffs)
+                    if repo_diffs
+                    else {"files": {}, "hotspots": [], "lanes": {}}
                 )
-                conflict_pairs.extend(group_out["pairs"])
-                for path, pairs in group_out["files"].items():
-                    conflict_files.setdefault(path, []).extend(pairs)
+                overlap_by_repo[repo] = repo_overlap
+
+                names = conflict_cwd_groups.get(repo, [])
+                repo_conflict_files: dict[str, list[list[str]]] = {}
+                if len(names) >= 2:
+                    group_out = collisions_mod.merge_conflicts(
+                        repo, {name: tips_by_name[name] for name in names}
+                    )
+                    conflict_pairs.extend(group_out["pairs"])
+                    repo_conflict_files = group_out["files"]
+                    for path, pairs in repo_conflict_files.items():
+                        conflict_files.setdefault(path, []).extend(pairs)
+
+                repo_hotspots = sorted(set(repo_overlap["hotspots"]) | set(repo_conflict_files))
+                groups_out.append(
+                    {
+                        "cwd": repo,
+                        "lanes": sorted(set(repo_diffs) | set(names)),
+                        "hotspots": repo_hotspots,
+                        "overlap": repo_overlap,
+                    }
+                )
             conflicts_out = (
                 {"pairs": conflict_pairs, "files": conflict_files} if conflict_pairs else None
             )
-            conflict_paths = {
-                path
-                for pair in (conflicts_out or {}).get("pairs", [])
-                for path in pair.get("conflicts") or []
-            }
+
+            if len(all_repos) > 1:
+                top_files: dict[str, list[str]] = {}
+                top_lanes: dict[str, int] = {}
+                top_overlap_hotspots: list[str] = []
+                for repo in all_repos:
+                    repo_overlap = overlap_by_repo[repo]
+                    for path, path_lanes in repo_overlap["files"].items():
+                        top_files[f"{repo}:{path}"] = path_lanes
+                    for lane_name, count in repo_overlap["lanes"].items():
+                        top_lanes[lane_name] = top_lanes.get(lane_name, 0) + count
+                    # `overlap` is the per-group `overlap` blocks merged,
+                    # never the conflict-merged `hotspots` (a merge conflict
+                    # can land on a path -- a rename's destination, say --
+                    # that raw overlap() alone never calls a hotspot).
+                    top_overlap_hotspots.extend(f"{repo}:{h}" for h in repo_overlap["hotspots"])
+                top_hotspots = sorted(
+                    f"{group['cwd']}:{h}" for group in groups_out for h in group["hotspots"]
+                )
+                top_overlap = {
+                    "files": top_files,
+                    "hotspots": sorted(top_overlap_hotspots),
+                    "lanes": top_lanes,
+                }
+            else:
+                top_overlap = groups_out[0]["overlap"]
+                top_hotspots = groups_out[0]["hotspots"]
+
             collisions_out = {
-                "overlap": overlap_out,
+                "overlap": top_overlap,
                 "conflicts": conflicts_out,
-                "hotspots": sorted(set(overlap_out["hotspots"]) | conflict_paths),
-                "groups": [
-                    {"cwd": repo, "lanes": sorted(cwd_groups[repo])} for repo in sorted(cwd_groups)
-                ],
+                "hotspots": top_hotspots,
+                "groups": groups_out,
             }
 
     collate_out: dict | None = None
@@ -4304,7 +4367,10 @@ def _execute_mission(
                 mission_dir,
                 base,
                 ranking=ranking,
-                collisions=collisions_out,
+                # E19: the collate always dispatches at the mission's own cwd
+                # (see col.spec below) -- its collisions section is scoped to
+                # that one repository's group, never another's.
+                collisions=_collisions_for_cwd(collisions_out, mission.cwd),
             )
 
     # D1: the resolver lane, dispatched after the collate (or right after the
@@ -4460,6 +4526,9 @@ def _execute_mission(
         ceiling=ceiling_result,
         unattended=unattended,
         forecast=forecast_result.to_dict() if forecast_result is not None else {},
+        repositories=sorted(
+            {lane.attempts[0].effective_cwd(mission.cwd) for lane in mission.lanes}
+        ),
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -4691,6 +4760,34 @@ def _collision_lines(collisions: dict) -> list[str]:
             text += " (conflict: " + "; ".join(", ".join(pair) for pair in pairs) + ")"
         lines.append(text)
     return lines
+
+
+def _collisions_for_cwd(collisions: dict | None, cwd: str) -> dict | None:
+    """E19: the `{"overlap", "conflicts", "hotspots"}` shape `_collision_lines`
+    already reads, scoped to one repository's own group -- so a judge or the
+    resolver, each anchored to one cwd, never sees another repository's
+    paths even though the mission's top-level `hotspots`/`overlap` carry
+    every group's, `<cwd>:`-prefixed. `None` when `collisions` names no group
+    for `cwd` (a collate whose own dispatch cwd matches none of the sinks'
+    repositories, say) -- the same as no collisions at all."""
+    if not collisions:
+        return None
+    group = next((g for g in collisions.get("groups") or [] if g["cwd"] == cwd), None)
+    if group is None:
+        return None
+    lane_set = set(group["lanes"])
+    conflicts = collisions.get("conflicts") or {}
+    pairs = [pair for pair in conflicts.get("pairs") or [] if set(pair["lanes"]) <= lane_set]
+    files: dict[str, list[list[str]]] = {}
+    for path, path_pairs in (conflicts.get("files") or {}).items():
+        kept = [pair for pair in path_pairs if set(pair) <= lane_set]
+        if kept:
+            files[path] = kept
+    return {
+        "overlap": group["overlap"],
+        "conflicts": {"pairs": pairs, "files": files} if pairs else None,
+        "hotspots": group["hotspots"],
+    }
 
 
 def _collisions_section(collisions: dict | None) -> str:
@@ -5270,19 +5367,28 @@ def _run_resolve(
     collisions: dict | None,
     strongest: str | None,
 ) -> dict:
-    """D1's resolver lane: one write-mode, isolated dispatch from the mission
-    HEAD, gated by the mission's own `test`, only when the sinks actually
-    collided. `lanes` are the mission's sink lanes, in mission order."""
+    """D1's resolver lane: one write-mode, isolated dispatch from the sinks'
+    own repository, gated by the mission's own `test`, only when the sinks
+    actually collided. `lanes` are the mission's sink lanes, in mission
+    order.
+
+    E19: `Mission.validate` already refuses a `resolve` block whose sinks
+    span more than one cwd, so exactly one repository is ever in play here;
+    the resolver dispatches, is gated, and is checked for a leftover tip
+    (`_resolve_is_trusted`) in that repository, never the mission's own cwd
+    when the two differ."""
     res = mission.resolve
     assert res is not None
-    if not collisions or not collisions.get("hotspots"):
+    resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
+    scoped = _collisions_for_cwd(collisions, resolve_cwd)
+    if not scoped or not scoped.get("hotspots"):
         return {"ran": False, "reason": "no hotspots"}
     why = ledger.blocker()
     if why:
         return {"ran": False, "reason": f"{why}; resolve not started"}
     candidates = [lane for lane in lanes if lane.diff_path and Path(lane.diff_path).is_file()]
     prompt = _with_prefix(
-        mission, _resolve_prompt(mission, candidates, collisions, res, strongest)
+        mission, _resolve_prompt(mission, candidates, scoped, res, strongest)
     )
     (mission_dir / "resolve-prompt.txt").write_text(prompt)
     from . import prompts as prompts_mod
@@ -5293,7 +5399,7 @@ def _run_resolve(
         else {}
     )
     result = dispatch(
-        res.spec(mission.cwd, prompt, cap_usd=_tighter(res.cap_usd, ledger.remaining())),
+        res.spec(resolve_cwd, prompt, cap_usd=_tighter(res.cap_usd, ledger.remaining())),
         isolate=True,
         home=base,
         prompt_versions=used_versions,
@@ -5316,7 +5422,7 @@ def _run_resolve(
         "cache_write_tokens": summary.get("cache_write_tokens"),
         "branch": iso.get("branch") or "",
         "tip": iso.get("tip_sha") or "",
-        "hotspots": list(collisions.get("hotspots") or []),
+        "hotspots": list(scoped.get("hotspots") or []),
         "error": summary.get("error"),
     }
 

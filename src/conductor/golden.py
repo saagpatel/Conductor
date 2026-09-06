@@ -104,15 +104,44 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
-def _placeholder_map(*, home: Path, cwd: str | None) -> list[tuple[str, str]]:
+def _placeholder_map(
+    *, home: Path, cwd: str | None, extra: list[tuple[str, str]] | None = None
+) -> list[tuple[str, str]]:
     """(real value, placeholder) pairs, longest real value first, so a home
     nested inside the user's own home is replaced before the shorter path
-    that contains it."""
+    that contains it.
+
+    E19: `extra` is every repository beyond the mission's own `cwd` a
+    cross-repo mission's lanes named (E26), already paired with its own
+    `<cwd2>`, `<cwd3>`, ... placeholder by the caller -- `record`'s own
+    first-appearance walk, or `replay`'s `cwds` argument."""
     pairs: list[tuple[str, str]] = [(str(home), "<home>"), (str(Path.home()), "<user>")]
     if cwd:
         pairs.append((str(cwd), "<cwd>"))
+    if extra:
+        pairs.extend(extra)
     pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
     return [pair for pair in pairs if pair[0]]
+
+
+_CWD_PLACEHOLDER_RE = re.compile(r"<cwd(\d+)>")
+
+
+def _extra_cwds(mission_raw: dict, cwd: str | None) -> list[str]:
+    """E19: every distinct lane- or attempt-level `cwd` (E26) in
+    `mission_raw` other than the mission's own, in first-appearance order --
+    what `record` gives a `<cwd2>`, `<cwd3>`, ... placeholder each."""
+    seen: list[str] = []
+    for lane in mission_raw.get("lanes") or []:
+        if not isinstance(lane, dict):
+            continue
+        for attempt in lane.get("attempts") or []:
+            if not isinstance(attempt, dict):
+                continue
+            value = attempt.get("cwd")
+            if isinstance(value, str) and value and value != cwd and value not in seen:
+                seen.append(value)
+    return seen
 
 
 def scrub_text(text: str, replacements: list[tuple[str, str]]) -> str:
@@ -173,17 +202,24 @@ def _decode_base64_runs(line: str) -> list[str]:
     return decoded
 
 
-def scrub_guard(path: str | Path) -> list[str]:
+def scrub_guard(path: str | Path, *, extra: list[tuple[str, str]] | None = None) -> list[str]:
     """Every occurrence in a fixture directory of the user's home path, the
-    conductor home, or any of the scrub's secret patterns, as
-    `file:line: <pattern name>`, including one hiding inside a base64-encoded
-    run (`file:line: <pattern name> (base64)`); empty when clean."""
+    conductor home, any of `extra`'s (path, label) pairs, or any of the
+    scrub's secret patterns, as `file:line: <pattern name>`, including one
+    hiding inside a base64-encoded run (`file:line: <pattern name>
+    (base64)`); empty when clean.
+
+    E19: `extra` lets a caller that knows a mission's own repository paths
+    (a cross-repo mission's, say) check for them too -- `scrub_guard` itself
+    has no way to recover a real path from an already-scrubbed fixture, so it
+    cannot find one it is not told about."""
     from .paths import conductor_home
 
     path = Path(path)
     patterns: list[tuple[str, str]] = [
         (str(Path.home()), "user home"),
         (str(conductor_home()), "conductor home"),
+        *(extra or []),
     ]
     findings: list[str] = []
     for file in sorted(p for p in path.rglob("*") if p.is_file()):
@@ -394,7 +430,14 @@ def record(
         raise GoldenError(f"{mission_dir}: no mission.json")
     mission_raw = json.loads(snapshot_path.read_text())
     cwd = mission_raw.get("cwd")
-    replacements = _placeholder_map(home=home, cwd=cwd)
+    # E19: a cross-repo mission's other repositories (E26 lane/attempt `cwd`)
+    # each get their own `<cwd2>`, `<cwd3>`, ... placeholder, in the order
+    # they first appear in the mission's lanes, so the fixture scrubs clean
+    # even when a lane's repository is not the mission's own.
+    extra_pairs = [
+        (path, f"<cwd{2 + i}>") for i, path in enumerate(_extra_cwds(mission_raw, cwd))
+    ]
+    replacements = _placeholder_map(home=home, cwd=cwd, extra=extra_pairs)
 
     lanes_dir = mission_dir / "lanes"
     lane_files = sorted(lanes_dir.glob("*.json")) if lanes_dir.is_dir() else []
@@ -510,7 +553,7 @@ def record(
             # moved; null-map fixtures (recorded before this field existed)
             # read as unknown, never as a failure.
             "prompt_versions": prompts_mod.prompt_versions(),
-            "placeholders": ["<home>", "<cwd>", "<user>"],
+            "placeholders": ["<home>", "<cwd>", "<user>", *(p for _, p in extra_pairs)],
             "files": files,
         }
         (work / "golden.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
@@ -565,10 +608,48 @@ def _lane_recordings(fixture_dir: Path) -> dict[str, list[tuple[str, str]]]:
     return out
 
 
-def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
+def _init_replay_repo(path: Path) -> None:
+    """An empty git repository with one commit -- the same shape
+    `_fresh_replay`'s own `cwd` gets -- so a lane dispatched into it can
+    still gate, diff, and commit."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "golden@example.invalid"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "golden"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "golden"], cwd=path, check=True)
+
+
+def _resolve_extra_cwds(
+    mission_text: str, home: Path, cwds: dict[str, str] | None
+) -> dict[str, str]:
+    """E19: every `<cwd2>`, `<cwd3>`, ... placeholder `mission_text` actually
+    uses, mapped to a real directory -- the caller's own `cwds`, when given,
+    else a fresh empty repository under `home` created just for the replay."""
+    cwds = cwds or {}
+    out: dict[str, str] = {}
+    for n in sorted({int(m) for m in _CWD_PLACEHOLDER_RE.findall(mission_text)}):
+        placeholder = f"<cwd{n}>"
+        if placeholder in cwds:
+            out[placeholder] = str(Path(cwds[placeholder]).resolve())
+            continue
+        repo_dir = home / f"_replay_cwd{n}"
+        _init_replay_repo(repo_dir)
+        out[placeholder] = str(repo_dir.resolve())
+    return out
+
+
+def replay(
+    fixture_dir: str | Path, *, home: Path, cwd: str, cwds: dict[str, str] | None = None
+) -> Replay:
     """Load a fixture's mission snapshot and run it again through
     `mission.run_mission`, with a dispatcher that replays each attempt's
-    recorded receipt instead of spawning a fleet."""
+    recorded receipt instead of spawning a fleet.
+
+    E19: `cwds` maps each extra `<cwd2>`, `<cwd3>`, ... placeholder a
+    cross-repo fixture uses to a real directory; a placeholder the caller
+    does not name gets a fresh empty repository under `home` instead, so a
+    fixture recorded before this field existed (or replayed by a caller that
+    never names one) still replays."""
     fixture_dir = Path(fixture_dir)
     home = Path(home)
     # `mission_from_dict` resolves `cwd` (symlinks included) when it loads a
@@ -576,7 +657,11 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
     # way, so a `cwd` that is not already resolved (macOS's /tmp -> /private
     # /tmp, for one) would make every snapshot fail to round-trip.
     cwd = str(Path(cwd).resolve())
-    mission_text = (fixture_dir / "mission.json").read_text().replace("<cwd>", cwd)
+    raw_mission_text = (fixture_dir / "mission.json").read_text()
+    mission_text = raw_mission_text.replace("<cwd>", cwd)
+    extra_cwds = _resolve_extra_cwds(raw_mission_text, home, cwds)
+    for placeholder, real in extra_cwds.items():
+        mission_text = mission_text.replace(placeholder, real)
     # A fixture recorded before a schema field existed (D2's `taint`, C5's
     # `retry`/`on`, ...) predates that field in its own mission.json; without
     # backfilling here, every such fixture would stop replaying the moment
@@ -586,7 +671,10 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
     user_home = str(home / "_replay_user_home")
 
     def restore(text: str) -> str:
-        return text.replace("<cwd>", cwd).replace("<home>", str(home)).replace("<user>", user_home)
+        text = text.replace("<cwd>", cwd).replace("<home>", str(home)).replace("<user>", user_home)
+        for placeholder, real in extra_cwds.items():
+            text = text.replace(placeholder, real)
+        return text
 
     # E7: a human lane's recorded answer stands in for the operator -- see
     # `record`'s `answers/` copy and `_execute_mission`'s `human_answers`.
@@ -692,7 +780,11 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
         # restored to real paths, and the freshly rendered prompt is scrubbed
         # the same way here, so a real replay `cwd`/`home` never leaks into
         # the comparison (or the diff) by accident.
-        replacements = _placeholder_map(home=Path(home), cwd=cwd)
+        replacements = _placeholder_map(
+            home=Path(home),
+            cwd=cwd,
+            extra=[(real, placeholder) for placeholder, real in extra_cwds.items()],
+        )
         rendered_mapped = _strip_nonce(scrub_text(spec.prompt, replacements))
         prompt_sha256 = hashlib.sha256(rendered_mapped.encode()).hexdigest()
 
@@ -735,21 +827,14 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
     )
 
 
-def _fresh_replay(fixture_dir: Path) -> Replay:
+def _fresh_replay(fixture_dir: Path, *, cwds: dict[str, str] | None = None) -> Replay:
     with (
         tempfile.TemporaryDirectory(prefix="conductor-golden-home-") as home_dir,
         tempfile.TemporaryDirectory(prefix="conductor-golden-cwd-") as cwd_dir,
     ):
         cwd_path = Path(cwd_dir)
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=cwd_path, check=True)
-        subprocess.run(
-            ["git", "config", "user.email", "golden@example.invalid"], cwd=cwd_path, check=True
-        )
-        subprocess.run(["git", "config", "user.name", "golden"], cwd=cwd_path, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "--allow-empty", "-m", "golden"], cwd=cwd_path, check=True
-        )
-        return replay(fixture_dir, home=Path(home_dir), cwd=str(cwd_path))
+        _init_replay_repo(cwd_path)
+        return replay(fixture_dir, home=Path(home_dir), cwd=str(cwd_path), cwds=cwds)
 
 
 # --- projection and check ---------------------------------------------------
@@ -909,14 +994,20 @@ def _backfill_prompt_sha256(fixture_dir: Path, expected: dict) -> dict:
     return expected
 
 
-def check(fixture_dir: str | Path, *, update: bool = False) -> list[str]:
+def check(
+    fixture_dir: str | Path, *, update: bool = False, cwds: dict[str, str] | None = None
+) -> list[str]:
     """Replay a fixture into a fresh temporary home and a fresh temporary
     git repository (one empty commit) as `cwd`. Returns the replay's own
     differences plus, unless `update`, one line per projection field that
     differs from the fixture's `expected.json`. `update` rewrites
-    `expected.json` from the replay instead."""
+    `expected.json` from the replay instead.
+
+    E19: `cwds` is `replay`'s own -- a cross-repo fixture's extra
+    placeholders each get a fresh empty repository when the caller does not
+    name one."""
     fixture_dir = Path(fixture_dir)
-    replayed = _fresh_replay(fixture_dir)
+    replayed = _fresh_replay(fixture_dir, cwds=cwds)
     expected_path = fixture_dir / "expected.json"
     if update:
         expected_path.write_text(json.dumps(replayed.projection, indent=2, sort_keys=True))
