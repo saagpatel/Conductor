@@ -1755,7 +1755,10 @@ def _usd(value: float | None) -> str:
 
 
 def _cache_summary(
-    lane_results: list[LaneResult], previous_collates: list[dict], collate_out: dict | None
+    lane_results: list[LaneResult],
+    previous_collates: list[dict],
+    collate_out: dict | None,
+    resolve_out: dict | None = None,
 ) -> dict:
     """B2: the mission's whole cache picture, one place. `hit_rate` is what
     share of everything read came from the cache rather than paying for it
@@ -1763,7 +1766,7 @@ def _cache_summary(
     input_tokens = sum(lane.input_tokens for lane in lane_results)
     cache_read = sum(lane.cache_read_tokens for lane in lane_results)
     cache_write = sum(lane.cache_write_tokens for lane in lane_results)
-    for item in [*previous_collates, collate_out or {}]:
+    for item in [*previous_collates, collate_out or {}, resolve_out or {}]:
         input_tokens += int(item.get("input_tokens") or 0)
         cache_read += int(item.get("cache_read_tokens") or 0)
         cache_write += int(item.get("cache_write_tokens") or 0)
@@ -2004,6 +2007,7 @@ class _ResumePlan:
     prior_result: dict | None = None
     history: list[dict] = field(default_factory=list)
     collate: str | None = None
+    resolve: str | None = None
     notes: list[str] = field(default_factory=list)
     spent_usd: float = 0.0
     unpriced_dispatches: int = 0
@@ -2245,6 +2249,9 @@ def _run_receipt_spend(
             if isinstance(old_collate, dict):
                 for run_id, record in _collate_run_ids(old_collate):
                     attempts.setdefault(run_id, record)
+    resolve = (prior_result or {}).get("resolve")
+    if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
+        attempts.setdefault(resolve["run_id"], resolve)
 
     spent = 0.0
     unpriced = 0
@@ -2302,6 +2309,27 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
     ) and isinstance(answer, str)
 
 
+def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
+    """D1 (cross-vendor review): whether a prior `resolve` outcome may be kept
+    as-is rather than re-dispatched. Only called once no sink lane reran, so
+    the collisions the resolver saw cannot have changed; still refuses to
+    keep a run that failed (retried on resume like any other failed write)
+    or whose committed tip has since vanished."""
+    resolve = (prior_result or {}).get("resolve")
+    if not isinstance(resolve, dict):
+        return False
+    if not resolve.get("ran"):
+        return True  # nothing was dispatched; there is nothing to redo
+    if resolve.get("ok") is not True:
+        return False
+    tip = resolve.get("tip")
+    if tip:
+        commit = git_run(mission.cwd, "cat-file", "-e", f"{tip}^{{commit}}")
+        if commit.returncode != 0:
+            return False
+    return True
+
+
 def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _ResumePlan:
     prior_result = _json_object(mission_dir / "result.json")
     history = (prior_result or {}).get("resumes")
@@ -2337,6 +2365,13 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             if not rerun and _collate_is_trusted(mission_dir, prior_result)
             else "rerun"
         )
+    resolve: str | None = None
+    if mission.resolve:
+        resolve = (
+            "kept"
+            if not rerun and _resolve_is_trusted(mission, prior_result)
+            else "rerun"
+        )
     spent, unpriced = _run_receipt_spend(base, previous, prior_result)
     return _ResumePlan(
         previous=previous,
@@ -2345,6 +2380,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         prior_result=prior_result,
         history=list(history),
         collate=collate,
+        resolve=resolve,
         spent_usd=spent,
         notes=notes,
         unpriced_dispatches=unpriced + accounting_unknown,
@@ -3034,11 +3070,14 @@ def _execute_mission(
     # sinks when there is none) so it can see which lane a rank collate named
     # strongest.
     resolve_out: dict | None = None
-    if mission.resolve is not None:
+    if pause_park is not None:
+        pass  # consistent with the collate: a parked mission starts nothing new
+    elif mission.resolve is not None and resume.resolve == "kept":
+        prior_resolve = (resume.prior_result or {}).get("resolve")
+        resolve_out = dict(prior_resolve) if isinstance(prior_resolve, dict) else None
+    elif mission.resolve is not None:
         if dry_run:
             resolve_out = {"ran": False, "reason": "dry run"}
-        elif pause_park is not None:
-            pass  # consistent with the collate: a parked mission starts nothing new
         elif not stop_requested():
             resolve_strongest = None
             if collate_out and collate_out.get("rank") and collate_out.get("ok"):
@@ -3145,8 +3184,9 @@ def _execute_mission(
             sum(lane.tokens for lane in lane_results)
             + sum(int(item.get("tokens") or 0) for item in previous_collates)
             + int((collate_out or {}).get("tokens") or 0)
+            + int((resolve_out or {}).get("tokens") or 0)
         ),
-        cache=_cache_summary(lane_results, previous_collates, collate_out),
+        cache=_cache_summary(lane_results, previous_collates, collate_out, resolve_out),
         duration_s=duration,
         budget=budget_state,
         collate=collate_out,
@@ -3707,6 +3747,9 @@ def _run_resolve(
             round(summary["cost_usd"], 6) if summary.get("cost_usd") is not None else None
         ),
         "tokens": summary.get("tokens"),
+        "input_tokens": summary.get("input_tokens"),
+        "cache_read_tokens": summary.get("cache_read_tokens"),
+        "cache_write_tokens": summary.get("cache_write_tokens"),
         "branch": iso.get("branch") or "",
         "tip": iso.get("tip_sha") or "",
         "hotspots": list(collisions.get("hotspots") or []),

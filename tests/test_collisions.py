@@ -384,6 +384,58 @@ def test_resolve_snapshot_round_trips(repo, home, tmp_path):
     assert reloaded.resolve.fleet == "cursor" and reloaded.resolve.max_chars == 500
 
 
+# --- resume accounting (cross-vendor review findings) -----------------------------
+
+
+def test_resolve_is_kept_on_resume_when_nothing_reran(repo, home, monkeypatch, tmp_path):
+    """A resume that keeps every sink lane must not re-dispatch (and re-commit)
+    the resolver: its hotspots cannot have changed if nothing upstream reran."""
+    calls = {"cursor": 0}
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            calls["cursor"] += 1
+            return ["sh", "-c", "echo merged > resolved.txt"]
+        return HOTSPOT_BUILD[spec.prompt.split()[0]]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is True and first.resolve["ran"] is True and first.resolve["ok"] is True
+    assert calls["cursor"] == 1
+
+    raw = json.loads((Path(first.mission_dir) / "mission.json").read_text())
+    reloaded = Mission.from_snapshot(raw)
+    resumed = run_mission(reloaded, home=home, resume_dir=Path(first.mission_dir))
+
+    assert calls["cursor"] == 1  # not re-dispatched
+    assert resumed.resolve == first.resolve
+
+
+def test_mission_tokens_include_the_resolvers_tokens(repo, home, monkeypatch, tmp_path):
+    """`cost_usd` already includes the resolver (it shares the ledger); the
+    mission's `tokens` total must not silently drop it."""
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            envelope = json.dumps(
+                {"result": "merged", "usage": {"input_tokens": 100, "output_tokens": 5}}
+            )
+            return ["sh", "-c", f"echo merged > resolved.txt && echo '{envelope}'"]
+        return HOTSPOT_BUILD[spec.prompt.split()[0]]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+
+    result = run_mission(mission, home=home)
+
+    assert result.resolve["ran"] is True
+    assert result.resolve["tokens"]
+    assert result.tokens == result.resolve["tokens"]
+    # The cache summary folds the resolver in too (lead edit after the review).
+    assert result.cache["input_tokens"] == result.resolve["input_tokens"] == 100
+
+
 # --- documentation ---------------------------------------------------------------
 
 
