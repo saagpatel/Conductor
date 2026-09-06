@@ -178,6 +178,42 @@ def test_collate_over_a_tainted_sink_is_refused_off_claude(tmp_path):
         mission_from_dict(raw, base_dir=tmp_path)
 
 
+def test_collate_over_a_tainted_non_sink_lane_is_refused_at_load(tmp_path):
+    """Cross-vendor review: load-time validation only checked `self.sinks()`,
+    but `_run_collate` is handed every lane in the mission
+    (`lane_results = [done[lane.name] for lane in mission.lanes]`) and, with
+    the default `candidates: 0`, `_collate_candidates` returns that whole
+    list unfiltered -- not just the sinks. A tainted lane that is not a sink
+    (here, `a`, needed by `b` through `base`) therefore still reaches the
+    collate prompt at runtime and taints its `Spec`, even though the load-time
+    check that only looked at sinks saw nothing tainted and let an
+    off-claude collate fleet through. That mismatch must be refused at load,
+    not discovered as an uncaught `DispatchRefused` out of `run_mission`."""
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write", "taint": True, "prompt": "A"},
+            {"name": "b", "fleet": "claude", "mode": "read", "base": "a", "prompt": "B"},
+        ],
+        "collate": {"fleet": "antigravity"},
+    }
+    with pytest.raises(MissionInvalid, match="taint is enforceable on the claude fleet only"):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_collate_refusal_names_the_tainted_lane(tmp_path):
+    """Spec item 2: every taint refusal is 'refused at load, naming the
+    lane'. The lane and branch refusals do; the collate refusal did not."""
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [{"name": "a", "fleet": "claude", "taint": True, "prompt": "A"}],
+        "collate": {"fleet": "antigravity"},
+    }
+    with pytest.raises(MissionInvalid) as exc_info:
+        mission_from_dict(raw, base_dir=tmp_path)
+    assert "'a'" in str(exc_info.value)
+
+
 def test_collate_over_an_untainted_mission_is_unaffected(tmp_path):
     raw = {
         "cwd": "/tmp",

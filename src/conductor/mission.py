@@ -423,10 +423,17 @@ class Mission:
                 raise MissionInvalid("collate rank needs at least two lanes")
             if self.collate.candidates and self.collate.candidates < 2:
                 raise MissionInvalid("collate candidates must be at least 2")
-            # D2: which sink could hand the collate tainted text is not known
-            # until the mechanical ranking runs (`candidates` may narrow it),
-            # so every sink is checked conservatively at load.
-            collate_tainted = any(lane.tainted for lane in self.sinks())
+            # D2: `_run_collate` hands every mission lane to `_collate_candidates`,
+            # which returns them all unfiltered whenever `candidates` is the
+            # default 0 -- not just the sinks (`candidates` only ever narrows
+            # to ranked *sinks*, so sinks is the right, and only then,
+            # conservative bound). Checking sinks alone here would let a
+            # tainted non-sink lane (fed to the collate through `base` rather
+            # than a template reference) slip an off-claude collate past load,
+            # to fail later as an uncaught DispatchRefused out of run_mission.
+            candidate_pool = self.sinks() if self.collate.candidates else self.lanes
+            tainted_lanes = [lane.name for lane in candidate_pool if lane.tainted]
+            collate_tainted = bool(tainted_lanes)
             try:
                 if self.collate.rank:
                     names_for_rank = [lane.name for lane in self.lanes]
@@ -441,6 +448,11 @@ class Mission:
                 else:
                     self.collate.spec(self.cwd, "collate", taint=collate_tainted).validate()
             except DispatchRefused as exc:
+                if tainted_lanes:
+                    names = ", ".join(f"'{name}'" for name in tainted_lanes)
+                    raise MissionInvalid(
+                        f"collate over tainted lane(s) {names}: {exc}"
+                    ) from exc
                 raise MissionInvalid(f"collate: {exc}") from exc
         self._validate_self_judging()
 
