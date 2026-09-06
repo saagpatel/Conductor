@@ -26,6 +26,7 @@ from .mission import (
     run_mission,
 )
 from .paths import conductor_home
+from .report import cmd_report
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
 from .verdicts import parse_checklist
@@ -787,6 +788,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_spend.add_argument("--json", action="store_true")
     p_spend.set_defaults(func=cmd_spend)
+
+    p_report = sub.add_parser(
+        "report", help="the ledger report: AGENTS.md's Shape A rules as numbers from receipts"
+    )
+    p_report.add_argument("--since", help="inclusive UTC date or ISO datetime")
+    p_report.add_argument("--until", help="exclusive UTC date or ISO datetime")
+    p_report.add_argument("--json", action="store_true")
+    p_report.set_defaults(func=cmd_report)
 
     p_mission = sub.add_parser(
         "mission",

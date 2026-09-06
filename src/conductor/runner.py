@@ -128,6 +128,16 @@ class Result:
     # None means the run failed for an unrelated reason before the init
     # event could settle the question either way.
     agent: dict | None = None
+    # E11: the pipeline stage (mission.STAGES: build, review, fix) this
+    # dispatch ran as, set from spec.stage whether or not a mission is
+    # involved; None outside a staged pipeline.
+    stage: str | None = None
+    # E11: which mission lane made this dispatch, and that mission's id.
+    # Set only when a mission dispatched this run; None for a plain
+    # `conductor dispatch` and for any receipt written before this field
+    # existed (report.py joins those through the mission snapshot instead).
+    lane: str | None = None
+    mission: str | None = None
 
     @property
     def gate_passed(self) -> bool:
@@ -918,6 +928,8 @@ def dispatch(
     base_ref: str | None = None,
     cancel: threading.Event | None = None,
     cancel_reason: str = "another lane already passed",
+    lane: str | None = None,
+    mission: str | None = None,
 ) -> Result:
     """Run one fleet and report honestly.
 
@@ -933,6 +945,11 @@ def dispatch(
     cancelling is known (a mission: another lane already passed) and
     `cancel_reason` names that reason for the receipt. A cancel that arrives
     after the fleet already exited cleanly changes nothing.
+
+    `lane` and `mission` (E11) name the mission lane and mission id that
+    made this dispatch, recorded on the receipt so `report.py` can group by
+    them without joining through the mission snapshot; both are None for a
+    plain dispatch outside a mission.
     """
     criteria = spec.verdict
     spec.validate()
@@ -962,12 +979,16 @@ def dispatch(
     checkout_before = GitState.capture(spec.cwd, content=False)
     if spec.mode == "write" and not checkout_before.is_repo and not dry_run:
         error = "write dispatch refused: cwd is not a git repository; only read mode may run there"
-        result = _refused_result(run_id, spec, model_id, timeout, run_dir, None, error)
+        result = _refused_result(
+            run_id, spec, model_id, timeout, run_dir, None, error, lane=lane, mission=mission
+        )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
     if commit_message and not isolate and checkout_before.dirty_files and not dry_run:
         error = "commit refused: the checkout has uncommitted changes; use --isolate"
-        result = _refused_result(run_id, spec, model_id, timeout, run_dir, None, error)
+        result = _refused_result(
+            run_id, spec, model_id, timeout, run_dir, None, error, lane=lane, mission=mission
+        )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
@@ -987,7 +1008,15 @@ def dispatch(
             # isolation exists to prevent, so it is refused before spawn. A
             # read dispatch changes nothing and may proceed in place.
             result = _refused_result(
-                run_id, spec, model_id, timeout, run_dir, iso, f"isolation failed: {iso.reason}"
+                run_id,
+                spec,
+                model_id,
+                timeout,
+                run_dir,
+                iso,
+                f"isolation failed: {iso.reason}",
+                lane=lane,
+                mission=mission,
             )
             (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
             return result
@@ -1025,6 +1054,9 @@ def dispatch(
             spawned=False,
             git_verdict=GitVerdict(checked=False, notes=["dry run"]).to_dict(),
             dry_run=True,
+            stage=spec.stage,
+            lane=lane,
+            mission=mission,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1067,6 +1099,8 @@ def dispatch(
             error,
             extra_notes=lane_notes,
             lane_env=_lane_env(),
+            lane=lane,
+            mission=mission,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1557,6 +1591,9 @@ def dispatch(
             else None
         ),
         agent=agent_result,
+        stage=spec.stage,
+        lane=lane,
+        mission=mission,
     )
     if result.spawned:
         statement = _lane_receipt_statement(
@@ -1762,6 +1799,8 @@ def _refused_result(
     *,
     extra_notes: list[str] | None = None,
     lane_env: dict | None = None,
+    lane: str | None = None,
+    mission: str | None = None,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
     return Result(
@@ -1784,6 +1823,9 @@ def _refused_result(
         isolation=iso.to_dict() if iso is not None else None,
         lane_env=lane_env,
         error=error,
+        stage=spec.stage,
+        lane=lane,
+        mission=mission,
     )
 
 

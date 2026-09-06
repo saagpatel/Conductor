@@ -2754,7 +2754,11 @@ def _execute_mission(
                     **dispatch_kwargs,
                 )
             else:
-                result = dispatch(spec, **dispatch_kwargs)
+                # E11: recorded on the live receipt so report.py can group by
+                # lane and mission without joining through the mission
+                # snapshot; golden.replay's dispatcher has its own fixed
+                # signature and predates these two fields.
+                result = dispatch(spec, lane=lane.name, mission=mission_id, **dispatch_kwargs)
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
                 (Path(result.run_dir) / "result.json").write_text(
