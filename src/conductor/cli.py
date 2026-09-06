@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest, golden, prices, shape
+from . import salvage as salvage_mod
 from .errors import error_kind
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec, cli_version
 from .gc import cmd_gc
@@ -28,6 +29,7 @@ from .mission import (
 from .paths import conductor_home
 from .report import cmd_report
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
+from .runner import _gate_passed as _runner_gate_passed
 from .spend import cmd_spend
 from .verdicts import parse_checklist
 from .verify import GitState, run_tests
@@ -454,6 +456,65 @@ def cmd_attest(args: argparse.Namespace) -> int:
     }
     print(json.dumps(out, indent=2))
     return 0 if out["verified"] else 1
+
+
+def cmd_salvage(args: argparse.Namespace) -> int:
+    """E23: re-run the clean gate from a kept lane's worktree by hand, and
+    optionally emit the follow-on review-and-fix mission once the lead has
+    committed what it showed."""
+    mission_id = args.mission_id
+    if Path(mission_id).name != mission_id or mission_id in {".", ".."}:
+        _invalid("MISSION_ID must be a mission directory name")
+        return 3
+    if args.emit and (args.items is None or args.modules is None):
+        _invalid("--emit needs --items and --modules")
+        return 3
+
+    home = conductor_home()
+    try:
+        result = salvage_mod.salvage(home, mission_id, args.lane)
+    except salvage_mod.SalvageInvalid as exc:
+        _invalid(str(exc))
+        return 3
+
+    passed = _runner_gate_passed(result.gate, None)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(f"worktree: {result.worktree}")
+        print(f"base_sha: {result.base_sha}")
+        print(f"head_sha: {result.head_sha}")
+        print(f"dirty: {result.dirty}")
+        print("--- diff ---")
+        print(result.diff)
+        print(f"gate: {result.test_command}")
+        print(f"gate exit code: {result.gate.get('exit_code')}")
+        print(result.gate.get("tail", ""))
+        print(f"receipt: {result.receipt_path}")
+
+    if args.emit:
+        if not passed:
+            _invalid("--emit refused: the gate is red")
+            return 3
+        try:
+            caps = shape.cap_arithmetic(args.items, args.modules, scheduler=args.scheduler)
+            salvage_mod.emit(
+                result,
+                Path(args.emit),
+                test=result.test_command,
+                caps=caps,
+                name=args.name or f"salvage-{mission_id}-{args.lane}",
+                branch=args.branch or "",
+                fix_commit=args.fix_commit or "",
+                about=args.about,
+            )
+        except (salvage_mod.SalvageInvalid, shape.ShapeInvalid, MissionInvalid) as exc:
+            _invalid(str(exc))
+            return 3
+        print(f"conductor mission {args.emit}")
+        return 0
+
+    return 0 if passed else 1
 
 
 LIVENESS_STALE_S: int = 30
@@ -927,6 +988,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_attest.add_argument("mission_id", metavar="MISSION_ID")
     p_attest.set_defaults(func=cmd_attest)
+
+    p_salvage = sub.add_parser(
+        "salvage",
+        help="gate a mission lane's kept worktree by hand (AGENTS.md rule 6), and "
+        "optionally emit the follow-on review-and-fix mission",
+    )
+    p_salvage.add_argument("mission_id", metavar="MISSION_ID")
+    p_salvage.add_argument("--lane", required=True, help="the kept lane's name")
+    p_salvage.add_argument(
+        "--emit", metavar="PATH", help="write a follow-on mission file here; needs a green gate"
+    )
+    p_salvage.add_argument(
+        "--items", type=int, help="hand-counted spec items for the fix cap (rule 2); needs --emit"
+    )
+    p_salvage.add_argument(
+        "--modules", type=int, help="hand-counted modules touched (rule 2); needs --emit"
+    )
+    p_salvage.add_argument(
+        "--scheduler", action="store_true", help="rule 2: +$2 fix cap"
+    )
+    p_salvage.add_argument(
+        "--name", help="follow-on mission name (default: salvage-<mission>-<lane>)"
+    )
+    p_salvage.add_argument("--branch", help="branch the fix lane lands on (default feat/<name>)")
+    p_salvage.add_argument("--fix-commit", help="fix lane commit message")
+    p_salvage.add_argument(
+        "--about", help="one phrase naming the repo for the shared prefix, e.g. 'the X service'"
+    )
+    p_salvage.add_argument("--json", action="store_true")
+    p_salvage.set_defaults(func=cmd_salvage)
 
     p_golden = sub.add_parser(
         "golden", help="record and replay golden-mission fixtures offline (C7)"

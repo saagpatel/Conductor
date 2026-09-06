@@ -749,6 +749,44 @@ claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), an
 cap. The file is written beside the spec (or at `--out`), never overwritten without
 `--force`, and `--dry-run` runs `conductor mission --dry-run` on it.
 
+### Salvage
+
+AGENTS.md rule 6: when a write lane's own gate is green but the clean gate
+rejects it (a flaky test under load, or the base tree's tests failing
+against new source), conductor keeps the lane's worktree rather than
+discard uncommitted work. Today the lead reads that diff, gates it, and
+commits it by hand, then writes a review-and-fix mission by hand too.
+`conductor salvage` is that path made repeatable:
+
+```
+conductor salvage MISSION_ID --lane build
+```
+
+It reads the lane's receipt and the mission snapshot, and refuses (exit 3)
+when the mission or lane does not exist, the lane was not kept, its
+recorded worktree is missing on disk or is not a git worktree of the
+mission's repository, or the lane's effective test command is empty. It
+then re-runs the clean gate from the kept worktree, in a fresh scratch copy
+under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/` -- never committing,
+writing into, or touching the index of the kept worktree itself -- and
+prints the worktree, its base and HEAD shas, whether it is dirty, the
+recorded diff, and the gate's command, exit code, and tail. Exit 0 means
+the gate passed, 1 means it failed. Every call, refused or not, writes a
+receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
+timestamp>.json`; salvage is the lead's own act, not a lane's, so it never
+extends the mission's signed receipt chain.
+
+Once the lead has read the diff and committed it in the kept worktree by
+hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,
+rule 2) writes a follow-on mission there: `shape.shape_a_followon`, the
+same Shape A shape as `conductor shape a` except there is no build lane --
+the kept worktree, already at the lead's commit, is the mission's `cwd`
+directly, so the two review lanes and the fix lane need no `base` and the
+fix lane has nothing to `resume`. `--emit` is refused when the gate is red,
+and `emit()` itself is refused when the kept worktree is still dirty or its
+HEAD still equals `base_sha` -- either way nothing has actually been
+committed yet, so the follow-on would review the wrong thing.
+
 ### Lane stages, reviewer policy, and reproduce before fix
 
 A lane may declare `"stage"`: `build`, `review`, or `fix`. A `review` lane
@@ -1430,7 +1468,9 @@ The report has five sections, in this order:
 - **Reviewer finding rate**: among `stage: review` dispatches that wrote an
   answer, the share whose answer is not exactly `NO_FINDINGS`, per vendor.
 - **Missions**: cost, whether the mission was ok, how many lanes it
-  declared, and whether any lane hit its cap.
+  declared, whether any lane hit its cap, and how many times
+  `conductor salvage` was run against it (`salvaged`, 0 when
+  `$CONDUCTOR_HOME/missions/<id>/salvage/` does not exist).
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
   and fix stages, how many runs were killed at their cap after their own
@@ -1438,10 +1478,9 @@ The report has five sections, in this order:
   was written for). A figure with nothing to compute from reads `n/a`,
   never `0`, so a missing stage is never mistaken for a clean one.
 
-What it does not report: a salvage's own rate. AGENTS.md rule 6's salvage
-path is the lead reading a kept worktree's diff and gating it by hand; that
-work leaves no dispatch receipt, so nothing under `$CONDUCTOR_HOME/runs`
-could ever count it.
+`salvaged` is the only trace of a salvage in this report: `conductor
+salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`
+could otherwise count it (see the Salvage subsection above).
 
 ### Per-dispatch caps
 
@@ -1663,6 +1702,10 @@ conductor golden check tests/golden/c5-build-cascade-capped --update
   port-claim cleanup; pass `--apply` to execute it
 - `conductor attest MISSION_ID`: verify a mission's signed receipt chain on
   bytes
+- `conductor salvage MISSION_ID --lane NAME`: re-run the clean gate from a
+  kept lane's worktree by hand (AGENTS.md rule 6), and, once the lead has
+  committed it, `--emit PATH --items N --modules M` writes the follow-on
+  review-and-fix mission
 - `conductor golden record MISSION_ID --out DIR`: record a finished mission
   under `$CONDUCTOR_HOME` as an offline, scrubbed fixture (`--max-bytes`
   overrides the 3,000,000-byte default)

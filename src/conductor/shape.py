@@ -309,3 +309,119 @@ def shape_a(
             },
         ],
     }
+
+
+def shape_a_followon(
+    *,
+    worktree: Path,
+    salvage_sha: str,
+    diff: str,
+    test: str,
+    caps: CapArithmetic,
+    name: str,
+    about: str | None = None,
+    branch: str = "",
+    fix_commit: str = "",
+    mission_dir: Path | None = None,
+) -> dict:
+    """E23: the review-and-fix mission for a salvage the lead has already
+    committed by hand (AGENTS.md rule 6). Identical in shape to `shape_a`
+    except there is no build lane: the kept worktree, already sitting at the
+    lead's own commit, is the mission's `cwd` directly, so no lane needs a
+    `base` to build on and the fix lane has nothing to `resume`. The two
+    review prompts are `GEMINI_REVIEW_PROMPT` and `GROK_READ_ONLY_PROMPT`
+    (never the suite-running one -- there is no build lane's session for
+    Grok to fall back to reproducing by hand), with `{{lanes.build.diff}}`
+    resolved eagerly to `diff` since there is no build lane to render it from;
+    `{{mission.prompt}}` still renders live, to the paragraph below.
+
+    `mission_dir` is accepted for the same reason `shape_a`'s is (the caller
+    may want mission-relative bookkeeping); every path this function itself
+    writes is already absolute, so it goes unused here.
+    """
+    del mission_dir
+    worktree = Path(worktree).expanduser().resolve()
+    if not (worktree / ".git").exists():
+        raise ShapeInvalid(f"worktree is not a git checkout: {worktree}")
+    if not salvage_sha.strip():
+        raise ShapeInvalid("salvage_sha must name a commit")
+    if not test.strip():
+        raise ShapeInvalid("--test must name the gate command; a Shape A build has one")
+    if not name.strip():
+        raise ShapeInvalid("name must not be empty")
+
+    mission_name = name
+    scope = worktree.name
+    branch = branch or f"feat/{mission_name}"
+    if branch.startswith("conductor/") or not branch.strip():
+        raise ShapeInvalid("--branch must be a name outside conductor/")
+    fix_commit = fix_commit or f"fix({scope}): address cross-vendor review of {mission_name}"
+
+    mission_prompt = (
+        f"This change is already committed at {salvage_sha} on branch '{branch}' in the "
+        "worktree named as this mission's cwd: conductor's own clean gate rejected the "
+        "original build lane's run, and the lead read the diff below, gated it by hand, "
+        "and committed it. Review or fix the change as it stands.\n\n"
+        f"<diff>\n{diff}\n</diff>"
+    )
+    gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", diff)
+    grok_prompt = GROK_READ_ONLY_PROMPT.replace("{{lanes.build.diff}}", diff)
+
+    return {
+        "name": mission_name,
+        "cwd": str(worktree),
+        "prompt": mission_prompt,
+        "concurrency": 2,
+        "require": "all",
+        "max_cost_usd": round(
+            caps.gemini_cap + caps.grok_cap + caps.fix_cap + USD_MISSION_SLACK, 2
+        ),
+        "test": test,
+        "template_max_chars": 160000,
+        "policy": {
+            "review": {"vendors": ["google", "xai"]},
+            "fix": {"vendors": ["anthropic"]},
+        },
+        "prefix": _prefix(worktree, about),
+        "pause": {"before": ["fix"]},
+        "lanes": [
+            {
+                "name": "review-gemini",
+                "stage": "review",
+                "fleet": "antigravity",
+                "model": "gemini-3.7-flash",
+                "effort": "standard",
+                "mode": "read",
+                "timeout": 1200,
+                "cap_usd": caps.gemini_cap,
+                "prompt": gemini_prompt,
+            },
+            {
+                "name": "review-grok",
+                "stage": "review",
+                "fleet": "cursor",
+                "model": "grok-4.6",
+                "effort": "standard",
+                "mode": "read",
+                "timeout": 1200,
+                "cap_usd": caps.grok_cap,
+                "prompt": grok_prompt,
+            },
+            {
+                "name": "fix",
+                "stage": "fix",
+                "fleet": "claude",
+                "model": "sonnet",
+                "effort": "standard",
+                "mode": "write",
+                "needs": ["review-gemini", "review-grok"],
+                "no_op_ok": True,
+                "timeout": 1800,
+                "cap_usd": caps.fix_cap,
+                "branch": branch,
+                "commit": fix_commit,
+                "cascade": False,
+                "prompt": FIX_PROMPT,
+            },
+        ],
+    }
