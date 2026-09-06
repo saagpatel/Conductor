@@ -1246,9 +1246,12 @@ def dispatch(
                     # A stream cut short before its own init event is not, on
                     # its own, evidence the persona failed to apply -- it is
                     # usually just evidence of whatever else ended the run
-                    # early, and that reason must not be replaced.
+                    # early, and that reason must not be replaced. "Looks
+                    # complete" means a result event was actually parsed (an
+                    # entirely empty stream is `parsed=False` with no error
+                    # of its own, and must not be mistaken for completeness).
                     run_looks_complete = (
-                        exit_code == 0 and error is None and not output.error
+                        exit_code == 0 and error is None and output.parsed and not output.error
                     )
                     if run_looks_complete:
                         if error is None:

@@ -482,6 +482,13 @@ class Mission:
                         f"lane '{lane.name}': stage '{lane.stage}' lanes must be "
                         f"{_STAGE_MODE[lane.stage]} mode"
                     )
+                try:
+                    attempt.spec(self.cwd, taint=lane.tainted).validate()
+                except DispatchRefused as exc:
+                    raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
+                # Spec.validate (above) has already confirmed `tools`, when
+                # given, is a list of non-empty strings -- this may assume
+                # that shape rather than re-checking it.
                 if lane.stage == "review" and attempt.agent and attempt.agent.get("tools"):
                     write_tools = sorted(set(attempt.agent["tools"]) & _AGENT_WRITE_TOOLS)
                     if write_tools:
@@ -489,10 +496,6 @@ class Mission:
                             f"lane '{lane.name}': a read lane's persona may not carry write "
                             f"tools ({', '.join(write_tools)})"
                         )
-                try:
-                    attempt.spec(self.cwd, taint=lane.tainted).validate()
-                except DispatchRefused as exc:
-                    raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
         self._validate_graph(seen)
         self._validate_quorum(seen)
         self._validate_policy()

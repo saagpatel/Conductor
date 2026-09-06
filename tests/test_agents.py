@@ -251,6 +251,21 @@ def test_no_init_event_and_nonzero_exit_keeps_exit_as_its_kind(repo, home, fake_
     assert result.summary()["kind"] == "exit"
 
 
+def test_empty_stream_with_exit_zero_keeps_its_own_kind_not_agent(repo, home, fake_fleet):
+    # Regression: "the run otherwise looks complete" was implemented as
+    # "exit 0 and no fleet-reported error", which an entirely empty stdout
+    # also satisfies (FleetOutput() has no error, but no result event either).
+    # The spec's bar is "exit 0 and a result event"; an empty stream must
+    # keep its own failure (a read dispatch with no answer) with `applied`
+    # null, not be recast as an `agent` failure.
+    fake_fleet(["true"])
+    result = dispatch(spec(cwd=str(repo), agent=AGENT), home=home)
+    assert result.ok is False
+    assert result.exit_code == 0
+    assert result.agent == {"name": "reviewer", "tools": ["Read", "Grep"], "applied": None}
+    assert result.summary()["kind"] == "no_answer"
+
+
 # --- mission: cascading, agent_file, review-stage refusal (item 3) ---------
 
 
@@ -381,6 +396,28 @@ def test_review_lane_agent_with_only_read_tools_is_fine(tmp_path):
     }
     mission = mission_from_dict(raw, base_dir=tmp_path)
     assert mission.lanes[0].attempts[0].agent == AGENT
+
+
+def test_review_lane_agent_with_non_list_tools_is_mission_invalid_not_a_crash(tmp_path):
+    # Regression: `set(attempt.agent["tools"]) & _AGENT_WRITE_TOOLS` in the
+    # review-stage check ran before `Spec.validate`'s own shape check, so a
+    # malformed `tools` (not a list) raised a bare TypeError instead of
+    # MissionInvalid naming the lane.
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {
+                "name": "critic",
+                "fleet": "claude",
+                "mode": "read",
+                "stage": "review",
+                "prompt": "R",
+                "agent": {**AGENT, "tools": 3},
+            }
+        ],
+    }
+    with pytest.raises(MissionInvalid, match="lane 'critic'"):
+        mission_from_dict(raw, base_dir=tmp_path)
 
 
 # --- mission: runtime, report, conductor runs, snapshot ---------------------
