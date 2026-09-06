@@ -42,6 +42,7 @@ the cap rules in `AGENTS.md`.
 | E9 rolling spend ceiling | 0.42.0 | Shape A on 0.40.0, in parallel with E3, merged after it; Grok's one finding real, fixed by hand | $5.95 |
 | E13 export bundles | 0.43.0 | Shape A on 0.42.0, third of Group 7; build stopped on a leak-guard flake, salvaged; Grok's two findings real, fixed on the follow-on | $5.58 |
 | E14 cost forecast | 0.44.0 | Shape A on 0.43.0, fourth of Group 7; build green under cap; Grok's one finding wording, fixed by hand | $5.72 |
+| E19 cross-repo collisions | 0.45.0 | Shape A on 0.44.0, fifth of Group 7; build green under cap and fixed the resolver cwd; Grok one real, one coverage, one wrong at confidence 10, fix lane sorted them | $10.45 |
 
 ## What "general" means here
 
