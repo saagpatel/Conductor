@@ -34,7 +34,7 @@ from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .errors import error_kind
-from .fleets import FLEETS, TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv
+from .fleets import FLEETS, TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv, cli_version
 from .outputs import FleetOutput, claude_init_event
 from .outputs import parse as parse_output
 from .paths import conductor_home
@@ -121,6 +121,10 @@ class Result:
     fleet_status: str | None = None
     fleet_error: str | None = None
     session_id: str | None = None
+    # E22: the fleet binary's own `--version` output, captured before spawn
+    # (also on a refused or dry-run receipt). None when the binary is
+    # missing, exits non-zero, times out, or predates this field.
+    fleet_version: str | None = None
     resumed: dict | None = None
     # C4: {"ports": [<int>], "setup": <TestOutcome dict or null>,
     # "teardown": <TestOutcome dict or null>, "included": [<path>]}, set only
@@ -339,6 +343,13 @@ class Result:
             "agent": self.agent,
             "deliverable": self.deliverable,
         }
+
+
+def _version_note(fleet_version: str | None) -> list[str]:
+    """E22: one note when the fleet's `--version` could not be captured, so
+    a receipt says why `fleet_version` is null instead of leaving a silent
+    gap."""
+    return [] if fleet_version is not None else ["fleet version unavailable"]
 
 
 def _over_budget(budget: dict) -> str:
@@ -608,9 +619,17 @@ def _lane_receipt_statement(
     error: str | None,
     taint: dict | None,
     agent: dict | None,
+    fleet_version: str | None = None,
 ) -> dict:
     """The statement A5 signs into `attestation.json`: what conductor can
-    check about this one dispatch without trusting the fleet's own report."""
+    check about this one dispatch without trusting the fleet's own report.
+
+    `fleet_version` (E22) is a keyword with a default so an older caller
+    (and every existing test that builds this statement by hand) keeps
+    working unchanged; `conductor attest` verifies a statement missing it
+    the same as any other older receipt, since verification checks the
+    signature, not a fixed field set.
+    """
     test_surface = (
         {
             "digest_before": surface_state["digest_before"],
@@ -636,6 +655,7 @@ def _lane_receipt_statement(
         "test_surface": test_surface,
         "gate": _gate_summary(tests_dict, surface_state, test_command),
         "reproduce_verdict": (reproduce_state or {}).get("verdict"),
+        "fleet_version": fleet_version,
         "ok": ok,
         "error": error,
         "ended_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -1116,6 +1136,9 @@ def dispatch(
     fleet = FLEETS[spec.fleet]
     model_id = fleet.model(spec.model).id_for(spec.effort)
     timeout = spec.resolved_timeout()
+    # E22: captured once, before spawn, so every receipt this dispatch can
+    # produce -- refused, dry-run, or spawned -- carries the same version.
+    fleet_version = cli_version(spec.fleet)
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     base = home or conductor_home()
@@ -1139,14 +1162,32 @@ def dispatch(
     if spec.mode == "write" and not checkout_before.is_repo and not dry_run:
         error = "write dispatch refused: cwd is not a git repository; only read mode may run there"
         result = _refused_result(
-            run_id, spec, model_id, timeout, run_dir, None, error, lane=lane, mission=mission
+            run_id,
+            spec,
+            model_id,
+            timeout,
+            run_dir,
+            None,
+            error,
+            lane=lane,
+            mission=mission,
+            fleet_version=fleet_version,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
     if commit_message and not isolate and checkout_before.dirty_files and not dry_run:
         error = "commit refused: the checkout has uncommitted changes; use --isolate"
         result = _refused_result(
-            run_id, spec, model_id, timeout, run_dir, None, error, lane=lane, mission=mission
+            run_id,
+            spec,
+            model_id,
+            timeout,
+            run_dir,
+            None,
+            error,
+            lane=lane,
+            mission=mission,
+            fleet_version=fleet_version,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1176,6 +1217,7 @@ def dispatch(
                 f"isolation failed: {iso.reason}",
                 lane=lane,
                 mission=mission,
+                fleet_version=fleet_version,
             )
             (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
             return result
@@ -1211,8 +1253,11 @@ def dispatch(
             stderr_path=str(stderr_path),
             tail="(dry run: nothing spawned)",
             spawned=False,
-            git_verdict=GitVerdict(checked=False, notes=["dry run"]).to_dict(),
+            git_verdict=GitVerdict(
+                checked=False, notes=["dry run", *_version_note(fleet_version)]
+            ).to_dict(),
             dry_run=True,
+            fleet_version=fleet_version,
             stage=spec.stage,
             lane=lane,
             mission=mission,
@@ -1261,6 +1306,7 @@ def dispatch(
             lane_env=_lane_env(),
             lane=lane,
             mission=mission,
+            fleet_version=fleet_version,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1743,6 +1789,7 @@ def dispatch(
             git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
     if lane_notes:
         git_verdict.notes.extend(lane_notes)
+    git_verdict.notes.extend(_version_note(fleet_version))
 
     base_commit, tip_commit = _commit_bounds(before, after, commit, iso)
     result = Result(
@@ -1795,6 +1842,7 @@ def dispatch(
         stage=spec.stage,
         lane=lane,
         mission=mission,
+        fleet_version=fleet_version,
     )
     if result.spawned:
         statement = _lane_receipt_statement(
@@ -1815,6 +1863,7 @@ def dispatch(
             error=result.failure(),
             taint=result.taint,
             agent=result.agent,
+            fleet_version=fleet_version,
         )
         try:
             key = attest.receipt_key(base)
@@ -2002,6 +2051,7 @@ def _refused_result(
     lane_env: dict | None = None,
     lane: str | None = None,
     mission: str | None = None,
+    fleet_version: str | None = None,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
     return Result(
@@ -2020,13 +2070,16 @@ def _refused_result(
         stderr_path=str(run_dir / "stderr.log"),
         tail="(not spawned)",
         spawned=False,
-        git_verdict=GitVerdict(checked=False, notes=[error, *(extra_notes or [])]).to_dict(),
+        git_verdict=GitVerdict(
+            checked=False, notes=[error, *(extra_notes or []), *_version_note(fleet_version)]
+        ).to_dict(),
         isolation=iso.to_dict() if iso is not None else None,
         lane_env=lane_env,
         error=error,
         stage=spec.stage,
         lane=lane,
         mission=mission,
+        fleet_version=fleet_version,
     )
 
 

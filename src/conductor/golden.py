@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from . import fleets as fleets_mod
 from . import outputs as outputs_mod
 from .mission import Attempt, Mission, MissionResult, run_mission
 from .runner import Result
@@ -293,6 +294,26 @@ def _run_ids_and_fleets(lane_files: list[Path]) -> tuple[list[str], dict[str, st
     return run_ids, fleet_by_run, fleets
 
 
+def _mission_fleet_versions(
+    home: Path, run_ids: list[str], fleet_by_run: dict[str, str], fleets: set[str]
+) -> dict[str, str | None]:
+    """E22: one version per fleet the mission used, taken from the first run
+    receipt that names it and carries a `fleet_version`; null for a fleet
+    whose every receipt predates that field (or whose result.json is
+    unreadable)."""
+    versions: dict[str, str | None] = dict.fromkeys(sorted(fleets))
+    for run_id in run_ids:
+        fleet = fleet_by_run.get(run_id)
+        if fleet is None or versions.get(fleet) is not None:
+            continue
+        try:
+            raw_result = json.loads((home / "runs" / run_id / "result.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        versions[fleet] = raw_result.get("fleet_version")
+    return versions
+
+
 def _field_defaults(cls: type) -> dict:
     return {f.name: f.default for f in _dc.fields(cls) if f.default is not _dc.MISSING}
 
@@ -436,6 +457,7 @@ def record(
             "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "conductor_version": __version__,
             "fleets": sorted(fleets),
+            "fleet_versions": _mission_fleet_versions(home, run_ids, fleet_by_run, fleets),
             "placeholders": ["<home>", "<cwd>", "<user>"],
             "files": files,
         }
@@ -744,6 +766,28 @@ def _diff_projection(expected: object, actual: object, path: str = "$") -> list[
     if expected != actual:
         return [f"projection {path}: expected {expected}, got {actual}"]
     return []
+
+
+def version_drift(fixture_dir: str | Path) -> list[str]:
+    """E22: one line per fleet whose `golden.json`-recorded `fleet_versions`
+    entry differs from `fleets.cli_version` on this machine, or a single
+    "recorded version unknown" line when the fixture predates that field
+    and carries none at all. Drift is a note, never a check failure: the
+    caller must not fold this into a fixture's pass/fail exit code."""
+    manifest_path = Path(fixture_dir) / "golden.json"
+    if not manifest_path.is_file():
+        return []
+    manifest = json.loads(manifest_path.read_text())
+    recorded = manifest.get("fleet_versions")
+    if not recorded:
+        return ["recorded version unknown"]
+    lines = []
+    for fleet_name in sorted(recorded):
+        old = recorded[fleet_name]
+        new = fleets_mod.cli_version(fleet_name)
+        if old != new:
+            lines.append(f"{fleet_name} recorded {old}, installed {new}")
+    return lines
 
 
 def check(fixture_dir: str | Path, *, update: bool = False) -> list[str]:

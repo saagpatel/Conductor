@@ -1099,6 +1099,21 @@ hold the key.
 Evidence (`docs/ROADMAP-2026-09.md` item A5): "Bernstein's signed replay
 receipts, the IETF signed action receipts draft
 ([draft-marques-asqav-compliance-receipts](https://datatracker.ietf.org/doc/html/draft-marques-asqav-compliance-receipts-08))."
+
+Every receipt also carries `fleet_version` (E22): the fleet binary's own
+`--version` output, captured once before spawn from `fleets.cli_version`
+(cached per process by binary path) and written to `result.json` and into
+the signed statement alike. Conductor asserts vendor-specific behavior at a
+point in time -- D2's tool deny list, D3's inline personas, the Cursor
+stream-json parser, agy's status-not-exit-code rule -- and a silent CLI
+release can move under any of it; `fleet_version` turns "which build ran
+this" from a guess into something on the receipt. It is `null` when the
+binary is not installed, exits non-zero on `--version`, or times out, and in
+that case `git_verdict.notes` carries one line, `fleet version unavailable`;
+a receipt written before this field existed reads back as `null` with no
+note, since nothing rewrites old receipts. A version capture never fails the
+dispatch and never delays it past its own short timeout.
+
 ### Pausing for the operator
 
 A mission may declare two pause points, either or both:
@@ -1467,8 +1482,10 @@ without the operator's key -- a copy would be both unscrubbed and
 unverifiable, and nothing in replay reads it beyond hashing it into a
 throwaway chain. `golden.json` is the manifest: format, the source mission
 id, the fixture's own name, when it was recorded, the conductor version,
-the fleets it exercises, the placeholder names, and a sha256 per file.
-`expected.json` holds the mission's `projection` (below) at record time.
+the fleets it exercises, each of those fleets' recorded `--version` output
+(`fleet_versions`, E22 -- null for a fleet whose every receipt predates
+that field), the placeholder names, and a sha256 per file. `expected.json`
+holds the mission's `projection` (below) at record time.
 
 ### Scrubbing
 
@@ -1540,11 +1557,21 @@ directory under `tests/golden/` of the current working directory that holds
 a `golden.json`, by default) into a fresh temporary home and a fresh
 temporary git repository, and prints every difference -- the replay's own,
 plus one line per projection field that disagrees with `expected.json` --
-prefixed by the fixture's name; exit 1 if anything printed, 0 if every
-fixture was clean. `--update` is for a deliberate change: it rewrites
+prefixed by the fixture's name; exit 1 if any difference printed, 0 if
+every fixture was clean (version-drift notes, below, print without changing
+the exit code). `--update` is for a deliberate change: it rewrites
 `expected.json` from the replay instead of reporting projection
 differences, so the next `check` is clean once the new behavior is the one
 you meant.
+
+`conductor golden check` also prints a version-drift note per fixture, from
+`golden.version_drift`: one line per fleet whose `golden.json`-recorded
+`fleet_versions` entry (E22) disagrees with `fleets.cli_version` on this
+machine (`<fleet> recorded <old>, installed <new>`), or `recorded version
+unknown` when the fixture predates that field and carries none at all --
+both of the fixtures shipped under `tests/golden/` today. Drift is a note,
+not a failure: it never changes the exit code, and `--update` never writes
+it back into `golden.json`.
 
 ```
 conductor golden record 20260905T171417Z-c5-error-kinds --out tests/golden/c5-build-cascade-capped
