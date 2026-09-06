@@ -203,6 +203,15 @@ def test_unattended_refuses_a_human_lane(tmp_path, home):
         run_mission(mission, home=home, unattended=True)
 
 
+def test_unattended_refusals_apply_on_a_dry_run_too(tmp_path, home):
+    mission = mission_from_dict(
+        {"cwd": str(tmp_path), "lanes": [{"name": "ask", "fleet": "human", "prompt": "approve?"}]},
+        base_dir=tmp_path,
+    )
+    with pytest.raises(MissionInvalid, match="human lane"):
+        run_mission(mission, home=home, unattended=True, dry_run=True)
+
+
 def test_unattended_refuses_a_fix_stage_write_lane_outside_pause_before(tmp_path, home):
     mission = mission_from_dict(
         {

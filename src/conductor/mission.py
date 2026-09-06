@@ -3425,9 +3425,12 @@ def run_mission(
     # launch and a resume alike (a resume starts dispatches too) -- never on
     # a dry run, which spawns nothing and spends nothing.
     ceiling_result: dict | None = None
+    # The unattended refusals are a property of the mission's shape, not of
+    # this run's spend, so a dry run rehearses them too: an unattended
+    # rehearsal that succeeds must mean the real launch would be allowed.
+    if unattended:
+        _check_unattended(mission)
     if not dry_run:
-        if unattended:
-            _check_unattended(mission)
         ceiling_result = _check_ceiling(mission, base)
     if resume_dir is None:
         _check_branches(mission, dry_run=dry_run)
