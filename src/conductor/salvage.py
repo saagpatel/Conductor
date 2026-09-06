@@ -213,7 +213,11 @@ def salvage(
     try:
         result = _gather(home, mission_id, lane, stop=stop)
     except SalvageInvalid as exc:
-        _write_receipt(home, mission_id, lane, {"refused": str(exc)})
+        # A mission that does not exist has nowhere to hold a receipt: writing
+        # one would create `missions/<typo>/salvage/` out of thin air, which
+        # `conductor missions` and `gc` would then list as a mission.
+        if (home / "missions" / mission_id).is_dir():
+            _write_receipt(home, mission_id, lane, {"refused": str(exc)})
         raise
     path = _write_receipt(home, mission_id, lane, result.to_dict())
     result.receipt_path = str(path)

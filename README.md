@@ -793,8 +793,9 @@ prints the worktree, its base and HEAD shas, whether it is dirty, the
 recorded diff, and the gate's command, exit code, and tail. Exit 0 means
 the gate passed, 1 means it failed. Every call, refused or not, writes a
 receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
-timestamp>.json`; salvage is the lead's own act, not a lane's, so it never
-extends the mission's signed receipt chain.
+timestamp>.json` (except when the mission itself does not exist: a typo
+never conjures a mission directory); salvage is the lead's own act, not a
+lane's, so it never extends the mission's signed receipt chain.
 
 Once the lead has read the diff and committed it in the kept worktree by
 hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,

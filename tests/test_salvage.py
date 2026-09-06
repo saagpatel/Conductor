@@ -119,9 +119,9 @@ def test_salvage_reports_a_red_gate_in_the_receipt_and_never_commits(repo, home,
 def test_salvage_refuses_an_unknown_mission(home):
     with pytest.raises(SalvageInvalid, match="mission 'no-such' does not exist"):
         salvage(home, "no-such", "build")
-    receipts = list((home / "missions" / "no-such" / "salvage").glob("*.json"))
-    assert len(receipts) == 1
-    assert json.loads(receipts[0].read_text())["refused"] == "mission 'no-such' does not exist"
+    # Nowhere to receipt: a refusal must not conjure `missions/no-such/` into
+    # existence, or a typo becomes a mission `conductor missions` lists.
+    assert not (home / "missions" / "no-such").exists()
 
 
 def test_salvage_refuses_an_unknown_lane(repo, home, fake_fleet):
