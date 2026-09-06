@@ -32,6 +32,7 @@ own resolved cwd rather than the mission's.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -50,6 +51,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import attest
+from . import ceiling as ceiling_mod
 from . import collisions as collisions_mod
 from . import notify as notify_mod
 from .errors import KINDS, error_kind
@@ -148,6 +150,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "cascade",
     "retry",
     "notify",
+    "ceiling",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -548,6 +551,13 @@ class Mission:
     # fleet's request. None (the default) emits nothing. See notify.py and
     # the three call sites in _execute_mission.
     notify: dict | None = None
+    # E9: {"per_hour_usd": <number or None>, "per_day_usd": <number or None>}.
+    # None (the default) means both bounds are ceiling.py's module defaults;
+    # a bound explicitly set to None in the mission file disables it for this
+    # mission. Checked once by `_check_ceiling`, in `run_mission`, against
+    # the rolling spend under `home/runs` -- never against this mission's own
+    # ledger, which `max_cost_usd` already bounds.
+    ceiling: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -942,6 +952,7 @@ class Mission:
             "retry",
             "test",
             "notify",
+            "ceiling",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -1080,6 +1091,7 @@ class Mission:
             "retry": raw["retry"],
             "test": raw["test"],
             "notify": raw["notify"],
+            "ceiling": raw["ceiling"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -1515,6 +1527,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     pause = _parse_pause(raw.get("pause"))
     retry = _parse_retry(raw.get("retry"))
     notify = _parse_notify(raw.get("notify"))
+    ceiling = _parse_ceiling(raw.get("ceiling"))
     prefix = _load_prefix(raw, base_dir)
     mission = Mission(
         name=name,
@@ -1537,6 +1550,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         retry=retry,
         test=str(defaults["test"]) if defaults.get("test") else None,
         notify=notify,
+        ceiling=ceiling,
     )
     mission.validate()
     return mission
@@ -1560,6 +1574,35 @@ def _parse_cascade(raw_cascade: object, base_dir: Path) -> dict | None:
         # qualifying lane at once.
         raise MissionInvalid("cap_grace_usd is stated per lane, not in cascade")
     return _attempt_fields(raw_cascade, base_dir, {})
+
+
+def _parse_ceiling(raw_ceiling: object) -> dict | None:
+    """E9: absent means both bounds are ceiling.py's module defaults; present
+    means the mission states both explicitly, a number to override a bound or
+    `null` to disable it -- the same explicit-null-disables shape the rest of
+    the mission grammar never uses for a partial object, chosen here because
+    a mission that names one bound but forgets the other would otherwise
+    silently inherit a default it never saw."""
+    if raw_ceiling is None:
+        return None
+    if not isinstance(raw_ceiling, dict) or set(raw_ceiling) != {
+        "per_hour_usd",
+        "per_day_usd",
+    }:
+        raise MissionInvalid(
+            "ceiling must be an object with exactly 'per_hour_usd' and 'per_day_usd'"
+        )
+    parsed: dict[str, float | None] = {}
+    for key, value in raw_ceiling.items():
+        if value is None:
+            parsed[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise MissionInvalid(f"ceiling.{key} must be a number or null")
+        if value <= 0:
+            raise MissionInvalid(f"ceiling.{key} must be positive")
+        parsed[key] = float(value)
+    return parsed
 
 
 def _parse_pause(raw_pause: object) -> dict | None:
@@ -2395,6 +2438,13 @@ class MissionResult:
     # snapshot can be diffed against it to see what moved. Empty only if the
     # catalog itself is empty, never omitted.
     prompt_versions: dict[str, str] = field(default_factory=dict)
+    # E9: {"per_hour_usd", "per_day_usd", "hour_usd", "day_usd",
+    # "unpriced_hour", "unpriced_day"} as read at the start of this run;
+    # None on a dry run, which never checks the ceiling.
+    ceiling: dict | None = None
+    # E9: whether this launch ran with --unattended. A launch property, not
+    # a mission property -- never recorded on the mission snapshot.
+    unattended: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2832,6 +2882,112 @@ def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
             notes.append(f"removed stale running.json lock before resume ({reason})")
 
 
+def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path, list[str]]:
+    """E9: beside the running lock (keyed by mission run), a lock keyed by
+    the mission *file*, so two overlapping launches of the same file cannot
+    both run -- `_acquire_running_lock` cannot catch this, since each launch
+    mints its own fresh mission id and directory. Same staleness rule as
+    `running.json`; the live lock's body names the mission id already
+    running, so a refusal can point at it directly."""
+    locks_dir = base / "locks"
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    resolved = str(Path(source).expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode()).hexdigest()[:16]
+    lock = locks_dir / f"{digest}.json"
+    notes: list[str] = []
+    while True:
+        try:
+            with lock.open("x") as target:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "started": datetime.now(UTC).isoformat(),
+                        "host": socket.gethostname(),
+                        "mission_id": mission_id,
+                    },
+                    target,
+                    indent=2,
+                )
+            return lock, notes
+        except FileExistsError:
+            current = _json_object(lock) or {}
+            live, reason = _lock_status(current)
+            if live:
+                raise MissionInvalid(
+                    f"mission file is already running as '{current.get('mission_id')}' "
+                    f"({reason}); lock at {lock}"
+                ) from None
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                continue
+            notes.append(f"removed stale file lock at {lock} before resume ({reason})")
+
+
+def _check_ceiling(mission: Mission, base: Path) -> dict:
+    """E9: read once, at start, against the rolling spend under `base/runs`
+    -- never against this mission's own ledger, which `max_cost_usd` already
+    bounds. Raises before a single dispatch, on a launch and a resume alike."""
+    per_hour = ceiling_mod.USD_PER_HOUR
+    per_day = ceiling_mod.USD_PER_DAY
+    if mission.ceiling is not None:
+        per_hour = mission.ceiling["per_hour_usd"]
+        per_day = mission.ceiling["per_day_usd"]
+    spend = ceiling_mod.rolling_spend(base)
+    if per_hour is not None and spend.hour_usd >= per_hour:
+        raise MissionInvalid(
+            f"spend ceiling: ${spend.hour_usd:.2f} in the last hour is over the "
+            f"${per_hour:.2f} per-hour ceiling"
+        )
+    if per_day is not None and spend.day_usd >= per_day:
+        raise MissionInvalid(
+            f"spend ceiling: ${spend.day_usd:.2f} in the last 24 hours is over the "
+            f"${per_day:.2f} per-day ceiling"
+        )
+    return {
+        "per_hour_usd": per_hour,
+        "per_day_usd": per_day,
+        "hour_usd": spend.hour_usd,
+        "day_usd": spend.day_usd,
+        "unpriced_hour": spend.unpriced_hour,
+        "unpriced_day": spend.unpriced_day,
+    }
+
+
+def _check_unattended(mission: Mission) -> None:
+    """E9: an unattended launch runs only where nobody reading it is not a
+    problem -- see the four refusals below, verbatim from the roadmap item.
+    Checked once, before the ceiling check, and never on a dry run."""
+    for lane in mission.lanes:
+        if lane.human:
+            raise MissionInvalid(
+                f"--unattended: lane '{lane.name}' is a human lane -- nobody is there "
+                "to answer it"
+            )
+    pause_before = set(mission.pause["before"]) if mission.pause else set()
+    if mission.resolve is not None:
+        raise MissionInvalid(
+            "--unattended: this mission has a resolve block, which writes without "
+            "a pause point of its own"
+        )
+    for lane in mission.lanes:
+        for attempt in lane.attempts:
+            if attempt.mode != "write":
+                continue
+            if lane.stage == "fix":
+                if lane.name not in pause_before:
+                    raise MissionInvalid(
+                        f"--unattended: lane '{lane.name}' is a fix-stage write lane not "
+                        "named in pause.before -- nothing may land without a lead reading "
+                        "the review"
+                    )
+            elif lane.stage is None:
+                raise MissionInvalid(
+                    f"--unattended: lane '{lane.name}' is a write lane with no stage -- "
+                    "an unstaged write lane is a landing nobody reads"
+                )
+
+
 def _artifact_matches(recorded: str | None, expected: Path) -> bool:
     if recorded is None:
         return True
@@ -3261,9 +3417,18 @@ def run_mission(
     answer_file: str | None = None,
     dispatcher: Callable[..., Result] | None = None,
     human_answers: dict[str, str] | None = None,
+    unattended: bool = False,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
+    # E9: checked once, after validate and before the running lock, on a
+    # launch and a resume alike (a resume starts dispatches too) -- never on
+    # a dry run, which spawns nothing and spends nothing.
+    ceiling_result: dict | None = None
+    if not dry_run:
+        if unattended:
+            _check_unattended(mission)
+        ceiling_result = _check_ceiling(mission, base)
     if resume_dir is None:
         _check_branches(mission, dry_run=dry_run)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -3317,6 +3482,15 @@ def run_mission(
 
     running, lock_notes = _acquire_running_lock(mission_dir)
     try:
+        # E9: beside the running lock (keyed by this run's own directory), a
+        # lock keyed by the mission file, so a second overlapping launch of
+        # the same file -- which would mint its own fresh mission id and so
+        # never trip `_acquire_running_lock` -- is refused too. A mission
+        # built in code (an empty source, as the tests do) takes no lock.
+        source_lock: Path | None = None
+        if mission.source:
+            source_lock, source_notes = _acquire_source_lock(base, mission.source, mission_id)
+            lock_notes.extend(source_notes)
         if resume_dir is None:
             (mission_dir / "mission.json").write_text(
                 json.dumps(mission.to_dict(), indent=2)
@@ -3343,12 +3517,19 @@ def run_mission(
             stop_answer=stop_answer,
             dispatcher=dispatcher,
             human_answers=human_answers,
+            unattended=unattended,
+            ceiling_result=ceiling_result,
         )
     finally:
         try:
             running.unlink()
         except FileNotFoundError:
             pass
+        if source_lock is not None:
+            try:
+                source_lock.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _execute_mission(
@@ -3363,6 +3544,8 @@ def _execute_mission(
     stop_answer: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
     human_answers: dict[str, str] | None = None,
+    unattended: bool = False,
+    ceiling_result: dict | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -4255,6 +4438,8 @@ def _execute_mission(
         resolve=resolve_out,
         notifications=notifications,
         prompt_versions=prompts_mod.prompt_versions(),
+        ceiling=ceiling_result,
+        unattended=unattended,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
