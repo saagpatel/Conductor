@@ -53,6 +53,7 @@ from pathlib import Path, PurePosixPath
 from . import attest
 from . import ceiling as ceiling_mod
 from . import collisions as collisions_mod
+from . import forecast as forecast_mod
 from . import notify as notify_mod
 from .errors import KINDS, error_kind
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
@@ -2445,6 +2446,11 @@ class MissionResult:
     # E9: whether this launch ran with --unattended. A launch property, not
     # a mission property -- never recorded on the mission snapshot.
     unattended: bool = False
+    # E14: {"lanes": [...], "warnings": [...]} from `forecast.forecast`,
+    # computed once at start against this run's own `home` -- on a launch, a
+    # resume, and a dry run alike. Every warning here is also appended to
+    # `notes`; this block keeps the per-lane figures behind them.
+    forecast: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2494,6 +2500,7 @@ class MissionResult:
             "collisions": self.collisions,
             "resolve": self.resolve,
             "paused": self.paused,
+            "forecast": self.forecast,
             "notes": self.notes,
             "resumes": self.resumes,
             "resumed_from": self.resumed_from,
@@ -3421,6 +3428,11 @@ def run_mission(
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
+    # E14: computed once, against the same receipts under `base/runs` a dry
+    # run and a real launch alike would spend into -- a dry run is exactly
+    # where a lead reads caps before committing to them, so it gets the same
+    # forecast a launch would, never a placeholder.
+    forecast_result = forecast_mod.forecast(mission, base)
     # E9: checked once, after validate and before the running lock, on a
     # launch and a resume alike (a resume starts dispatches too) -- never on
     # a dry run, which spawns nothing and spends nothing.
@@ -3522,6 +3534,7 @@ def run_mission(
             human_answers=human_answers,
             unattended=unattended,
             ceiling_result=ceiling_result,
+            forecast_result=forecast_result,
         )
     finally:
         try:
@@ -3549,6 +3562,7 @@ def _execute_mission(
     human_answers: dict[str, str] | None = None,
     unattended: bool = False,
     ceiling_result: dict | None = None,
+    forecast_result: forecast_mod.Forecast | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -4329,6 +4343,8 @@ def _execute_mission(
     # on. In a flat mission that is every lane, as before.
     quorum: dict | None = None
     notes: list[str] = list(resume.notes) + mission_notes
+    if forecast_result is not None:
+        notes.extend(forecast_result.warnings)
     if chain.error:
         notes.append(chain.error)
     if isinstance(mission.require, dict):
@@ -4443,6 +4459,7 @@ def _execute_mission(
         prompt_versions=prompts_mod.prompt_versions(),
         ceiling=ceiling_result,
         unattended=unattended,
+        forecast=forecast_result.to_dict() if forecast_result is not None else {},
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
