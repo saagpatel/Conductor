@@ -95,6 +95,19 @@ def test_scrub_json_redacts_a_secret_shaped_key(tmp_path):
     assert scrubbed["note"] == "fine"
 
 
+def test_scrub_guard_does_not_read_raw_base64_as_an_env_secret(tmp_path):
+    """The base64 alphabet can spell "...KEY=" right before its padding; a
+    plain-text scan of the raw run read that as an env secret (E13's export
+    hit it on a re-encoded receipt payload). Only the decoded text counts."""
+    clean = b"a clean statement with nothing secret in it, padded to len " * 2
+    clean = clean[: len(clean) - len(clean) % 3]
+    tail = base64.b64decode("KEY=")
+    encoded = base64.b64encode(clean + tail).decode()
+    assert encoded.endswith("KEY=")
+    (tmp_path / "receipt.json").write_text(f'{{"payload": "{encoded}"}}\n')
+    assert golden.scrub_guard(tmp_path) == []
+
+
 def test_scrub_guard_decodes_a_base64_blob_and_finds_the_user_home(tmp_path):
     # A DSSE-style payload: real secrets base64-encoded inside a JSON field,
     # the way attestation.json carries its statement. Plain-text scanning

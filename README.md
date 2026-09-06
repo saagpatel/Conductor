@@ -1461,6 +1461,73 @@ a receipt written before this field existed reads back as `null` with no
 note, since nothing rewrites old receipts. A version capture never fails the
 dispatch and never delays it past its own short timeout.
 
+### Export bundles
+
+A mission's signed receipts live under `$CONDUCTOR_HOME`, and `conductor
+attest` needs that home and its key to check them. A reader outside this
+machine has neither, so E13 adds a bundle everything they need to audit a
+mission travels in, with a manifest that says exactly what can and cannot be
+re-verified from it.
+
+```
+conductor export MISSION_ID --out DIR [--logs]
+```
+
+writes `DIR/`: every mission-directory file (`mission.json`, `result.json`,
+`report.md`, `pause.json`, `lanes/`, `receipts/`, `diffs/`, `answers/`,
+`asks/`, `verdicts/`, `deliverables/`, `tally.*`, each only when it exists),
+and `runs/<run id>/` for every run id the receipt chain or any lane's
+attempts name -- `result.json`, `attestation.json`, `diff.patch`,
+`prompt.txt`, `answer.txt`, and `argv.json` always, `stdout.log` and
+`stderr.log` only with `--logs` (the bulk of a bundle's size, and nothing
+the manifest checks anything against). Every file passes through C7's
+scrubber (`golden.scrub_text` / `golden.scrub_json_text`), the conductor
+home, the mission's `cwd`, and the user's home becoming placeholders. A DSSE
+envelope -- every receipt link and every run's `attestation.json` -- carries
+its statement as a base64 payload, opaque to a plain-text scrub: it is
+decoded, scrubbed as JSON, and re-encoded, with `signatures` left exactly as
+they were. That means the envelope's signature deliberately no longer
+verifies against its re-encoded payload -- the same trade every scrubbed
+secret makes, made explicit in `manifest.json` rather than left for a reader
+to discover by trying to verify one. `receipts/chain.json`'s own `path`
+fields and a link statement's `attestation_path` are rewritten to
+bundle-relative paths after scrubbing, so they still point somewhere real
+inside the bundle instead of at a placeholder. After writing, `export` runs
+`golden.scrub_guard` over the whole bundle; a finding removes the bundle and
+refuses the export, exactly as `golden record` refuses a leaking fixture.
+
+Before scrubbing anything, `export` verifies the mission on bytes with the
+exporting machine's own key -- the same checks `conductor attest` runs, for
+the chain and, individually, for every run's attestation -- and records the
+verdict in `manifest.json`: `chain.verified_at_export`, one row per link
+(`index`, `lane`, `run_id`, `verified`, `problems`), and one entry per run id
+under `attestations` (`verified_at_export`, `problems`). `files` lists every
+bundled file by its bundle-relative path with three numbers: `sha256` (the
+scrubbed bytes actually in the bundle), `sha256_original` (the file's digest
+on the exporting machine, before scrubbing), and `bytes`. `verifiable_here`
+names what a reader can check from the bundle alone -- file digests and the
+chain's linkage; `not_verifiable_here` names what they cannot -- signatures.
+`note` says why: the receipt key is a shared secret (`attest.py`), so a
+bundle a third party could verify standalone would be a bundle that shipped
+the key that forges everything. Verifying it once, here, with the key, and
+shipping the verdict instead of the key is the whole design.
+
+```
+conductor export --check DIR
+```
+
+reads only `DIR` -- never `$CONDUCTOR_HOME`, never the key -- and confirms
+the manifest still describes the bundle sitting in front of it: every listed
+file exists at its recorded `sha256` and `bytes`, no unlisted file is
+present, `receipts/chain.json`'s links are in index order, each link file's
+`sha256_original` matches what `chain.json` recorded for it, each
+statement's `previous` matches the prior link's recorded hash (`null` on the
+first), and each statement's `run_id` has a `runs/<run id>/attestation.json`
+in the bundle whose `sha256_original` matches the statement's own
+`attestation_sha256`. It says nothing about signatures -- that would need
+the key -- and exits 0 when every check passes, 1 otherwise, printing
+`not_verifiable_here` alongside whatever it found.
+
 ### Pausing for the operator
 
 A mission may declare two pause points, either or both:
