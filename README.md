@@ -1108,9 +1108,10 @@ point in time -- D2's tool deny list, D3's inline personas, the Cursor
 stream-json parser, agy's status-not-exit-code rule -- and a silent CLI
 release can move under any of it; `fleet_version` turns "which build ran
 this" from a guess into something on the receipt. It is `null` when the
-binary is not installed, exits non-zero on `--version`, times out, or the
-receipt predates this field, and in that case `git_verdict.notes` carries
-one line, `fleet version unavailable`; a version capture never fails the
+binary is not installed, exits non-zero on `--version`, or times out, and in
+that case `git_verdict.notes` carries one line, `fleet version unavailable`;
+a receipt written before this field existed reads back as `null` with no
+note, since nothing rewrites old receipts. A version capture never fails the
 dispatch and never delays it past its own short timeout.
 
 ### Pausing for the operator
@@ -1556,8 +1557,9 @@ directory under `tests/golden/` of the current working directory that holds
 a `golden.json`, by default) into a fresh temporary home and a fresh
 temporary git repository, and prints every difference -- the replay's own,
 plus one line per projection field that disagrees with `expected.json` --
-prefixed by the fixture's name; exit 1 if anything printed, 0 if every
-fixture was clean. `--update` is for a deliberate change: it rewrites
+prefixed by the fixture's name; exit 1 if any difference printed, 0 if
+every fixture was clean (version-drift notes, below, print without changing
+the exit code). `--update` is for a deliberate change: it rewrites
 `expected.json` from the replay instead of reporting projection
 differences, so the next `check` is clean once the new behavior is the one
 you meant.
