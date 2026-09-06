@@ -16,10 +16,15 @@ from conductor.prices import DEFAULT_PRICES, Price, estimate, load_prices, looku
 
 def test_every_permitted_model_id_is_priced_at_every_effort():
     """The allowlist and the price table must agree, or a permitted model
-    silently runs unpriced."""
+    silently runs unpriced. E6: the script fleet is exempt -- it costs
+    nothing by construction (runner.dispatch prices it at a hardcoded
+    0.0, never estimated from tokens), so "sh" is deliberately absent from
+    the price table rather than priced at zero."""
     from conductor.fleets import EFFORTS, FLEETS
 
     for fleet in FLEETS.values():
+        if fleet.cap == "none":
+            continue
         for model in fleet.models:
             for effort in EFFORTS:
                 model_id = model.id_for(effort)

@@ -39,7 +39,7 @@ TEST_POLICIES = ("clean", "allow", "forbid")
 # The company behind a model, independent of which fleet dispatches it. A
 # fleet can carry more than one vendor (cursor resells Grok and runs its own
 # Composer); a judge scoring a lane on its own vendor is what A3 refuses.
-VENDORS = ("anthropic", "openai", "google", "xai", "cursor")
+VENDORS = ("anthropic", "openai", "google", "xai", "cursor", "script")
 
 # Per-mode default wall-clock caps. No fleet has a native cap; an agent that
 # loses its way will happily spin until something outside it says stop.
@@ -401,6 +401,18 @@ FLEETS: dict[str, Fleet] = {
             ),
         ),
     ),
+    # E6: a shell command run in the lane's worktree, not a model. One model
+    # ("sh") because there is nothing to choose between; cap mode "none"
+    # because it costs nothing to enforce a cap against -- see budget.py and
+    # `dispatch`'s script-specific handling in runner.py.
+    "script": Fleet(
+        name="script",
+        binary="sh",
+        vendor="script (local)",
+        default_model="sh",
+        cap="none",
+        models=(_flat("sh", "sh", "script"),),
+    ),
 }
 
 
@@ -467,6 +479,11 @@ class Spec:
     # filesystem after the fleet exits (runner.dispatch), never through
     # `git status` (see the module docstring there for why).
     deliverable: dict | None = None
+    # E6: the shell command a `fleet: "script"` dispatch runs; ignored by
+    # every other fleet. Refused as missing (script) or as set (any other
+    # fleet) by mission.py at load time; `_validate_script` refuses it here
+    # too, for a bare Spec built outside a mission.
+    command: str | None = None
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -493,13 +510,15 @@ class Spec:
                     "test_surface patterns must be non-empty repo-relative Git globs "
                     f"without '..': {pattern!r}"
                 )
-        if not self.prompt.strip():
+        if self.fleet != "script" and not self.prompt.strip():
             raise DispatchRefused("empty prompt")
         if self.resume is not None and (
             not isinstance(self.resume, str) or not self.resume.strip()
         ):
             raise DispatchRefused("resume must be a non-empty session id")
         FLEETS[self.fleet].model(self.model)  # raises if the model is off-policy
+        if self.fleet == "script":
+            self._validate_script()
         if self.verdict is not None and (
             not isinstance(self.verdict, list)
             or not all(isinstance(criterion, Criterion) for criterion in self.verdict)
@@ -622,6 +641,35 @@ class Spec:
         if self.cap_grace_usd > CAP_GRACE_CEILING_USD:
             raise DispatchRefused(
                 f"cap_grace_usd must not exceed the ${CAP_GRACE_CEILING_USD:.2f} ceiling"
+            )
+
+    def _validate_script(self) -> None:
+        """E6: a script dispatch has no model dialogue, no tool surface to
+        deny, and costs nothing -- a dollar cap has nothing to enforce
+        against it. Every field refused below describes a dispatch that
+        never happens on this fleet; each gets its own reason so a caller
+        can act on the refusal rather than guess at it."""
+        if not self.command or not self.command.strip():
+            raise DispatchRefused("fleet 'script' needs a non-empty command")
+        if self.schema:
+            raise DispatchRefused("fleet 'script' has no structured-output flag; drop --schema")
+        if self.verdict is not None:
+            raise DispatchRefused("fleet 'script' has no structured-output flag; drop --verdict")
+        if self.resume is not None:
+            raise DispatchRefused("fleet 'script' holds no session to resume")
+        if self.cap_usd is not None:
+            raise DispatchRefused(
+                "fleet 'script' costs nothing; a dollar cap has nothing to enforce"
+            )
+        if self.cap_grace_usd is not None:
+            raise DispatchRefused(
+                "fleet 'script' costs nothing; a dollar cap has nothing to enforce"
+            )
+        if self.agent is not None:
+            raise DispatchRefused("fleet 'script' has no tool surface for a persona; drop --agent")
+        if self.taint:
+            raise DispatchRefused(
+                "fleet 'script' has no tool surface to deny; taint is a no-op there"
             )
 
     def _validate_schema(self) -> None:
@@ -971,11 +1019,19 @@ def _build_cursor(spec: Spec, model: str) -> list[str]:
     return argv
 
 
+def _build_script(spec: Spec, model: str) -> list[str]:
+    # `model` is always "sh" (the fleet's only model) and carries no dialect
+    # of its own; the run's own worktree is the process cwd, set by the
+    # caller the same way as for every other fleet.
+    return [FLEETS["script"].binary, "-c", spec.command]
+
+
 _BUILDERS = {
     "claude": _build_claude,
     "codex": _build_codex,
     "antigravity": _build_antigravity,
     "cursor": _build_cursor,
+    "script": _build_script,
 }
 
 

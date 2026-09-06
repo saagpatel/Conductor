@@ -100,6 +100,12 @@ def parse(fleet: str, stdout: str) -> FleetOutput:
     """Best-effort: a fleet that changes its envelope must degrade to the raw
     text, never to an exception in the middle of an unattended run."""
     text = stdout.strip()
+    if fleet == "script":
+        # E6: unlike every other fleet, a script dispatch is priced (at
+        # zero) whether or not it printed anything -- checked before the
+        # generic empty-stdout short circuit below, which would otherwise
+        # leave a silent command's usage as None (unpriced) instead of free.
+        return _parse_script(text)
     if not text:
         return FleetOutput()
     if fleet == "codex":
@@ -110,10 +116,22 @@ def parse(fleet: str, stdout: str) -> FleetOutput:
         return _parse_cursor(text)
     if fleet == "claude":
         return _parse_claude(text)
+    if fleet == "script":
+        return _parse_script(text)
     payload = _last_json_object(text)
     if payload is None:
         return FleetOutput(answer=text, parsed=False)
     return _parse_envelope(fleet, payload, text)
+
+
+def _parse_script(text: str) -> FleetOutput:
+    """A shell command reports no session id and no token usage; its cost
+    is fixed at zero rather than estimated, whether or not it printed
+    anything -- a command that prints nothing is exactly as free as one
+    that prints a page (see budget.py's `free` state). Its whole stdout is
+    its answer -- there is no separate "final message" to pick out the way
+    a chat model's last reply is, just whatever the command printed."""
+    return FleetOutput(answer=text, parsed=bool(text), usage=Usage(cost_usd=0.0))
 
 
 def _parse_claude(text: str) -> FleetOutput:

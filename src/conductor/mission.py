@@ -97,6 +97,7 @@ _INHERITED = (
     "include",
     "agent",
     "deliverable",
+    "command",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
 
@@ -264,6 +265,9 @@ class Attempt:
     # C5: which of the previous attempt's error `KINDS` this fallback answers;
     # None (every fallback but a hand-set one) means every kind, as before.
     on: list[str] | None = None
+    # E6: the shell command a `fleet: "script"` attempt runs; None on every
+    # other fleet (refused at load if it names one anyway).
+    command: str | None = None
 
     def spec(
         self,
@@ -279,7 +283,16 @@ class Attempt:
         ledger passes what it has left), `prompt` the rendered template,
         `stage` the lane's pipeline stage (item 4's reproduce gate reads it
         off the Spec, not the mission), and `taint` the lane's computed
-        (not this attempt's own) taint state (D2)."""
+        (not this attempt's own) taint state (D2).
+
+        E6: a script attempt has no stream for a breaker to read and no
+        tool surface for taint to deny, and never carries a dollar cap (a
+        mission-wide `cap_usd`/`ledger.remaining()` must not leak onto it
+        either, since fleets.Spec refuses one) -- every field below that a
+        script fleet cannot use is forced off here, once, rather than left
+        to whatever the caller happened to pass in.
+        """
+        script = self.fleet == "script"
         return Spec(
             fleet=self.fleet,
             prompt=self.prompt if prompt is None else prompt,
@@ -288,14 +301,14 @@ class Attempt:
             effort=self.effort,
             mode=self.mode,
             timeout=self.timeout,
-            stall_timeout=self.stall_timeout,
-            loop_limit=self.loop_limit,
-            max_tool_calls=self.max_tool_calls,
-            tool_idle_timeout=self.tool_idle_timeout,
+            stall_timeout=0 if script else self.stall_timeout,
+            loop_limit=0 if script else self.loop_limit,
+            max_tool_calls=0 if script else self.max_tool_calls,
+            tool_idle_timeout=0 if script else self.tool_idle_timeout,
             schema=self.schema,
             verdict=self.verdict,
             resume=resume,
-            cap_usd=self.cap_usd if cap_usd is None else cap_usd,
+            cap_usd=None if script else (self.cap_usd if cap_usd is None else cap_usd),
             cap_grace_usd=self.cap_grace_usd,
             test_policy=self.test_policy,
             test_surface=self.test_surface,
@@ -304,9 +317,10 @@ class Attempt:
             setup=self.setup,
             teardown=self.teardown,
             include=self.include,
-            taint=taint,
+            taint=False if script else taint,
             agent=self.agent,
             deliverable=self.deliverable,
+            command=self.command,
         )
 
     def effective_cwd(self, mission_cwd: str) -> str:
@@ -356,6 +370,13 @@ class Lane:
     # E7: this lane's fleet is the operator, not a dispatch -- see _human_lane.
     # Load-derived from `fleet: "human"`, never set directly by a mission file.
     human: bool = False
+    # E6: this lane's declared fleet (its primary attempt, before any
+    # fallback or cascade) is "script". Load-derived from `fleet: "script"`,
+    # never set directly by a mission file. Unlike a human lane, a script
+    # lane is dispatched exactly like a model lane -- this flag exists for
+    # the load-time refusals (resume, cascade, taint) that make no sense on
+    # it, not to skip dispatch.
+    script: bool = False
 
 
 @dataclass
@@ -821,6 +842,11 @@ class Mission:
                         f"lane '{lane.name}': resume '{lane.resume}' is a human lane, "
                         "which holds no session to resume"
                     )
+                if by_name[lane.resume].script:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': resume '{lane.resume}' is a script lane, "
+                        "which holds no session to resume"
+                    )
             for attempt in lane.attempts:
                 for ref_lane, ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
                     if is_mission:
@@ -928,6 +954,7 @@ class Mission:
             "tainted",
             "taint_from",
             "human",
+            "script",
         }
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
@@ -952,6 +979,8 @@ class Mission:
                 )
             if not isinstance(raw_lane["human"], bool):
                 raise MissionInvalid(f"mission snapshot lane {index} human must be true or false")
+            if not isinstance(raw_lane["script"], bool):
+                raise MissionInvalid(f"mission snapshot lane {index} script must be true or false")
             attempts = raw_lane["attempts"]
             if not isinstance(attempts, list) or not attempts:
                 raise MissionInvalid(
@@ -1233,6 +1262,11 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             # from it exactly the way it would from any other tainted lane.
             tainted_by_name[lane.name] = (True, list(lane.taint_from))
             continue
+        # E6: this lane's own declared fleet, before any fallback or cascade
+        # attempt -- Lane.script, and the refusals below that make no sense
+        # on a lane whose primary dispatch runs a shell command instead of a
+        # model.
+        lane_is_script = raw_lane.get("fleet") == "script"
         primary_fields = _attempt_fields(raw_lane, base_dir, defaults)
         primary = _attempt(primary_fields, where=lane_where)
         attempts = [primary]
@@ -1249,6 +1283,10 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             )
         lane_name = str(raw_lane.get("name") or _default_lane_name(primary, lanes))
         needs, lane_base, lane_resume = _lane_graph_fields(raw_lane, where=f"lane {i}")
+        if lane_is_script and lane_resume is not None:
+            # E6: a script attempt holds no fleet session -- nothing to
+            # resume, the same reasoning a human lane's resume is refused for.
+            raise MissionInvalid(f"{lane_where}: a script lane may not set resume")
         lane_branch = raw_lane.get("branch")
         if lane_branch is not None and not isinstance(lane_branch, str):
             raise MissionInvalid(f"lane {i}: branch must be a string")
@@ -1258,9 +1296,17 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         lane_taint = raw_lane.get("taint", False)
         if not isinstance(lane_taint, bool):
             raise MissionInvalid(f"lane {i}: taint must be true or false")
+        if lane_is_script and lane_taint:
+            raise MissionInvalid(f"{lane_where}: a script lane may not set taint")
         lane_cascade = raw_lane.get("cascade", True)
         if not isinstance(lane_cascade, bool):
             raise MissionInvalid(f"lane {i}: cascade must be true or false")
+        if lane_is_script:
+            if raw_lane.get("cascade") is True:
+                raise MissionInvalid(f"{lane_where}: a script lane may not set cascade")
+            # A script lane never cascades, even under a mission-wide
+            # default it did not opt out of by name.
+            lane_cascade = False
         lane_cascaded = False
         if cascade_fields is not None and lane_cascade:
             qualifies = lane_stage == "build" if any_staged else primary.mode == "write"
@@ -1271,6 +1317,20 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 )
                 attempts = [cascade_attempt, *attempts]
                 lane_cascaded = True
+        # E6: every attempt this lane actually holds (primary, fallback, and
+        # any cascade attempt) -- a script attempt needs its command and may
+        # not set the fields that describe a model dispatch; a command on
+        # any other fleet's attempt is refused the same way.
+        for attempt in attempts:
+            attempt_where = f"{lane_where} ({attempt.label()})"
+            if attempt.fleet == "script":
+                if not attempt.command or not attempt.command.strip():
+                    raise MissionInvalid(f"{attempt_where}: a script attempt needs 'command'")
+                _validate_script_attempt(attempt, where=attempt_where)
+            elif attempt.command is not None:
+                raise MissionInvalid(
+                    f"{attempt_where}: command may only be set on a script attempt"
+                )
         # D2: inherited taint, from every attempt's template references
         # (cascade attempt included) and from resuming a tainted lane's
         # session. Only lanes already processed (i.e. earlier in mission
@@ -1301,6 +1361,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 taint=lane_taint,
                 tainted=lane_tainted,
                 taint_from=taint_from,
+                script=lane_is_script,
             )
         )
 
@@ -1607,12 +1668,16 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
     """Merge one level of the cascade: explicit keys override the parent's."""
     out = dict(parent)
     if parent.get("fleet") and raw.get("fleet") and raw["fleet"] != parent["fleet"]:
-        # Model names are fleet-local. A fallback that switches fleet must
-        # not carry its parent's model with it: caught live 2026-09-03 when
-        # an antigravity fallback inherited "luna" from its codex primary.
+        # Model and command names are fleet-local. A fallback that switches
+        # fleet must not carry its parent's model with it: caught live
+        # 2026-09-03 when an antigravity fallback inherited "luna" from its
+        # codex primary. E6: a script attempt's own command is exactly as
+        # local -- a fallback that leaves script for a model fleet (or the
+        # reverse) must not carry a stray command across the switch.
         # (A mission-level model has no fleet to differ from and does cascade;
         # load-time validation refuses it on any lane it does not fit.)
         out.pop("model", None)
+        out.pop("command", None)
     for key in _INHERITED:
         if key in raw and (raw[key] is not None or key in _BREAKER_KEYS):
             out[key] = raw[key]
@@ -1624,6 +1689,14 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
     out.pop("cap_grace_usd", None)
     if "cap_grace_usd" in raw:
         out["cap_grace_usd"] = raw["cap_grace_usd"]
+    # E6: a mission- or lane-level cap_usd default must not silently become
+    # a script attempt's own cap -- fleets.Spec refuses any cap_usd on that
+    # fleet, so a mission-wide cap would otherwise refuse every script lane
+    # it reaches. Only this level's own explicit value (present in `raw`)
+    # survives; Attempt.spec() also forces cap_usd off for a script attempt
+    # as a second line of defense.
+    if out.get("fleet") == "script" and "cap_usd" not in raw:
+        out.pop("cap_usd", None)
     if raw.get("cwd"):
         # E26: resolved exactly as the mission-level `cwd` is (relative to
         # the mission file's directory, `expanduser`, `resolve`), so a lane
@@ -1673,9 +1746,11 @@ def _validate_on(raw_on: object, where: str) -> list[str] | None:
 def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
     if "fleet" not in fields:
         raise MissionInvalid(f"{where}: fleet is required")
-    if not str(fields.get("prompt", "")).strip():
+    # E6: a script attempt's ask is optional -- its command is the work;
+    # every other fleet still needs one (nothing else tells it what to do).
+    if fields.get("fleet") != "script" and not str(fields.get("prompt", "")).strip():
         raise MissionInvalid(f"{where}: no prompt (set prompt or prompt_file on the mission)")
-    for key in ("model", "test", "commit", "schema", "test_policy", "cwd"):
+    for key in ("model", "test", "commit", "schema", "test_policy", "cwd", "command"):
         if fields.get(key) is not None and not isinstance(fields[key], str):
             raise MissionInvalid(f"{where}: {key} must be a string")
     surface = fields.get("test_surface")
@@ -1716,14 +1791,21 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
         except ValueError as exc:
             raise MissionInvalid(f"{where}: verdict: {exc}") from exc
     validated_on = _validate_on(on, where)
+    # E6: a script attempt's ordinary job is to change the tree; a model
+    # attempt's is to look, unless it says otherwise. Still overridable
+    # (`mode: read` for a script review lane).
+    default_mode = "write" if fields.get("fleet") == "script" else "read"
     try:
         return Attempt(
             fleet=str(fields["fleet"]),
             model=fields.get("model"),
             effort=str(fields.get("effort", "standard")),
-            mode=str(fields.get("mode", "read")),
+            mode=str(fields.get("mode", default_mode)),
             cwd=fields.get("cwd"),
-            prompt=str(fields["prompt"]),
+            # E6: a script attempt's prompt is optional and may never have
+            # been set anywhere in the cascade -- "fleet is required" above
+            # guarantees `fields["fleet"]`, but nothing guarantees "prompt".
+            prompt=str(fields.get("prompt", "")),
             timeout=int(fields["timeout"]) if fields.get("timeout") is not None else None,
             stall_timeout=_breaker_value(fields, "stall_timeout", 600),
             loop_limit=_breaker_value(fields, "loop_limit", 6),
@@ -1748,6 +1830,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             agent=fields.get("agent"),
             deliverable=fields.get("deliverable"),
             on=validated_on,
+            command=fields.get("command"),
         )
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"{where}: {exc}") from exc
@@ -1791,6 +1874,30 @@ def _validate_human_attempt(attempt: Attempt, where: str) -> None:
             continue
         if getattr(attempt, f.name) != getattr(reference, f.name):
             raise MissionInvalid(f"{where}: a human lane may not set {f.name}")
+
+
+# E6: an attempt whose fleet is "script" has no effort dial, no model but
+# "sh", no dollar cap to enforce, and no structured-output or persona
+# surface -- refused with the field named, the same shape
+# _validate_human_attempt checks for a human lane's Attempt fields.
+_SCRIPT_ATTEMPT_DENIED = (
+    "effort",
+    "model",
+    "cap_usd",
+    "cap_grace_usd",
+    "schema",
+    "verdict",
+    "agent",
+)
+
+
+def _validate_script_attempt(attempt: Attempt, *, where: str) -> None:
+    reference = Attempt(fleet="script", prompt=attempt.prompt, command=attempt.command)
+    for f in fields(Attempt):
+        if f.name not in _SCRIPT_ATTEMPT_DENIED:
+            continue
+        if getattr(attempt, f.name) != getattr(reference, f.name):
+            raise MissionInvalid(f"{where}: a script attempt may not set {f.name}")
 
 
 def _human_deliverable_path(mission_cwd: str, path: str) -> Path:
@@ -3405,6 +3512,10 @@ def _execute_mission(
             summary["unpriced"] = (
                 result.spawned and not result.interrupted and summary.get("cost_usd") is None
             )
+            # E6: a script attempt is priced at zero and verified, never
+            # unpriced (result.budget carries "free": true; its cost_usd is
+            # 0.0, so the line above already reads False here on its own).
+            summary["free"] = bool((result.budget or {}).get("free"))
             out.attempts.append(summary)
             out.kinds.append(kind)
             out.cost_usd += float(summary.get("cost_usd") or 0.0)
