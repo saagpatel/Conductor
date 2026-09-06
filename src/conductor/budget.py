@@ -42,10 +42,14 @@ POLL_S = 2.0
 class Budget:
     """One dispatch's cap and what became of it."""
 
-    cap_usd: float
-    enforcement: str  # "native" | "watcher" | "post-hoc", from the fleet registry
+    cap_usd: float | None
+    enforcement: str  # "native" | "watcher" | "post-hoc" | "none", from the fleet registry
     exceeded: bool = False
     unpriced: bool = False  # a cap was set and no figure ever arrived: unenforced
+    # E6: a script dispatch's own budget block -- priced at zero and
+    # verified, never unpriced, and carrying no cap to enforce. False on
+    # every other fleet, whether or not a cap_usd was ever set.
+    free: bool = False
     observed_usd: float | None = None  # the figure the verdict was based on
     # E24: cap_grace_usd from the dispatch's own Spec, carried here so
     # settle() has it without a second argument; None means no grace band.
@@ -93,11 +97,15 @@ class Budget:
         """
         self.observed_usd = cost_usd
         self.unpriced = cost_usd is None and not killed and not interrupted
-        ceiling = self.cap_usd if self.grace_usd is None else self.cap_usd + self.grace_usd
+        ceiling = (
+            self.cap_usd
+            if self.grace_usd is None or self.cap_usd is None
+            else self.cap_usd + self.grace_usd
+        )
         self.exceeded = (
             killed
             or fleet_status == "error_max_budget_usd"
-            or (cost_usd is not None and cost_usd > ceiling)
+            or (cost_usd is not None and ceiling is not None and cost_usd > ceiling)
         )
         if self.grace_usd is None or cost_usd is None:
             self.grace_used = None

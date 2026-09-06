@@ -1333,6 +1333,13 @@ def dispatch(
     """
     criteria = spec.verdict
     spec.validate()
+    if spec.fleet == "script":
+        # E6: there is no stream for a breaker to read, so every ceiling it
+        # would otherwise watch is forced off here -- not just left at
+        # whatever the caller's Spec happened to carry.
+        spec = _replace(
+            spec, stall_timeout=0, loop_limit=0, max_tool_calls=0, tool_idle_timeout=0
+        )
     isolate = isolate or base_ref is not None
     fleet = FLEETS[spec.fleet]
     model_id = fleet.model(spec.model).id_for(spec.effort)
@@ -1616,6 +1623,11 @@ def dispatch(
         budget = (
             Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap, grace_usd=spec.cap_grace_usd)
             if spec.cap_usd is not None
+            # E6: priced at zero and verified, never unpriced -- a script
+            # dispatch never sets cap_usd (Spec.validate refuses it), so it
+            # would otherwise carry no budget block at all.
+            else Budget(cap_usd=None, enforcement=fleet.cap, free=True)
+            if spec.fleet == "script"
             else None
         )
         # The watcher follows the fleet's running usage whether or not there is a
@@ -1639,13 +1651,25 @@ def dispatch(
                 proc = subprocess.Popen(
                     argv,
                     cwd=spec.cwd,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE if spec.fleet == "script" else subprocess.DEVNULL,
                     stdout=out,
                     stderr=err,
                     start_new_session=True,
                     env=env,
                 )
                 _register_live_group(proc.pid)
+                if spec.fleet == "script" and proc.stdin is not None:
+                    # E6: the prompt, when there is one, is delivered on
+                    # stdin; an empty prompt just closes it at once. A
+                    # command that never reads stdin at all (exits before
+                    # this write lands) must not be mistaken for a spawn
+                    # failure.
+                    try:
+                        proc.stdin.write(spec.prompt.encode())
+                    except (BrokenPipeError, OSError):
+                        pass
+                    finally:
+                        proc.stdin.close()
                 if (
                     spec.stall_timeout
                     or spec.loop_limit
