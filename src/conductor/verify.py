@@ -248,6 +248,27 @@ def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
     )
 
 
+def changed_paths_since(cwd: str, base_sha: str, *, exclude: list[str] | None = None) -> list[str]:
+    """Every path that differs from `base_sha` in the current tree --
+    committed, staged, unstaged, and untracked -- optionally excluding Git
+    pathspec globs (E16: an adversarial lane's test-surface patterns, so the
+    caller can ask "did anything change outside the test?" without a second
+    pass in Python). Sibling to `diff_since`: same notion of "everything the
+    tree now holds that `base_sha` did not," as names rather than a patch.
+    """
+    exclusions = [f":(exclude,glob){pattern}" for pattern in exclude or []]
+    names: set[str] = set()
+    tracked = _git(cwd, "diff", "--name-only", base_sha, "--", ".", *exclusions)
+    if tracked.returncode == 0:
+        names.update(line for line in tracked.stdout.splitlines() if line.strip())
+    status = _git(
+        cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", *exclusions
+    )
+    if status.returncode == 0:
+        names.update(path for code, path in _status_entries(status.stdout) if code == "??")
+    return sorted(names)
+
+
 DIFF_LIMIT = 400_000
 
 
@@ -364,6 +385,37 @@ def uncommit(cwd: str, outcome: CommitOutcome, base_sha: str) -> CommitOutcome:
         files=outcome.files,
         deletions=outcome.deletions,
         reason=f"gate failed; commit {outcome.sha[:8]} undone, work left staged in the tree",
+    )
+
+
+def discard(cwd: str, outcome: CommitOutcome, base_sha: str) -> CommitOutcome:
+    """E16: like `uncommit`, but wipes the working tree back to `base_sha`
+    too, instead of leaving the change staged.
+
+    An adversarial lane that must not land has no kept-worktree story the
+    way a fix's does (nothing here calls for a human to read the diff by
+    hand); what does matter is that a later lane can still build cleanly on
+    this one's unchanged base, which a soft reset's leftover dirty state
+    would refuse (`LaneResult.buildable` requires `clean`). The reason is
+    `commit_work`'s own "nothing to commit" -- once the tree is back at
+    `base_sha` with nothing staged, that is exactly the state it describes,
+    and `Result.failure()` already reads that reason as legitimately empty
+    under `no_op_ok` instead of a distinct kind of failure.
+    """
+    if not base_sha:
+        return replace(outcome, reason="commit kept: no base to reset to")
+    undo = _git(cwd, "reset", "--hard", base_sha)
+    if undo.returncode != 0:
+        return replace(outcome, reason=f"could not undo commit: {undo.stderr.strip()}")
+    cleaned = _git(cwd, "clean", "-fd")
+    if cleaned.returncode != 0:
+        return replace(outcome, reason=f"could not clean working tree: {cleaned.stderr.strip()}")
+    return CommitOutcome(
+        attempted=True,
+        committed=False,
+        files=outcome.files,
+        deletions=outcome.deletions,
+        reason="nothing to commit",
     )
 
 

@@ -409,7 +409,7 @@ order, first match wins:
 
 ```
 interrupted, cancelled, cap, breaker, timeout, setup, refused, agent, deliverable,
-rate_limit, transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op,
+adversarial, rate_limit, transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op,
 read_moved_bytes, no_answer, commit, unknown
 ```
 
@@ -433,6 +433,7 @@ reported error text and status, case-insensitive:
 | `transport` | `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`, `network`, `502`, `503`, `504`, `stream ended without a result event` |
 | `refusal` | Claude's `subtype` starting with `error_` (other than `error_max_budget_usd` and `error_max_turns`) when the text says `refus`, `cannot help`, or `not able to`; on every fleet, the text `I can't help` or `I cannot help` |
 | `agent` | The receipt's own `error` field (never a fleet's), matched on the `agent '` prefix and the ` not applied: ` marker -- D3's own persona assertion, not anything a fleet reported |
+| `adversarial` | The receipt's own `error` field, matched on the `adversarial lane changed source:` prefix -- E16's own check of the diff against an adversarial lane's base, not anything a fleet reported |
 
 A fallback may set `"on": [<kind>, ...]` to run only in answer to those
 kinds; an unknown kind is refused at load, naming the lane and the entry.
@@ -803,9 +804,12 @@ claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), an
 cap. `--cap-grace-usd` (default $0.25, ceiling $0.50) sets the grace band (E24) on
 the build and fix lanes, the two Claude lanes whose cap is native; `--cap-grace-usd 0`
 disables it. The cap arithmetic prints the band as its own line, and it never changes
-the build or fix cap themselves. The file is written beside the spec (or at `--out`),
-never overwritten without `--force`, and `--dry-run` runs `conductor mission --dry-run`
-on it.
+the build or fix cap themselves. `--adversarial` (E16) adds the adversarial lane
+beside the two reviewers, moves the fix lane's `base` onto it (its `resume` stays
+`build`), adds `adversarial` to the vendor policy and the cap arithmetic, and gives
+`FIX_PROMPT` an `<adversarial>` block carrying that lane's answer and diff. The file
+is written beside the spec (or at `--out`), never overwritten without `--force`, and
+`--dry-run` runs `conductor mission --dry-run` on it.
 
 The launcher writes each lane's prompt text to `prompts/<lane>.md` beside
 the mission file and references it with `prompt_file`, so the prompts a
@@ -860,10 +864,10 @@ committed yet, so the follow-on would review the wrong thing.
 
 ### Lane stages, reviewer policy, and reproduce before fix
 
-A lane may declare `"stage"`: `build`, `review`, or `fix`. A `review` lane
-must be read mode; a `build` or `fix` lane must be write mode. Any other
-mode for a staged lane, or any stage string outside those three, is refused
-at load with the lane named.
+A lane may declare `"stage"`: `build`, `review`, `fix`, or `adversarial`. A
+`review` lane must be read mode; a `build`, `fix`, or `adversarial` lane
+must be write mode. Any other mode for a staged lane, or any stage string
+outside those four, is refused at load with the lane named.
 
 A mission may also set a top-level `"policy"` object naming which vendors
 may run each stage:
@@ -916,10 +920,57 @@ Three outcomes besides a normal reproduction:
 
 The receipt gains a `reproduce` block: `ran`, `exit_code`, `timed_out`,
 `tail`, `worktree`, `patch_bytes`, and `verdict` — `reproduced`,
-`not-reproduced`, `no-check`, or `skipped` (reason in `tail`) for every
-dispatch that is not a `stage: fix` write, including a plain dispatch with
-no stage at all. The reproduce worktree is always removed once the gate
-ends, exactly like the clean gate's.
+`not-reproduced`, `no-check`, `inherited` (below), or `skipped` (reason in
+`tail`) for every dispatch that is not a `stage: fix` or `stage:
+adversarial` write, including a plain dispatch with no stage at all. The
+reproduce worktree is always removed once the gate ends, exactly like the
+clean gate's.
+
+#### Adversarial test lanes (E16)
+
+A `stage: adversarial` lane's deliverable is a test, not a fix: it must
+declare a `base` — the lane it attacks — refused at load otherwise naming
+the lane, and every attempt must set `test_policy: allow`, refused
+otherwise, because its whole diff *is* a test-surface change and
+`test_policy: clean` would trip the clean gate on it by construction.
+
+A clean write that moved bytes is judged in two steps. First, any change
+outside the test surface fails the dispatch outright — an adversarial
+lane's job is to write a failing test, never to fix or touch source —
+`adversarial lane changed source: <files>` (sorted, at most five, then `,
+and N more`), kind `adversarial`. Otherwise conductor runs the same
+reproduce transplant as a fix lane's, against the dispatch's own base
+commit, but reads the verdict the other way round: the gate **failing**
+there means the lane found a defect (`reproduced`); the gate **passing**
+means it found nothing (`not-reproduced`). Neither verdict fails the lane.
+Only a `no-check` (no gate set, no base commit, or no test-surface change
+at all) does, with the same "without a reproducing check" wording a fix
+lane gets. The lane's own gate and the clean gate never run for this stage
+(its test fails on its own tree by construction; the receipt notes them as
+skipped) — the reproduce transplant is the only judge.
+
+What lands depends on the verdict: `reproduced` commits normally, and the
+lane is buildable, same as any other write lane. `not-reproduced` and
+`no-check` both commit nothing — the harness discards the change back to
+the base commit entirely (not merely soft-reset, the way a fix's failed
+gate leaves work staged for review) so a later lane can still build
+cleanly on the unchanged base — and the lane is `ok` for `not-reproduced`
+(it did its job; it just found nothing) but not for `no-check`.
+
+A `stage: fix` lane may name an adversarial lane as its `base` (its
+`resume` rule is unchanged: `resume` must still be a need or the base). When
+that adversarial lane's own final attempt actually reproduced something,
+the fix dispatch inherits the check: its reproduce receipt reads `verdict:
+inherited`, naming the lane, instead of demanding a fresh test-surface
+change of its own — the failing test already sits at the fix's base commit.
+The fix's ordinary gate (or the clean gate, per `test_policy`) still runs
+and still has to pass; that is where the inherited test is actually
+exercised. When the adversarial base was `not-reproduced`, the fix lane
+behaves exactly as it would building on any other lane: no inheritance, its
+own reproduce-before-fix rule applies in full.
+
+`conductor shape a --adversarial` adds this lane to Shape A; see "The Shape
+A launcher" below.
 
 ### Structured review and a 2-of-3 quorum
 

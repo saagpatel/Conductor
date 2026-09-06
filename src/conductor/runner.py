@@ -54,9 +54,11 @@ from .verify import (
     GitState,
     TestOutcome,
     changed_entry_paths,
+    changed_paths_since,
     commit_work,
     compare,
     diff_since,
+    discard,
     git_run,
     killpg,
     run_tests,
@@ -1030,6 +1032,7 @@ def _reproduce_receipt(
     home: Path,
     run_id: str,
     env: dict[str, str] | None = None,
+    inherited_check: str | None = None,
 ) -> tuple[dict, str | None]:
     """Reproduce before fix: a `stage: fix` write dispatch must show its own
     check failing on the base before it may land. Runs the caller's gate
@@ -1040,8 +1043,24 @@ def _reproduce_receipt(
     refused, the error string (`None` when it may proceed to its ordinary
     gate, and for every case the ordinary no-op and mode/stage handling
     already covers).
+
+    E16: a `stage: adversarial` write dispatch runs the same transplant
+    against its own base (the lane it attacks), but reads the verdict the
+    other way round -- a failing gate means the lane found a defect
+    (`reproduced`), a passing one means it found nothing (`not-reproduced`),
+    and neither fails the lane; only a `no-check` (no gate, no base, no
+    test-surface change at all) does. Before any of that, a clean run that
+    changed anything outside the test surface fails the dispatch outright --
+    an adversarial lane's whole deliverable is the test, never the fix.
+
+    `inherited_check` (E16) names an adversarial lane a `stage: fix` dispatch
+    is built on whose own final attempt already reproduced something: the
+    failing test already sits at this dispatch's base commit, so its own
+    reproduce step is satisfied without demanding a fresh test-surface change
+    of its own -- the verdict reads `inherited` and the ordinary gate (run
+    after this returns) is where that inherited test must now pass.
     """
-    if spec.stage != "fix":
+    if spec.stage not in ("fix", "adversarial"):
         return _reproduce_skip("skipped", "stage is not fix"), None
     if spec.mode != "write":
         return _reproduce_skip("skipped", "mode is read"), None
@@ -1050,20 +1069,40 @@ def _reproduce_receipt(
     moved = not compare(spec.cwd, before, GitState.capture(spec.cwd)).no_op
     if not moved:
         return _reproduce_skip("skipped", "the fleet made no changes"), None
+    if spec.stage == "fix" and inherited_check:
+        return (
+            {
+                "ran": False,
+                "exit_code": None,
+                "timed_out": False,
+                "tail": f"inherited from adversarial lane '{inherited_check}'",
+                "worktree": "",
+                "patch_bytes": 0,
+                "verdict": "inherited",
+            },
+            None,
+        )
+    subject = "fix" if spec.stage == "fix" else "adversarial lane"
+    if spec.stage == "adversarial" and before.head:
+        assert surface_before is not None  # every write dispatch on a repo captures it
+        outside = changed_paths_since(spec.cwd, before.head, exclude=surface_before.patterns)
+        if outside:
+            message = f"adversarial lane changed source: {_test_surface_note(outside)}"
+            return _reproduce_skip("skipped", message), message
     if not test_command:
         return (
             _reproduce_skip("no-check", "no gate set"),
-            "fix without a reproducing check: no gate set",
+            f"{subject} without a reproducing check: no gate set",
         )
     if not before.head:
         return (
             _reproduce_skip("no-check", "no base commit to re-run against"),
-            "fix without a reproducing check: no base commit to re-run against",
+            f"{subject} without a reproducing check: no base commit to re-run against",
         )
     if surface_state is None or not surface_state["touched"]:
         return (
             _reproduce_skip("no-check", "no test-surface change"),
-            "fix without a reproducing check: no test-surface change",
+            f"{subject} without a reproducing check: no test-surface change",
         )
     assert surface_before is not None  # surface_state implies it was captured
     outcome = _reproduce_gate(
@@ -1087,20 +1126,22 @@ def _reproduce_receipt(
         # that anything was reproduced.
         return (
             {**outcome, "verdict": "no-check"},
-            "fix without a reproducing check: reproduce gate could not run: "
+            f"{subject} without a reproducing check: reproduce gate could not run: "
             + outcome.get("tail", ""),
         )
     if outcome.get("timed_out"):
         # A gate that never finished proves nothing either way.
         return (
             {**outcome, "verdict": "no-check"},
-            "fix without a reproducing check: reproduce gate timed out",
+            f"{subject} without a reproducing check: reproduce gate timed out",
         )
     if _gate_passed(outcome, None):
-        return (
-            {**outcome, "verdict": "not-reproduced"},
-            "reproduce gate passed on the base: the check does not reproduce the finding",
-        )
+        state = {**outcome, "verdict": "not-reproduced"}
+        if spec.stage == "adversarial":
+            # Neither verdict fails an adversarial lane; the caller still
+            # withholds the commit (see dispatch()'s reproduce_blocks_commit).
+            return state, None
+        return state, "reproduce gate passed on the base: the check does not reproduce the finding"
     return {**outcome, "verdict": "reproduced"}, None
 
 
@@ -1257,6 +1298,7 @@ def dispatch(
     lane: str | None = None,
     mission: str | None = None,
     prompt_versions: dict[str, str] | None = None,
+    inherited_check: str | None = None,
 ) -> Result:
     """Run one fleet and report honestly.
 
@@ -1284,6 +1326,10 @@ def dispatch(
     contract. This dispatch adds its own `checklist_contract` id to that map
     when `spec.verdict` is set, and the union lands on the receipt
     unconditionally, empty when neither applies.
+
+    `inherited_check` (E16) names an adversarial lane this `stage: fix`
+    dispatch is built on whose own final attempt already reproduced
+    something; see `_reproduce_receipt`'s own docstring for what that changes.
     """
     criteria = spec.verdict
     spec.validate()
@@ -1763,6 +1809,21 @@ def dispatch(
             home=base,
             run_id=run_id,
             env=env,
+            inherited_check=inherited_check,
+        )
+        # E16: an adversarial lane's `not-reproduced` verdict does not fail
+        # the lane (`reproduce_error` is None for it) but must still keep the
+        # commit off the branch, same as `no-check` -- only `reproduced`,
+        # `inherited` (a fix building on a reproduced adversarial base), and
+        # every other stage's `skipped` (which never had a commit to block
+        # anyway) may land. This is a superset of the old `reproduce_error is
+        # not None` check: for a `fix` dispatch the two verdicts that ever set
+        # `reproduce_error` (`no-check`, `not-reproduced`) are exactly the two
+        # excluded here, so a fix lane's behavior is unchanged.
+        reproduce_blocks_commit = reproduce_state.get("verdict") not in (
+            "reproduced",
+            "inherited",
+            "skipped",
         )
         if reproduce_error is not None:
             # A fix that reproduces nothing must not land: no commit, and its
@@ -1816,7 +1877,14 @@ def dispatch(
             )
 
         tests: TestOutcome | None = None
-        if test_command and not timed_out and error is None:
+        # E16: an adversarial lane's own gate and the clean gate both fail by
+        # construction (its deliverable is a test that fails on its own
+        # tree) -- neither runs here; `_gate_passed`/`_gate_summary` already
+        # read "nothing ran" as passed, so this alone never blocks the
+        # commit (`reproduce_blocks_commit`, above, is what actually gates
+        # it). test_policy is `allow` on every adversarial attempt (enforced
+        # at load), so the clean-gate block below is already skipped too.
+        if test_command and not timed_out and error is None and spec.stage != "adversarial":
             tests = run_tests(
                 spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested, env=env
             )
@@ -1872,11 +1940,17 @@ def dispatch(
                 commit = uncommit(spec.cwd, commit, before.head)
             error = forbid_error
 
-        if reproduce_error is not None and commit and commit.committed:
-            # A fix that never reproduced anything must not land, even when the
+        if reproduce_blocks_commit and commit and commit.committed:
+            # A fix that never reproduced anything, or an adversarial lane
+            # whose test passed on its own base, must not land, even when the
             # fleet committed its own work directly instead of leaving it staged
-            # for conductor's own commit_work to pick up.
-            commit = uncommit(spec.cwd, commit, before.head)
+            # for conductor's own commit_work to pick up. An adversarial lane
+            # gets a hard discard, not a soft one: a later lane must still be
+            # able to build cleanly on its unchanged base (see `discard`).
+            if spec.stage == "adversarial":
+                commit = discard(spec.cwd, commit, before.head)
+            else:
+                commit = uncommit(spec.cwd, commit, before.head)
 
         after = GitState.capture(spec.cwd)
         git_verdict = compare(spec.cwd, before, after)
@@ -1913,10 +1987,21 @@ def dispatch(
             )
             if spec.test_policy == "clean" and not test_command:
                 git_verdict.notes.append("test surface changed with no gate to re-run")
+        if spec.stage == "adversarial":
+            # E16: the dispatch's own gate and clean gate never ran for this
+            # stage -- its test is expected to fail on this tree by
+            # construction, so there was nothing to gate; `reproduce` above
+            # carries the verdict that actually judged this lane.
+            git_verdict.notes.append(
+                "adversarial lane: own gate and clean gate skipped, tests recorded as "
+                "skipped -- its test is expected to fail on this tree by construction"
+            )
         if commit and commit.deletions:
             deleted = ", ".join(commit.deletions[:10])
             git_verdict.notes.append(f"commit removed {len(commit.deletions)} file(s): {deleted}")
-        if commit and not commit.committed and commit.reason.startswith("gate failed"):
+        if commit and not commit.committed and (
+            commit.reason.startswith("gate failed") or spec.stage == "adversarial"
+        ):
             git_verdict.notes.append(commit.reason)
         diff_path: str | None = None
         if git_verdict.checked and not git_verdict.no_op and before.head:
@@ -2044,7 +2129,13 @@ def dispatch(
         resumed=resumed,
         lane_env=_lane_env(teardown_outcome),
         error=error,
-        no_op_ok=no_op_ok,
+        # E16: an adversarial lane's `not-reproduced` verdict discards its
+        # commit back to the base (see `discard`), which looks exactly like
+        # an ordinary no-op to the check below -- it is not one (the fleet
+        # moved real bytes; the lane just found nothing) and must not fail
+        # the lane the way a genuine no-op would.
+        no_op_ok=no_op_ok
+        or (spec.stage == "adversarial" and reproduce_state.get("verdict") == "not-reproduced"),
         interrupted=interrupted,
         cancelled=cancelled,
         taint=(
