@@ -179,6 +179,10 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   works in its own scratch directory. Effort `max` collapses to `high`.
 - Observed: over-delivers (added an unrequested guard on the probe task) and uses 3x the tool
   calls of the cheap models for the same result.
+- Per-lane tool denial exists headless: `<cwd>/.agents/hooks.json` with a named `PreToolUse`
+  command hook answering `{"decision": "deny"}` per tool name blocks the call on bytes. No
+  wildcard matcher; a malformed file logs "loaded 0 named hooks" and the run continues, so
+  pass `--log-file` and check the count (`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`).
 
 ### Grok 4.6 and Composer 2.5 (fleet `cursor`, binary `cursor-agent`)
 
@@ -191,6 +195,9 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
 - Headless traps: no structured-output flag (conductor refuses `--schema`/`--verdict` here);
   the single-envelope `json` format keeps only the last message, so conductor uses
   `stream-json`; read mode needs `--trust`. Costs are post-hoc estimates.
+- Per-lane tool denial exists headless: `<cwd>/.cursor/cli.json` with `permissions.deny`
+  rules (`Shell(...)`, `Write(...)`, `Mcp(...)`) holds on bytes even under `--force`. An
+  unknown rule kind is ignored silently, so validate rules before writing them (same probe doc).
 
 ### Cheap open models through OpenCode (planned fleet `opencode`)
 

@@ -246,6 +246,19 @@ half-migration means a lane gating the wrong repo. `gc` is already multi-repo (i
 worktrees by the repo on each receipt). Split out of E19 so it lands early and E19's
 remainder stays size 1. Depends on nothing. Size 1. Build cap $8.
 
+**E21. Tool deny lists on Antigravity and Cursor.** Probed 2026-09-06
+(`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`); the expected answer was
+no and the answer is yes on both. Cursor loads `<cwd>/.cursor/cli.json` with
+`permissions.deny` rules (`Shell(...)`, `Write(...)`, `Mcp(...)`) and held them on bytes
+under `--force`; Antigravity loads `<cwd>/.agents/hooks.json` and a `PreToolUse` command
+hook answering `deny` blocked `write_to_file` and `run_command` on bytes. Both fail open on
+bad input (Cursor ignores an unknown rule kind silently; agy logs "loaded 0 named hooks" on a
+malformed file or a wildcard matcher and continues), so conductor validates what it writes,
+generates agy matchers from the init event's tool list, and asserts the log count. The
+file is written into the worktree before the bytes baseline. This lifts D2's Claude-only
+refusal for taint on both fleets; D3 personas stay Claude-only. Depends on D2. Size 1.
+Build cap $7.
+
 **E19. Cross-repo collisions. Operator decision on semantics first.** With E26 in,
 collisions across repositories. Today `collisions.touched_files` keys on repo-relative
 paths with no repo qualifier, so two lanes touching `src/foo.py` in two different
@@ -268,7 +281,6 @@ reclamation). Depends on E26, D1. Size 1. Build cap $7.
 | E15 shape picker | dropped | no seam, one dominant shape, n=14: it would be a constant function. AGENTS.md is the picker, written by hand from the same data |
 | E18 lessons file | dropped | the read half is `prefix_file`, shipped; the write half changes the prefix every mission and destroys the B2 cache it rides on (98.7 percent hits on C5), and injects unaudited framing into reviewer prompts |
 | E20 non-git directories | read half is one README line; write half dropped | read lanes already run there; a non-git write lane has no worktree, commit, clean gate, reproduce gate, or attestation bounds, and would trade away the bytes-moved verdict |
-| E21 non-Claude allow lists | one-hour lead probe, expect NO | D3 already recorded agy fails open and Cursor has nothing; the only open question is a flag under another name. Record it so it stops being re-proposed |
 
 ## Operator decisions before the affected item is specced
 
@@ -283,23 +295,24 @@ reclamation). Depends on E26, D1. Size 1. Build cap $7.
 
 Groups are parallel where named; everything with the scheduler tax runs alone.
 
-- **Group 0, lead only, no fleet spend:** E5 launcher; E21 probe.
+- **Group 0, lead only, no fleet spend:** E5 launcher; E21 probe. Both done 2026-09-06;
+  the probe came back positive and E21 is now a build item in Group 4.
 - **Group 1, two in parallel, snapshot-disjoint:** E1 deliverables; E11 ledger report
   with `stage` on `Result`.
 - **Group 2, three in parallel, small and disjoint:** E12 notifications; E22 vendor
   versions; E25 clean-gate diagnosis.
 - **Group 3, two in parallel:** E23 salvage; E26 per-lane cwd. These discount every
   mission after them.
-- **Group 4, two in parallel:** E17 prompt versioning (nothing else that touches
-  fixtures runs beside it); E24 cap grace if approved.
+- **Group 4, three in parallel:** E17 prompt versioning (nothing else that touches
+  fixtures runs beside it); E24 cap grace if approved; E21 deny lists on the two fleets.
 - **Group 5, series, scheduler tax:** E16 adversarial tests; E7 human lanes.
 - **Group 6, series, scheduler tax:** E4 judge sittings; E6 script lanes.
 - **Group 7, series, each with its decision settled:** E3 if approved; E9 ceiling; E13
   export; E14 warn; E19 cross-repo; E10 planner, two specs, last.
 
-Roughly 19 releases and 20 missions. Build caps sum to about $150; with review and fix
-lanes, $210 to $230 of fleet spend, three to four weeks at the September pace. Groups 0
-through 4 are about $75 across ten missions and roughly two working days.
+Roughly 20 releases and 21 missions. Build caps sum to about $157; with review and fix
+lanes, $220 to $240 of fleet spend, three to four weeks at the September pace. Groups 0
+through 4 are about $85 across eleven missions and roughly two working days.
 
 ## First consumers, carried over
 
