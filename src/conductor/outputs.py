@@ -181,6 +181,25 @@ def claude_init_event(text: str) -> dict | None:
     return None
 
 
+def agy_init_event(text: str) -> dict | None:
+    """The nested `init` object of an Antigravity stream's first `init`
+    event, carrying the session's full `tools` list -- E21's only evidence,
+    independent of the hooks.json file itself, of which tools a tainted
+    dispatch actually had (mirrors `claude_init_event` above for D3).
+
+    The event is `{"event": "init", "conversation_id": ..., "init": {"tools":
+    [...], ...}}` -- the tool list sits under the nested `init` key, not at
+    the event's own top level (confirmed against a recorded transcript,
+    tests/golden/c5-review-fix/runs/20260905T182328Z-antigravity-.../
+    stdout.jsonl line 1)."""
+    for line in text.splitlines():
+        event = json_line(line)
+        if event is not None and event.get("event") == "init":
+            inner = event.get("init")
+            return inner if isinstance(inner, dict) else event
+    return None
+
+
 def claude_said(events: list[dict]) -> str:
     """Text Claude completed before a stream was cut short."""
     parts: list[str] = []

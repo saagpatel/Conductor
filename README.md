@@ -641,16 +641,18 @@ A tainted dispatch runs on Claude Code with `--disallowedTools` naming
 `WebFetch`, `WebSearch`, `Task`, `Agent`, `Bash(curl *)`, `Bash(wget *)`,
 `Bash(git push *)`, `Bash(gh *)`, `Bash(ssh *)`, and `Bash(scp *)`: no network
 egress, no subagent that would inherit the tainted context without inheriting
-this deny list, no push rights. No other fleet exposes a headless tool deny
-list, so taint is enforced on Claude only; a mission declaring it on any
-attempt of an antigravity or cursor lane is refused at load, naming the lane
-(`--taint` on `conductor dispatch` is refused the same way off the claude
-fleet). A tainted lane also never holds a deliverable `branch`: refused at
+this deny list, no push rights. Antigravity enforces the same policy through
+a per-lane `PreToolUse` deny hook (below); every other fleet still exposes no
+headless tool deny list, so a mission declaring taint on any attempt of a
+cursor lane is refused at load, naming the lane (`--taint` on
+`conductor dispatch` is refused the same way off the claude and antigravity
+fleets). A tainted lane also never holds a deliverable `branch`: refused at
 load, naming the lane, since outside text should not be the thing that names
 what gets published. A `collate` is refused at load, naming the tainted
 lane(s), when any sink it could collate over is tainted and the collate's own
-fleet is not claude; when a candidate sink actually is tainted, the collate's
-own `Spec` — prose or rank, every dispatch — is tainted too.
+fleet is not claude or antigravity; when a candidate sink actually is
+tainted, the collate's own `Spec` — prose or rank, every dispatch — is
+tainted too.
 
 When `_render` pastes a tainted lane's answer, diff, verdict, or
 `test_touched` into another prompt, the fence note says so in the bytes
@@ -669,9 +671,41 @@ lane table gets a `taint` column reading `no`, `yes`, or
 `yes (from a, b)`; `conductor missions` rows carry `"tainted": ["<lane>", ...]`.
 The mission result's `collate` dict carries `"tainted": true|false`.
 
+**Antigravity (E21):** a tainted `antigravity` lane dispatches instead of
+being refused. `runner.dispatch` refuses the lane up front unless it isolates
+into a git repository (the hook files have nowhere else to live), then, after
+`worktrees.create` and before the bytes baseline is captured, writes
+`.agents/hooks.json` (one named `PreToolUse` command hook per
+`fleets.TAINT_AGY_DENIED_TOOLS` name plus one for `run_command`) and the
+stdlib-only deny script it points at into the worktree, and keeps both
+untracked through the same worktree-scoped `core.excludesFile` that
+`include` uses (never the shared `info/exclude`, which every worktree of
+the repository reads), so neither the baseline, the diff, nor the no-op
+check ever sees them. The
+script denies a call by tool name or, for `run_command`, by the same shell
+prefixes as Claude's `Bash(<prefix> *)` list, checked after leading
+whitespace, environment assignments, `sudo`, and shell chain operators,
+and fails closed (deny) on anything it cannot parse. Nothing here is trusted
+on the fleet's word: after the run, conductor requires the agy log's own
+"loaded N named hooks" line to name exactly as many hooks as it wrote, and
+computes `uncovered` -- any tool in the stream's init event that reaches
+outside the worktree by name (`browser_*`, or containing `subagent`, `mcp`,
+`web`, `url`, `message`, `schedule`, or `inbox`) and is not in the deny set.
+Either check failing fails the run as `taint hooks not enforced: <reason>`,
+kind `taint`, and the lane is not committed. The receipt gains
+`taint_enforcement`: `{"hooks_written", "hooks_loaded", "tools_seen",
+"uncovered", "denied_calls"}` (`denied_calls` counts the stream's own
+"denied by pre-tool hook" tool errors), `null` when the lane is not a
+tainted antigravity dispatch. Cursor's `.cursor/cli.json` has no rule kind
+for its native web fetch and search tools (`Shell`, `Write`, and `Mcp` only),
+so a tainted lane there would keep network egress whatever the config said;
+taint on Cursor (and on Codex, which exposes no deny list at all) stays
+refused.
+
 Evidence (`docs/ROADMAP-2026-09.md` item D2): CVSS 9.4 prompt injection
 through repo comments across Claude, Gemini, and Copilot CI agents (CSA,
-April 2026).
+April 2026). E21's Antigravity mechanism and its failure modes are
+live-probed in `docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`.
 
 ### Inline agents: a persona per lane
 

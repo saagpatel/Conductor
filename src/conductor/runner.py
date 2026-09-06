@@ -34,8 +34,17 @@ from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .errors import error_kind
-from .fleets import FLEETS, TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv, cli_version
-from .outputs import FleetOutput, claude_init_event
+from .fleets import (
+    FLEETS,
+    TAINT_AGY_DENIED_TOOLS,
+    TAINT_DISALLOWED_TOOLS,
+    DispatchRefused,
+    Spec,
+    build_argv,
+    cli_version,
+    taint_hook_files,
+)
+from .outputs import FleetOutput, agy_init_event, claude_init_event
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -138,6 +147,11 @@ class Result:
     # D2: {"declared": True, "tools_denied": [...]} when spec.taint was set,
     # else None. Set by dispatch(), never inferred from anything a fleet said.
     taint: dict | None = None
+    # E21: {"hooks_written", "hooks_loaded", "tools_seen", "uncovered",
+    # "denied_calls"} when spec.taint was set on the antigravity fleet, else
+    # None. Set by dispatch() from the deny hook's own log and the stream's
+    # init event, never from anything the fleet claims about itself.
+    taint_enforcement: dict | None = None
     # D3: {"name", "tools": [...] | None, "applied": True | False | None} when
     # spec.agent was set, else None. `applied` is asserted from the stream's
     # own init event, never from the fleet's answer (see claude_init_event);
@@ -646,6 +660,85 @@ def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str
     return receipt, None
 
 
+# E21: reaching-out name patterns the deny hook cannot name individually
+# (agy's own init event is the only inventory of what actually ran; the
+# probe's tool list was not exhaustive -- see the comment above
+# TAINT_AGY_DENIED_TOOLS in fleets.py).
+_TAINT_AGY_UNCOVERED_SUBSTRINGS = ("subagent", "mcp", "web", "url", "message", "schedule", "inbox")
+_TAINT_AGY_LOG_RE = re.compile(r"loaded (\d+) named hooks? from \d+ hooks\.json file\(s\)")
+_TAINT_AGY_DENIED_CALL_MARKER = "denied by pre-tool hook"
+
+
+def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> list[str]:
+    """E21: write the deny hook files into the worktree, before `before` is
+    captured, and return their worktree-relative paths so the caller can keep
+    them untracked through the worktree-scoped `core.excludesFile` that
+    `_apply_include` builds. Never the shared `info/exclude`: `git rev-parse
+    --git-path info/exclude` resolves to the one file every worktree of the
+    repository shares (verified on git 2.55 from a linked worktree), so
+    writing there would mutate the operator's checkout and leak this lane's
+    pattern into every other lane's.
+    """
+    hook_files = taint_hook_files(cwd)
+    repo_root = Path(iso.worktree).resolve()
+    cwd_root = Path(cwd).resolve()
+    try:
+        prefix = cwd_root.relative_to(repo_root)
+    except ValueError:
+        prefix = Path(".")
+    written: list[str] = []
+    for rel_path, text in hook_files.items():
+        dest = cwd_root / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text)
+        written.append((prefix / rel_path).as_posix())
+    return written
+
+
+def _uncovered_agy_tools(tools: list[str]) -> list[str]:
+    denied = frozenset(TAINT_AGY_DENIED_TOOLS)
+    return [
+        name
+        for name in tools
+        if name not in denied
+        and (name.startswith("browser_") or any(s in name for s in _TAINT_AGY_UNCOVERED_SUBSTRINGS))
+    ]
+
+
+def _count_denied_calls(stdout_text: str) -> int:
+    return sum(1 for line in stdout_text.splitlines() if _TAINT_AGY_DENIED_CALL_MARKER in line)
+
+
+def _taint_agy_enforcement(
+    *, hooks_written: int, stdout_text: str, log_text: str
+) -> tuple[dict, str | None]:
+    """E21: fail closed on the evidence, not on the fleet's own status.
+
+    Returns the receipt's `taint_enforcement` dict and, when the hooks did
+    not visibly hold, the text `dispatch()` uses as the run's `error`."""
+    init_event = agy_init_event(stdout_text)
+    raw_tools = init_event.get("tools") if init_event is not None else None
+    tools_seen = list(raw_tools) if isinstance(raw_tools, list) else []
+    uncovered = _uncovered_agy_tools(tools_seen)
+    denied_calls = _count_denied_calls(stdout_text)
+    log_match = _TAINT_AGY_LOG_RE.search(log_text)
+    hooks_loaded = int(log_match.group(1)) if log_match else None
+    receipt = {
+        "hooks_written": hooks_written,
+        "hooks_loaded": hooks_loaded,
+        "tools_seen": tools_seen,
+        "uncovered": uncovered,
+        "denied_calls": denied_calls,
+    }
+    if log_match is None:
+        return receipt, "no 'loaded N named hooks' line in agy.log"
+    if hooks_loaded != hooks_written:
+        return receipt, f"agy loaded {hooks_loaded} named hook(s), expected {hooks_written}"
+    if uncovered:
+        return receipt, f"uncovered tool(s) reach outside the worktree: {', '.join(uncovered)}"
+    return receipt, None
+
+
 def _lane_receipt_statement(
     *,
     run_id: str,
@@ -1080,7 +1173,11 @@ def _operator_global_excludes(worktree: str) -> Path | None:
 
 
 def _apply_include(
-    spec: Spec, iso: worktrees.Isolation, home: Path, run_id: str
+    spec: Spec,
+    iso: worktrees.Isolation,
+    home: Path,
+    run_id: str,
+    extra_excludes: list[str] | None = None,
 ) -> tuple[list[str], list[str], Path | None]:
     """Copy `spec.include`'s untracked, repo-relative paths into the
     worktree and keep them untracked there too.
@@ -1093,7 +1190,10 @@ def _apply_include(
     operator already globally ignores for the run's duration. Returns the
     paths actually copied, notes for paths missing from the checkout, and
     the external exclude-list file's path (or None if nothing was copied),
-    which the caller removes when the dispatch ends.
+    which the caller removes when the dispatch ends. `extra_excludes` (E21)
+    are worktree-relative paths conductor itself wrote into the worktree
+    (the taint deny hook files) that must stay untracked the same way, with
+    or without an `include`.
 
     Raises DispatchRefused for a path Git already tracks: copying it would
     smuggle an uncommitted edit past the base commit a reviewer diffs
@@ -1111,7 +1211,8 @@ def _apply_include(
         if tracked.returncode == 0:
             raise DispatchRefused(f"include: {rel} is tracked; the worktree already has it")
         to_copy.append(rel)
-    if not to_copy:
+    extra = list(extra_excludes or [])
+    if not to_copy and not extra:
         return included, notes, None
 
     # `extensions.worktreeConfig` is a one-time repository setting, like
@@ -1123,7 +1224,7 @@ def _apply_include(
     exclude_lines = []
     if global_excludes is not None:
         exclude_lines.append(global_excludes.read_text())
-    exclude_lines.append("\n".join(to_copy) + "\n")
+    exclude_lines.append("\n".join([*extra, *to_copy]) + "\n")
 
     exclude_file = home / "worktrees" / f"{run_id}-include-exclude"
     exclude_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1220,6 +1321,29 @@ def dispatch(
     # Refusals need repository identity and dirty-file presence, not a hash
     # of every operator-owned untracked byte in the shared checkout.
     checkout_before = GitState.capture(spec.cwd, content=False)
+    # E21: the deny hook files live in a conductor-owned worktree, nowhere
+    # else -- a tainted antigravity dispatch that cannot get one is refused
+    # before spawn rather than run unguarded.
+    tainted_agy = spec.taint and spec.fleet == "antigravity"
+    if tainted_agy and not dry_run and (not isolate or not checkout_before.is_repo):
+        error = (
+            "taint on antigravity refused: dispatch must isolate into a git repository; "
+            "the hook files live in a conductor-owned worktree, nowhere else"
+        )
+        result = _refused_result(
+            run_id,
+            spec,
+            model_id,
+            timeout,
+            run_dir,
+            None,
+            error,
+            lane=lane,
+            mission=mission,
+            fleet_version=fleet_version,
+        )
+        (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        return result
     if spec.mode == "write" and not checkout_before.is_repo and not dry_run:
         error = "write dispatch refused: cwd is not a git repository; only read mode may run there"
         result = _refused_result(
@@ -1259,17 +1383,22 @@ def dispatch(
     # commit, tests) must see the worktree as the working directory, not the
     # shared checkout the caller named.
     iso: worktrees.Isolation | None = None
+    taint_hook_paths: list[str] = []
     if isolate and not dry_run:
         iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
         if iso.active:
             # A cwd inside the repo stays the same subdirectory inside the
             # worktree; the fleet was pointed at that directory for a reason.
             spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
-        elif spec.mode == "write" or base_ref is not None:
+            if tainted_agy:
+                taint_hook_paths = _write_taint_agy_hooks(spec.cwd, iso)
+        elif spec.mode == "write" or base_ref is not None or tainted_agy:
             # The caller asked for a private tree and cannot have one. For a
             # write, running in the shared checkout instead is the collision
             # isolation exists to prevent, so it is refused before spawn. A
-            # read dispatch changes nothing and may proceed in place.
+            # read dispatch changes nothing and may proceed in place -- unless
+            # it is a tainted antigravity dispatch, which has nowhere else to
+            # put its deny hook files.
             result = _refused_result(
                 run_id,
                 spec,
@@ -1293,6 +1422,13 @@ def dispatch(
         spec_with_paths = _replace(spec, last_message=str(run_dir / "last_message.txt"))
 
     argv = build_argv(spec_with_paths)
+    if tainted_agy:
+        # E21: needs this run's own directory, which no Spec field carries;
+        # appended here rather than threaded into build_argv's signature (see
+        # the docstring there) so every fake fleet a test installs -- real
+        # argv or not -- still gets it, and no monkeypatched build_argv with
+        # the old one-argument shape breaks.
+        argv = [*argv, "--log-file", str(run_dir / "agy.log")]
 
     (run_dir / "prompt.txt").write_text(spec.prompt)
     (run_dir / "argv.json").write_text(json.dumps(argv, indent=2))
@@ -1377,16 +1513,16 @@ def dispatch(
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
-    if spec.include:
+    if spec.include or taint_hook_paths:
         if iso is not None and iso.active:
             try:
                 included_paths, notes, include_exclude_file = _apply_include(
-                    spec, iso, base, run_id
+                    spec, iso, base, run_id, extra_excludes=taint_hook_paths
                 )
                 lane_notes.extend(notes)
             except DispatchRefused as exc:
                 return _bail(str(exc))
-        else:
+        elif spec.include:
             lane_notes.append("include ignored: dispatch is not isolated")
 
     if spec.ports:
@@ -1566,6 +1702,18 @@ def dispatch(
                         agent_result["applied"] = None
                 elif error is None:
                     error = agent_problem
+
+        taint_enforcement: dict | None = None
+        if tainted_agy:
+            # Every denied tool name, plus one entry for run_command.
+            hooks_written = len(TAINT_AGY_DENIED_TOOLS) + 1
+            taint_enforcement, taint_problem = _taint_agy_enforcement(
+                hooks_written=hooks_written,
+                stdout_text=_read(stdout_path),
+                log_text=_read(run_dir / "agy.log"),
+            )
+            if taint_problem is not None and error is None:
+                error = f"taint hooks not enforced: {taint_problem}"
 
         answer = output.answer
         if not answer and spec_with_paths.last_message:
@@ -1900,10 +2048,18 @@ def dispatch(
         interrupted=interrupted,
         cancelled=cancelled,
         taint=(
-            {"declared": True, "tools_denied": list(TAINT_DISALLOWED_TOOLS)}
+            {
+                "declared": True,
+                "tools_denied": (
+                    list(TAINT_AGY_DENIED_TOOLS)
+                    if spec.fleet == "antigravity"
+                    else list(TAINT_DISALLOWED_TOOLS)
+                ),
+            }
             if spec.taint
             else None
         ),
+        taint_enforcement=taint_enforcement,
         agent=agent_result,
         stage=spec.stage,
         lane=lane,
