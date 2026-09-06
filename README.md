@@ -1190,6 +1190,47 @@ records nothing. `conductor missions` shows `"paused": true` while
 Evidence (`docs/ROADMAP-2026-09.md` item C2): LangGraph `interrupt()`,
 Microsoft request/response events.
 
+#### Notifications
+
+Nothing above tells anyone outside the terminal that a mission paused,
+ended, or hit a breaker. `notify` is an opt-in mission key that runs a shell
+command at those three moments:
+
+```json
+{
+  "notify": {
+    "command": "cat >> /tmp/conductor-events.jsonl",
+    "events": ["pause", "end", "breaker"],
+    "timeout": 10
+  }
+}
+```
+
+`command` is required and refused empty; `events` defaults to all three and
+is refused naming anything else; `timeout` defaults to 10 seconds and is
+refused zero or negative. The command runs through the shell in the
+mission's `cwd`, with the event as one line of JSON on stdin and
+`CONDUCTOR_EVENT` (the event name) and `CONDUCTOR_MISSION` (the mission id)
+set in its environment:
+
+- `pause`, right after `pause.json` is written: `{"event", "mission_id",
+  "kind", "lane", "spent_usd", "threshold", "question"}` -- the same fields
+  as the pause record above.
+- `end`, right after `result.json` and `report.md` are written: `{"event",
+  "mission_id", "ok", "name", "cost_usd", "lanes": [{"name", "ok", "kind"}]}`.
+  Not sent while the mission is parked on a pause point -- a paused mission
+  has not ended.
+- `breaker`, whenever a lane's final attempt settles having tripped one:
+  `{"event", "mission_id", "lane", "breaker", "run_id", "cost_usd"}`.
+
+Notifying the operator is not the operator's decision to make: like
+`setup`/`teardown` above, a notification's outcome is a note, never a
+verdict. Conductor never blocks on it beyond `timeout`, and whether it
+succeeded never changes `ok`, an exit code, or a pause -- it is recorded,
+in order, as `notifications: [{"event", "ok", "exit_code", "timed_out",
+"error"}, ...]` on the mission result and as a `## Notifications` section in
+`report.md`. A dry run emits nothing.
+
 ## Isolation: a branch is not a worktree
 
 HEAD and the index are shared mutable state, so two fleets editing one
