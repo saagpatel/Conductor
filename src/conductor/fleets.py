@@ -30,6 +30,10 @@ from . import prices
 from .verdicts import Criterion
 
 EFFORTS = ("cheap", "standard", "hard", "max")
+# E24: the hard ceiling on Spec.cap_grace_usd -- an operator decision, not a
+# fleet limit; a terminal-message grace band bigger than this is not a grace
+# band, it is a second cap.
+CAP_GRACE_CEILING_USD = 0.50
 MODES = ("read", "write")
 TEST_POLICIES = ("clean", "allow", "forbid")
 # The company behind a model, independent of which fleet dispatches it. A
@@ -264,6 +268,11 @@ class Spec:
     last_message: str | None = None  # path the fleet should write its answer to
     resume: str | None = None  # fleet session id to continue
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
+    # E24: a per-lane, opt-in band added on top of cap_usd, claude only --
+    # the cap is native there, so the CLI's own terminal message can finish
+    # inside cap_usd + cap_grace_usd instead of being cut off mid-summary.
+    # Never inherited silently; see mission.py's _ATTEMPT_KEYS handling.
+    cap_grace_usd: float | None = None
     # 900s, the gate's own default: a fleet running a long suite inside one
     # tool call prints nothing until it returns, and must not be killed for it.
     stall_timeout: int | None = 900  # silence before conductor kills the fleet; 0 disables
@@ -370,6 +379,8 @@ class Spec:
             self._validate_deliverable()
         if self.cap_usd is not None:
             self._validate_cap()
+        if self.cap_grace_usd is not None:
+            self._validate_cap_grace()
         for name, value in (
             ("stall_timeout", self.stall_timeout),
             ("loop_limit", self.loop_limit),
@@ -419,6 +430,26 @@ class Spec:
             raise DispatchRefused(
                 f"model '{model_id}' is unpriced, so a ${self.cap_usd} cap cannot be enforced on "
                 f"fleet '{self.fleet}'; price it in prices.json or drop the cap"
+            )
+
+    def _validate_cap_grace(self) -> None:
+        """E24: the grace band only ever finishes a native cap's own terminal
+        message. It needs a cap_usd to extend, and it is enforceable on the
+        claude fleet only -- every other fleet's cap is a watcher kill or a
+        post-hoc verdict, and a killed run has no terminal message left to
+        finish."""
+        if self.cap_usd is None:
+            raise DispatchRefused("cap_grace_usd needs a cap_usd to extend")
+        if self.fleet != "claude":
+            raise DispatchRefused(
+                f"cap_grace_usd is enforceable on the claude fleet only: {self.fleet}'s cap "
+                "is not native, and a watcher-killed run has no terminal message to finish"
+            )
+        if not (math.isfinite(self.cap_grace_usd) and self.cap_grace_usd > 0):
+            raise DispatchRefused("cap_grace_usd must be a positive finite number")
+        if self.cap_grace_usd > CAP_GRACE_CEILING_USD:
+            raise DispatchRefused(
+                f"cap_grace_usd must not exceed the ${CAP_GRACE_CEILING_USD:.2f} ceiling"
             )
 
     def _validate_schema(self) -> None:
@@ -575,8 +606,10 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # Claude Code stops itself: exit 1, is_error, subtype
         # error_max_budget_usd, and "Reached maximum budget ($N)" under
         # `errors`, with the spend so far still reported. Verified live
-        # 2026-09-03.
-        argv += ["--max-budget-usd", _usd_arg(spec.cap_usd)]
+        # 2026-09-03. E24: cap_grace_usd, when set, is folded into the same
+        # flag -- the CLI knows only one ceiling, so its own terminal message
+        # gets to finish inside cap_usd + cap_grace_usd.
+        argv += ["--max-budget-usd", _usd_arg(spec.cap_usd + (spec.cap_grace_usd or 0.0))]
     if spec.resume is not None:
         argv += ["--resume", spec.resume]
     if spec.taint:

@@ -346,6 +346,7 @@ class Result:
             "cache_write_tokens": (self.usage or {}).get("cache_write_tokens"),
             "cap_usd": (self.budget or {}).get("cap_usd"),
             "over_cap": bool((self.budget or {}).get("exceeded")),
+            "grace_used": (self.budget or {}).get("grace_used"),
             "tool_calls": (self.breaker or {}).get("tool_calls", 0),
             "breaker": (self.breaker or {}).get("tripped"),
             "ports": (self.lane_env or {}).get("ports", []),
@@ -1399,7 +1400,7 @@ def dispatch(
         breaker: Breaker | None = None
         exit_code: int | None = None
         budget = (
-            Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap)
+            Budget(cap_usd=spec.cap_usd, enforcement=fleet.cap, grace_usd=spec.cap_grace_usd)
             if spec.cap_usd is not None
             else None
         )

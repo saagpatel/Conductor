@@ -16,7 +16,16 @@ from pathlib import Path
 from . import attest, golden, prices, shape
 from . import salvage as salvage_mod
 from .errors import error_kind
-from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec, cli_version
+from .fleets import (
+    CAP_GRACE_CEILING_USD,
+    EFFORTS,
+    FLEETS,
+    MODES,
+    TEST_POLICIES,
+    DispatchRefused,
+    Spec,
+    cli_version,
+)
 from .gc import cmd_gc
 from .mission import (
     STAGES,
@@ -139,6 +148,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             verdict=criteria,
             resume=args.resume,
             cap_usd=args.cap_usd,
+            cap_grace_usd=args.cap_grace_usd,
             test_policy=args.test_policy,
             test_surface=args.test_surface,
             stage=args.stage,
@@ -689,6 +699,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             args.modules,
             scheduler=args.scheduler,
             grok_runs_suite=args.grok_runs_suite,
+            cap_grace_usd=args.cap_grace_usd,
         )
         out = Path(args.out).expanduser().resolve() if args.out else None
         mission_dir = out.parent if out else None
@@ -804,6 +815,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="per-dispatch dollar cap: claude stops itself, codex and antigravity are killed "
         "when their running usage prices over it, cursor is judged after the run",
+    )
+    p_dispatch.add_argument(
+        "--cap-grace-usd",
+        type=float,
+        help="claude only: a band on top of --cap-usd so the CLI's own terminal message can "
+        f"finish, ceiling ${CAP_GRACE_CEILING_USD:.2f}",
     )
     p_dispatch.add_argument("--test", help="gate to run after the dispatch, in --cwd")
     p_dispatch.add_argument("--test-policy", choices=TEST_POLICIES, default="clean")
@@ -947,6 +964,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--grok-runs-suite",
         action="store_true",
         help="let Grok run the gate (rule 7: cap $2.00 instead of $1.50)",
+    )
+    p_shape_a.add_argument(
+        "--cap-grace-usd",
+        type=float,
+        default=shape.USD_CLAUDE_GRACE,
+        help=f"grace band on the build and fix (claude) lanes (E24); 0 disables it, "
+        f"ceiling ${CAP_GRACE_CEILING_USD:.2f} (default ${shape.USD_CLAUDE_GRACE:.2f})",
     )
     p_shape_a.add_argument("--name", help="mission name (default: the spec's stem)")
     p_shape_a.add_argument(

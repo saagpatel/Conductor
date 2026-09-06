@@ -26,7 +26,7 @@ from . import fleets
 from .paths import conductor_home
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
-from .spend import _collate_run_ids, _parse_bound
+from .spend import _collate_run_ids, _number, _parse_bound
 from .spend import _read_run as _spend_read_run
 
 REVIEW_STAGE = "review"
@@ -78,6 +78,11 @@ class Run(_SpendRun):
     mode: str | None = None
     answer_path: str | None = None
     gate_passed: bool = True
+    # E24: how much of the grace band this run drew on, and whether it
+    # finished inside the band (grace used, and not over budget) -- the
+    # two figures rule 10 reports per stage.
+    grace_used: Decimal | None = None
+    finished_in_band: bool = False
 
 
 def _str_field(raw: dict, key: str) -> str | None:
@@ -182,6 +187,18 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
     )
     gate_passed = _runner_gate_passed(raw.get("tests"), raw.get("test_surface"))
 
+    budget = raw.get("budget")
+    grace_used: Decimal | None = None
+    finished_in_band = False
+    if isinstance(budget, dict):
+        try:
+            grace_used = _number(budget.get("grace_used"))
+        except ValueError:
+            grace_used = None
+        finished_in_band = (
+            grace_used is not None and grace_used > 0 and budget.get("exceeded") is False
+        )
+
     return Run(
         run_id=base.run_id,
         created=base.created,
@@ -203,6 +220,8 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         mode=_str_field(raw, "mode"),
         answer_path=_str_field(raw, "answer_path"),
         gate_passed=gate_passed,
+        grace_used=grace_used,
+        finished_in_band=finished_in_band,
     )
 
 
@@ -414,12 +433,22 @@ def _build_report(
         )
 
     cap_losses: dict[str, object] = {}
+    # E24: rule 10's other half -- how much of the grace band each Claude
+    # build/fix stage actually drew on, and how many of its runs finished
+    # inside the band instead of being lost the way rule 10's dollar names.
+    grace: dict[str, object] = {}
     for stage in ("build", "fix"):
         matches = [r for r in rows if _vendor(r.fleet, r.model) == "anthropic" and r.stage == stage]
         if not matches:
             cap_losses[stage] = "n/a"
         else:
             cap_losses[stage] = sum(1 for r in matches if r.kind == "cap" and r.gate_passed)
+        grace_total = sum((r.grace_used for r in matches if r.grace_used), Decimal("0"))
+        grace[stage] = {
+            "used_usd": _money(grace_total),
+            "runs": sum(1 for r in matches if r.finished_in_band),
+        }
+    cap_losses["grace"] = grace
 
     return Report(
         vendor_stage=vendor_stage_rows,
@@ -547,7 +576,19 @@ def _print_report(rpt: Report) -> None:
     _print_section(
         "  rule 10: Claude runs capped after their gate passed",
         ("stage", "count"),
-        [(stage, _cell(count)) for stage, count in rpt.rules.cap_losses.items()],
+        [
+            (stage, _cell(count))
+            for stage, count in rpt.rules.cap_losses.items()
+            if stage != "grace"
+        ],
+    )
+    _print_section(
+        "  rule 10: grace band usage (E24)",
+        ("stage", "used_usd", "runs finished in band"),
+        [
+            (stage, info["used_usd"], _cell(info["runs"]))
+            for stage, info in (rpt.rules.cap_losses.get("grace") or {}).items()
+        ],
     )
     if rpt.skipped:
         print(f"{rpt.skipped} receipt(s) skipped (malformed or unreadable)")
