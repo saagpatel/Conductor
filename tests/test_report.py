@@ -63,10 +63,21 @@ def _write_receipt(
     return directory
 
 
-def _write_mission(home: Path, mission_id: str, *, name: str, ok: bool, lanes: list[dict]) -> None:
+def _write_mission(
+    home: Path,
+    mission_id: str,
+    *,
+    name: str,
+    ok: bool,
+    lanes: list[dict],
+    collate: dict | None = None,
+) -> None:
     mission_dir = home / "missions" / mission_id
     mission_dir.mkdir(parents=True)
-    (mission_dir / "result.json").write_text(json.dumps({"name": name, "ok": ok, "lanes": lanes}))
+    payload: dict[str, object] = {"name": name, "ok": ok, "lanes": lanes}
+    if collate is not None:
+        payload["collate"] = collate
+    (mission_dir / "result.json").write_text(json.dumps(payload))
 
 
 def test_report_groups_by_vendor_and_stage_with_join_for_missing_stage(home: Path):
@@ -104,7 +115,11 @@ def test_report_groups_by_vendor_and_stage_with_join_for_missing_stage(home: Pat
     row = next(r for r in rpt.vendor_stage if r.vendor == "anthropic" and r.stage == "build")
     assert row.runs == 2
     assert row.cost_usd == 3
-    joined_run = next(r for r in rpt.missions if r.mission == "m-old")
+    # The join resolves to the snapshot directory's own name -- the same
+    # identity a staged lane's live receipt carries directly (mission_id,
+    # not the snapshot's separate "name" field; see
+    # test_report_mission_identity_matches_what_dispatch_stamps_on_the_receipt).
+    joined_run = next(r for r in rpt.missions if r.mission == "20260101T020000Z-m-old")
     assert joined_run.cost_usd == 2
 
 
@@ -204,11 +219,66 @@ def test_report_mission_rows_with_capped_lane(home: Path):
         ],
     )
     rpt = report(home)
-    row = next(r for r in rpt.missions if r.mission == "mission-x")
+    # Both receipts here are joined (neither sets `stage`/`mission` directly),
+    # so they resolve to the snapshot directory's own name, matching what a
+    # staged lane's live receipt would carry directly.
+    row = next(r for r in rpt.missions if r.mission == "20260101T020000Z-mission-x")
     assert row.cost_usd == 2
     assert row.ok is True
     assert row.lanes == 2
     assert row.capped is True
+
+
+def test_report_mission_identity_matches_what_dispatch_stamps_on_the_receipt(home: Path):
+    """A staged lane's live receipt carries `mission=mission_id` (the
+    timestamped directory name -- mission.py's dispatch_one passes exactly
+    that). A collate dispatch never gets a `mission=` kwarg at all, so its
+    receipt is only ever recovered through the snapshot join. Both must
+    resolve to the SAME mission group, keyed on the identity `report.py`
+    actually has on a live receipt -- the directory id -- not the
+    snapshot's separate, friendlier `name` field, or one mission silently
+    splits into two rows and the id-keyed row never receives its own
+    snapshot's `ok`/`lanes`.
+    """
+    mission_id = "20260101T020000Z-parser-refactor"
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        cost=1.0,
+        stage="build",
+        lane="build",
+        mission=mission_id,
+    )
+    _write_receipt(
+        home,
+        "20260101T010000Z-claude-collate",
+        fleet="claude",
+        model="claude-haiku-4-5",
+        cost=0.5,
+    )
+    _write_mission(
+        home,
+        mission_id,
+        name="parser-refactor",
+        ok=True,
+        lanes=[
+            {
+                "name": "build",
+                "stage": "build",
+                "attempts": [{"run_id": "20260101T000000Z-claude-build"}],
+            }
+        ],
+        collate={"run_id": "20260101T010000Z-claude-collate"},
+    )
+    rpt = report(home)
+    assert len(rpt.missions) == 1
+    row = rpt.missions[0]
+    assert row.mission == mission_id
+    assert row.cost_usd == 1.5
+    assert row.ok is True
+    assert row.lanes == 1
 
 
 def test_report_rules_section_reports_n_a_when_no_data(home: Path):

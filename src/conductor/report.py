@@ -95,6 +95,16 @@ def _scan_missions(
     A lane attempt joins to its declared name and stage; a collate or
     `previous_collates` run (`spend._collate_run_ids`) joins to the mission
     alone, since neither is a lane and carries no stage of its own.
+
+    `mission` here is the snapshot directory's own name (`result_file.parent.
+    name`) -- the same `mission_id` `mission.py`'s dispatch_one stamps
+    directly onto a staged lane's live receipt (`dispatch(spec, lane=...,
+    mission=mission_id, ...)`), never the snapshot's separate, friendlier
+    `name` field. A staged lane's receipt already carries `stage`, so it is
+    never joined at all; keying this map by anything other than the id that
+    receipt already carries would only ever match an unrelated, joined
+    (unstaged) run and never the staged one, splitting one mission's runs
+    across two group keys and leaving the id-keyed row's `ok`/`lanes` unset.
     """
     join: dict[str, tuple[str, str | None, str | None]] = {}
     meta: dict[str, dict[str, object]] = {}
@@ -108,8 +118,7 @@ def _scan_missions(
             continue
         if not isinstance(raw, dict):
             continue
-        name = raw.get("name")
-        mission = name if isinstance(name, str) and name else result_file.parent.name
+        mission = result_file.parent.name
         lanes = raw.get("lanes")
         lane_list = lanes if isinstance(lanes, list) else []
         ok = raw.get("ok")
