@@ -46,6 +46,7 @@ from pathlib import Path
 
 from . import attest
 from . import collisions as collisions_mod
+from . import notify as notify_mod
 from .errors import KINDS, error_kind
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
@@ -132,6 +133,7 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "prefix_file",
     "cascade",
     "retry",
+    "notify",
 }
 _COLLATE_KEYS = {
     "fleet",
@@ -434,6 +436,11 @@ class Mission:
     # collate, if any) settle, when `collisions.hotspots` is non-empty. None
     # when the mission sets no resolve.
     resolve: Resolve | None = None
+    # E12: {"command", "events", "timeout"}. An opt-in shell hook fired at
+    # three settle boundaries (pause, end, breaker) -- mission data, never a
+    # fleet's request. None (the default) emits nothing. See notify.py and
+    # the three call sites in _execute_mission.
+    notify: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -756,6 +763,7 @@ class Mission:
             "cascade",
             "retry",
             "test",
+            "notify",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -881,6 +889,7 @@ class Mission:
             "cascade": raw["cascade"],
             "retry": raw["retry"],
             "test": raw["test"],
+            "notify": raw["notify"],
         }
         mission = mission_from_dict(
             mission_raw, base_dir=Path("/"), source=raw["source"]
@@ -1198,6 +1207,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         raise MissionInvalid("early_cancel must be true or false")
     pause = _parse_pause(raw.get("pause"))
     retry = _parse_retry(raw.get("retry"))
+    notify = _parse_notify(raw.get("notify"))
     prefix = _load_prefix(raw, base_dir)
     mission = Mission(
         name=name,
@@ -1219,6 +1229,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         cascade=cascade_fields,
         retry=retry,
         test=str(defaults["test"]) if defaults.get("test") else None,
+        notify=notify,
     )
     mission.validate()
     return mission
@@ -1261,6 +1272,44 @@ def _parse_pause(raw_pause: object) -> dict | None:
     if not before and spend_usd is None:
         raise MissionInvalid("pause needs 'before', 'spend_usd', or both")
     return {"before": before, "spend_usd": spend_usd}
+
+
+_DEFAULT_NOTIFY_TIMEOUT = 10
+
+
+def _parse_notify(raw_notify: object) -> dict | None:
+    """E12: an opt-in shell hook mission.py fires at three settle boundaries
+    (pause, end, breaker -- see notify.py and _execute_mission). Parsed and
+    fully validated here, the way pause and retry are, so a mission never
+    half-carries an unknown key, an unknown event name, or a timeout that
+    could never fire before the fleet it is meant to page ever gets asked."""
+    if raw_notify is None:
+        return None
+    if not isinstance(raw_notify, dict):
+        raise MissionInvalid("notify must be an object")
+    unknown = sorted(set(raw_notify) - {"command", "events", "timeout"})
+    if unknown:
+        raise MissionInvalid(f"notify: unknown field(s) {', '.join(unknown)}")
+    command = raw_notify.get("command")
+    if not isinstance(command, str) or not command:
+        raise MissionInvalid("notify.command must be a non-empty string")
+    events_raw = raw_notify.get("events", list(notify_mod.NOTIFY_EVENTS))
+    if not isinstance(events_raw, list) or not all(isinstance(e, str) for e in events_raw):
+        raise MissionInvalid("notify.events must be a list of event names")
+    unknown_events = sorted(set(events_raw) - set(notify_mod.NOTIFY_EVENTS))
+    if unknown_events:
+        raise MissionInvalid(
+            f"notify.events: unknown event {unknown_events[0]!r}; "
+            f"known: {', '.join(notify_mod.NOTIFY_EVENTS)}"
+        )
+    timeout_raw = raw_notify.get("timeout", _DEFAULT_NOTIFY_TIMEOUT)
+    try:
+        timeout = float(timeout_raw)
+    except (TypeError, ValueError) as exc:
+        raise MissionInvalid(f"notify.timeout must be a number: {exc}") from exc
+    if isinstance(timeout_raw, bool) or timeout <= 0:
+        raise MissionInvalid("notify.timeout must be positive")
+    return {"command": command, "events": list(events_raw), "timeout": timeout}
 
 
 _DEFAULT_RETRY_KINDS = ("rate_limit", "transport")
@@ -1850,6 +1899,10 @@ class MissionResult:
     # else {"ran": True, "ok", "run_id", "cost_usd", "tokens", "branch",
     # "tip", "hotspots", "error"}.
     resolve: dict | None = None
+    # E12: every notify.emit() result, in order, across the mission's pause,
+    # end, and breaker settle boundaries. Empty, never null, on a mission
+    # with no `notify` or a dry run, which emits nothing.
+    notifications: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1904,6 +1957,7 @@ class MissionResult:
             "resumed_from": self.resumed_from,
             "report_path": self.report_path,
             "mission_dir": self.mission_dir,
+            "notifications": self.notifications,
         }
 
 
@@ -2688,6 +2742,11 @@ def _execute_mission(
     # own notes once every lane has settled. Plain list.append is safe here:
     # each lane's own worker thread only ever appends its own lane's notes.
     mission_notes: list[str] = []
+    # E12: every emit() result, in order, across the mission's three settle
+    # boundaries. `settle()` and the pause/end call sites all run on the
+    # scheduler's own thread, never a lane worker's, so plain list.append
+    # needs no lock.
+    notifications: list[dict] = []
 
     def fresh_lane_result(lane: Lane, *, skipped: str | None = None) -> LaneResult:
         old = resume.previous.get(lane.name)
@@ -3020,6 +3079,28 @@ def _execute_mission(
             )
         if not dry_run:
             chain.append(lane_result)
+        if (
+            mission.notify
+            and not dry_run
+            and lane_result.breaker
+            and "breaker" in mission.notify["events"]
+        ):
+            notifications.append(
+                notify_mod.emit(
+                    mission.notify,
+                    {
+                        "event": "breaker",
+                        "mission_id": mission_id,
+                        "lane": lane_result.name,
+                        "breaker": lane_result.breaker,
+                        "run_id": (
+                            lane_result.attempts[-1]["run_id"] if lane_result.attempts else None
+                        ),
+                        "cost_usd": lane_result.cost_usd,
+                    },
+                    cwd=mission.cwd,
+                )
+            )
 
     # C2: the pause primitive. `pause_park` becomes this run's paused-result
     # payload the moment either the stop-answer short circuit below, or the
@@ -3166,6 +3247,22 @@ def _execute_mission(
                 indent=2,
             )
         )
+        if mission.notify and "pause" in mission.notify["events"]:
+            notifications.append(
+                notify_mod.emit(
+                    mission.notify,
+                    {
+                        "event": "pause",
+                        "mission_id": mission_id,
+                        "kind": pause_info["kind"],
+                        "lane": pause_info["lane"],
+                        "spent_usd": pause_info["spent_usd"],
+                        "threshold": pause_info["threshold"],
+                        "question": pause_info["question"],
+                    },
+                    cwd=mission.cwd,
+                )
+            )
         pause_park = {
             "kind": pause_info["kind"],
             "lane": pause_info["lane"],
@@ -3389,9 +3486,34 @@ def _execute_mission(
         errors=errors_out,
         collisions=collisions_out,
         resolve=resolve_out,
+        notifications=notifications,
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+    if mission.notify and not dry_run and pause_park is None and "end" in mission.notify["events"]:
+        notifications.append(
+            notify_mod.emit(
+                mission.notify,
+                {
+                    "event": "end",
+                    "mission_id": mission_id,
+                    "ok": result.ok,
+                    "name": result.name,
+                    "cost_usd": result.cost_usd,
+                    "lanes": [
+                        {
+                            "name": lane.name,
+                            "ok": lane.ok,
+                            "kind": lane.kinds[-1] if lane.kinds else None,
+                        }
+                        for lane in lane_results
+                    ],
+                },
+                cwd=mission.cwd,
+            )
+        )
+        report_path.write_text(_report(mission, result, lane_results))
+        (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 
 
@@ -4183,5 +4305,10 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             )
         else:
             lines.append(f"(resolve failed: {result.resolve.get('error')})")
+    if result.notifications:
+        lines += ["", "## Notifications", ""]
+        for note in result.notifications:
+            status = "ok" if note.get("ok") else f"failed: {note.get('error')}"
+            lines.append(f"- {note.get('event')}: {status}")
     lines.append("")
     return "\n".join(lines)
