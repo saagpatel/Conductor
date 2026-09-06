@@ -541,7 +541,8 @@ new conversation, and exits 0.
 
 Prompt templates: `{{lanes.<name>.answer}}`, `{{lanes.<name>.diff}}`,
 `{{lanes.<name>.test_touched}}` (`yes (n files: ...)` or `no`),
-`{{lanes.<name>.verdict}}`, and `{{mission.prompt}}` (the mission-level prompt,
+`{{lanes.<name>.verdict}}`, `{{lanes.<name>.deliverable}}`, and
+`{{mission.prompt}}` (the mission-level prompt,
 verbatim). A referenced lane
 must be in `needs`; anything else between double braces is refused at load,
 so a misspelt name cannot render as `(none)`. Rendering is a single pass, so
@@ -596,8 +597,8 @@ Declare it on the lane that quotes the outside text:
 Taint spreads forward, computed at load time to a fixed point in mission
 order (a lane can only reference an earlier one): a lane is tainted when it
 declares `taint: true` itself, when any attempt's prompt references a tainted
-lane's `{{lanes.<name>.answer}}`, `.diff`, `.verdict`, or `.test_touched`, or
-when it `resume`s a tainted lane's session. `Lane.taint_from` names the lanes
+lane's `{{lanes.<name>.answer}}`, `.diff`, `.verdict`, `.test_touched`, or
+`.deliverable`, or when it `resume`s a tainted lane's session. `Lane.taint_from` names the lanes
 it inherited from, in mission order, empty when the lane is tainted only by
 its own `taint: true`. Every attempt of a tainted lane dispatches with taint
 set on its `Spec`, cascade attempts included — the ladder does not launder a

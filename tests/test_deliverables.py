@@ -415,3 +415,58 @@ def test_deliverable_template_is_empty_when_the_lane_left_none(tmp_path):
         dry_run=False,
     )
     assert rendered == "(none)"
+
+
+# --- review findings ---------------------------------------------------------
+
+
+def test_read_lane_exemption_holds_when_cwd_is_a_repo_subdirectory(repo, home, fake_fleet):
+    """The deliverable exemption compares against git status paths, which are
+    repo-root-relative, while `spec.deliverable["path"]` is cwd-relative. A
+    dispatch whose cwd is a subdirectory of the repo (an ordinary, supported
+    shape: README's "Isolation" section: "A cwd inside the repo stays the
+    same subdirectory inside the worktree") must still recognize its own
+    declared file as the only thing that moved."""
+    subdir = repo / "src"
+    subdir.mkdir()
+    (subdir / "keep.txt").write_text("existing\n")
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "add subdir"], cwd=repo, check=True, capture_output=True
+    )
+    fake_fleet(["sh", "-c", f"echo out > report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(subdir, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is True, result.failure()
+    assert result.git_verdict["deliverable_only"] is True
+
+
+def test_schema_type_as_a_list_does_not_crash_the_dispatch(repo, home, fake_fleet, tmp_path):
+    """JSON Schema allows `"type"` to be a list of allowed types (e.g.
+    `["string", "null"]`). `_SCHEMA_TYPE_CHECKS.get(expected)` looks that list
+    up in a dict keyed by strings, which raises `TypeError: unhashable type`
+    instead of the documented `deliverable does not match schema` outcome."""
+    schema = tmp_path / "schema.json"
+    schema.write_text(
+        json.dumps({"type": "object", "properties": {"note": {"type": ["string", "null"]}}})
+    )
+    fake_fleet(["sh", "-c", "printf '%s' '{\"note\": \"hi\"}' > record.json"])
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+
+
+def test_readme_lists_deliverable_among_the_template_and_taint_surfaces():
+    readme = Path(__file__).parents[1] / "README.md"
+    text = readme.read_text()
+    templates_section = text.split("Prompt templates:", 1)[1].split("\n\n", 1)[0]
+    assert "{{lanes.<name>.deliverable}}" in templates_section
+    taint_section = text.split("Taint spreads forward", 1)[1].split("\n\n", 1)[0]
+    assert "deliverable" in taint_section

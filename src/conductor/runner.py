@@ -388,10 +388,30 @@ def _schema_mismatch(data: object, schema: dict) -> str | None:
         if name not in data or not isinstance(subschema, dict):
             continue
         expected = subschema.get("type")
-        checker = _SCHEMA_TYPE_CHECKS.get(expected)
+        # JSON Schema allows "type" to be a list of alternatives (or anything
+        # else); item 3's own scope is a single declared type name, so
+        # anything else is not checked rather than raised on -- a schema
+        # that could not have been anticipated must not crash the dispatch.
+        checker = _SCHEMA_TYPE_CHECKS.get(expected) if isinstance(expected, str) else None
         if checker is not None and not checker(data[name]):
             return f"property {name!r} must be of type {expected}"
     return None
+
+
+def _repo_relative(cwd: str, path: str) -> str:
+    """`path`, declared relative to `cwd`, expressed relative to the repo's
+    toplevel instead -- what `changed_entry_paths` (git status, always
+    root-relative) actually names. Falls back to `path` unchanged when the
+    toplevel can't be found, so a non-repo cwd degrades to the old behavior
+    rather than raising."""
+    top = git_run(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return path
+    try:
+        prefix = Path(cwd).resolve().relative_to(Path(top.stdout.strip()).resolve())
+    except ValueError:
+        return path
+    return (prefix / path).as_posix()
 
 
 def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
@@ -1576,9 +1596,14 @@ def dispatch(
         ):
             # E1: a read lane may move exactly its declared deliverable. Any
             # other change -- a second file, a commit, a branch move -- must
-            # still fail the ordinary read-only check below.
+            # still fail the ordinary read-only check below. `changed` names
+            # are repo-root-relative (git status runs at the toplevel), while
+            # `spec.deliverable["path"]` is cwd-relative; a cwd that is a
+            # subdirectory of the repo (an ordinary, supported shape) needs
+            # the same prefix joined on before the two can compare equal.
             changed = changed_entry_paths(before, after)
-            if changed and changed == {spec.deliverable["path"]}:
+            deliverable_repo_path = _repo_relative(spec.cwd, spec.deliverable["path"])
+            if changed and changed == {deliverable_repo_path}:
                 git_verdict.deliverable_only = True
                 git_verdict.notes.append(
                     f"read dispatch moved only its declared deliverable: "
