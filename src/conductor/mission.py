@@ -86,12 +86,16 @@ _INHERITED = (
     "setup",
     "teardown",
     "include",
+    "agent",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
 
 # Every key a mission file may use, per object. A typo (`need` for `needs`)
 # would otherwise silently turn a dependent lane into a root.
-_ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
+_ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file", "agent_file"}
+# D3: a review-stage lane's persona may not carry these -- a read lane's
+# job is to look, not to edit or run a shell.
+_AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "Bash"})
 _FALLBACK_KEYS = _ATTEMPT_KEYS
 # C5: `on` selects a fallback by the previous attempt's error kind. It is not
 # in `_INHERITED` (each fallback's own, never cascaded to the next) and not
@@ -217,6 +221,9 @@ class Attempt:
     setup: str | None = None
     teardown: str | None = None
     include: list[str] | None = None
+    # D3: an inline persona for this attempt; cascades like `schema`. See
+    # fleets.Spec.agent for the shape and its validation.
+    agent: dict | None = None
     # C5: which of the previous attempt's error `KINDS` this fallback answers;
     # None (every fallback but a hand-set one) means every kind, as before.
     on: list[str] | None = None
@@ -260,6 +267,7 @@ class Attempt:
             teardown=self.teardown,
             include=self.include,
             taint=taint,
+            agent=self.agent,
         )
 
     def isolated(self) -> bool:
@@ -478,6 +486,16 @@ class Mission:
                     attempt.spec(self.cwd, taint=lane.tainted).validate()
                 except DispatchRefused as exc:
                     raise MissionInvalid(f"lane '{lane.name}' ({attempt.label()}): {exc}") from exc
+                # Spec.validate (above) has already confirmed `tools`, when
+                # given, is a list of non-empty strings -- this may assume
+                # that shape rather than re-checking it.
+                if lane.stage == "review" and attempt.agent and attempt.agent.get("tools"):
+                    write_tools = sorted(set(attempt.agent["tools"]) & _AGENT_WRITE_TOOLS)
+                    if write_tools:
+                        raise MissionInvalid(
+                            f"lane '{lane.name}': a read lane's persona may not carry write "
+                            f"tools ({', '.join(write_tools)})"
+                        )
         self._validate_graph(seen)
         self._validate_quorum(seen)
         self._validate_policy()
@@ -1337,6 +1355,16 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
             out["prompt"] = prompt_path.read_text()
         except OSError as exc:
             raise MissionInvalid(f"cannot read prompt_file: {exc}") from exc
+    if raw.get("agent_file") is not None and raw.get("agent") is not None:
+        raise MissionInvalid("agent and agent_file are mutually exclusive")
+    if raw.get("agent_file"):
+        agent_path = (base_dir / str(raw["agent_file"])).expanduser().resolve()
+        try:
+            out["agent"] = json.loads(agent_path.read_text())
+        except OSError as exc:
+            raise MissionInvalid(f"cannot read agent_file: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise MissionInvalid(f"agent_file is not valid JSON: {exc}") from exc
     if "schema" in raw and raw["schema"]:
         out["schema"] = str((base_dir / str(raw["schema"])).expanduser().resolve())
     return out
@@ -1390,6 +1418,8 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             isinstance(value, bool) or not isinstance(value, int) or value < 0
         ):
             raise MissionInvalid(f"{where}: {key} must be positive; 0 or null disables")
+    if fields.get("agent") is not None and not isinstance(fields["agent"], dict):
+        raise MissionInvalid(f"{where}: agent must be an object")
     verdict = None
     if "verdict" in fields:
         try:
@@ -1422,6 +1452,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             setup=fields.get("setup"),
             teardown=fields.get("teardown"),
             include=list(include) if include is not None else None,
+            agent=fields.get("agent"),
             on=validated_on,
         )
     except (TypeError, ValueError) as exc:
@@ -3902,12 +3933,13 @@ def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = Non
     cost = _usd(attempt.get("cost_usd"))
     if attempt.get("unpriced"):
         cost += " (1 unpriced)"
+    agent_name = (attempt.get("agent") or {}).get("name") or ""
     return (
         f"| {lane.name} | {label or attempt['attempt']} | {attempt['ok']} | "
         f"{_verdict_label(attempt.get('verdict_data')) or ''} | {attempt['exit_code']} | "
         f"{attempt['no_op']} | {_test_touched(attempt.get('test_surface'))} | "
         f"{attempt['commits']} | {attempt.get('branch') or ''} | {_taint_label(lane)} | "
-        f"{cost} | {attempt.get('tokens') or ''} | {attempt.get('tool_calls', 0)} | "
+        f"{agent_name} | {cost} | {attempt.get('tokens') or ''} | {attempt.get('tool_calls', 0)} | "
         f"{_cached(attempt)} | {_resumed_label(attempt)} | {attempt['duration_s']} |"
     )
 
@@ -3970,8 +4002,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     lines += [
         "",
         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
-        "taint | cost_usd | tokens | tools | cached | resumed | dur_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "taint | agent | cost_usd | tokens | tools | cached | resumed | dur_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for lane in lanes:
         if lane.skipped:
@@ -3983,7 +4015,7 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             else:
                 lines.append(
                     f"| {lane.name} | (skipped) | False | | | | no | | | "
-                    f"{_taint_label(lane)} | | | | - | no | |"
+                    f"{_taint_label(lane)} | | | | | - | no | |"
                 )
             continue
         if lane.kept and lane.attempts:
