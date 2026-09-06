@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest, golden, prices, prompts, shape
+from . import export as export_mod
 from . import salvage as salvage_mod
 from .errors import error_kind
 from .fleets import (
@@ -333,56 +334,6 @@ def cmd_missions(args: argparse.Namespace) -> int:
     return 0
 
 
-def _verify_run_attestation(
-    home: Path, run_id: str, link_statement: dict, key: bytes
-) -> tuple[list[str], dict | None]:
-    """Whether one mission link's run still checks out: its attestation.json
-    is unmoved and verifies, and it agrees with the run's own result.json
-    and diff.patch on the few things the mission link claims about it.
-
-    Returns the problems found and the run's own attestation `taint` field
-    (D2), so `cmd_attest` can show it whether or not the run verifies."""
-    problems: list[str] = []
-    run_dir = home / "runs" / run_id
-    attestation_file = run_dir / "attestation.json"
-    expected_sha = link_statement.get("attestation_sha256")
-    actual_sha = attest.file_sha256(attestation_file)
-    if actual_sha is None:
-        problems.append(f"run '{run_id}': attestation.json is missing")
-        return problems, None
-    if expected_sha is not None and actual_sha != expected_sha:
-        problems.append(f"run '{run_id}': attestation.json sha256 disagrees with the mission link")
-    try:
-        envelope = json.loads(attestation_file.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        problems.append(f"run '{run_id}': attestation.json unreadable: {exc}")
-        return problems, None
-    statement, reason = attest.verify(envelope, key)
-    if statement is None:
-        problems.append(f"run '{run_id}': attestation signature: {reason}")
-        return problems, None
-    taint = statement.get("taint")
-    try:
-        result_data = json.loads((run_dir / "result.json").read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        problems.append(f"run '{run_id}': result.json unreadable: {exc}")
-        return problems, taint
-    if statement.get("ok") != result_data.get("ok"):
-        problems.append(f"run '{run_id}': attestation ok disagrees with result.json")
-    # Compare against the receipt's own `base_commit`/`tip_commit`, not a
-    # reconstruction from `isolation`/`commit`: those are only set for an
-    # isolated or landed dispatch, so a non-isolated read lane's real HEAD
-    # would otherwise read back as a mismatch that never happened.
-    if statement.get("base_commit") != result_data.get("base_commit"):
-        problems.append(f"run '{run_id}': attestation base_commit disagrees with result.json")
-    if statement.get("tip_commit") != result_data.get("tip_commit"):
-        problems.append(f"run '{run_id}': attestation tip_commit disagrees with result.json")
-    expected_digest = attest.file_sha256(run_dir / "diff.patch")
-    if statement.get("source_diff_sha256") != expected_digest:
-        problems.append(f"run '{run_id}': attestation source_diff_sha256 disagrees with diff.patch")
-    return problems, taint
-
-
 def _invalid(reason: str) -> None:
     print(json.dumps({"invalid": reason}, indent=2), file=sys.stderr)
 
@@ -417,53 +368,8 @@ def cmd_attest(args: argparse.Namespace) -> int:
         _invalid("chain.json is malformed")
         return 3
 
-    results: list[dict] = []
-    previous_sha: str | None = None
-    for entry in chain["links"]:
-        index = entry.get("index") if isinstance(entry, dict) else None
-        lane = entry.get("lane") if isinstance(entry, dict) else None
-        recorded_sha = entry.get("sha256") if isinstance(entry, dict) else None
-        path_str = entry.get("path") if isinstance(entry, dict) else None
-        problems: list[str] = []
-        run_id: str | None = None
-        run_taint: dict | None = None
-        actual_sha: str | None = None
-        link_path = Path(path_str) if isinstance(path_str, str) else None
-        if link_path is None or not link_path.is_file():
-            problems.append("link file missing")
-        else:
-            actual_sha = attest.file_sha256(link_path)
-            if actual_sha != recorded_sha:
-                problems.append("link file sha256 does not match chain.json")
-            try:
-                envelope = json.loads(link_path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                envelope = None
-                problems.append(f"link file is not valid JSON: {exc}")
-            if envelope is not None:
-                statement, reason = attest.verify(envelope, key)
-                if statement is None:
-                    problems.append(f"link signature: {reason}")
-                else:
-                    if statement.get("previous") != previous_sha:
-                        problems.append("previous does not match the prior link")
-                    run_id = statement.get("run_id")
-                    if isinstance(run_id, str):
-                        run_problems, run_taint = _verify_run_attestation(
-                            home, run_id, statement, key
-                        )
-                        problems.extend(run_problems)
-        results.append(
-            {
-                "index": index,
-                "lane": lane,
-                "run_id": run_id,
-                "taint": run_taint,
-                "verified": not problems,
-                "problems": problems,
-            }
-        )
-        previous_sha = actual_sha
+    rows = attest.verify_chain_links(chain, home=home, key=key)
+    results = [{k: v for k, v in row.items() if k != "_statement"} for row in rows]
 
     out = {
         "mission_id": chain.get("mission_id", mission_id),
@@ -700,6 +606,79 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
         for line in golden.version_drift(fixture_dir):
             print(f"{fixture_dir.name}: {line}")
     return 1 if any_diff else 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """E13: write a scrubbed, manifest-checked receipt bundle for a mission
+    (`conductor export MISSION_ID --out DIR`), or verify one against its own
+    manifest with nothing but the bundle (`conductor export --check DIR`)."""
+    if args.check:
+        result = export_mod.check(Path(args.check))
+        not_verifiable_here: list = []
+        try:
+            manifest = json.loads((Path(args.check) / "manifest.json").read_text())
+            if isinstance(manifest, dict) and isinstance(manifest.get("not_verifiable_here"), list):
+                not_verifiable_here = manifest["not_verifiable_here"]
+        except (OSError, json.JSONDecodeError):
+            pass
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": result.ok,
+                        "problems": result.problems,
+                        "files_checked": result.files_checked,
+                        "links_checked": result.links_checked,
+                        "not_verifiable_here": not_verifiable_here,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"ok: {result.ok}")
+            print(f"files checked: {result.files_checked}")
+            print(f"links checked: {result.links_checked}")
+            for problem in result.problems:
+                print(f"- {problem}")
+            if not_verifiable_here:
+                print(f"not verifiable here: {', '.join(not_verifiable_here)}")
+        return 0 if result.ok else 1
+
+    if not args.mission_id or not args.out:
+        _invalid("MISSION_ID and --out are required unless --check is given")
+        return 3
+
+    home = conductor_home()
+    try:
+        result = export_mod.export(home, args.mission_id, Path(args.out), logs=args.logs)
+    except export_mod.ExportError as exc:
+        if exc.leaks:
+            print(json.dumps({"invalid": str(exc), "leaks": exc.leaks}, indent=2), file=sys.stderr)
+            return 1
+        _invalid(str(exc))
+        return 3
+
+    verified, total = result.attestations_verified_at_export
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "bundle_dir": str(result.bundle_dir),
+                    "files": result.files,
+                    "bytes": result.bytes,
+                    "chain_verified_at_export": result.chain_verified_at_export,
+                    "attestations_verified_at_export": [verified, total],
+                    "leaks": result.leaks,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"bundle: {result.bundle_dir}")
+        print(f"files: {result.files}, bytes: {result.bytes}")
+        print(f"chain verified at export: {result.chain_verified_at_export}")
+        print(f"attestations verified at export: {verified}/{total}")
+    return 0
 
 
 def _write_lane_prompts(raw: dict, base_dir: Path) -> None:
@@ -1136,6 +1115,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--update", action="store_true", help="rewrite expected.json from the replay"
     )
     p_golden_check.set_defaults(func=cmd_golden_check)
+
+    p_export = sub.add_parser(
+        "export", help="export a scrubbed, manifest-checked receipt bundle for a mission (E13)"
+    )
+    p_export.add_argument("mission_id", nargs="?", metavar="MISSION_ID")
+    p_export.add_argument("--out", metavar="DIR", help="write the bundle here")
+    p_export.add_argument("--logs", action="store_true", help="include stdout.log/stderr.log")
+    p_export.add_argument(
+        "--check", metavar="DIR", help="verify a bundle against its own manifest.json instead"
+    )
+    p_export.add_argument("--json", action="store_true")
+    p_export.set_defaults(func=cmd_export)
 
     return parser
 

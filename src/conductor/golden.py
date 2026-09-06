@@ -193,7 +193,11 @@ def scrub_guard(path: str | Path) -> list[str]:
             continue
         rel = file.relative_to(path)
         for line_no, line in enumerate(text.splitlines(), start=1):
-            for name in _pattern_hits(line, patterns):
+            # E13: a base64 run is scanned decoded, never raw -- the raw
+            # alphabet can spell "key" before its "=" padding and read as an
+            # env secret to a plain-text scan, which is not a leak, only
+            # base64. The decoded scan below still sees everything inside it.
+            for name in _pattern_hits(_BASE64_RUN_RE.sub(" ", line), patterns):
                 findings.append(f"{rel}:{line_no}: {name}")
             for decoded in _decode_base64_runs(line):
                 for name in _pattern_hits(decoded, patterns):

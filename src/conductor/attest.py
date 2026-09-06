@@ -170,3 +170,121 @@ def file_sha256(path: str | Path) -> str | None:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verify_run_attestation(
+    home: Path, run_id: str, link_statement: dict, key: bytes
+) -> tuple[list[str], dict | None]:
+    """Whether one mission link's run still checks out: its attestation.json
+    is unmoved and verifies, and it agrees with the run's own result.json
+    and diff.patch on the few things the mission link claims about it.
+
+    `link_statement` supplies `attestation_sha256` when the caller has one to
+    check against (a mission link); an empty dict skips just that one check,
+    so the same function verifies a run's attestation standalone (E13's
+    export, for a run id no link names).
+
+    Returns the problems found and the run's own attestation `taint` field
+    (D2), so a caller can show it whether or not the run verifies."""
+    problems: list[str] = []
+    run_dir = home / "runs" / run_id
+    attestation_file = run_dir / "attestation.json"
+    expected_sha = link_statement.get("attestation_sha256")
+    actual_sha = file_sha256(attestation_file)
+    if actual_sha is None:
+        problems.append(f"run '{run_id}': attestation.json is missing")
+        return problems, None
+    if expected_sha is not None and actual_sha != expected_sha:
+        problems.append(f"run '{run_id}': attestation.json sha256 disagrees with the mission link")
+    try:
+        envelope = json.loads(attestation_file.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"run '{run_id}': attestation.json unreadable: {exc}")
+        return problems, None
+    statement, reason = verify(envelope, key)
+    if statement is None:
+        problems.append(f"run '{run_id}': attestation signature: {reason}")
+        return problems, None
+    taint = statement.get("taint")
+    try:
+        result_data = json.loads((run_dir / "result.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        problems.append(f"run '{run_id}': result.json unreadable: {exc}")
+        return problems, taint
+    if statement.get("ok") != result_data.get("ok"):
+        problems.append(f"run '{run_id}': attestation ok disagrees with result.json")
+    # Compare against the receipt's own `base_commit`/`tip_commit`, not a
+    # reconstruction from `isolation`/`commit`: those are only set for an
+    # isolated or landed dispatch, so a non-isolated read lane's real HEAD
+    # would otherwise read back as a mismatch that never happened.
+    if statement.get("base_commit") != result_data.get("base_commit"):
+        problems.append(f"run '{run_id}': attestation base_commit disagrees with result.json")
+    if statement.get("tip_commit") != result_data.get("tip_commit"):
+        problems.append(f"run '{run_id}': attestation tip_commit disagrees with result.json")
+    expected_digest = file_sha256(run_dir / "diff.patch")
+    if statement.get("source_diff_sha256") != expected_digest:
+        problems.append(f"run '{run_id}': attestation source_diff_sha256 disagrees with diff.patch")
+    return problems, taint
+
+
+def verify_chain_links(chain: dict, *, home: Path, key: bytes) -> list[dict]:
+    """The per-link verification loop `cmd_attest` runs: each link's
+    signature, its place in the hash chain, and, for a link with a run, that
+    the run's own attestation still matches its result.json and diff.patch.
+
+    Each row carries the fields `cmd_attest` prints (`index`, `lane`,
+    `run_id`, `taint`, `verified`, `problems`) plus `_statement`, the link's
+    own decoded statement (or None) -- never printed by `cmd_attest`, but
+    read by `export.export` so it does not have to decode every link a
+    second time to learn a run's expected `attestation_sha256`."""
+    results: list[dict] = []
+    previous_sha: str | None = None
+    links = chain.get("links") if isinstance(chain, dict) else None
+    for entry in links or []:
+        index = entry.get("index") if isinstance(entry, dict) else None
+        lane = entry.get("lane") if isinstance(entry, dict) else None
+        recorded_sha = entry.get("sha256") if isinstance(entry, dict) else None
+        path_str = entry.get("path") if isinstance(entry, dict) else None
+        problems: list[str] = []
+        run_id: str | None = None
+        run_taint: dict | None = None
+        actual_sha: str | None = None
+        statement: dict | None = None
+        link_path = Path(path_str) if isinstance(path_str, str) else None
+        if link_path is None or not link_path.is_file():
+            problems.append("link file missing")
+        else:
+            actual_sha = file_sha256(link_path)
+            if actual_sha != recorded_sha:
+                problems.append("link file sha256 does not match chain.json")
+            try:
+                envelope = json.loads(link_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                envelope = None
+                problems.append(f"link file is not valid JSON: {exc}")
+            if envelope is not None:
+                statement, reason = verify(envelope, key)
+                if statement is None:
+                    problems.append(f"link signature: {reason}")
+                else:
+                    if statement.get("previous") != previous_sha:
+                        problems.append("previous does not match the prior link")
+                    run_id = statement.get("run_id")
+                    if isinstance(run_id, str):
+                        run_problems, run_taint = verify_run_attestation(
+                            home, run_id, statement, key
+                        )
+                        problems.extend(run_problems)
+        results.append(
+            {
+                "index": index,
+                "lane": lane,
+                "run_id": run_id,
+                "taint": run_taint,
+                "verified": not problems,
+                "problems": problems,
+                "_statement": statement,
+            }
+        )
+        previous_sha = actual_sha
+    return results
