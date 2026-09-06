@@ -174,7 +174,9 @@ def _spec(tmp_path: Path) -> Path:
     return spec
 
 
-def test_shape_a_writes_prompt_files_that_load_through_prompt_file(repo, home, monkeypatch, tmp_path):
+def test_shape_a_writes_prompt_files_that_load_through_prompt_file(
+    repo, home, monkeypatch, tmp_path
+):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     spec = _spec(tmp_path)
     out = tmp_path / "m" / "mission.json"
