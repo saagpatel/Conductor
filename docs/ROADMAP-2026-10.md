@@ -63,16 +63,15 @@ transcripts), and a read lane with a deliverable must be distinguished from a re
 that ignored read-only, or every review lane with an output file reads as a violation.
 Depends on nothing. Size 0.5. Build cap $8.
 
-**E3. Fetch-allowed research lanes. Operator decision required.** The draft called this
-an enablement; it is a weakening. Untainted Claude lanes already have WebFetch and
-WebSearch; `--disallowedTools` is appended only when a lane is tainted (`fleets.py`). What
-`fetch: true` actually does is let a tainted lane keep network egress, which is exactly
-what D2's deny list exists to stop ("exfiltrate repo contents, fetch a second-stage
-payload"). If built: split `TAINT_DISALLOWED_TOOLS` into ingress (fetch, search) and
-egress-or-privilege (push, gh, curl, Task, Agent), never a flat opt-out, and state that
-the taint downstream of a fetch lane no longer carries the no-egress guarantee.
-`test_policy: allow` is mandatory (the D2 tests pin the tuple). Depends on D2. Size 1.
-Build cap $6.
+**E3. Untrusted-output lanes.** The draft's fetch-allowed tainted lane was dropped on
+2026-09-06 (operator decision): a tainted lane's deny list exists to stop the outside text
+in its prompt from exfiltrating the repository or pulling a second stage, and an untainted
+lane already has fetch and search. The hole that remains is the other direction: a research
+lane that reads the web produces untrusted text, and a build lane that pastes its answer is
+not tainted today. E3 is now: a lane may declare `untrusted_output: true`; it runs with its
+full tool set, and any lane whose template references its answer or diff becomes tainted
+(the D2 propagation walk, one more source). No tool weakening. Depends on D2. Size 0.5.
+Build cap $5.
 
 **E4. Judge sittings.** N candidates times M judges over the existing rank collate
 (`Collate.rank` already dispatches both orders; `candidates` narrows; A3 hygiene already
@@ -130,8 +129,10 @@ directory, and every launch mints a new id, so two overlapping firings of the sa
 both run today). Check B4's existing fleet-wide hourly and daily cap before building;
 it may already be most of this. The real risk of unattended runs is not money but
 salvage: five of fourteen Shape A runs needed a lead salvage and a cap-cut build leaves a
-kept worktree that `gc` protects forever. Operator question: what is allowed to run
-unattended at all. Depends on E11. Size 1. Build cap $6.
+kept worktree that `gc` protects forever. Decision 2026-09-06: any read-only mission may
+run unattended at any hour; a write mission only when it pauses before its fix stage, so
+nothing lands without a lead reading it; salvage is never automated. Ceiling defaults $10
+per hour and $25 per day, overridable per mission. Depends on E11. Size 1. Build cap $6.
 
 **E10. Planner lanes.** A read lane whose deliverable is a mission file (E1 with the
 mission schema). Conductor dry-runs it, refuses it over the parent's remaining budget or a
@@ -197,13 +198,15 @@ work. Salvage was the path for four of nineteen September items and the Septembe
 roadmap names the lead's salvage time as the cost that grew. This also gives E11 its
 salvage receipt. Depends on E5, E26. Size 1. Build cap $7.
 
-**E24. Cap grace for the terminal message. Operator decision required.** A bounded
+**E24. Cap grace for the terminal message. Approved 2026-09-06.** A bounded
 `cap_grace_usd` that lets a Claude dispatch's final summary turn finish past the cap,
 receipted separately as `budget.grace_used`, refused above a ceiling, stated per lane and
 never inherited silently. This is rule 10 as a function: a green build was lost for five
 cents twice in one day and a green fix for seven cents on D1. It is also a hole in the
 one guarantee the September roadmap calls conductor's moat, spend capped from live vendor
-usage. Small absolute band, separate receipt field, or not at all. Depends on nothing
+usage. Decision: per lane, opt-in, default $0.25 in the Shape A template, hard ceiling
+$0.50, receipted as `budget.grace_used`. Rule 10's flat dollar stays on the cap until the
+ledger shows the band absorbs every terminal-message overrun. Depends on nothing
 (`BudgetState.settle` and `over_cap`). Size 0.5. Build cap $5.
 
 **E25. Clean-gate diagnosis for the test-surface trap.** When the clean gate fails and
@@ -259,13 +262,14 @@ file is written into the worktree before the bytes baseline. This lifts D2's Cla
 refusal for taint on both fleets; D3 personas stay Claude-only. Depends on D2. Size 1.
 Build cap $7.
 
-**E19. Cross-repo collisions. Operator decision on semantics first.** With E26 in,
+**E19. Cross-repo collisions. Semantics decided 2026-09-06.** With E26 in,
 collisions across repositories. Today `collisions.touched_files` keys on repo-relative
 paths with no repo qualifier, so two lanes touching `src/foo.py` in two different
 repositories would report a hotspot and feed the D1 resolver, which writes, into
-resolving a conflict that does not exist. The semantics (a collision is a path within one
-repository, and a cross-repo mission has one gate per repo) are a design decision before
-any lane is dispatched. A second repo is an absolute path in a mission file, so the golden
+resolving a conflict that does not exist. Decision: a collision is the same path in the
+same repository; each repository runs its own gate; the resolver never merges across
+repositories. Cross-repo missions are fully allowed under that; this item and E26 are what
+make them possible. A second repo is an absolute path in a mission file, so the golden
 suite cannot cover it without a placeholder. Resume touches (per-repo branch
 reclamation). Depends on E26, D1. Size 1. Build cap $7.
 
@@ -282,14 +286,17 @@ reclamation). Depends on E26, D1. Size 1. Build cap $7.
 | E18 lessons file | dropped | the read half is `prefix_file`, shipped; the write half changes the prefix every mission and destroys the B2 cache it rides on (98.7 percent hits on C5), and injects unaudited framing into reviewer prompts |
 | E20 non-git directories | read half is one README line; write half dropped | read lanes already run there; a non-git write lane has no worktree, commit, clean gate, reproduce gate, or attestation bounds, and would trade away the bytes-moved verdict |
 
-## Operator decisions before the affected item is specced
+## Operator decisions, settled 2026-09-06
 
-1. **E3**: whether a tainted lane may ever keep ingress tools. If no, E3 is dropped and
-   research lanes stay untainted lanes with the ordinary tool set.
-2. **E24**: whether a bounded grace band above the cap is acceptable, and its ceiling.
-3. **E19**: cross-repo collision semantics (proposal: collisions are per repository, one
-   gate per repository, the resolver never crosses repositories).
-4. **E9**: what may run unattended, given that salvage needs a lead.
+1. **E3**: a tainted lane never keeps ingress tools. The fetch-allowed item is dropped and
+   replaced by untrusted-output lanes (output taints downstream, no tool weakening).
+2. **E24**: a grace band is acceptable: opt-in per lane, default $0.25, ceiling $0.50,
+   receipted separately.
+3. **E19**: collisions are per repository, one gate per repository, the resolver never
+   crosses repositories.
+4. **E9**: read-only missions may run unattended at any hour; write missions only with a
+   pause before the fix stage; salvage never automated; ceiling $10 per hour and $25 per
+   day by default.
 
 ## Recommended order
 
@@ -304,11 +311,11 @@ Groups are parallel where named; everything with the scheduler tax runs alone.
 - **Group 3, two in parallel:** E23 salvage; E26 per-lane cwd. These discount every
   mission after them.
 - **Group 4, three in parallel:** E17 prompt versioning (nothing else that touches
-  fixtures runs beside it); E24 cap grace if approved; E21 deny lists on the two fleets.
+  fixtures runs beside it); E24 cap grace; E21 deny lists on the two fleets.
 - **Group 5, series, scheduler tax:** E16 adversarial tests; E7 human lanes.
 - **Group 6, series, scheduler tax:** E4 judge sittings; E6 script lanes.
-- **Group 7, series, each with its decision settled:** E3 if approved; E9 ceiling; E13
-  export; E14 warn; E19 cross-repo; E10 planner, two specs, last.
+- **Group 7, series:** E3 untrusted-output lanes; E9 ceiling; E13 export; E14 warn; E19
+  cross-repo; E10 planner, two specs, last.
 
 Roughly 20 releases and 21 missions. Build caps sum to about $157; with review and fix
 lanes, $220 to $240 of fleet spend, three to four weeks at the September pace. Groups 0
@@ -317,7 +324,7 @@ through 4 are about $85 across eleven missions and roughly two working days.
 ## First consumers, carried over
 
 The core-guard cross-vendor audit needs nothing from this roadmap and can run today.
-OPERANT-J sitting 2 wants E4. Anti-slop passes want E1 and, if approved, E3. The
+OPERANT-J sitting 2 wants E4. Anti-slop passes want E1 and E3. The
 HarnessBench live tier wants E6 and E26.
 
 ## Receipt: how this document was produced
