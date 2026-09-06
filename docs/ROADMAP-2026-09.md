@@ -30,7 +30,7 @@ orchestrators. Sources are linked where a claim rests on one.
 | D1 conflict-aware collate | 0.25.0 | Shape A on 0.23.0, in parallel with D2; fix salvaged | $11.17 |
 | D3 inline agent definitions | 0.26.0 | Probe, then Shape A on 0.25.0; fix as its own mission | $9.72 |
 
-Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
+The next phase is `docs/ROADMAP-2026-10.md` (Phase E, drafted 2026-09-06). Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
 order; the second merge was the lead's. B2, B3, and C4 ran as three missions at once and merged in that order. C5 ran on 0.21.0 with the
 new features engaged. C6 was probed live and shelved (`docs/research/2026-09-05-live-probe-background-lanes.md`:
