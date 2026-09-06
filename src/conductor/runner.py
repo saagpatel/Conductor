@@ -656,14 +656,15 @@ _TAINT_AGY_LOG_RE = re.compile(r"loaded (\d+) named hooks? from \d+ hooks\.json 
 _TAINT_AGY_DENIED_CALL_MARKER = "denied by pre-tool hook"
 
 
-def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> None:
-    """E21: write the deny hook files into the worktree and hide them from
-    every git-status/diff/no-op check that worktree can see, before `before`
-    is captured.
-
-    `git rev-parse --git-path info/exclude` is per worktree; run with `cwd`
-    outside the repository it would resolve to the wrong place, so this
-    always runs against `iso.worktree`, not the caller's `cwd`.
+def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> list[str]:
+    """E21: write the deny hook files into the worktree, before `before` is
+    captured, and return their worktree-relative paths so the caller can keep
+    them untracked through the worktree-scoped `core.excludesFile` that
+    `_apply_include` builds. Never the shared `info/exclude`: `git rev-parse
+    --git-path info/exclude` resolves to the one file every worktree of the
+    repository shares (verified on git 2.55 from a linked worktree), so
+    writing there would mutate the operator's checkout and leak this lane's
+    pattern into every other lane's.
     """
     hook_files = taint_hook_files(cwd)
     repo_root = Path(iso.worktree).resolve()
@@ -672,34 +673,13 @@ def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> None:
         prefix = cwd_root.relative_to(repo_root)
     except ValueError:
         prefix = Path(".")
-    exclude_entries = []
+    written: list[str] = []
     for rel_path, text in hook_files.items():
         dest = cwd_root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
-        exclude_entries.append((prefix / rel_path).as_posix())
-    git_path = git_run(
-        iso.worktree,
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "info/exclude",
-        timeout=worktrees.GIT_TIMEOUT,
-    )
-    if git_path.returncode != 0:
-        return
-    exclude_file = Path(git_path.stdout.strip())
-    existing = exclude_file.read_text() if exclude_file.is_file() else ""
-    existing_lines = set(existing.splitlines())
-    missing = [line for line in exclude_entries if line not in existing_lines]
-    if not missing:
-        return
-    exclude_file.parent.mkdir(parents=True, exist_ok=True)
-    with exclude_file.open("a") as fh:
-        if existing and not existing.endswith("\n"):
-            fh.write("\n")
-        for line in missing:
-            fh.write(line + "\n")
+        written.append((prefix / rel_path).as_posix())
+    return written
 
 
 def _uncovered_agy_tools(tools: list[str]) -> list[str]:
@@ -1180,7 +1160,11 @@ def _operator_global_excludes(worktree: str) -> Path | None:
 
 
 def _apply_include(
-    spec: Spec, iso: worktrees.Isolation, home: Path, run_id: str
+    spec: Spec,
+    iso: worktrees.Isolation,
+    home: Path,
+    run_id: str,
+    extra_excludes: list[str] | None = None,
 ) -> tuple[list[str], list[str], Path | None]:
     """Copy `spec.include`'s untracked, repo-relative paths into the
     worktree and keep them untracked there too.
@@ -1193,7 +1177,10 @@ def _apply_include(
     operator already globally ignores for the run's duration. Returns the
     paths actually copied, notes for paths missing from the checkout, and
     the external exclude-list file's path (or None if nothing was copied),
-    which the caller removes when the dispatch ends.
+    which the caller removes when the dispatch ends. `extra_excludes` (E21)
+    are worktree-relative paths conductor itself wrote into the worktree
+    (the taint deny hook files) that must stay untracked the same way, with
+    or without an `include`.
 
     Raises DispatchRefused for a path Git already tracks: copying it would
     smuggle an uncommitted edit past the base commit a reviewer diffs
@@ -1211,7 +1198,8 @@ def _apply_include(
         if tracked.returncode == 0:
             raise DispatchRefused(f"include: {rel} is tracked; the worktree already has it")
         to_copy.append(rel)
-    if not to_copy:
+    extra = list(extra_excludes or [])
+    if not to_copy and not extra:
         return included, notes, None
 
     # `extensions.worktreeConfig` is a one-time repository setting, like
@@ -1223,7 +1211,7 @@ def _apply_include(
     exclude_lines = []
     if global_excludes is not None:
         exclude_lines.append(global_excludes.read_text())
-    exclude_lines.append("\n".join(to_copy) + "\n")
+    exclude_lines.append("\n".join([*extra, *to_copy]) + "\n")
 
     exclude_file = home / "worktrees" / f"{run_id}-include-exclude"
     exclude_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1365,6 +1353,7 @@ def dispatch(
     # commit, tests) must see the worktree as the working directory, not the
     # shared checkout the caller named.
     iso: worktrees.Isolation | None = None
+    taint_hook_paths: list[str] = []
     if isolate and not dry_run:
         iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
         if iso.active:
@@ -1372,7 +1361,7 @@ def dispatch(
             # worktree; the fleet was pointed at that directory for a reason.
             spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
             if tainted_agy:
-                _write_taint_agy_hooks(spec.cwd, iso)
+                taint_hook_paths = _write_taint_agy_hooks(spec.cwd, iso)
         elif spec.mode == "write" or base_ref is not None or tainted_agy:
             # The caller asked for a private tree and cannot have one. For a
             # write, running in the shared checkout instead is the collision
@@ -1491,16 +1480,16 @@ def dispatch(
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
-    if spec.include:
+    if spec.include or taint_hook_paths:
         if iso is not None and iso.active:
             try:
                 included_paths, notes, include_exclude_file = _apply_include(
-                    spec, iso, base, run_id
+                    spec, iso, base, run_id, extra_excludes=taint_hook_paths
                 )
                 lane_notes.extend(notes)
             except DispatchRefused as exc:
                 return _bail(str(exc))
-        else:
+        elif spec.include:
             lane_notes.append("include ignored: dispatch is not isolated")
 
     if spec.ports:

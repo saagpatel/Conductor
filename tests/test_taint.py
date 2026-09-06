@@ -506,3 +506,9 @@ def test_readme_documents_taint():
     assert "tainted: came from outside the operator's trust" in section
     assert "docs/ROADMAP-2026-09.md" in section and "item D2" in section
     assert "CVSS 9.4" in section
+    # Review finding (Grok, E21): after lifting taint for antigravity, a
+    # collate over a tainted sink is refused off claude AND antigravity, not
+    # off claude alone -- the stale wording said only "not claude".
+    assert "fleet is not claude or antigravity" in section
+    assert "fleet is not claude\n" not in section
+    assert "fleet is not claude." not in section

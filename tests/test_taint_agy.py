@@ -119,6 +119,26 @@ def test_taint_hook_files_has_one_entry_per_denied_name_plus_run_command():
         assert command == "python3 /some/worktree/.agents/conductor-taint.py"
 
 
+def test_denied_tools_cover_every_browser_tool_in_a_recorded_agy_stream():
+    """Review finding (Grok, E21): the live probe's writeup never enumerated
+    every `browser_*` tool name; a recorded transcript in this repo does
+    (57 tools). There is no wildcard matcher, so every one of them must be
+    individually denied or the hook simply never sees it."""
+    fixture = (
+        Path(__file__).parent
+        / "golden"
+        / "c5-review-fix"
+        / "runs"
+        / "20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor"
+        / "stdout.jsonl"
+    )
+    tools = json.loads(fixture.read_text().splitlines()[0])["init"]["tools"]
+    browser_tools = [name for name in tools if name.startswith("browser_")]
+    assert browser_tools, "fixture must actually list browser_* tools, or this test proves nothing"
+    missing = sorted(set(browser_tools) - set(TAINT_AGY_DENIED_TOOLS))
+    assert missing == []
+
+
 def test_taint_hook_files_script_is_valid_python():
     files = taint_hook_files("/some/worktree")
     compile(files[".agents/conductor-taint.py"], "conductor-taint.py", "exec")
@@ -180,7 +200,7 @@ def _agy_argv(
     parts = [f"mkdir -p {run_dir}"]
     if log_line is not None:
         parts.append(f"printf '%s\\n' {shlex.quote(log_line)} > {run_dir}/agy.log")
-    init_event = json.dumps({"event": "init", "tools": tools})
+    init_event = json.dumps({"event": "init", "conversation_id": "c1", "init": {"tools": tools}})
     result_event = json.dumps(
         {
             "event": "result",
@@ -219,9 +239,36 @@ def test_tainted_lane_writes_hooks_before_the_baseline_and_excludes_them(
     assert result.git_verdict["no_op"] is True
     assert not (Path(result.run_dir) / "diff.patch").exists()
 
-    exclude = Path(repo, ".git", "info", "exclude").read_text()
-    assert ".agents/hooks.json" in exclude
-    assert ".agents/conductor-taint.py" in exclude
+    # The no-op verdict above is the proof the hook files stayed out of the
+    # bytes; the shared info/exclude, which every worktree of the repository
+    # reads, is never the lever (see test_hook_files_are_kept_untracked_...).
+    shared = Path(repo, ".git", "info", "exclude")
+    assert not shared.is_file() or ".agents/" not in shared.read_text()
+
+
+def test_hook_files_are_kept_untracked_by_the_worktree_scoped_excludes_file(repo, home, git_out):
+    """Review finding (Grok, E21): `git rev-parse --git-path info/exclude`
+    resolves to the file every worktree of the repository shares, so writing
+    there mutates the operator's checkout. The hook paths go through the same
+    worktree-scoped `core.excludesFile` that `include` uses instead."""
+    from conductor import worktrees
+    from conductor.runner import _apply_include, _write_taint_agy_hooks
+
+    iso = worktrees.create(str(repo), "taint-probe", home / "worktrees")
+    assert iso.active, iso.reason
+    written = _write_taint_agy_hooks(iso.worktree, iso)
+    assert sorted(written) == [".agents/conductor-taint.py", ".agents/hooks.json"]
+    assert git_out(Path(iso.worktree), "status", "--porcelain").strip() != ""
+    _, _, exclude_file = _apply_include(
+        spec(cwd=iso.worktree), iso, home, "taint-probe", extra_excludes=written
+    )
+    assert exclude_file is not None
+    listed = exclude_file.read_text()
+    assert ".agents/hooks.json" in listed and ".agents/conductor-taint.py" in listed
+    assert git_out(Path(iso.worktree), "status", "--porcelain").strip() == ""
+    shared = Path(repo, ".git", "info", "exclude")
+    assert not shared.is_file() or ".agents/" not in shared.read_text()
+    worktrees.release(iso)
 
 
 def test_tainted_lane_argv_carries_log_file(repo, home, fake_fleet):
@@ -277,9 +324,7 @@ def test_disagreeing_hook_count_fails(repo, home, fake_fleet):
 
 
 def test_missing_log_line_fails(repo, home, fake_fleet):
-    fake_fleet(
-        _agy_argv(home, log_line=None, tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[])
-    )
+    fake_fleet(_agy_argv(home, log_line=None, tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[]))
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is False
     assert error_kind(result) == "taint"
@@ -299,6 +344,54 @@ def test_uncovered_tool_fails(repo, home, fake_fleet):
     assert result.ok is False
     assert error_kind(result) == "taint"
     assert result.taint_enforcement["uncovered"] == ["browser_click"]
+
+
+def test_uncovered_tool_fails_with_the_real_nested_init_event_shape(repo, home, fake_fleet):
+    """Review finding (Grok, E21): a real `agy` init event nests its tool
+    list under `init.tools`, not at the event's top level -- confirmed
+    against a recorded transcript,
+    tests/golden/c5-review-fix/runs/20260905T182328Z-antigravity-.../stdout.jsonl
+    line 1: `{"event": "init", "conversation_id": ..., "init": {"tools":
+    [...], ...}}`. An uncovered tool in that real shape must still fail the
+    run; a top-level-only reader silently sees an empty tool list and passes
+    every uncovered tool through.
+    """
+    init_event = json.dumps(
+        {
+            "event": "init",
+            "conversation_id": "c1",
+            "init": {"tools": [*TAINT_AGY_DENIED_TOOLS, "browser_future_tool"]},
+        }
+    )
+    result_event = json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "ok",
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+        }
+    )
+    home_q = shlex.quote(str(home))
+    run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
+    script = " && ".join(
+        [
+            f"mkdir -p {run_dir}",
+            f"printf '%s\\n' {shlex.quote(_passing_log_line())} > {run_dir}/agy.log",
+            f"printf '%s\\n' {shlex.quote(init_event)}",
+            f"printf '%s\\n' {shlex.quote(result_event)}",
+        ]
+    )
+    fake_fleet(["sh", "-c", script])
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False, "an uncovered tool in the real nested init event must fail the run"
+    assert error_kind(result) == "taint"
+    assert result.taint_enforcement["tools_seen"] == [
+        *TAINT_AGY_DENIED_TOOLS,
+        "browser_future_tool",
+    ]
+    assert result.taint_enforcement["uncovered"] == ["browser_future_tool"]
 
 
 def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):

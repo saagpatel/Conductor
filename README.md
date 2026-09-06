@@ -650,8 +650,9 @@ fleets). A tainted lane also never holds a deliverable `branch`: refused at
 load, naming the lane, since outside text should not be the thing that names
 what gets published. A `collate` is refused at load, naming the tainted
 lane(s), when any sink it could collate over is tainted and the collate's own
-fleet is not claude; when a candidate sink actually is tainted, the collate's
-own `Spec` — prose or rank, every dispatch — is tainted too.
+fleet is not claude or antigravity; when a candidate sink actually is
+tainted, the collate's own `Spec` — prose or rank, every dispatch — is
+tainted too.
 
 When `_render` pastes a tainted lane's answer, diff, verdict, or
 `test_touched` into another prompt, the fence note says so in the bytes
@@ -676,9 +677,11 @@ into a git repository (the hook files have nowhere else to live), then, after
 `worktrees.create` and before the bytes baseline is captured, writes
 `.agents/hooks.json` (one named `PreToolUse` command hook per
 `fleets.TAINT_AGY_DENIED_TOOLS` name plus one for `run_command`) and the
-stdlib-only deny script it points at into the worktree, and appends both
-paths to the worktree's own `git rev-parse --git-path info/exclude` so
-neither the baseline, the diff, nor the no-op check ever sees them. The
+stdlib-only deny script it points at into the worktree, and keeps both
+untracked through the same worktree-scoped `core.excludesFile` that
+`include` uses (never the shared `info/exclude`, which every worktree of
+the repository reads), so neither the baseline, the diff, nor the no-op
+check ever sees them. The
 script denies a call by tool name or, for `run_command`, by the same shell
 prefixes as Claude's `Bash(<prefix> *)` list, checked after leading
 whitespace, environment assignments, `sudo`, and shell chain operators,

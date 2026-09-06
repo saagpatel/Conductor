@@ -82,6 +82,26 @@ TAINT_AGY_DENIED_TOOLS: tuple[str, ...] = (
     "open_browser_url",  # drives the browser to a network destination
     "read_browser_page",  # reads whatever the browser last loaded from the network
     "execute_browser_javascript",  # arbitrary code in the browser's network-connected context
+    # Named individually from a recorded transcript's own init event (57
+    # tools; tests/golden/c5-review-fix/runs/20260905T182328Z-antigravity-
+    # .../stdout.jsonl line 1) rather than the live probe's writeup, which
+    # said "every browser_* tool" without listing them all -- there is no
+    # wildcard matcher, so an unnamed one is invisible to the hook.
+    "browser_click_element",  # drives the browser, network-connected context
+    "browser_drag_pixel_to_pixel",  # drives the browser, network-connected context
+    "browser_get_dom",  # reads whatever the browser last loaded from the network
+    "browser_get_network_request",  # reads network traffic the browser made
+    "browser_input",  # drives the browser, network-connected context
+    "browser_list_network_requests",  # reads network traffic the browser made
+    "browser_mouse_down",  # drives the browser, network-connected context
+    "browser_mouse_up",  # drives the browser, network-connected context
+    "browser_move_mouse",  # drives the browser, network-connected context
+    "browser_press_key",  # drives the browser, network-connected context
+    "browser_refresh_page",  # network egress: reloads whatever URL is open
+    "browser_resize_window",  # drives the browser, network-connected context
+    "browser_scroll",  # drives the browser, network-connected context
+    "browser_scroll_dom",  # drives the browser, network-connected context
+    "browser_select_option",  # drives the browser, network-connected context
     "browser_subagent",  # a subagent inherits the tainted context without inheriting this deny list
     "invoke_subagent",  # same risk as browser_subagent, for a non-browser subagent
     "define_subagent",  # defines a subagent that would not carry this deny list
