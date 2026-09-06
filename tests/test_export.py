@@ -80,6 +80,23 @@ def test_export_refuses_a_missing_receipt_key(repo, home, monkeypatch, tmp_path)
         export.export(home, result.mission_id, tmp_path / "out")
 
 
+def test_export_does_not_claim_a_corrupt_chain_verified(repo, home, monkeypatch, tmp_path):
+    """A chain.json `cmd_attest` would refuse as invalid must not be reported
+    as `chain.verified_at_export: true` just because it produced zero rows to
+    check -- that is the same vacuous-truth gap `cmd_attest` never has, since
+    it refuses outright on the same input."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = home / "missions" / result.mission_id / "receipts" / "chain.json"
+    chain_path.write_text("not json")
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_verified_at_export is False
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["chain"]["verified_at_export"] is False
+
+
 # --- what a bundle holds -----------------------------------------------
 
 
@@ -230,6 +247,36 @@ def test_check_fails_when_a_links_previous_is_broken(repo, home, monkeypatch, tm
     result = export.check(out)
     assert result.ok is False
     assert any("previous does not match" in p for p in result.problems)
+
+
+def test_check_never_reads_a_file_outside_the_bundle_via_a_manifest_path(
+    repo, home, monkeypatch, tmp_path
+):
+    """`check` promises to read nothing but the bundle. A manifest entry
+    whose path escapes `bundle_dir` with `..` must be reported as a problem,
+    never followed and silently "verified" against whatever it points at
+    outside the bundle -- even when that outside file happens to match the
+    digest and size the manifest records for it."""
+    import hashlib
+
+    out = _export_bundle(repo, home, monkeypatch, tmp_path)
+    secret = tmp_path / "outside-the-bundle-secret.txt"
+    secret.write_bytes(b"not part of any bundle\n")
+
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    escape_key = "../outside-the-bundle-secret.txt"
+    manifest["files"][escape_key] = {
+        "sha256": hashlib.sha256(secret.read_bytes()).hexdigest(),
+        "sha256_original": hashlib.sha256(secret.read_bytes()).hexdigest(),
+        "bytes": secret.stat().st_size,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    result = export.check(out)
+
+    assert result.ok is False
+    assert any(escape_key in p for p in result.problems)
 
 
 def test_check_fails_when_an_attestations_original_digest_disagrees(

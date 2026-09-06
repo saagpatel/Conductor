@@ -263,15 +263,21 @@ def export(
 
     chain_path = mission_dir / "receipts" / "chain.json"
     chain_obj: dict | None = None
+    chain_invalid = False
     if chain_path.is_file():
         try:
             loaded_chain = json.loads(chain_path.read_text())
         except (OSError, json.JSONDecodeError):
             loaded_chain = None
-        if isinstance(loaded_chain, dict):
+        if isinstance(loaded_chain, dict) and isinstance(loaded_chain.get("links"), list):
             chain_obj = loaded_chain
+        else:
+            chain_invalid = True
     chain_rows = attest.verify_chain_links(chain_obj, home=home, key=key) if chain_obj else []
-    chain_verified = all(row["verified"] for row in chain_rows)
+    # A chain.json `cmd_attest` would refuse as invalid (missing, unreadable,
+    # not an object, or without a `links` list) must never be reported as
+    # verified just because it produced zero rows to check.
+    chain_verified = not chain_invalid and all(row["verified"] for row in chain_rows)
 
     chain_run_ids = {row["run_id"] for row in chain_rows if isinstance(row["run_id"], str)}
     run_ids = sorted(_lane_run_ids(mission_dir) | chain_run_ids)
@@ -386,6 +392,20 @@ def export(
 # --- check ---------------------------------------------------------------
 
 
+def _resolve_in_bundle(bundle_dir: Path, relpath: str) -> Path | None:
+    """A manifest or chain.json path that resolves outside `bundle_dir`
+    (a `..` escape, or an absolute path) is never followed -- `check` reads
+    nothing but the bundle, even when the bundle's own metadata is
+    tampered with."""
+    root = bundle_dir.resolve()
+    candidate = (bundle_dir / relpath).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
 def check(bundle_dir: str | Path) -> CheckResult:
     """Verify a bundle against its own `manifest.json`, reading nothing but
     the bundle: every listed file's digest and size, that no unlisted file
@@ -422,7 +442,10 @@ def check(bundle_dir: str | Path) -> CheckResult:
 
     files_checked = 0
     for relpath, meta in sorted(files_meta.items()):
-        path = bundle_dir / relpath
+        path = _resolve_in_bundle(bundle_dir, relpath)
+        if path is None:
+            problems.append(f"{relpath}: path escapes the bundle")
+            continue
         if not path.is_file():
             problems.append(f"{relpath}: missing from the bundle")
             continue
@@ -471,7 +494,11 @@ def check(bundle_dir: str | Path) -> CheckResult:
             continue
         if link_meta.get("sha256_original") != recorded_sha:
             problems.append(f"{link_relpath}: original sha256 disagrees with chain.json")
-        link_path = bundle_dir / link_relpath
+        link_path = _resolve_in_bundle(bundle_dir, link_relpath)
+        if link_path is None:
+            problems.append(f"{link_relpath}: path escapes the bundle")
+            previous_sha = recorded_sha
+            continue
         if not link_path.is_file():
             problems.append(f"{link_relpath}: missing from the bundle")
             previous_sha = recorded_sha
