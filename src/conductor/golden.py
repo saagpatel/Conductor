@@ -304,16 +304,22 @@ _ATTEMPT_FIELD_DEFAULTS = _field_defaults(Attempt)
 def _backfill_snapshot(mission_raw: dict) -> dict:
     """Fill any field the current snapshot schema expects but an older
     recording predates (`retry` and `on`, added by C5, are not on any
-    mission run before it) with that field's own dataclass default -- the
-    value the mission actually ran with, before the field existed to set
-    otherwise. `Mission.from_snapshot` requires an exact key match, so a
-    recording from an earlier version of conductor could not be replayed at
-    all without this."""
+    mission run before it; `taint`/`tainted`/`taint_from`, added by D2,
+    likewise) with that field's own dataclass default -- the value the
+    mission actually ran with, before the field existed to set otherwise.
+    `Mission.from_snapshot` requires an exact key match, so a recording from
+    an earlier version of conductor could not be replayed at all without
+    this."""
     for key, default in _MISSION_FIELD_DEFAULTS.items():
         mission_raw.setdefault(key, default)
     for lane in mission_raw.get("lanes") or []:
         if not isinstance(lane, dict):
             continue
+        # D2: no recording before this field existed ever ran a tainted
+        # lane, so `False`/`[]` is not a guess -- it is what actually ran.
+        lane.setdefault("taint", False)
+        lane.setdefault("tainted", False)
+        lane.setdefault("taint_from", [])
         for attempt in lane.get("attempts") or []:
             if isinstance(attempt, dict):
                 for key, default in _ATTEMPT_FIELD_DEFAULTS.items():
@@ -497,7 +503,11 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
     # /tmp, for one) would make every snapshot fail to round-trip.
     cwd = str(Path(cwd).resolve())
     mission_text = (fixture_dir / "mission.json").read_text().replace("<cwd>", cwd)
-    mission = Mission.from_snapshot(json.loads(mission_text))
+    # A fixture recorded before a schema field existed (D2's `taint`, C5's
+    # `retry`/`on`, ...) predates that field in its own mission.json; without
+    # backfilling here, every such fixture would stop replaying the moment
+    # `Mission.from_snapshot`'s exact key match tightens around a new field.
+    mission = Mission.from_snapshot(_backfill_snapshot(json.loads(mission_text)))
 
     user_home = str(home / "_replay_user_home")
 

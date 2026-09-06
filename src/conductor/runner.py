@@ -34,7 +34,7 @@ from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
 from .errors import error_kind
-from .fleets import FLEETS, DispatchRefused, Spec, build_argv
+from .fleets import FLEETS, TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv
 from .outputs import FleetOutput
 from .outputs import parse as parse_output
 from .paths import conductor_home
@@ -119,6 +119,9 @@ class Result:
     no_op_ok: bool = False  # a write that may legitimately change nothing
     interrupted: bool = False  # a stop request ended the run
     cancelled: bool = False  # another lane already passed; this one was cut
+    # D2: {"declared": True, "tools_denied": [...]} when spec.taint was set,
+    # else None. Set by dispatch(), never inferred from anything a fleet said.
+    taint: dict | None = None
 
     @property
     def gate_passed(self) -> bool:
@@ -290,6 +293,7 @@ class Result:
             "error": self.error or self.fleet_error,
             "failure": self.failure(),
             "cancelled": self.cancelled,
+            "taint": self.taint,
         }
 
 
@@ -397,6 +401,7 @@ def _lane_receipt_statement(
     reproduce_state: dict | None,
     ok: bool,
     error: str | None,
+    taint: dict | None,
 ) -> dict:
     """The statement A5 signs into `attestation.json`: what conductor can
     check about this one dispatch without trusting the fleet's own report."""
@@ -416,6 +421,7 @@ def _lane_receipt_statement(
         "model": model,
         "mode": mode,
         "stage": stage,
+        "taint": taint,
         "cwd": cwd,
         "base_commit": base_commit,
         "tip_commit": tip_commit,
@@ -1482,6 +1488,11 @@ def dispatch(
         no_op_ok=no_op_ok,
         interrupted=interrupted,
         cancelled=cancelled,
+        taint=(
+            {"declared": True, "tools_denied": list(TAINT_DISALLOWED_TOOLS)}
+            if spec.taint
+            else None
+        ),
     )
     if result.spawned:
         statement = _lane_receipt_statement(
@@ -1500,6 +1511,7 @@ def dispatch(
             reproduce_state=reproduce_state,
             ok=result.ok,
             error=result.failure(),
+            taint=result.taint,
         )
         try:
             key = attest.receipt_key(base)
