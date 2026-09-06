@@ -36,6 +36,7 @@ from pathlib import Path
 from . import __version__
 from . import fleets as fleets_mod
 from . import outputs as outputs_mod
+from . import prompts as prompts_mod
 from .mission import Attempt, Mission, MissionResult, run_mission
 from .runner import Result
 
@@ -458,6 +459,11 @@ def record(
             "conductor_version": __version__,
             "fleets": sorted(fleets),
             "fleet_versions": _mission_fleet_versions(home, run_ids, fleet_by_run, fleets),
+            # E17: the whole conductor-authored prompt catalog as it stood at
+            # record time, so `version_drift` can later say which of them
+            # moved; null-map fixtures (recorded before this field existed)
+            # read as unknown, never as a failure.
+            "prompt_versions": prompts_mod.prompt_versions(),
             "placeholders": ["<home>", "<cwd>", "<user>"],
             "files": files,
         }
@@ -617,16 +623,18 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
             differences, run_id, "session_id", recorded_result.get("session_id"), parsed.session_id
         )
 
+        # E17: both sides compared (and hashed) in placeholder form: the
+        # fixture's prompt.txt was scrubbed at record time and is never
+        # restored to real paths, and the freshly rendered prompt is scrubbed
+        # the same way here, so a real replay `cwd`/`home` never leaks into
+        # the comparison (or the diff) by accident.
+        replacements = _placeholder_map(home=Path(home), cwd=cwd)
+        rendered_mapped = _strip_nonce(scrub_text(spec.prompt, replacements))
+        prompt_sha256 = hashlib.sha256(rendered_mapped.encode()).hexdigest()
+
         recorded_prompt_path = src / "prompt.txt"
         if recorded_prompt_path.is_file():
-            # Both sides compared in placeholder form: the fixture's
-            # prompt.txt was scrubbed at record time and is never restored
-            # to real paths, and the freshly rendered prompt is scrubbed the
-            # same way here, so a real replay `cwd`/`home` never leaks into
-            # the comparison (or the diff) by accident.
             recorded_prompt = _strip_nonce(recorded_prompt_path.read_text())
-            replacements = _placeholder_map(home=Path(home), cwd=cwd)
-            rendered_mapped = _strip_nonce(scrub_text(spec.prompt, replacements))
             if rendered_mapped != recorded_prompt:
                 diff_lines = list(
                     difflib.unified_diff(
@@ -649,6 +657,7 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
             # so the recreated run directory never gets one either.
             "attestation_path": None,
             "cwd": cwd,
+            "prompt_sha256": prompt_sha256,
         }
         return Result.from_dict({**recorded_result, **overrides})
 
@@ -700,6 +709,7 @@ _ATTEMPT_PROJECTION_KEYS = (
     "retry_of",
     "retry",
     "note",
+    "prompt_sha256",
 )
 _LANE_PROJECTION_KEYS = (
     "name",
@@ -772,22 +782,65 @@ def version_drift(fixture_dir: str | Path) -> list[str]:
     """E22: one line per fleet whose `golden.json`-recorded `fleet_versions`
     entry differs from `fleets.cli_version` on this machine, or a single
     "recorded version unknown" line when the fixture predates that field
-    and carries none at all. Drift is a note, never a check failure: the
-    caller must not fold this into a fixture's pass/fail exit code."""
+    and carries none at all. E17: the same, one line per conductor-authored
+    prompt whose recorded id differs from `prompts.prompt_versions()` today,
+    or "prompt versions unknown" when the fixture predates that field. Drift
+    is a note, never a check failure: the caller must not fold this into a
+    fixture's pass/fail exit code."""
     manifest_path = Path(fixture_dir) / "golden.json"
     if not manifest_path.is_file():
         return []
     manifest = json.loads(manifest_path.read_text())
-    recorded = manifest.get("fleet_versions")
-    if not recorded:
-        return ["recorded version unknown"]
-    lines = []
-    for fleet_name in sorted(recorded):
-        old = recorded[fleet_name]
-        new = fleets_mod.cli_version(fleet_name)
-        if old != new:
-            lines.append(f"{fleet_name} recorded {old}, installed {new}")
+    lines: list[str] = []
+    recorded_fleets = manifest.get("fleet_versions")
+    if not recorded_fleets:
+        lines.append("recorded version unknown")
+    else:
+        for fleet_name in sorted(recorded_fleets):
+            old = recorded_fleets[fleet_name]
+            new = fleets_mod.cli_version(fleet_name)
+            if old != new:
+                lines.append(f"{fleet_name} recorded {old}, installed {new}")
+    recorded_prompts = manifest.get("prompt_versions")
+    if not recorded_prompts:
+        lines.append("prompt versions unknown")
+    else:
+        current = prompts_mod.prompt_versions()
+        for name in sorted(recorded_prompts):
+            old = recorded_prompts[name]
+            new = current.get(name)
+            if old != new:
+                lines.append(f"prompt {name} recorded {old}, now {new}")
     return lines
+
+
+def _prompt_sha256_from_recording(fixture_dir: Path, run_id: str) -> str | None:
+    """E17: an attempt's `prompt_sha256`, recomputed from its own recorded
+    `prompt.txt` -- never from the live replay, so a legacy fixture that
+    predates this field gets the value it actually ran with, not today's."""
+    path = fixture_dir / "runs" / run_id / "prompt.txt"
+    if not path.is_file():
+        return None
+    return hashlib.sha256(_strip_nonce(scrub_text(path.read_text(), [])).encode()).hexdigest()
+
+
+def _backfill_prompt_sha256(fixture_dir: Path, expected: dict) -> dict:
+    """A fixture recorded before `prompt_sha256` existed lacks it on every
+    attempt; fill it in from that attempt's own recorded run (matched by
+    position, the same order `replay`'s dispatcher consumes) so `check`
+    compares like for like instead of manufacturing a difference on every
+    fixture on record the first time this ships."""
+    lane_recordings = _lane_recordings(fixture_dir)
+    for lane in expected.get("lanes") or []:
+        recordings = lane_recordings.get(lane.get("name"), [])
+        for index, attempt in enumerate(lane.get("attempts") or []):
+            if not isinstance(attempt, dict) or "prompt_sha256" in attempt:
+                continue
+            run_id = recordings[index][0] if index < len(recordings) else None
+            attempt["prompt_sha256"] = (
+                _prompt_sha256_from_recording(fixture_dir, run_id) if run_id else None
+            )
+    return expected
 
 
 def check(fixture_dir: str | Path, *, update: bool = False) -> list[str]:
@@ -803,4 +856,5 @@ def check(fixture_dir: str | Path, *, update: bool = False) -> list[str]:
         expected_path.write_text(json.dumps(replayed.projection, indent=2, sort_keys=True))
         return list(replayed.differences)
     expected = json.loads(expected_path.read_text()) if expected_path.is_file() else {}
+    expected = _backfill_prompt_sha256(fixture_dir, expected)
     return list(replayed.differences) + _diff_projection(expected, replayed.projection)

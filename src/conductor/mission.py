@@ -1976,6 +1976,11 @@ class MissionResult:
     # end, and breaker settle boundaries. Empty, never null, on a mission
     # with no `notify` or a dry run, which emits nothing.
     notifications: list[dict] = field(default_factory=list)
+    # E17: the whole prompts.prompt_versions() catalog, snapshotted once per
+    # mission -- not just what this mission used -- so a later mission's own
+    # snapshot can be diffed against it to see what moved. Empty only if the
+    # catalog itself is empty, never omitted.
+    prompt_versions: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -3547,6 +3552,10 @@ def _execute_mission(
             "collate": resume.collate,
         }
         resumes.append(resume_entry)
+    # E17: deferred import -- prompts.py imports this module at load time, so
+    # importing it back at module level here would cycle.
+    from . import prompts as prompts_mod
+
     result = MissionResult(
         mission_id=mission_id,
         name=mission.name,
@@ -3585,6 +3594,7 @@ def _execute_mission(
         collisions=collisions_out,
         resolve=resolve_out,
         notifications=notifications,
+        prompt_versions=prompts_mod.prompt_versions(),
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
@@ -3941,12 +3951,23 @@ def _run_collate(
     )
     (mission_dir / "collate-prompt.txt").write_text(prompt)
 
+    # E17: mission.py owns this decision (the default text versus an
+    # operator-set override), so it hands dispatch() the id rather than
+    # dispatch() trying to detect it from prompt text alone.
+    from . import prompts as prompts_mod
+
+    used_versions = (
+        {"collate_default": prompts_mod.prompt_versions()["collate_default"]}
+        if col.instructions == DEFAULT_COLLATE_INSTRUCTIONS
+        else {}
+    )
     result = dispatch(
         col.spec(
             mission.cwd, prompt, cap_usd=_tighter(col.cap_usd, ledger.remaining()), taint=tainted
         ),
         isolate=True,
         home=base,
+        prompt_versions=used_versions,
     )
     ledger.add(result)
     summary = result.summary()
@@ -4051,6 +4072,8 @@ def _run_rank_collate(
             + _rank_contract(ordered_names),
         )
         (mission_dir / f"collate-prompt-{label}.txt").write_text(prompt)
+        from . import prompts as prompts_mod
+
         result = dispatch(
             col.spec(
                 mission.cwd,
@@ -4061,6 +4084,7 @@ def _run_rank_collate(
             ),
             isolate=True,
             home=base,
+            prompt_versions={"rank_contract": prompts_mod.prompt_versions()["rank_contract"]},
         )
         ledger.add(result)
         summary = result.summary()
@@ -4171,10 +4195,18 @@ def _run_resolve(
         mission, _resolve_prompt(mission, candidates, collisions, res, strongest)
     )
     (mission_dir / "resolve-prompt.txt").write_text(prompt)
+    from . import prompts as prompts_mod
+
+    used_versions = (
+        {"resolve_default": prompts_mod.prompt_versions()["resolve_default"]}
+        if res.instructions == DEFAULT_RESOLVE_INSTRUCTIONS
+        else {}
+    )
     result = dispatch(
         res.spec(mission.cwd, prompt, cap_usd=_tighter(res.cap_usd, ledger.remaining())),
         isolate=True,
         home=base,
+        prompt_versions=used_versions,
         test_command=mission.test,
         commit_message=res.commit,
     )

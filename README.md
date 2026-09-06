@@ -773,6 +773,13 @@ the build or fix cap themselves. The file is written beside the spec (or at `--o
 never overwritten without `--force`, and `--dry-run` runs `conductor mission --dry-run`
 on it.
 
+The launcher writes each lane's prompt text to `prompts/<lane>.md` beside
+the mission file and references it with `prompt_file`, so the prompts a
+mission ran with sit under version control next to the spec and an edit to
+one is a diff. `--inline` keeps every prompt inside the mission file. The
+`prefix` stays inline either way: it is a cache key, and `prefix_file`
+already exists for the operator.
+
 ### Salvage
 
 AGENTS.md rule 6: when a write lane's own gate is green but the clean gate
@@ -1685,6 +1692,31 @@ has <n>`), answered with a refused result so the mission still completes
 rather than raising. `runner.Result.from_dict` rehydrates a stored
 `result.json` back into a `Result`; an unknown field is refused by name, and
 a field missing from an older receipt takes its dataclass default.
+
+### Prompt versions
+
+Conductor authors prompt text of its own in five places: the collate and
+resolve defaults and the rank contract in `mission.py`, the verdict
+checklist contract in `verdicts.py`, and the Shape A review, fix, and prefix
+texts in `shape.py`. `prompts.prompt_versions()` gives each one a stable
+name and a version id, the first twelve hex characters of the sha256 of its
+text (the two contracts and the prefix rendered with a fixed sample input),
+so an edit moves the id with no hand bump. `conductor fleets` and
+`conductor shape a` print the map; every mission's `result.json` carries the
+whole map as `prompt_versions`, and a run receipt carries the ids of the
+prompts that dispatch actually appended (the checklist contract, or the
+collate, resolve, or rank contract the mission handed it).
+
+Each attempt in a fixture's projection carries `prompt_sha256`, the sha256
+of its rendered prompt after scrubbing and nonce stripping, exactly as
+`replay` compares it. A fixture recorded before the key existed is not
+re-recorded: `check` fills the missing value from that attempt's own
+recorded `prompt.txt`, never from the live replay, and then compares, so an
+edit to any prompt a fixture used fails `check` naming the lane, the
+attempt, and the key. `golden.json` records the prompt version map at record
+time; `version_drift` lists each prompt id that has moved since, or
+"prompt versions unknown" on a fixture that predates the field. Drift is a
+note, never a failure.
 
 ### Checking a fixture
 

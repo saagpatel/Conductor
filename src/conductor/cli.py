@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import attest, golden, prices, shape
+from . import attest, golden, prices, prompts, shape
 from . import salvage as salvage_mod
 from .errors import error_kind
 from .fleets import (
@@ -86,6 +86,9 @@ def cmd_fleets(args: argparse.Namespace) -> int:
     missing = [r["fleet"] for r in rows if not r["installed"]]
     if missing:
         print(f"\nnot installed: {', '.join(missing)}", file=sys.stderr)
+    print("\nprompt versions:")
+    for prompt_name, version_id in sorted(prompts.prompt_versions().items()):
+        print(f"  {prompt_name}: {version_id}")
     return 0
 
 
@@ -691,6 +694,21 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
     return 1 if any_diff else 0
 
 
+def _write_lane_prompts(raw: dict, base_dir: Path) -> None:
+    """E17: the prompts/ convention. Each lane's prompt text becomes its own
+    file beside the mission, `prompt_file`-referenced instead of inlined, so
+    the prompts a mission ran with are under version control next to the
+    spec and an edit to one is a diff."""
+    prompts_dir = base_dir / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    for lane in raw["lanes"]:
+        prompt_text = lane.pop("prompt", None)
+        if prompt_text is None:
+            continue
+        (prompts_dir / f"{lane['name']}.md").write_text(prompt_text)
+        lane["prompt_file"] = f"prompts/{lane['name']}.md"
+
+
 def cmd_shape_a(args: argparse.Namespace) -> int:
     """E5: write a Shape A mission from a spec, print the cap arithmetic, validate it."""
     try:
@@ -718,18 +736,26 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             fix_commit=args.fix_commit or "",
         )
         base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
-        mission = mission_from_dict(raw, base_dir=base_dir, source=str(out or "<stdout>"))
+        if out is None:
+            out = base_dir / "mission.json"
+        if out.exists() and not args.force:
+            print(
+                json.dumps({"invalid": f"{out} exists; pass --force to overwrite"}),
+                file=sys.stderr,
+            )
+            return 3
+        if not args.inline:
+            _write_lane_prompts(raw, base_dir)
+        mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
     except (shape.ShapeInvalid, MissionInvalid) as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
     print(f"shape {shape.SHAPE_VERSION}: {len(mission.lanes)} lanes, mission '{mission.name}'")
     print(caps.render())
+    print("prompt versions:")
+    for prompt_name, version_id in sorted(prompts.prompt_versions().items()):
+        print(f"  {prompt_name}: {version_id}")
     text = json.dumps(raw, indent=2) + "\n"
-    if out is None:
-        out = Path(args.spec).expanduser().resolve().parent / "mission.json"
-    if out.exists() and not args.force:
-        print(json.dumps({"invalid": f"{out} exists; pass --force to overwrite"}), file=sys.stderr)
-        return 3
     out.write_text(text)
     print(f"wrote {out}")
     if args.dry_run:
@@ -992,6 +1018,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_shape_a.add_argument("--force", action="store_true", help="overwrite an existing --out")
     p_shape_a.add_argument(
         "--dry-run", action="store_true", help="also run `conductor mission --dry-run` on it"
+    )
+    p_shape_a.add_argument(
+        "--inline",
+        action="store_true",
+        help="keep every lane's prompt inline in the mission file instead of writing "
+        "prompts/<lane>.md beside it",
     )
     p_shape_a.set_defaults(func=cmd_shape_a)
 
