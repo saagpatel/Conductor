@@ -348,6 +348,11 @@ def _backfill_snapshot(mission_raw: dict) -> dict:
             if isinstance(attempt, dict):
                 for key, default in _ATTEMPT_FIELD_DEFAULTS.items():
                     attempt.setdefault(key, default)
+    collate = mission_raw.get("collate")
+    if isinstance(collate, dict):
+        # E4: no recording before judge sittings existed ever ran one, so an
+        # empty list is what actually ran, not a guess.
+        collate.setdefault("judges", [])
     return mission_raw
 
 

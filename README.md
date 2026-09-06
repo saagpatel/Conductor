@@ -1065,11 +1065,56 @@ mission order, once reversed — and prices and records both
 (`collate.orders`). Agreement across the two orders sets `collate.strongest`
 to the winner and the reason given; any disagreement, or an answer naming an
 unknown lane or that is not valid JSON, sets `collate.strongest` to null and
-the mission not ok (`judge disagreed across orders: <a> vs <b>`, or
-`judge order <n> invalid: <reason>`) — a split decision escalates to the
+the mission not ok (`judges disagreed: <lane>=<n>, <lane>=<n>`, or
+`judge <j> order <k> invalid: <reason>`) — a split decision escalates to the
 operator rather than being resolved by picking one order's answer. `rank` needs at
 least two lanes and, like any structured-output request, is refused at load
 on a fleet with no schema flag (Cursor).
+
+##### Judge sittings (E4)
+
+A rank collate is not limited to one judge. `collate.judges` names M - 1
+more of them (judge 1 is the collate's own `fleet`/`model`); each takes the
+same keys a collate does (`fleet` required, `model`, `effort`, `timeout`,
+`cap_usd` — defaulting to the collate's own `cap_usd` when unset), and is
+refused at load unless `rank: true` (`collate judges need rank`). Every
+judge is dispatched in both lane orders — 2M dispatches total — fanned out
+in parallel through the mission's own `concurrency` cap rather than one at a
+time. Unanimity, every judge and both of its orders naming the same lane,
+sets `collate.strongest`; one invalid order anywhere escalates
+(`judge <j> order <k> invalid: <reason>`, both one-based) and any
+disagreement among otherwise-valid votes escalates too
+(`judges disagreed: <lane>=<n>, <lane>=<n>, ...`, descending count then
+name). A judge is refused at load the same way a lone collate is if it
+shares a vendor with a lane it collates over — labelled `collate` for judge
+1 and `collate.judges[<i>]` (zero-based) for the rest, so
+`self_judging: allow` still lifts the refusal one pair at a time.
+
+The schema a judge sitting hands every dispatch also accepts an optional
+`scores` object, one integer 1 to 10 per candidate lane — welcome, never
+required, and folded into `collate.orders[i].scores` /
+`collate.judges[i].orders[k].scores` (`null` when a judge did not score).
+`collate.tally` (and the mission directory's `tally.json` / `tally.md`)
+records the whole sitting: `candidates` (lane names), `votes` (per lane,
+across every valid order), `judges` (`judge`, `fleet`, `model`, `forward`,
+`reverse`, `agrees`, `scores` — that judge's own mean per lane), `agreement`
+(`"unanimous"`, `"split"`, or `"invalid"`), and `mean_scores` (per lane,
+over every judge that scored it). `report.md`'s `## Collated` section
+prints the tally as a markdown table after the strongest or escalation
+line. A one-judge `rank` collate is a one-row sitting: it produces exactly
+the receipt it always did, plus `judges: []`, `tally`, and `scores: null` on
+each order.
+
+```json
+"collate": {
+  "fleet": "antigravity",
+  "rank": true,
+  "judges": [
+    {"fleet": "claude", "model": "opus"},
+    {"fleet": "codex", "model": "sol", "cap_usd": 2.0}
+  ]
+}
+```
 
 A pipeline is judged on its outputs: `require` applies to the lanes nothing
 else depends on, so `build ok, fix failed` is a failed pipeline whatever
