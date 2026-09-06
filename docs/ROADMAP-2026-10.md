@@ -33,6 +33,7 @@ the cap rules in `AGENTS.md`.
 | E23 conductor salvage | 0.33.0 | Shape A on 0.31.0, in parallel with E26; merged after it; Grok's two findings fixed on the resumed thread | $9.40 |
 | E24 cap grace | 0.34.0 | Shape A on 0.33.0, one of three in parallel; build capped at $7 with everything written, salvaged through `conductor salvage`; docs-only finding tidied by hand | $8.03 |
 | E17 prompt versions | 0.35.0 | Shape A on 0.33.0, one of three in parallel; build capped at $7 with the code done, salvaged; both reviewers NO_FINDINGS; one lint line wrapped by hand | $8.42 |
+| E21 taint on Antigravity | 0.36.0 | Shape A on 0.33.0, one of three in parallel; Grok's four findings all real; fix lane capped, finished by hand from its kept worktree | $10.46 |
 
 ## What "general" means here
 
