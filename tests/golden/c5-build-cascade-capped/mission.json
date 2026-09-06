@@ -226,5 +226,7 @@
     "effort": "standard",
     "cap_usd": 4.0
   },
-  "retry": null
+  "retry": null,
+  "test": null,
+  "resolve": null
 }

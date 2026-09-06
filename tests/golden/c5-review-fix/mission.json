@@ -143,5 +143,7 @@
   "early_cancel": false,
   "pause": null,
   "cascade": null,
-  "retry": null
+  "retry": null,
+  "test": null,
+  "resolve": null
 }
