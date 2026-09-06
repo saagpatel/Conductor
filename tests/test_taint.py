@@ -50,9 +50,20 @@ def test_untainted_claude_argv_carries_no_disallowed_tools():
         assert name not in argv
 
 
-@pytest.mark.parametrize("fleet,model", [("antigravity", None), ("cursor", "grok-4.6")])
-def test_taint_is_refused_off_the_claude_fleet(fleet, model):
-    with pytest.raises(DispatchRefused, match="taint is enforceable on the claude fleet only"):
+def test_taint_is_enforceable_on_antigravity_too():
+    """E21: Antigravity gets a per-lane PreToolUse deny hook (fleets.py's
+    taint_hook_files), so it is no longer refused at validate() the way
+    Cursor and Codex still are -- runner.dispatch is what actually writes
+    and checks the hook, tested in test_taint_agy.py."""
+    argv = build_argv(spec(fleet="antigravity", taint=True))
+    assert argv[0] == "agy"
+
+
+@pytest.mark.parametrize("fleet,model", [("cursor", "grok-4.6"), ("codex", None)])
+def test_taint_is_refused_off_the_claude_and_antigravity_fleets(fleet, model):
+    with pytest.raises(
+        DispatchRefused, match="taint is enforceable on the claude and antigravity fleets only"
+    ):
         build_argv(spec(fleet=fleet, model=model, taint=True))
 
 
@@ -152,7 +163,9 @@ def test_a_lane_on_cursor_pasting_a_tainted_answer_is_refused_at_load(tmp_path):
             {"name": "b", "fleet": "cursor", "needs": ["a"], "prompt": "B sees {{lanes.a.answer}}"},
         ],
     }
-    with pytest.raises(MissionInvalid, match="taint is enforceable on the claude fleet only"):
+    with pytest.raises(
+        MissionInvalid, match="taint is enforceable on the claude and antigravity fleets only"
+    ):
         mission_from_dict(raw, base_dir=tmp_path)
 
 
@@ -168,14 +181,28 @@ def test_branch_on_a_tainted_lane_is_refused_at_load(tmp_path):
         mission_from_dict(raw, base_dir=tmp_path)
 
 
-def test_collate_over_a_tainted_sink_is_refused_off_claude(tmp_path):
+def test_collate_over_a_tainted_sink_is_refused_off_claude_and_antigravity(tmp_path):
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [{"name": "a", "fleet": "claude", "taint": True, "prompt": "A"}],
+        "collate": {"fleet": "cursor"},
+    }
+    with pytest.raises(
+        MissionInvalid, match="taint is enforceable on the claude and antigravity fleets only"
+    ):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_collate_over_a_tainted_sink_dispatches_on_antigravity(tmp_path):
+    """E21: the same refusal, lifted for antigravity -- the collate's own
+    Spec goes through Spec.validate() exactly like a lane's."""
     raw = {
         "cwd": "/tmp",
         "lanes": [{"name": "a", "fleet": "claude", "taint": True, "prompt": "A"}],
         "collate": {"fleet": "antigravity"},
     }
-    with pytest.raises(MissionInvalid, match="taint is enforceable on the claude fleet only"):
-        mission_from_dict(raw, base_dir=tmp_path)
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert mission.collate.fleet == "antigravity"
 
 
 def test_collate_over_a_tainted_non_sink_lane_is_refused_at_load(tmp_path):
@@ -195,9 +222,11 @@ def test_collate_over_a_tainted_non_sink_lane_is_refused_at_load(tmp_path):
             {"name": "a", "fleet": "claude", "mode": "write", "taint": True, "prompt": "A"},
             {"name": "b", "fleet": "claude", "mode": "read", "base": "a", "prompt": "B"},
         ],
-        "collate": {"fleet": "antigravity"},
+        "collate": {"fleet": "cursor"},
     }
-    with pytest.raises(MissionInvalid, match="taint is enforceable on the claude fleet only"):
+    with pytest.raises(
+        MissionInvalid, match="taint is enforceable on the claude and antigravity fleets only"
+    ):
         mission_from_dict(raw, base_dir=tmp_path)
 
 
@@ -207,7 +236,7 @@ def test_collate_refusal_names_the_tainted_lane(tmp_path):
     raw = {
         "cwd": "/tmp",
         "lanes": [{"name": "a", "fleet": "claude", "taint": True, "prompt": "A"}],
-        "collate": {"fleet": "antigravity"},
+        "collate": {"fleet": "cursor"},
     }
     with pytest.raises(MissionInvalid) as exc_info:
         mission_from_dict(raw, base_dir=tmp_path)

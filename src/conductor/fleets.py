@@ -58,6 +58,147 @@ TAINT_DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash(scp *)",  # file exfiltration over the network
 )
 
+# E21: the shell prefixes a tainted dispatch may not run, derived from
+# TAINT_DISALLOWED_TOOLS's own `Bash(<prefix> *)` entries so the Claude list
+# and the Antigravity hook script can never drift apart.
+TAINT_SHELL_DENIED_PREFIXES: tuple[str, ...] = tuple(
+    pattern[len("Bash(") : -len(" *)")]
+    for pattern in TAINT_DISALLOWED_TOOLS
+    if pattern.startswith("Bash(") and pattern.endswith(" *)")
+)
+
+# E21: the Antigravity tool names that reach outside the worktree, named
+# individually because agy's hooks.json has no wildcard matcher (a matcher
+# of "*" loads zero hooks; verified live,
+# docs/research/2026-09-06-live-probe-tool-deny-non-claude.md). The probe's
+# init event listed 57 tools and named these as reaching outside the
+# worktree; it did not enumerate every `browser_*` tool by name, so a
+# `browser_*` (or subagent/mcp/web/url/message/schedule/inbox) tool this
+# tuple does not name is instead caught at runtime by runner.dispatch's
+# `uncovered` check, which fails the run rather than silently missing it.
+TAINT_AGY_DENIED_TOOLS: tuple[str, ...] = (
+    "read_url_content",  # network egress: fetch a page or a second-stage payload
+    "search_web",  # network egress, same risk as read_url_content
+    "open_browser_url",  # drives the browser to a network destination
+    "read_browser_page",  # reads whatever the browser last loaded from the network
+    "execute_browser_javascript",  # arbitrary code in the browser's network-connected context
+    "browser_subagent",  # a subagent inherits the tainted context without inheriting this deny list
+    "invoke_subagent",  # same risk as browser_subagent, for a non-browser subagent
+    "define_subagent",  # defines a subagent that would not carry this deny list
+    "manage_subagents",  # controls subagents that would not carry this deny list
+    "call_mcp_tool",  # an MCP server is an arbitrary external integration
+    "send_message",  # an exfiltration channel to somewhere outside the worktree
+    "manage_inbox",  # reads and writes messages outside the worktree
+    "schedule",  # schedules work that runs after this dispatch's oversight ends
+    "generate_image",  # network egress to an image-generation backend
+)
+
+# E21: the PreToolUse deny hook, written by taint_hook_files() into a tainted
+# Antigravity dispatch's worktree. Placeholders are substituted with
+# `repr()`, not `.format()`, so the JSON literals in the script body (and its
+# own docstring) never need brace-escaping.
+_TAINT_AGY_HOOK_SCRIPT = '''#!/usr/bin/env python3
+"""conductor E21: PreToolUse deny hook for a tainted Antigravity dispatch.
+
+Written by taint_hook_files(); never edited by hand. Reads one JSON object
+from stdin and denies a tool call that reaches outside the worktree by name
+or, for run_command, by a denied shell prefix found after leading
+whitespace, environment assignments, sudo, or a chain operator (; && || |).
+Fails closed: anything this script cannot parse is denied, not allowed.
+"""
+import json
+import re
+import sys
+
+DENIED_TOOLS = __DENIED_TOOLS__
+DENIED_PREFIXES = __DENIED_PREFIXES__
+_CHAIN_RE = re.compile(r";|&&|\\|\\||\\|")
+_ENV_RE = re.compile(r"^\\s*[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+")
+
+
+def _stripped(segment):
+    s = segment.lstrip()
+    while True:
+        m = _ENV_RE.match(s)
+        if m:
+            s = s[m.end():]
+            continue
+        if s == "sudo" or s.startswith("sudo "):
+            s = s[len("sudo"):].lstrip()
+            continue
+        break
+    return s
+
+
+def _shell_denied(command_line):
+    for segment in _CHAIN_RE.split(command_line):
+        cleaned = _stripped(segment)
+        for prefix in DENIED_PREFIXES:
+            if cleaned == prefix or cleaned.startswith(prefix + " "):
+                return True
+    return False
+
+
+def _decide(payload):
+    call = payload.get("toolCall")
+    if not isinstance(call, dict):
+        return "deny", "conductor: taint: malformed tool call"
+    name = call.get("name")
+    if not isinstance(name, str) or not name:
+        return "deny", "conductor: taint: malformed tool call"
+    if name in DENIED_TOOLS:
+        return "deny", "conductor: taint: %s reaches outside the worktree" % name
+    if name == "run_command":
+        args = call.get("args")
+        command = args.get("CommandLine") if isinstance(args, dict) else None
+        if not isinstance(command, str):
+            return "deny", "conductor: taint: malformed run_command call"
+        if _shell_denied(command):
+            return "deny", "conductor: taint: shell command reaches outside the worktree"
+    return "allow", None
+
+
+def main():
+    try:
+        payload = json.loads(sys.stdin.read())
+        if not isinstance(payload, dict):
+            raise ValueError("not an object")
+    except (json.JSONDecodeError, ValueError):
+        print(json.dumps({"decision": "deny", "reason": "conductor: taint: unparseable input"}))
+        return
+    decision, reason = _decide(payload)
+    out = {"decision": decision}
+    if reason:
+        out["reason"] = reason
+    print(json.dumps(out))
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def taint_hook_files(cwd: str) -> dict[str, str]:
+    """E21: the two files a tainted Antigravity dispatch needs in its
+    worktree, keyed by their path relative to `cwd` -- `.agents/hooks.json`,
+    naming one `PreToolUse` command hook per `TAINT_AGY_DENIED_TOOLS` name
+    plus one for `run_command`, and the command hook script itself, stdlib
+    only. `cwd` is baked into the hook's own command line because agy runs
+    it as a plain subprocess with no fixed working directory guarantee.
+    """
+    script_rel = ".agents/conductor-taint.py"
+    hooks_rel = ".agents/hooks.json"
+    script_abs = str(Path(cwd) / script_rel)
+    script_text = _TAINT_AGY_HOOK_SCRIPT.replace(
+        "__DENIED_TOOLS__", repr(frozenset(TAINT_AGY_DENIED_TOOLS))
+    ).replace("__DENIED_PREFIXES__", repr(TAINT_SHELL_DENIED_PREFIXES))
+    entries = [
+        {"matcher": name, "hooks": [{"type": "command", "command": f"python3 {script_abs}"}]}
+        for name in (*TAINT_AGY_DENIED_TOOLS, "run_command")
+    ]
+    hooks_text = json.dumps({"hooks": {"PreToolUse": entries}}, indent=2) + "\n"
+    return {hooks_rel: hooks_text, script_rel: script_text}
+
 # D3: an inline persona -- {"name", "description", "prompt", "tools": [...]}.
 # `tools`, when given, is an allow list; unlike D2's deny list, it is the only
 # field that is optional. Live-probed
@@ -346,14 +487,23 @@ class Spec:
             )
         if self.schema:
             self._validate_schema()
-        # D2: only Claude Code exposes a headless tool deny list
-        # (--disallowedTools); antigravity and cursor have nothing to enforce
-        # taint with, so a tainted dispatch on either is refused, not run
-        # unguarded.
-        if self.taint and self.fleet != "claude":
+        # D2/E21: Claude Code exposes a headless tool deny list
+        # (--disallowedTools); Antigravity exposes a per-lane PreToolUse deny
+        # hook, written into the worktree by runner.dispatch
+        # (taint_hook_files, see docs/research/2026-09-06-live-probe-tool-
+        # deny-non-claude.md). Cursor's `.cursor/cli.json` has no rule kind
+        # for its native web fetch and search tools, so a tainted lane there
+        # would keep network egress whatever the config said; taint on
+        # Cursor (and on Codex, which exposes no deny list at all) stays
+        # refused, not run unguarded.
+        if self.taint and self.fleet not in {"claude", "antigravity"}:
+            detail = (
+                "its .cursor/cli.json has no rule for the native web fetch and search tools"
+                if self.fleet == "cursor"
+                else f"{self.fleet} exposes no tool deny list headless"
+            )
             raise DispatchRefused(
-                f"taint is enforceable on the claude fleet only: {self.fleet} exposes no "
-                "tool deny list headless"
+                f"taint is enforceable on the claude and antigravity fleets only: {detail}"
             )
         # D3: only Claude Code exposes an inline persona headless; agy's
         # --agent selects from disk and fails open on an unknown name, and
@@ -517,6 +667,14 @@ def build_argv(spec: Spec) -> list[str]:
         run has nobody to answer a permission prompt,
       * read mode gets the fleet's strongest read-only setting, so a
         misbehaving research dispatch cannot edit the tree.
+
+    E21's `--log-file` for a tainted Antigravity dispatch is not built here:
+    it needs this run's own directory, which no `Spec` field carries, so
+    `runner.dispatch` appends it to whatever this returns (real argv or a
+    test's faked one) rather than changing this function's signature --
+    dozens of tests replace `build_argv` wholesale with a single-argument
+    fake, and a new required (or even optional-but-passed) parameter here
+    would break every one of them.
     """
     spec.validate()
     fleet = FLEETS[spec.fleet]

@@ -37,6 +37,7 @@ KINDS: tuple[str, ...] = (
     "refused",
     "agent",
     "deliverable",
+    "taint",
     "rate_limit",
     "transport",
     "refusal",
@@ -229,6 +230,10 @@ def error_kind(result: Result) -> str | None:
     # it is conductor's own check of the stream's init event).
     if error_text.startswith("agent '") and " not applied: " in error_text:
         return "agent"
+    # E21: like the agent check above, this is conductor's own check of the
+    # stream's init event and the deny hook's own log, never a fleet's word.
+    if error_text.startswith("taint hooks not enforced:"):
+        return "taint"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):

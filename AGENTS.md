@@ -184,6 +184,11 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   command hook answering `{"decision": "deny"}` per tool name blocks the call on bytes. No
   wildcard matcher; a malformed file logs "loaded 0 named hooks" and the run continues, so
   pass `--log-file` and check the count (`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`).
+  E21 builds taint enforcement on exactly this: `fleets.taint_hook_files` writes the hook plus a
+  stdlib-only deny script into a tainted lane's worktree, and `runner.dispatch` refuses to trust
+  its own write -- it requires the log's "loaded N" count to match what it wrote and fails the run
+  as `taint hooks not enforced` if the init event's tool list still names something reaching
+  outside the worktree that no hook covered.
 
 ### Grok 4.6 and Composer 2.5 (fleet `cursor`, binary `cursor-agent`)
 
@@ -199,6 +204,8 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
 - Per-lane tool denial exists headless: `<cwd>/.cursor/cli.json` with `permissions.deny`
   rules (`Shell(...)`, `Write(...)`, `Mcp(...)`) holds on bytes even under `--force`. An
   unknown rule kind is ignored silently, so validate rules before writing them (same probe doc).
+  No rule kind covers Cursor's native web fetch and search tools, so E21 leaves taint refused
+  here (Antigravity's `PreToolUse` hook does not have that gap; see above).
 
 ### Cheap open models through OpenCode (planned fleet `opencode`)
 

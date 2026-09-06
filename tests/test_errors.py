@@ -254,6 +254,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "refused",
         "agent",
         "deliverable",
+        "taint",
         "rate_limit",
         "transport",
         "refusal",

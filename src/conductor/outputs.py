@@ -181,6 +181,18 @@ def claude_init_event(text: str) -> dict | None:
     return None
 
 
+def agy_init_event(text: str) -> dict | None:
+    """The first `init` event of an Antigravity stream, carrying the
+    session's full `tools` list -- E21's only evidence, independent of the
+    hooks.json file itself, of which tools a tainted dispatch actually had
+    (mirrors `claude_init_event` above for D3)."""
+    for line in text.splitlines():
+        event = json_line(line)
+        if event is not None and event.get("event") == "init":
+            return event
+    return None
+
+
 def claude_said(events: list[dict]) -> str:
     """Text Claude completed before a stream was cut short."""
     parts: list[str] = []
