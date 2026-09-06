@@ -418,6 +418,7 @@ def shape_a_followon(
                 "no_op_ok": True,
                 "timeout": 1800,
                 "cap_usd": caps.fix_cap,
+                "test_policy": "allow",
                 "branch": branch,
                 "commit": fix_commit,
                 "cascade": False,

@@ -479,7 +479,11 @@ def cmd_salvage(args: argparse.Namespace) -> int:
 
     passed = _runner_gate_passed(result.gate, None)
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2))
+        # The receipt on disk, not `result.to_dict()`: the two differ
+        # (`recorded_at` is only ever known once the receipt is written;
+        # `receipt_path` is only ever known once it isn't). `--json` shows
+        # the caller exactly what `<home>/missions/.../salvage/...json` holds.
+        print(Path(result.receipt_path).read_text().rstrip("\n"))
     else:
         print(f"worktree: {result.worktree}")
         print(f"base_sha: {result.base_sha}")

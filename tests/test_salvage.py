@@ -248,6 +248,11 @@ def test_emit_writes_a_loadable_no_build_followon_mission_with_the_diff_in_its_p
     assert all(lane_obj.base is None for lane_obj in mission.lanes)
     fix_lane = next(lane_obj for lane_obj in mission.lanes if lane_obj.name == "fix")
     assert fix_lane.resume is None
+    # Not one of item 3's listed deltas from shape_a, whose fix lane carries
+    # `test_policy: allow` (rule 3): a follow-on fix that touches a test
+    # fixture must not fail the harness's clean gate the same way an
+    # ordinary Shape A fix is protected from it.
+    assert fix_lane.attempts[0].test_policy == "allow"
 
 
 def test_report_counts_salvage_receipts_per_mission(repo, home, fake_fleet):
@@ -284,3 +289,23 @@ def test_cli_salvage_exit_codes(repo, home, fake_fleet, monkeypatch: pytest.Monk
     assert main(["salvage", "no-such-mission", "--lane", "build", "--json"]) == 3
     err = capsys.readouterr().err
     assert "does not exist" in err
+
+
+def test_cli_salvage_json_matches_the_written_receipt_exactly(
+    repo, home, fake_fleet, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """`--json` prints the receipt dict (item 4), meaning the same object
+    `<home>/missions/<id>/salvage/<lane>-<stamp>.json` holds -- not an
+    in-memory `SalvageResult.to_dict()` computed before the receipt path was
+    known and missing the `recorded_at` the file itself carries."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="exit 1")
+
+    assert main(["salvage", mission_id, "--lane", lane, "--json"]) == 1
+    printed = json.loads(capsys.readouterr().out)
+
+    receipts = list((home / "missions" / mission_id / "salvage").glob(f"{lane}-*.json"))
+    assert len(receipts) == 1
+    on_disk = json.loads(receipts[0].read_text())
+    assert printed == on_disk
+    assert "recorded_at" in printed
