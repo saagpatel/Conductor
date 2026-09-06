@@ -41,6 +41,7 @@ the cap rules in `AGENTS.md`.
 | E3 untrusted-output lanes | 0.41.0 | Shape A on 0.40.0, first of Group 7, in parallel with E9; build green under cap; both reviewers NO_FINDINGS, no fix paid | $4.81 |
 | E9 rolling spend ceiling | 0.42.0 | Shape A on 0.40.0, in parallel with E3, merged after it; Grok's one finding real, fixed by hand | $5.95 |
 | E13 export bundles | 0.43.0 | Shape A on 0.42.0, third of Group 7; build stopped on a leak-guard flake, salvaged; Grok's two findings real, fixed on the follow-on | $5.58 |
+| E14 cost forecast | 0.44.0 | Shape A on 0.43.0, fourth of Group 7; build green under cap; Grok's one finding wording, fixed by hand | $5.72 |
 
 ## What "general" means here
 
