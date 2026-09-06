@@ -154,6 +154,16 @@ class Result:
     # existed (report.py joins those through the mission snapshot instead).
     lane: str | None = None
     mission: str | None = None
+    # E17: the sha256 of this attempt's rendered prompt, scrubbed and
+    # nonce-stripped the way golden.replay compares it; set by golden's
+    # replay dispatcher, None on a live dispatch (nothing today reads it
+    # outside golden.projection).
+    prompt_sha256: str | None = None
+    # E17: name -> version id (prompts.prompt_versions()) for every
+    # conductor-authored prompt text this dispatch actually appended to
+    # spec.prompt (the verdict checklist contract; a mission's collate,
+    # resolve, or rank contract, passed in by the caller); empty when none did.
+    prompt_versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def gate_passed(self) -> bool:
@@ -362,6 +372,8 @@ class Result:
             "taint": self.taint,
             "agent": self.agent,
             "deliverable": self.deliverable,
+            "prompt_versions": self.prompt_versions,
+            "prompt_sha256": self.prompt_sha256,
         }
 
 
@@ -1142,6 +1154,7 @@ def dispatch(
     cancel_reason: str = "another lane already passed",
     lane: str | None = None,
     mission: str | None = None,
+    prompt_versions: dict[str, str] | None = None,
 ) -> Result:
     """Run one fleet and report honestly.
 
@@ -1162,6 +1175,13 @@ def dispatch(
     made this dispatch, recorded on the receipt so `report.py` can group by
     them without joining through the mission snapshot; both are None for a
     plain dispatch outside a mission.
+
+    `prompt_versions` (E17) is the caller's own hint of which named,
+    conductor-authored prompt texts (`prompts.prompt_versions()`) it already
+    folded into `spec.prompt` -- a mission's collate, resolve, or rank
+    contract. This dispatch adds its own `checklist_contract` id to that map
+    when `spec.verdict` is set, and the union lands on the receipt
+    unconditionally, empty when neither applies.
     """
     criteria = spec.verdict
     spec.validate()
@@ -1172,12 +1192,19 @@ def dispatch(
     # E22: captured once, before spawn, so every receipt this dispatch can
     # produce -- refused, dry-run, or spawned -- carries the same version.
     fleet_version = cli_version(spec.fleet)
+    prompt_versions = dict(prompt_versions or {})
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     base = home or conductor_home()
     run_id, run_dir = claim_dir(base / "runs", f"{stamp}-{spec.fleet}-{_slug(spec.prompt)}")
 
     if criteria is not None:
+        # E17: deferred import -- prompts.py imports mission.py at module
+        # level, so importing it up front here would cycle back through
+        # mission.py's own `from .runner import ...`.
+        from . import prompts as prompts_mod
+
+        prompt_versions["checklist_contract"] = prompts_mod.prompt_versions()["checklist_contract"]
         # A caller cannot accidentally drift the schema away from the
         # checklist: conductor writes both from the same Criterion objects.
         schema_path = run_dir / "verdict.schema.json"
@@ -1205,6 +1232,7 @@ def dispatch(
             lane=lane,
             mission=mission,
             fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1221,6 +1249,7 @@ def dispatch(
             lane=lane,
             mission=mission,
             fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1251,6 +1280,7 @@ def dispatch(
                 lane=lane,
                 mission=mission,
                 fleet_version=fleet_version,
+                prompt_versions=prompt_versions,
             )
             (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
             return result
@@ -1295,6 +1325,7 @@ def dispatch(
             lane=lane,
             mission=mission,
             deliverable=_check_deliverable(spec, dry_run=True),
+            prompt_versions=prompt_versions,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1340,6 +1371,7 @@ def dispatch(
             lane=lane,
             mission=mission,
             fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1876,6 +1908,7 @@ def dispatch(
         lane=lane,
         mission=mission,
         fleet_version=fleet_version,
+        prompt_versions=prompt_versions,
     )
     if result.spawned:
         statement = _lane_receipt_statement(
@@ -2085,6 +2118,7 @@ def _refused_result(
     lane: str | None = None,
     mission: str | None = None,
     fleet_version: str | None = None,
+    prompt_versions: dict[str, str] | None = None,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
     return Result(
@@ -2113,6 +2147,7 @@ def _refused_result(
         lane=lane,
         mission=mission,
         fleet_version=fleet_version,
+        prompt_versions=dict(prompt_versions or {}),
     )
 
 
