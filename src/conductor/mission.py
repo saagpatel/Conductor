@@ -178,6 +178,13 @@ DEFAULT_RESOLVE_INSTRUCTIONS = (
     "from which lane."
 )
 REPORT_MAX_CHARS = 4000
+# E25: appended to a `gate_test_surface` attempt's report line, beside the
+# message that already names the touched files, so the lead reads the fix
+# (AGENTS.md rule 3) without re-deriving it from the receipt.
+GATE_TEST_SURFACE_NOTE = (
+    "the base tree's tests ran against the new source; if the spec changes what "
+    "existing missions may do, rerun with test_policy: allow and read every test edit."
+)
 # Total characters of upstream output one rendered prompt may carry. A 2 MB
 # patch pasted into a prompt is a cost bug, not a feature.
 TEMPLATE_MAX_CHARS = 40_000
@@ -4122,7 +4129,10 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
             failure_text = a.get("error") or a.get("failure")
             if failure_text:
                 kind_suffix = f" (kind: {a['kind']})" if a.get("kind") else ""
-                lines.append(f"- {a['attempt']}: {failure_text}{kind_suffix}")
+                line = f"- {a['attempt']}: {failure_text}{kind_suffix}"
+                if a.get("kind") == "gate_test_surface":
+                    line += f" {GATE_TEST_SURFACE_NOTE}"
+                lines.append(line)
             if a.get("note"):
                 lines.append(f"- {a['attempt']}: {a['note']}")
             if a.get("worktree"):

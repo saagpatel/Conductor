@@ -43,6 +43,7 @@ KINDS: tuple[str, ...] = (
     "fleet_error",
     "exit",
     "gate",
+    "gate_test_surface",
     "no_op",
     "read_moved_bytes",
     "no_answer",
@@ -148,6 +149,20 @@ def _gate_failed(result: Result) -> bool:
     return bool(counted and counted.get("ran") and not result.gate_passed)
 
 
+def _gate_test_surface_failed(result: Result) -> bool:
+    """A narrower `_gate_failed`: only the clean gate's plain "exited N"
+    failure (not a timeout or an interruption, which keep their own kind),
+    and only when the diff itself is what touched the test surface -- the
+    trap AGENTS.md rule 3 exists for, distinct from an ordinary broken build."""
+    clean = (result.test_surface or {}).get("clean_gate") or {}
+    if not clean.get("ran") or result.gate_passed:
+        return False
+    if clean.get("interrupted") or clean.get("timed_out"):
+        return False
+    surface = result.test_surface or {}
+    return bool(surface.get("touched") and surface.get("changed"))
+
+
 def _no_op(result: Result) -> bool:
     verdict = result.git_verdict or {}
     moved_nothing = bool(verdict.get("checked") and verdict.get("no_op"))
@@ -220,6 +235,8 @@ def error_kind(result: Result) -> str | None:
         return "fleet_error"
     if result.exit_code not in (0, None):
         return "exit"
+    if _gate_test_surface_failed(result):
+        return "gate_test_surface"
     if _gate_failed(result):
         return "gate"
     if _deliverable_failed(result):

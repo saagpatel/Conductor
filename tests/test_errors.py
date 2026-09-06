@@ -260,6 +260,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "fleet_error",
         "exit",
         "gate",
+        "gate_test_surface",
         "no_op",
         "read_moved_bytes",
         "no_answer",
@@ -553,8 +554,10 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         "interrupted, cancelled, cap, breaker, timeout, setup, refused, agent,"
         in section
     )
-    assert "transport, refusal, fleet_error, exit, gate, no_op, read_moved_bytes," in section
-    assert "no_answer, commit, unknown" in section
+    assert (
+        "transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op," in section
+    )
+    assert "read_moved_bytes, no_answer, commit, unknown" in section
     assert "cap kill that also timed out is `cap`, not `timeout`" in section
     assert "rate limit is `rate_limit`, not `fleet_error`" in section
     assert "I can't help` or `I cannot help`" in section

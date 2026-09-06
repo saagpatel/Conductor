@@ -147,6 +147,19 @@ What a touched surface means is the dispatch's `test_policy`:
   the per-stage allowlist for a lane whose job is to write tests.
 - `forbid`: any surface change fails the dispatch outright.
 
+A `clean` gate that fails is not always a broken build: when the lane's own
+diff is what touched the test surface, the base tree's tests just ran
+against the new source, and both the build that changed a fixture's shape
+and the fixture it changed can be right at once (this rejected two real
+builds and a fix before it had a name; see `docs/RESET-2026-09.md`). So a
+clean-gate failure whose diff touched the surface gets its own message --
+`clean gate exited N after the diff touched K test-surface files: a, b, c`
+(paths sorted, at most five, then `and M more`) -- and its own kind,
+`gate_test_surface`, instead of the plain `gate` an ordinary broken build
+still gets. The fix is AGENTS.md rule 3: rerun the lane with
+`test_policy: allow` and read every test edit by hand, not to keep
+re-running it under `clean`.
+
 The clean worktree is pristine: it has no installed dependencies, so the
 gate command must bring its own toolchain (an absolute interpreter path, a
 `uv run --project`, a `make` target that installs). The worktree is removed
@@ -376,8 +389,8 @@ order, first match wins:
 
 ```
 interrupted, cancelled, cap, breaker, timeout, setup, refused, agent, deliverable,
-rate_limit, transport, refusal, fleet_error, exit, gate, no_op, read_moved_bytes,
-no_answer, commit, unknown
+rate_limit, transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op,
+read_moved_bytes, no_answer, commit, unknown
 ```
 
 (`deliverable` is listed here beside `agent` -- both are conductor's own
