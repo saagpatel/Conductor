@@ -252,6 +252,14 @@ def cmd_missions(args: argparse.Namespace) -> int:
             )
             continue
         data = json.loads(result_file.read_text())
+        collisions = data.get("collisions")
+        resolve = data.get("resolve")
+        if resolve is None:
+            resolve_status = None
+        elif not resolve.get("ran"):
+            resolve_status = "skipped"
+        else:
+            resolve_status = "ok" if resolve.get("ok") else "failed"
         rows.append(
             {
                 "mission_id": data["mission_id"],
@@ -268,6 +276,8 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "tainted": [
                     lane["name"] for lane in data.get("lanes", []) if lane.get("tainted")
                 ],
+                "hotspots": len(collisions["hotspots"]) if collisions else None,
+                "resolve": resolve_status,
             }
         )
     print(json.dumps(rows, indent=2))

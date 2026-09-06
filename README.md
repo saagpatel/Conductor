@@ -802,6 +802,105 @@ those lanes too. The prompt says which lanes were left out and why
 `candidates: ["<lane>", ...]`. `candidates` larger than the number of
 dispatched sink lanes just uses what there is.
 
+#### Conflict-aware collate: collisions and a resolver lane
+
+Nothing so far looks at where two sink lanes touch the same ground. Two
+builds that both edit `mission.py` are judged on prose and patches like any
+other pair, and the operator finds the conflict at merge time. Evidence
+(`docs/ROADMAP-2026-09.md` item D1): a 27.7% conflict rate across 107k
+simulated agentic merges
+([AgenticFlict](https://arxiv.org/pdf/2604.03551)), and Cursor's own agent
+swarm accumulating 70k conflicts, 7,771 of them on one file
+([Cursor](https://cursor.com/blog/agent-swarm-model-economics)).
+
+Once every sink lane has settled (and before the collate, if there is one),
+conductor computes `collisions` over whichever sinks left a diff:
+
+- `overlap`: which files each sink's patch touches
+  (`conductor.collisions.touched_files`, read from a unified diff's
+  `diff --git a/<p> b/<p>` headers; a rename counts both paths), and which
+  files two or more sinks touch -- a **hotspot**.
+- `conflicts`: for every pair of sinks that both left a clean commit,
+  whether `git merge-tree --write-tree --name-only` on their two tips would
+  actually conflict, and on which paths. A pair whose merge would fail for
+  any other reason (a missing tip, a timeout) records that pair's error
+  rather than raising.
+- `hotspots`: the sorted union of both -- a file two sinks' diffs both
+  touch, or that a real merge would conflict on.
+
+`collisions` is `null` when fewer than two sinks left a diff, or on a dry
+run; otherwise every mission result carries it:
+
+```json
+{
+  "overlap": {
+    "files": {"mission.py": ["build-a", "build-b"]},
+    "hotspots": ["mission.py"],
+    "lanes": {"build-a": 1, "build-b": 1}
+  },
+  "conflicts": {
+    "pairs": [{"lanes": ["build-a", "build-b"], "conflicts": ["mission.py"]}],
+    "files": {"mission.py": [["build-a", "build-b"]]}
+  },
+  "hotspots": ["mission.py"]
+}
+```
+
+`report.md` gets a `## Collisions` section listing each hotspot and the
+lanes that touch it, `(conflict: build-a, build-b)` appended when a real
+merge would fail there, and `conductor missions` rows carry
+`"hotspots": <count or null>`. When a mission sets `collate` and there are
+any hotspots, the collate's own prompt gets the same `## Collisions`
+section between the original prompt and the lane results, so the judge
+sees where the candidates collide instead of grading each in isolation.
+
+A mission may also set `"resolve"`, a dedicated resolver lane:
+
+```json
+{
+  "resolve": {"fleet": "claude", "model": "opus", "commit": "merge: reconcile candidates"}
+}
+```
+
+Keys: `fleet` (required), `model`, `effort`, `timeout`, `cap_usd`
+(cascades from the mission's own `cap_usd` like the collate's),
+`commit` (the resolver's commit message), `instructions`, and `max_chars`
+(defaulted the way the collate's are). `resolve` is refused at load on a
+mission with fewer than two sink lanes, and on an unknown fleet, the same
+as any other attempt.
+
+When the mission has hotspots, conductor dispatches the resolver after the
+collate (or right after the sinks, when there is none): one write-mode,
+isolated lane from the mission HEAD, gated by the mission's own top-level
+`test`, committed with `resolve.commit`. Its prompt (written to
+`resolve-prompt.txt`, prefixed like every other dispatch) carries the
+original prompt, the `## Collisions` section, one line naming the lane a
+rank collate judged strongest (when one ran and agreed), then every
+candidate sink's patch, fenced and labelled as another agent's data and
+each clipped to `max_chars`, then the instructions. The default
+instructions ask for one change that applies the strongest candidate (or
+the first lane in mission order when none was named) everywhere except the
+hotspot files, keeps what each candidate did right on the hotspot files
+themselves rather than picking one wholesale, and expects the answer to
+explain what was kept from which lane.
+
+The outcome lands in `result.json` as `"resolve"`:
+
+```json
+{"ran": true, "ok": true, "run_id": "...", "cost_usd": 0.41, "tokens": 8213,
+ "branch": "conductor/20260906T...", "tip": "abc1234...", "hotspots": ["mission.py"],
+ "error": null}
+```
+
+`{"ran": false, "reason": "no hotspots"}` when `resolve` is set but nothing
+collided, and `{"ran": false, "reason": "dry run"}` on a dry run (nothing is
+dispatched either way); `null` when the mission sets no `resolve` at all. A
+resolver that ran and failed its gate or its fleet makes the mission not
+ok, the same as a failed collate. `report.md` shows a `## Resolve` section
+with the outcome, and `conductor missions` rows carry
+`"resolve": "ok" | "failed" | "skipped" | null`. The ledger's blocker rules
+apply before the resolver starts, exactly as they do before the collate.
+
 ### Signed lane receipts
 
 Every spawned dispatch writes `attestation.json` beside its `result.json`: a
