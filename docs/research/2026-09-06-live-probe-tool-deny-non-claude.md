@@ -97,6 +97,24 @@ brain/<conversation>/", and the model fell back to the shell. Gemini write lanes
 September missions edited through `replace_file_content` and the shell, so this did not
 surface there; worth knowing when a Gemini write lane reports a refused write.
 
+Run 8 (later the same day, before building E21): what the hook receives. A hook command that
+dumps stdin and answers `deny`, matchers `run_command` and `write_to_file`, prompt asking for
+`curl -s https://example.com` then a write. Log: "loaded 1 named hooks from 1 hooks.json
+file(s)"; both calls denied; `status: SUCCESS`; nothing written. Stdin is one JSON object per
+call: `conversationId`, `modelName`, `stepIdx`, `workspacePaths`, `transcriptPath`, and
+`toolCall: {"name": "run_command", "args": {"CommandLine": "curl -s https://example.com",
+"Cwd": "<scratch>", ...}}` (for `write_to_file`: `TargetFile`, `CodeContent`, `Overwrite`).
+**The hook sees the shell command line**, so a single conductor-owned script can deny by tool
+name and by command prefix, the same list Claude's `--disallowedTools` carries. The init event
+on this run listed 57 tools; the ones that reach outside the worktree by name: `read_url_content`,
+`search_web`, `open_browser_url`, `read_browser_page`, `execute_browser_javascript`, every
+`browser_*` tool, `browser_subagent`, `invoke_subagent`, `define_subagent`, `manage_subagents`,
+`call_mcp_tool`, `send_message`, `manage_inbox`, `schedule`, `generate_image`.
+
+Cursor, by contrast, has no rule kind for `webFetchToolCall` or `webSearchToolCall` (the bundle
+carries `Shell`, `Write`, `Mcp` only), so a tainted Cursor lane would keep network egress
+through the native web tools whatever `cli.json` says. Taint on Cursor stays refused.
+
 ## What this changes
 
 - D2's refusal "taint is Claude-only, no other fleet exposes a tool deny list headless"
