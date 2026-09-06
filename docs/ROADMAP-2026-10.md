@@ -37,6 +37,7 @@ the cap rules in `AGENTS.md`.
 | E16 adversarial test lanes | 0.37.0 | Shape A on 0.36.0, first of Group 5; build capped at $11 with the work done, salvaged; Grok's three findings all real | $13.32 |
 | E7 human lanes | 0.38.0 | Shape A on 0.37.0, second of Group 5; build green inside the grace band; Grok's four findings all real, fix finished by hand from its kept worktree | $15.25 |
 | E4 judge sittings | 0.39.0 | Shape A on 0.38.0, first of Group 6; build green under cap; both reviewers NO_FINDINGS, no fix paid | $9.07 |
+| E6 script lanes | 0.40.0 | Shape A on 0.39.0, second of Group 6; build green under cap; Grok's three findings all real, fixed on the resumed thread | $16.32 |
 
 ## What "general" means here
 
