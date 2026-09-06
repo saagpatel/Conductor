@@ -36,7 +36,9 @@ order; the second merge was the lead's. B2, B3, and C4 ran as three missions at 
 new features engaged. C6 was probed live and shelved (`docs/research/2026-09-05-live-probe-background-lanes.md`:
 `claude --bg` is an interactive session with no stream, `cursor-agent persist` needs tmux, agy has no
 background mode). C7 shipped on 0.22.0 as one mission plus a salvaged fix. D1 and D2 ran as two missions at once on
-0.23.0 and merged in the order D2, D1. D3 was probed and built for the Claude fleet only. D4 is the operator's decision.
+0.23.0 and merged in the order D2, D1. D3 was probed and built for the Claude fleet only. **D4 shelved 2026-09-06, operator decision:** every
+cloud mode ships the checkout to a vendor, which the local-only rule exists to prevent, and the
+receipts show review is not the bottleneck. Reopen only for a repository that already lives on a remote.
 
 ## What conductor is, in one paragraph
 
