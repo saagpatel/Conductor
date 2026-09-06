@@ -164,6 +164,33 @@ def test_emit_missing_command_is_ok_false(tmp_path):
     assert result["exit_code"] == 127
 
 
+def test_emit_never_raises_on_non_utf8_output(tmp_path):
+    # Review finding (grok): `text=True` with no `errors=` decodes with the
+    # strict handler, so a command that writes invalid UTF-8 raised
+    # `UnicodeDecodeError` out of `emit` -- not `OSError`, so the spec's "it
+    # never raises" did not hold and a noisy notify command could abort the
+    # mission instead of recording `ok: false`.
+    result = emit(
+        {"command": r"printf '\xff\xfe'", "timeout": 5},
+        {"event": "end", "mission_id": "m"},
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is True
+
+
+def test_emit_appends_a_newline_so_two_events_are_two_jsonl_lines(tmp_path):
+    # Review finding (grok): `emit` sends the event with no trailing
+    # newline, so the README's own example (`cat >> events.jsonl`, "the
+    # event as one line of JSON on stdin") concatenates a second event onto
+    # the first line instead of appending a new one.
+    events_file = tmp_path / "events.jsonl"
+    config = {"command": f"cat >> {events_file}", "timeout": 5}
+    emit(config, {"event": "pause", "mission_id": "m"}, cwd=str(tmp_path))
+    emit(config, {"event": "end", "mission_id": "m"}, cwd=str(tmp_path))
+    lines = events_file.read_text().splitlines()
+    assert [json.loads(line)["event"] for line in lines] == ["pause", "end"]
+
+
 # --- item 3: emission points through a mission --------------------------------
 
 
@@ -175,7 +202,7 @@ def test_pause_sends_pause_event_but_not_end(repo, home, monkeypatch, tmp_path):
             "prompt": "x",
             "cwd": str(repo),
             "pause": {"before": ["b"]},
-            "notify": {"command": f"(cat; echo) >> {notify_file}"},
+            "notify": {"command": f"cat >> {notify_file}"},
             "lanes": [
                 {"name": "a", "fleet": "claude"},
                 {"name": "b", "fleet": "claude", "needs": ["a"]},
@@ -200,7 +227,7 @@ def test_end_event_carries_lanes_and_cost(repo, home, monkeypatch, tmp_path):
         {
             "prompt": "x",
             "cwd": str(repo),
-            "notify": {"command": f"(cat; echo) >> {notify_file}"},
+            "notify": {"command": f"cat >> {notify_file}"},
             "lanes": [{"name": "a", "fleet": "claude"}],
         },
         base_dir=tmp_path,
@@ -237,7 +264,7 @@ def test_breaker_trip_emits_breaker_event(repo, home, monkeypatch, tmp_path):
             "prompt": "x",
             "cwd": str(repo),
             "max_tool_calls": 1,
-            "notify": {"command": f"(cat; echo) >> {notify_file}"},
+            "notify": {"command": f"cat >> {notify_file}"},
             "lanes": [{"fleet": "codex", "name": "a"}],
         },
         base_dir=tmp_path,
@@ -265,7 +292,7 @@ def test_events_filter_suppresses_unlisted_events(repo, home, monkeypatch, tmp_p
         {
             "prompt": "x",
             "cwd": str(repo),
-            "notify": {"command": f"(cat; echo) >> {notify_file}", "events": ["pause"]},
+            "notify": {"command": f"cat >> {notify_file}", "events": ["pause"]},
             "lanes": [{"name": "a", "fleet": "claude"}],
         },
         base_dir=tmp_path,
@@ -307,7 +334,7 @@ def test_dry_run_emits_nothing(repo, home, monkeypatch, tmp_path):
         {
             "prompt": "x",
             "cwd": str(repo),
-            "notify": {"command": f"(cat; echo) >> {notify_file}"},
+            "notify": {"command": f"cat >> {notify_file}"},
             "lanes": [{"name": "a", "fleet": "claude"}],
         },
         base_dir=tmp_path,

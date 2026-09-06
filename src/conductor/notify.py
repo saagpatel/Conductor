@@ -33,9 +33,17 @@ def emit(config: dict, event: dict, *, cwd: str) -> dict:
             config["command"],
             shell=True,
             cwd=cwd,
-            input=json.dumps(event),
+            # A trailing newline so a command that appends stdin to a file
+            # (the README's own example) produces one JSON line per event,
+            # never two events concatenated on one line.
+            input=json.dumps(event) + "\n",
             capture_output=True,
             text=True,
+            # Never strict: a notify command's output is discarded beyond a
+            # 500-char tail on failure, so invalid bytes in it must not be
+            # able to raise past `emit` the way `errors="strict"` (the
+            # `text=True` default) would.
+            errors="replace",
             timeout=config["timeout"],
             env=env,
         )
