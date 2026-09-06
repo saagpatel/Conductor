@@ -360,3 +360,29 @@ def test_salvage_runs_the_kept_trees_own_gate_beside_the_clean_gate(
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     code = main(["salvage", mission_id, "--lane", lane])
     assert code == 1
+
+
+def test_salvage_skips_the_clean_gate_when_the_lane_ran_under_test_policy_allow(
+    repo, home, fake_fleet
+):
+    """Rule 3: a lane that ran under `test_policy: allow` is not judged on the
+    clean gate by the harness, so salvage records it as skipped and judges on
+    the own gate alone -- otherwise a spec that edits an existing test could
+    never salvage green."""
+    fake_fleet(_claude_ok_argv("mkdir -p tests && echo x > tests/test_new.py && echo y >> app.py"))
+    lane = {
+        "name": "build",
+        "fleet": "claude",
+        "mode": "write",
+        "test": "test -f tests/test_new.py",
+        "test_policy": "allow",
+    }
+    mission = mission_from_dict(
+        {"cwd": str(repo), "prompt": "x", "lanes": [lane]}, base_dir=repo
+    )
+    run_mission(mission, home=home)
+    mission_id = sorted((home / "missions").iterdir())[-1].name
+    result = salvage(home, mission_id, "build")
+    assert result.own_gate["exit_code"] == 0
+    assert result.gate["ran"] is False
+    assert "test_policy allow" in result.gate["tail"]

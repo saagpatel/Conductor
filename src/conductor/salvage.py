@@ -26,7 +26,7 @@ from . import attest, shape
 from .fleets import DEFAULT_TIMEOUT
 from .mission import LaneResult, Mission, MissionInvalid, mission_from_dict
 from .runner import _clean_gate, _transplant_gate
-from .verify import diff_since, git_run
+from .verify import TestOutcome, diff_since, git_run
 
 
 class SalvageInvalid(ValueError):
@@ -190,15 +190,26 @@ def _gather(
         stop=stop or (lambda: False),
         worktree=scratch.with_name(f"{lane}-own"),
     )
-    outcome = _clean_gate(
-        str(worktree),
-        base_sha=base_sha,
-        patterns=list(patterns),
-        command=test_command,
-        timeout=int(timeout),
-        stop=stop or (lambda: False),
-        worktree=scratch,
-    )
+    if test_surface.get("policy") == "allow":
+        # Rule 3: the lane ran under `test_policy: allow`, so the harness
+        # would not have judged it on the clean gate either -- a spec that
+        # changes what existing missions may do fails that gate by design
+        # (the base tree's tests against the new source). The own gate above
+        # is the verdict; the clean gate is recorded as skipped, not judged.
+        outcome = TestOutcome(
+            ran=False, exit_code=None, tail="skipped: test_policy allow"
+        ).to_dict()
+        outcome.update(worktree="", patch_bytes=0)
+    else:
+        outcome = _clean_gate(
+            str(worktree),
+            base_sha=base_sha,
+            patterns=list(patterns),
+            command=test_command,
+            timeout=int(timeout),
+            stop=stop or (lambda: False),
+            worktree=scratch,
+        )
 
     return SalvageResult(
         mission=mission_id,

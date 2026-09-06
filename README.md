@@ -834,7 +834,8 @@ mission's repository, or the lane's effective test command is empty. It
 then runs two gates from the kept worktree, each in a fresh scratch copy
 under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the tree's own gate
 (everything transplanted, new tests included) and the clean gate (test
-surface restored from the base) -- never committing,
+surface restored from the base; recorded as skipped, not judged, when the
+lane ran under `test_policy: allow`, rule 3) -- never committing,
 writing into, or touching the index of the kept worktree itself -- and
 prints the worktree, its base and HEAD shas, whether it is dirty, the
 recorded diff, and each gate's exit code and tail. Exit 0 means both
