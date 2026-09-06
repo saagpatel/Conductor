@@ -326,6 +326,7 @@ def shape_a(
             "timeout": 1800,
             "cap_usd": caps.adversarial_cap,
             "test_policy": "allow",
+            "commit": f"test({scope}): adversarial check for {mission_name}",
             "prompt": ADVERSARIAL_PROMPT,
         }
         if caps.cap_grace_usd:

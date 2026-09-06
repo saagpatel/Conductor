@@ -196,6 +196,34 @@ def test_adversarial_lane_with_no_gate_set_is_refused_without_a_reproducing_chec
     assert result.commit is None
 
 
+def test_adversarial_lane_that_self_commits_after_editing_source_is_discarded(
+    repo, home, fake_fleet
+):
+    """A fleet that self-commits despite the prompt's "do not commit" must not
+    be able to land a source edit through the back door: `reproduce_blocks_commit`
+    must catch a self-commit the same way it catches conductor's own, since the
+    spec requires "any change outside the test surface fails the dispatch" with
+    nothing landed, self-commit or not."""
+    (repo / "app.txt").write_text("bad\n")
+    base = _commit(repo)
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "printf 'good\\n' > app.txt && mkdir -p tests && "
+            "printf 'raise SystemExit(0)\\n' > tests/check.py && "
+            "git add -A && git commit -m 'self commit'",
+        ]
+    )
+
+    result = dispatch(_spec(repo), home=home, test_command="python tests/check.py")
+
+    assert result.error == "adversarial lane changed source: app.txt"
+    assert result.ok is False
+    assert result.commit is None or result.commit["committed"] is False
+    assert _git(repo, "rev-parse", "HEAD") == base
+
+
 # --- 3. the verdict, through a mission (buildable / discard) -----------------
 
 
@@ -452,6 +480,10 @@ def test_shape_a_adversarial_flag_adds_the_lane_policy_and_fix_prompt_block(repo
     assert adversarial_lane["stage"] == "adversarial"
     assert adversarial_lane["base"] == "build"
     assert adversarial_lane["test_policy"] == "allow"
+    # Item 2: "the harness commits only on reproduced" -- with no `commit`
+    # message configured, conductor's own commit_work is never invoked, so a
+    # reproduced adversarial lane can never land.
+    assert adversarial_lane.get("commit")
     fix_lane = next(lane for lane in raw["lanes"] if lane["name"] == "fix")
     assert fix_lane["base"] == "adversarial"
     assert "adversarial" in fix_lane["needs"] and "build" in fix_lane["needs"]

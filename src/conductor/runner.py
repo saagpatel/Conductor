@@ -1824,6 +1824,15 @@ def dispatch(
             "reproduced",
             "inherited",
             "skipped",
+        ) or (
+            # An adversarial lane that changed source outside the test surface
+            # is refused with `verdict: skipped` (see `_reproduce_receipt`),
+            # which the exclusion above would otherwise treat as landable --
+            # right for every other skip (nothing to gate), wrong here: the
+            # lane's whole deliverable is the test, never the fix, so this
+            # must block a self-commit exactly as it blocks conductor's own.
+            spec.stage == "adversarial"
+            and reproduce_error is not None
         )
         if reproduce_error is not None:
             # A fix that reproduces nothing must not land: no commit, and its
