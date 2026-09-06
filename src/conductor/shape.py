@@ -358,10 +358,10 @@ def shape_a_followon(
     fix_commit = fix_commit or f"fix({scope}): address cross-vendor review of {mission_name}"
 
     mission_prompt = (
-        f"This change is already committed at {salvage_sha} on branch '{branch}' in the "
-        "worktree named as this mission's cwd: conductor's own clean gate rejected the "
-        "original build lane's run, and the lead read the diff below, gated it by hand, "
-        "and committed it. Review or fix the change as it stands.\n\n"
+        f"This change is already committed at {salvage_sha}, the HEAD of the worktree named "
+        "as this mission's cwd: conductor's own clean gate rejected the original build "
+        "lane's run, and the lead read the diff below, gated it by hand, and committed it. "
+        f"Review or fix the change as it stands; the fix lane lands on branch '{branch}'.\n\n"
         f"<diff>\n{diff}\n</diff>"
     )
     gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", diff)
