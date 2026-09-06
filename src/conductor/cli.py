@@ -229,7 +229,7 @@ def cmd_prices(args: argparse.Namespace) -> int:
 
 def cmd_mission(args: argparse.Namespace) -> int:
     try:
-        if args.answer and not args.resume:
+        if (args.answer or args.answer_file) and not args.resume:
             raise MissionInvalid("--answer needs --resume")
         if args.resume:
             if Path(args.resume).name != args.resume or args.resume in {".", ".."}:
@@ -252,6 +252,7 @@ def cmd_mission(args: argparse.Namespace) -> int:
                 dry_run=args.dry_run,
                 resume_dir=mission_dir,
                 answer=args.answer,
+                answer_file=args.answer_file,
             )
         else:
             mission = load_mission(args.file)
@@ -956,10 +957,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_mission.add_argument(
         "--dry-run", action="store_true", help="validate and record argv, spawn nothing"
     )
-    p_mission.add_argument(
+    answer_group = p_mission.add_mutually_exclusive_group()
+    answer_group.add_argument(
         "--answer",
-        choices=("continue", "stop"),
-        help="answer a mission paused at a pause.before lane or pause.spend_usd threshold; "
+        help="answer a paused mission: 'continue' or 'stop' for a pause.before lane or "
+        "pause.spend_usd threshold, any text for a human lane's ask, or 'stop' for one "
+        "too; needs --resume",
+    )
+    answer_group.add_argument(
+        "--answer-file",
+        metavar="PATH",
+        help="answer a human lane's ask with a file's contents instead of --answer TEXT; "
         "needs --resume",
     )
     p_mission.set_defaults(func=cmd_mission)

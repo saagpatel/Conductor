@@ -342,6 +342,8 @@ def _backfill_snapshot(mission_raw: dict) -> dict:
         lane.setdefault("taint", False)
         lane.setdefault("tainted", False)
         lane.setdefault("taint_from", [])
+        # E7: no recording before this field existed ever ran a human lane.
+        lane.setdefault("human", False)
         for attempt in lane.get("attempts") or []:
             if isinstance(attempt, dict):
                 for key, default in _ATTEMPT_FIELD_DEFAULTS.items():
@@ -407,6 +409,21 @@ def record(
         work_lanes.mkdir()
         for lane_file in lane_files:
             _copy_json(lane_file, work_lanes / lane_file.name, replacements)
+
+        # E7: a human lane has no run to record -- its answer file is the
+        # whole recording, so replay can stand it in for the operator.
+        human_lane_names = [
+            lane["name"]
+            for lane in mission_raw.get("lanes") or []
+            if isinstance(lane, dict) and lane.get("human")
+        ]
+        if human_lane_names:
+            work_answers = work / "answers"
+            work_answers.mkdir(exist_ok=True)
+            for name in human_lane_names:
+                answer_src = mission_dir / "answers" / f"{name}.txt"
+                if answer_src.is_file():
+                    _copy_text(answer_src, work_answers / f"{name}.txt", replacements)
 
         work_runs = work / "runs"
         for run_id in run_ids:
@@ -542,6 +559,18 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
     def restore(text: str) -> str:
         return text.replace("<cwd>", cwd).replace("<home>", str(home)).replace("<user>", user_home)
 
+    # E7: a human lane's recorded answer stands in for the operator -- see
+    # `record`'s `answers/` copy and `_execute_mission`'s `human_answers`.
+    human_answers: dict[str, str] = {}
+    answers_dir = fixture_dir / "answers"
+    if answers_dir.is_dir():
+        for lane in mission.lanes:
+            if not lane.human:
+                continue
+            answer_file = answers_dir / f"{lane.name}.txt"
+            if answer_file.is_file():
+                human_answers[lane.name] = restore(answer_file.read_text())
+
     lane_recordings = _lane_recordings(fixture_dir)
     differences: list[str] = []
     call_index: dict[str, int] = {}
@@ -661,7 +690,9 @@ def replay(fixture_dir: str | Path, *, home: Path, cwd: str) -> Replay:
         }
         return Result.from_dict({**recorded_result, **overrides})
 
-    mission_result = run_mission(mission, home=home, dispatcher=dispatcher)
+    mission_result = run_mission(
+        mission, home=home, dispatcher=dispatcher, human_answers=human_answers or None
+    )
     return Replay(
         differences=differences,
         projection=projection(mission_result),
