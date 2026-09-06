@@ -648,6 +648,39 @@ Evidence (`docs/ROADMAP-2026-09.md` item D3): `claude --agents '<json>'` and
 `agy --agent` let a lane define its reviewer or fixer persona at dispatch
 time with nothing on the operator's disk.
 
+### The Shape A launcher
+
+Shape A is the measured default (AGENTS.md): Sonnet 5 builds at `hard`, Gemini 3.7 Flash
+and Grok 4.6 review cold and in parallel, Sonnet fixes on the build's resumed thread, and
+the lead judges on bytes. Every mission on record was hand-written and hand-sized, and
+mis-sized caps cost money five times. `conductor shape a` writes that mission from the
+template in `shape.py`:
+
+```
+conductor shape a --spec specs/widget.md --repo ~/Projects/widget \
+  --test 'make check' --items 5 --modules 4 --scheduler
+```
+
+It prints every term of the cap arithmetic, not just the sum, because the one recorded
+$2 shortfall was a module undercount that one printed number would hide:
+
+```
+build cap: $5.00 5 spec items + $2.00 scheduler tax + $2.00 2 modules past the second + $1.00 Claude summary = $10.00
+review-gemini cap: $1.00 (reads only; rule 7)
+review-grok cap: $1.50 (reads only; rule 7)
+fix cap: $2.00 fix base + $2.00 scheduler tax + $1.00 Claude summary = $5.00
+mission budget: lanes $17.50 + $1.50 slack = $19.00
+```
+
+`--items` and `--modules` are hand counts. Conductor has no notion of a spec item or a
+module touched and the launcher is not a forecaster; it is rules 2 and 10 as a function.
+The fix lane lands on `--branch` (default `feat/<spec stem>`), `--build-commit` and
+`--fix-commit` default to conventional messages scoped to the repo name, `--ports`
+claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), and
+`--grok-runs-suite` switches Grok to the prompt that lets it run the gate at the $2.00
+cap. The file is written beside the spec (or at `--out`), never overwritten without
+`--force`, and `--dry-run` runs `conductor mission --dry-run` on it.
+
 ### Lane stages, reviewer policy, and reproduce before fix
 
 A lane may declare `"stage"`: `build`, `review`, or `fix`. A `review` lane
@@ -1437,6 +1470,10 @@ conductor golden check tests/golden/c5-build-cascade-capped --update
   `--include PATH` copies an untracked path into the worktree)
 - `conductor mission FILE`: run a mission file (`--dry-run` validates and
   records every argv without spawning)
+- `conductor shape a --spec FILE --repo DIR --test CMD --items N --modules M`: write a
+  Shape A mission from the versioned template, print every term of its cap arithmetic
+  (AGENTS.md rules 2 and 10), and validate it (`--scheduler` adds the tax,
+  `--grok-runs-suite` raises Grok's cap, `--out`, `--force`, `--dry-run`)
 - `conductor verify`: inspect repo state, optionally run a gate
 - `conductor runs` / `conductor missions`: recent dispatches and missions
 - `conductor prices`: the effective price table after overrides

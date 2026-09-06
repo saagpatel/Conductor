@@ -13,11 +13,18 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import attest, golden, prices
+from . import attest, golden, prices, shape
 from .errors import error_kind
 from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
 from .gc import cmd_gc
-from .mission import STAGES, Mission, MissionInvalid, load_mission, run_mission
+from .mission import (
+    STAGES,
+    Mission,
+    MissionInvalid,
+    load_mission,
+    mission_from_dict,
+    run_mission,
+)
 from .paths import conductor_home
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .spend import cmd_spend
@@ -588,6 +595,53 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
     return 1 if any_diff else 0
 
 
+def cmd_shape_a(args: argparse.Namespace) -> int:
+    """E5: write a Shape A mission from a spec, print the cap arithmetic, validate it."""
+    try:
+        caps = shape.cap_arithmetic(
+            args.items,
+            args.modules,
+            scheduler=args.scheduler,
+            grok_runs_suite=args.grok_runs_suite,
+        )
+        out = Path(args.out).expanduser().resolve() if args.out else None
+        mission_dir = out.parent if out else None
+        raw = shape.shape_a(
+            spec=Path(args.spec),
+            repo=Path(args.repo),
+            test=args.test,
+            caps=caps,
+            name=args.name or "",
+            about=args.about,
+            ports=args.ports,
+            test_policy=args.test_policy,
+            mission_dir=mission_dir,
+            branch=args.branch or "",
+            build_commit=args.build_commit or "",
+            fix_commit=args.fix_commit or "",
+        )
+        base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
+        mission = mission_from_dict(raw, base_dir=base_dir, source=str(out or "<stdout>"))
+    except (shape.ShapeInvalid, MissionInvalid) as exc:
+        print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
+        return 3
+    print(f"shape {shape.SHAPE_VERSION}: {len(mission.lanes)} lanes, mission '{mission.name}'")
+    print(caps.render())
+    text = json.dumps(raw, indent=2) + "\n"
+    if out is None:
+        out = Path(args.spec).expanduser().resolve().parent / "mission.json"
+    if out.exists() and not args.force:
+        print(json.dumps({"invalid": f"{out} exists; pass --force to overwrite"}), file=sys.stderr)
+        return 3
+    out.write_text(text)
+    print(f"wrote {out}")
+    if args.dry_run:
+        result = run_mission(load_mission(out), home=conductor_home(), dry_run=True)
+        print(json.dumps(result.summary(), indent=2))
+        return 0 if result.ok else 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="conductor",
@@ -756,6 +810,62 @@ def build_parser() -> argparse.ArgumentParser:
         "needs --resume",
     )
     p_mission.set_defaults(func=cmd_mission)
+
+    p_shape = sub.add_parser(
+        "shape", help="write a mission file from a versioned shape and print its cap arithmetic"
+    )
+    shape_sub = p_shape.add_subparsers(dest="shape_name", required=True)
+    p_shape_a = shape_sub.add_parser(
+        "a",
+        help="Shape A: Sonnet builds, Gemini and Grok review cold, Sonnet fixes, "
+        "caps sized by AGENTS.md rules 2 and 10",
+    )
+    p_shape_a.add_argument("--spec", required=True, help="spec file the build lane implements")
+    p_shape_a.add_argument("--repo", required=True, help="git repository the mission runs in")
+    p_shape_a.add_argument(
+        "--test", required=True, help="the gate command; run in every lane's worktree"
+    )
+    p_shape_a.add_argument(
+        "--items", type=int, required=True, help="hand-counted spec items (rule 2)"
+    )
+    p_shape_a.add_argument(
+        "--modules",
+        type=int,
+        required=True,
+        help="hand-counted source modules the spec touches (rule 2: a dollar past the second)",
+    )
+    p_shape_a.add_argument(
+        "--scheduler",
+        action="store_true",
+        help="the spec touches the scheduler, the runner wait loop, or resume (rule 2: +$2)",
+    )
+    p_shape_a.add_argument(
+        "--grok-runs-suite",
+        action="store_true",
+        help="let Grok run the gate (rule 7: cap $2.00 instead of $1.50)",
+    )
+    p_shape_a.add_argument("--name", help="mission name (default: the spec's stem)")
+    p_shape_a.add_argument(
+        "--about", help="one phrase naming the repo for the shared prefix, e.g. 'the X service'"
+    )
+    p_shape_a.add_argument("--ports", type=int, default=0, help="TCP ports the build lane claims")
+    p_shape_a.add_argument("--branch", help="branch the fix lane lands on (default feat/<name>)")
+    p_shape_a.add_argument("--build-commit", help="build lane commit message")
+    p_shape_a.add_argument("--fix-commit", help="fix lane commit message")
+    p_shape_a.add_argument(
+        "--test-policy",
+        choices=TEST_POLICIES,
+        default="allow",
+        help="test-surface policy on the build and fix lanes (default allow; rule 3)",
+    )
+    p_shape_a.add_argument(
+        "--out", help="mission file to write (default: mission.json beside the spec)"
+    )
+    p_shape_a.add_argument("--force", action="store_true", help="overwrite an existing --out")
+    p_shape_a.add_argument(
+        "--dry-run", action="store_true", help="also run `conductor mission --dry-run` on it"
+    )
+    p_shape_a.set_defaults(func=cmd_shape_a)
 
     p_missions = sub.add_parser("missions", help="list recent missions")
     p_missions.add_argument("--limit", type=int, default=20)
