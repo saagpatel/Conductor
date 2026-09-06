@@ -26,13 +26,15 @@ orchestrators. Sources are linked where a claim rests on one.
 | C4 per-lane setup, teardown, ports, includes | 0.21.0 | Shape A, one of three in parallel, review rerun | $11.88 |
 | C5 structured error kinds | 0.22.0 | Shape A on 0.21.0 with cascade, prefix, ports live; salvaged | $14.78 |
 | C7 golden-mission suite | 0.23.0 | Shape A on 0.22.0, pause fired live; fix salvaged | $12.21 |
+| D2 taint tracking | 0.24.0 | Shape A on 0.23.0, in parallel with D1 | $13.17 |
 
 Receipts and the operating rules they produced: `docs/RESET-2026-09.md` and `AGENTS.md`
 ("Shape A"). A5 and C2 ran as two missions in parallel against one checkout and merged in that
 order; the second merge was the lead's. B2, B3, and C4 ran as three missions at once and merged in that order. C5 ran on 0.21.0 with the
 new features engaged. C6 was probed live and shelved (`docs/research/2026-09-05-live-probe-background-lanes.md`:
 `claude --bg` is an interactive session with no stream, `cursor-agent persist` needs tmux, agy has no
-background mode). C7 shipped on 0.22.0 as one mission plus a salvaged fix. Next: Phase D.
+background mode). C7 shipped on 0.22.0 as one mission plus a salvaged fix. D1 and D2 ran as two missions at once on
+0.23.0 and merged in the order D2, D1. Next: D3 (probe first), then D4 is the operator's decision.
 
 ## What conductor is, in one paragraph
 
