@@ -31,6 +31,7 @@ the cap rules in `AGENTS.md`.
 | E25 clean-gate diagnosis | 0.31.0 | Shape A on 0.28.0, one of three in parallel; clean run end to end | $5.45 |
 | E26 per-lane cwd | 0.32.0 | Shape A on 0.31.0, in parallel with E23; both reviewers NO_FINDINGS, fix lane stopped, build tip landed by hand | $7.02 |
 | E23 conductor salvage | 0.33.0 | Shape A on 0.31.0, in parallel with E26; merged after it; Grok's two findings fixed on the resumed thread | $9.40 |
+| E24 cap grace | 0.34.0 | Shape A on 0.33.0, one of three in parallel; build capped at $7 with everything written, salvaged through `conductor salvage`; docs-only finding tidied by hand | $8.03 |
 
 ## What "general" means here
 
