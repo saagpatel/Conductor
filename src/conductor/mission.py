@@ -100,7 +100,11 @@ _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "too
 
 # Every key a mission file may use, per object. A typo (`need` for `needs`)
 # would otherwise silently turn a dependent lane into a root.
-_ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file", "agent_file"}
+# E24: cap_grace_usd is deliberately not in _INHERITED -- it is stated per
+# lane or per attempt and never cascades (mission_from_dict and
+# _parse_cascade both refuse it above the lane; _attempt_fields never lets
+# it survive an uncredited copy of a parent's fields either).
+_ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file", "agent_file", "cap_grace_usd"}
 # D3: a review-stage lane's persona may not carry these -- a read lane's
 # job is to look, not to edit or run a shell.
 _AGENT_WRITE_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "Bash"})
@@ -234,6 +238,9 @@ class Attempt:
     verdict: list[Criterion] | None = None
     isolate: bool | None = None
     cap_usd: float | None = None
+    # E24: stated on this lane or this attempt only; never cascades (see
+    # _ATTEMPT_KEYS above and _attempt_fields below).
+    cap_grace_usd: float | None = None
     no_op_ok: bool = False
     test_policy: str = "clean"
     test_surface: list[str] | None = None
@@ -283,6 +290,7 @@ class Attempt:
             verdict=self.verdict,
             resume=resume,
             cap_usd=self.cap_usd if cap_usd is None else cap_usd,
+            cap_grace_usd=self.cap_grace_usd,
             test_policy=self.test_policy,
             test_surface=self.test_surface,
             stage=stage,
@@ -1064,6 +1072,10 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         # A mission-level fleet would make every lane the same fleet; the
         # lanes list is where fleets belong.
         raise MissionInvalid("set fleet on each lane, not on the mission")
+    if "cap_grace_usd" in defaults:
+        # E24: grace is a per-lane decision -- a mission-level default would
+        # cascade onto lanes whose fleet cannot even use it.
+        raise MissionInvalid("cap_grace_usd is stated per lane, not on the mission")
     # E26: `cwd` above is Mission.cwd, a distinct field; it must not be baked
     # into `defaults` as every lane's own starting cwd, or every attempt
     # would carry a concrete value instead of the None sentinel
@@ -1282,6 +1294,11 @@ def _parse_cascade(raw_cascade: object, base_dir: Path) -> dict | None:
     _reject_unknown(raw_cascade, _FALLBACK_KEYS, "cascade")
     if "fleet" not in raw_cascade:
         raise MissionInvalid("cascade: fleet is required")
+    if "cap_grace_usd" in raw_cascade:
+        # E24: same reasoning as the mission-level refusal above -- grace is
+        # a per-lane decision, and the cascade template applies to every
+        # qualifying lane at once.
+        raise MissionInvalid("cap_grace_usd is stated per lane, not in cascade")
     return _attempt_fields(raw_cascade, base_dir, {})
 
 
@@ -1439,6 +1456,14 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
     for key in _INHERITED:
         if key in raw and (raw[key] is not None or key in _BREAKER_KEYS):
             out[key] = raw[key]
+    # E24: cap_grace_usd is not in _INHERITED and must never survive an
+    # uncredited copy of `parent`'s fields (out started as dict(parent)
+    # above) -- a lane's grace must not leak onto its fallback attempts, or
+    # a cascade attempt built from this lane's primary. Only this level's
+    # own, explicit value (present in `raw`, even if null) counts.
+    out.pop("cap_grace_usd", None)
+    if "cap_grace_usd" in raw:
+        out["cap_grace_usd"] = raw["cap_grace_usd"]
     if raw.get("cwd"):
         # E26: resolved exactly as the mission-level `cwd` is (relative to
         # the mission file's directory, `expanduser`, `resolve`), so a lane
@@ -1550,6 +1575,9 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             verdict=verdict,
             isolate=fields.get("isolate"),
             cap_usd=float(fields["cap_usd"]) if fields.get("cap_usd") is not None else None,
+            cap_grace_usd=(
+                float(fields["cap_grace_usd"]) if fields.get("cap_grace_usd") is not None else None
+            ),
             no_op_ok=bool(fields.get("no_op_ok", False)),
             test_policy=str(fields.get("test_policy", "clean")),
             test_surface=list(surface) if surface is not None else None,
@@ -4326,6 +4354,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 lines.append(line)
             if a.get("note"):
                 lines.append(f"- {a['attempt']}: {a['note']}")
+            if a.get("grace_used"):
+                lines.append(f"- {a['attempt']}: grace used ${_usd(a['grace_used'])}")
             if a.get("worktree"):
                 lines.append(f"- {a['attempt']}: uncommitted work kept at `{a['worktree']}`")
         if lane.diff_path:

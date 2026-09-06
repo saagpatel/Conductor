@@ -19,6 +19,8 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
+from .fleets import CAP_GRACE_CEILING_USD
+
 SHAPE_VERSION = "a-2026-09-06"
 
 # Rule 2 and rule 10, as constants with the rule number beside each.
@@ -31,6 +33,7 @@ USD_GEMINI_READ = 1.0  # rule 7: Gemini reads only on this shape
 USD_GROK_READ = 1.5  # rule 7: Grok reading only
 USD_GROK_SUITE = 2.0  # rule 7: Grok when it runs the suite
 USD_MISSION_SLACK = 1.5  # room for a retry's partial spend before the mission budget sinks
+USD_CLAUDE_GRACE = 0.25  # E24: default grace band on the build and fix (claude) lanes
 
 REVIEW_TAIL = (
     "Report anything that could cause incorrect behavior, a test failure, or a misleading "
@@ -94,6 +97,8 @@ class CapArithmetic:
     modules: int
     scheduler: bool
     grok_runs_suite: bool
+    # E24: the grace band on the build and fix (claude) lanes; 0 disables it.
+    cap_grace_usd: float = USD_CLAUDE_GRACE
 
     @property
     def build_terms(self) -> list[tuple[str, float]]:
@@ -146,6 +151,12 @@ class CapArithmetic:
             f"review-grok cap: ${self.grok_cap:.2f} "
             + ("(runs the suite; rule 7)" if self.grok_runs_suite else "(reads only; rule 7)"),
             line("fix cap", self.fix_terms, self.fix_cap),
+            (
+                f"grace: ${self.cap_grace_usd:.2f} per claude lane (E24, on top of its own "
+                "cap; does not change the caps above)"
+                if self.cap_grace_usd
+                else "grace: disabled (E24)"
+            ),
             f"mission budget: lanes ${self.mission_budget - USD_MISSION_SLACK:.2f} "
             f"+ ${USD_MISSION_SLACK:.2f} slack = ${self.mission_budget:.2f}",
         ]
@@ -158,16 +169,20 @@ def cap_arithmetic(
     *,
     scheduler: bool = False,
     grok_runs_suite: bool = False,
+    cap_grace_usd: float = USD_CLAUDE_GRACE,
 ) -> CapArithmetic:
     if spec_items < 1:
         raise ShapeInvalid("--items must be at least 1")
     if modules < 1:
         raise ShapeInvalid("--modules must be at least 1")
+    if cap_grace_usd < 0 or cap_grace_usd > CAP_GRACE_CEILING_USD:
+        raise ShapeInvalid(f"--cap-grace-usd must be between 0 and ${CAP_GRACE_CEILING_USD:.2f}")
     return CapArithmetic(
         spec_items=spec_items,
         modules=modules,
         scheduler=scheduler,
         grok_runs_suite=grok_runs_suite,
+        cap_grace_usd=cap_grace_usd,
     )
 
 
@@ -246,6 +261,29 @@ def shape_a(
     }
     if ports:
         build["ports"] = ports
+    if caps.cap_grace_usd:
+        build["cap_grace_usd"] = caps.cap_grace_usd
+    fix: dict = {
+        "name": "fix",
+        "stage": "fix",
+        "fleet": "claude",
+        "model": "sonnet",
+        "effort": "standard",
+        "mode": "write",
+        "base": "build",
+        "needs": ["review-gemini", "review-grok"],
+        "resume": "build",
+        "no_op_ok": True,
+        "timeout": 1800,
+        "cap_usd": caps.fix_cap,
+        "test_policy": test_policy,
+        "branch": branch,
+        "commit": fix_commit,
+        "cascade": False,
+        "prompt": FIX_PROMPT,
+    }
+    if caps.cap_grace_usd:
+        fix["cap_grace_usd"] = caps.cap_grace_usd
     return {
         "name": mission_name,
         "cwd": rel(repo),
@@ -288,25 +326,7 @@ def shape_a(
                 "cap_usd": caps.grok_cap,
                 "prompt": GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT,
             },
-            {
-                "name": "fix",
-                "stage": "fix",
-                "fleet": "claude",
-                "model": "sonnet",
-                "effort": "standard",
-                "mode": "write",
-                "base": "build",
-                "needs": ["review-gemini", "review-grok"],
-                "resume": "build",
-                "no_op_ok": True,
-                "timeout": 1800,
-                "cap_usd": caps.fix_cap,
-                "test_policy": test_policy,
-                "branch": branch,
-                "commit": fix_commit,
-                "cascade": False,
-                "prompt": FIX_PROMPT,
-            },
+            fix,
         ],
     }
 
@@ -367,6 +387,26 @@ def shape_a_followon(
     gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", diff)
     grok_prompt = GROK_READ_ONLY_PROMPT.replace("{{lanes.build.diff}}", diff)
 
+    fix: dict = {
+        "name": "fix",
+        "stage": "fix",
+        "fleet": "claude",
+        "model": "sonnet",
+        "effort": "standard",
+        "mode": "write",
+        "needs": ["review-gemini", "review-grok"],
+        "no_op_ok": True,
+        "timeout": 1800,
+        "cap_usd": caps.fix_cap,
+        "test_policy": "allow",
+        "branch": branch,
+        "commit": fix_commit,
+        "cascade": False,
+        "prompt": FIX_PROMPT,
+    }
+    if caps.cap_grace_usd:
+        fix["cap_grace_usd"] = caps.cap_grace_usd
+
     return {
         "name": mission_name,
         "cwd": str(worktree),
@@ -407,22 +447,6 @@ def shape_a_followon(
                 "cap_usd": caps.grok_cap,
                 "prompt": grok_prompt,
             },
-            {
-                "name": "fix",
-                "stage": "fix",
-                "fleet": "claude",
-                "model": "sonnet",
-                "effort": "standard",
-                "mode": "write",
-                "needs": ["review-gemini", "review-grok"],
-                "no_op_ok": True,
-                "timeout": 1800,
-                "cap_usd": caps.fix_cap,
-                "test_policy": "allow",
-                "branch": branch,
-                "commit": fix_commit,
-                "cascade": False,
-                "prompt": FIX_PROMPT,
-            },
+            fix,
         ],
     }

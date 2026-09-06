@@ -766,8 +766,12 @@ The fix lane lands on `--branch` (default `feat/<spec stem>`), `--build-commit` 
 `--fix-commit` default to conventional messages scoped to the repo name, `--ports`
 claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), and
 `--grok-runs-suite` switches Grok to the prompt that lets it run the gate at the $2.00
-cap. The file is written beside the spec (or at `--out`), never overwritten without
-`--force`, and `--dry-run` runs `conductor mission --dry-run` on it.
+cap. `--cap-grace-usd` (default $0.25, ceiling $0.50) sets the grace band (E24) on
+the build and fix lanes, the two Claude lanes whose cap is native; `--cap-grace-usd 0`
+disables it. The cap arithmetic prints the band as its own line, and it never changes
+the build or fix cap themselves. The file is written beside the spec (or at `--out`),
+never overwritten without `--force`, and `--dry-run` runs `conductor mission --dry-run`
+on it.
 
 ### Salvage
 
@@ -1526,6 +1530,24 @@ the ledger as `cost_usd: null`. A cap on an unpriced model is refused before
 spawn rather than silently unenforced, and a capped run that comes back with
 no usage at all fails closed (`cap unenforced: the run came back unpriced`)
 instead of reading as within budget.
+
+#### Cap grace (E24)
+
+`--cap-grace-usd` (or `cap_grace_usd` on a lane or an attempt) adds a small,
+opt-in band on top of `--cap-usd`, so Claude Code's own terminal message has
+room to finish instead of being cut off mid-summary: `--max-budget-usd`
+carries `cap_usd + cap_grace_usd` as one figure, so a run that lands inside
+the band still stops itself, but is not over budget. It is enforceable on
+the `claude` fleet only (the only native cap; a watcher-killed run never
+gets a terminal message to finish), refused without a `cap_usd`, refused
+above a $0.50 ceiling, and stated per lane or per attempt -- never on a
+mission or a mission-level `cascade`, and a lane's own grace never cascades
+onto its fallback attempts. The receipt's `budget` gains `grace_usd` (what
+was configured) and `grace_used` (how much of the band a finished run
+actually drew on: zero within the plain cap, capped at `grace_usd` itself
+once a run clears the whole band); both are omitted, not null, when no
+grace was set. It changes nothing else: the mission ledger still charges
+the actual cost, so grace draws on `max_cost_usd` like any other spend.
 
 #### Breakers
 

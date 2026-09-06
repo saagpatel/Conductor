@@ -47,9 +47,24 @@ class Budget:
     exceeded: bool = False
     unpriced: bool = False  # a cap was set and no figure ever arrived: unenforced
     observed_usd: float | None = None  # the figure the verdict was based on
+    # E24: cap_grace_usd from the dispatch's own Spec, carried here so
+    # settle() has it without a second argument; None means no grace band.
+    grace_usd: float | None = None
+    # E24: how much of the grace band a finished run actually drew on.
+    # Zero when the cost never left cap_usd; capped at grace_usd itself
+    # once the cost clears the whole band (the band cannot absorb more than
+    # it holds); None when no grace was set or the cost is unknown.
+    grace_used: float | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        # E24: grace_usd/grace_used are omitted, not written null, on a
+        # dispatch that never set a grace band -- every receipt written
+        # before this field existed stays byte-identical in shape.
+        data = asdict(self)
+        if self.grace_usd is None:
+            del data["grace_usd"]
+            del data["grace_used"]
+        return data
 
     def settle(
         self,
@@ -69,14 +84,25 @@ class Budget:
         interrupted was stopped by something other than its cap; it is not
         over budget, and coming back unpriced is no evidence about the cap
         either way.
+
+        E24: with `grace_usd` set, the real ceiling is `cap_usd + grace_usd`
+        -- a run that finishes inside that band is not over budget and is
+        not failed. The native stop (`error_max_budget_usd`) already fires at
+        that same combined figure (fleets.build_argv folds grace into the
+        one flag Claude Code takes), so it still means over budget here.
         """
         self.observed_usd = cost_usd
         self.unpriced = cost_usd is None and not killed and not interrupted
+        ceiling = self.cap_usd if self.grace_usd is None else self.cap_usd + self.grace_usd
         self.exceeded = (
             killed
             or fleet_status == "error_max_budget_usd"
-            or (cost_usd is not None and cost_usd > self.cap_usd)
+            or (cost_usd is not None and cost_usd > ceiling)
         )
+        if self.grace_usd is None or cost_usd is None:
+            self.grace_used = None
+        else:
+            self.grace_used = min(max(0.0, cost_usd - self.cap_usd), self.grace_usd)
 
 
 def codex_sessions_dir() -> Path:

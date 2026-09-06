@@ -99,6 +99,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    put the cascade on one- or two-item specs and fix lanes. Claude stops itself at exactly the cap and
    its final summary costs, so a green build was lost for five cents twice in one day and a green fix
    for seven cents the next (D1): every Claude cap, build or fix, = estimate from rule 2, plus one dollar.
+   E24 adds a smaller, opt-in per-lane `cap_grace_usd` for the same trap: a band folded into the same
+   native cap so the terminal message itself has room to finish without moving rule 2's estimate.
 
 ## Reviewer prompts: no quotas, ever
 
