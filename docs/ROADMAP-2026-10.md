@@ -27,6 +27,7 @@ the cap rules in `AGENTS.md`.
 | E11 ledger report | 0.27.0 | Shape A on 0.26.0 via `conductor shape a`, in parallel with E1; fix salvaged | $7.69 |
 | E1 deliverable verdicts | 0.28.0 | Shape A on 0.26.0 via `conductor shape a`, in parallel with E11; merged after E11 | $11.94 |
 | E22 vendor CLI versions | 0.29.0 | Shape A on 0.28.0, one of three in parallel; fix lane stopped, two README sentences tidied by the lead | $4.81 |
+| E12 notifications | 0.30.0 | Shape A on 0.28.0, one of three in parallel; fix salvaged | $6.17 |
 
 ## What "general" means here
 
