@@ -288,6 +288,11 @@ class Spec:
     # "tools": [...] (optional)}. Opt-in, never inferred; enforceable on
     # Claude Code only (see _AGENT_KEYS above).
     agent: dict | None = None
+    # E1: a lane's product can be a file, not just its reply --
+    # {"path": <repo-relative>, "schema": <path, optional>}. Checked on the
+    # filesystem after the fleet exits (runner.dispatch), never through
+    # `git status` (see the module docstring there for why).
+    deliverable: dict | None = None
 
     def validate(self) -> None:
         if self.fleet not in FLEETS:
@@ -359,6 +364,8 @@ class Spec:
                     "agents from disk and ignores an unknown name"
                 )
             self._validate_agent()
+        if self.deliverable is not None:
+            self._validate_deliverable()
         if self.cap_usd is not None:
             self._validate_cap()
         for name, value in (
@@ -457,6 +464,43 @@ class Spec:
             or not all(isinstance(t, str) and t.strip() for t in tools)
         ):
             raise DispatchRefused("agent tools must be a list of non-empty strings")
+
+    def _validate_deliverable(self) -> None:
+        """E1: `path` is checked on a real filesystem after the fleet exits,
+        so it must stay inside `cwd` -- never absolute, never a `..` escape,
+        never resolving out through a symlink -- the same shape as `include`
+        above. `schema`, when set, is parsed now for the same reason
+        `_validate_schema` parses its schema now: a broken file should fail
+        here, not after the run.
+        """
+        deliverable = self.deliverable
+        if not isinstance(deliverable, dict):
+            raise DispatchRefused("deliverable must be an object")
+        unknown = sorted(set(deliverable) - {"path", "schema"})
+        if unknown:
+            raise DispatchRefused(f"deliverable has unknown field(s): {', '.join(unknown)}")
+        path = deliverable.get("path")
+        if not isinstance(path, str) or not path:
+            raise DispatchRefused("deliverable needs a non-empty 'path'")
+        p = PurePosixPath(path)
+        if p.is_absolute():
+            raise DispatchRefused(f"deliverable path must be repo-relative, not absolute: {path!r}")
+        if ".." in p.parts:
+            raise DispatchRefused(f"deliverable path must not contain '..': {path!r}")
+        root = Path(self.cwd).resolve()
+        resolved = (root / path).resolve()
+        if resolved != root and root not in resolved.parents:
+            raise DispatchRefused(f"deliverable path resolves outside cwd: {path!r}")
+        schema = deliverable.get("schema")
+        if schema is not None:
+            if not isinstance(schema, str) or not schema:
+                raise DispatchRefused("deliverable schema must be a non-empty string")
+            try:
+                json.loads(Path(schema).read_text())
+            except OSError as exc:
+                raise DispatchRefused(f"deliverable schema file unreadable: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise DispatchRefused(f"deliverable schema file is not valid JSON: {exc}") from exc
 
     def resolved_timeout(self) -> int:
         return self.timeout if self.timeout is not None else DEFAULT_TIMEOUT[self.mode]

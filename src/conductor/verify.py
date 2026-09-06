@@ -71,6 +71,11 @@ class GitState:
     branch: str = ""
     dirty_files: int = 0
     manifest: str = ""
+    # E1: per-path identity and bytes, not merely folded into `manifest`'s
+    # single combined digest, so a caller (the read-lane deliverable
+    # exemption) can ask which one path changed instead of only whether
+    # anything did. Populated only when `content` is True, same as `manifest`.
+    signatures: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def capture(cls, cwd: str, *, content: bool = True) -> GitState:
@@ -82,13 +87,15 @@ class GitState:
         root = Path(top.stdout.strip())
         status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         entries = _status_entries(status.stdout) if status.returncode == 0 else []
+        signatures = _signatures(root, entries) if content else {}
         return cls(
             is_repo=True,
             # An unborn HEAD is not an error here; it just means no commits yet.
             head=head.stdout.strip() if head.returncode == 0 else "",
             branch=branch.stdout.strip() if branch.returncode == 0 else "",
             dirty_files=len(entries),
-            manifest=_manifest(root, status.stdout, entries) if content else "",
+            manifest=_manifest(status.stdout, signatures) if content else "",
+            signatures=signatures,
         )
 
 
@@ -109,31 +116,52 @@ def _status_entries(status: str) -> list[tuple[str, str]]:
     return entries
 
 
-def _manifest(root: Path, status: str, entries: list[tuple[str, str]]) -> str:
+def _entry_signature(path: Path) -> str:
+    """One dirty path's identity and bytes, size and content hash joined."""
+    try:
+        if path.is_symlink():
+            content = os.readlink(path).encode(errors="surrogateescape")
+            size = len(content)
+            content_hash = sha256(content).hexdigest()
+        else:
+            # A large untracked tree must not be duplicated in RSS merely
+            # to prove its bytes moved; stream the same complete hash.
+            content_digest = sha256()
+            size = 0
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    size += len(chunk)
+                    content_digest.update(chunk)
+            content_hash = content_digest.hexdigest()
+    except OSError:
+        size = -1
+        content_hash = "missing"
+    return f"{size}\0{content_hash}"
+
+
+def _signatures(root: Path, entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Every dirty path's own signature, computed once and shared by
+    `_manifest`'s combined digest and by `changed_entry_paths`' per-path
+    comparison -- a large untracked file must not be hashed twice."""
+    return {name: _entry_signature(root / name) for _, name in entries}
+
+
+def _manifest(status: str, signatures: dict[str, str]) -> str:
     """Hash dirty path identities and bytes, not merely their count."""
     digest = sha256(status.encode(errors="surrogateescape"))
-    for _, name in sorted(entries, key=lambda entry: entry[1]):
-        path = root / name
-        try:
-            if path.is_symlink():
-                content = os.readlink(path).encode(errors="surrogateescape")
-                size = len(content)
-                content_hash = sha256(content).hexdigest()
-            else:
-                # A large untracked tree must not be duplicated in RSS merely
-                # to prove its bytes moved; stream the same complete hash.
-                content_digest = sha256()
-                size = 0
-                with path.open("rb") as source:
-                    while chunk := source.read(1024 * 1024):
-                        size += len(chunk)
-                        content_digest.update(chunk)
-                content_hash = content_digest.hexdigest()
-        except OSError:
-            size = -1
-            content_hash = "missing"
-        digest.update(f"\0{name}\0{size}\0{content_hash}".encode(errors="surrogateescape"))
+    for name in sorted(signatures):
+        digest.update(f"\0{name}\0{signatures[name]}".encode(errors="surrogateescape"))
     return digest.hexdigest()
+
+
+def changed_entry_paths(before: GitState, after: GitState) -> set[str]:
+    """E1: every dirty path whose presence or content actually differs
+    between two snapshots -- the per-path evidence `manifest`'s single
+    combined hash otherwise collapses into one yes/no. Used by the read-lane
+    deliverable exemption to tell "only the declared file changed" apart
+    from "something else changed too"."""
+    names = set(before.signatures) | set(after.signatures)
+    return {name for name in names if before.signatures.get(name) != after.signatures.get(name)}
 
 
 @dataclass
@@ -148,6 +176,10 @@ class Verdict:
     branch_before: str = ""
     branch_after: str = ""
     branch_moved: bool = False
+    # E1: true only when this was a read dispatch with a declared deliverable
+    # and the only dirty-path change was that file, set by runner.dispatch
+    # (this module has no notion of a Spec's deliverable).
+    deliverable_only: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

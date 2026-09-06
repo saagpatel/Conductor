@@ -109,6 +109,13 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 raise DispatchRefused(f"agent file unreadable: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise DispatchRefused(f"agent file is not valid JSON: {exc}") from exc
+        deliverable = None
+        if args.deliverable:
+            deliverable = {"path": args.deliverable}
+            if args.deliverable_schema:
+                deliverable["schema"] = args.deliverable_schema
+        elif args.deliverable_schema:
+            raise DispatchRefused("--deliverable-schema needs --deliverable")
         spec = Spec(
             fleet=args.fleet,
             prompt=prompt,
@@ -134,6 +141,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             include=args.include,
             taint=args.taint,
             agent=agent,
+            deliverable=deliverable,
         )
         result = dispatch(
             spec,
@@ -691,6 +699,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="kill after this many seconds without a tool call; 0 disables",
     )
     p_dispatch.add_argument("--schema", help="JSON Schema path for the final message")
+    p_dispatch.add_argument(
+        "--deliverable",
+        metavar="PATH",
+        help="repo-relative file this dispatch must produce; checked on disk after it exits",
+    )
+    p_dispatch.add_argument(
+        "--deliverable-schema",
+        metavar="FILE",
+        help="JSON Schema path the deliverable must satisfy; needs --deliverable",
+    )
     p_dispatch.add_argument("--resume", metavar="SESSION_ID", help="resume a fleet session")
     p_dispatch.add_argument(
         "--verdict",

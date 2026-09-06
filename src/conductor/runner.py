@@ -44,6 +44,7 @@ from .verify import (
     CommitOutcome,
     GitState,
     TestOutcome,
+    changed_entry_paths,
     commit_work,
     compare,
     diff_since,
@@ -91,12 +92,23 @@ class Result:
     tests: dict | None = None
     test_surface: dict | None = None
     reproduce: dict | None = None
+    # E1: {"path", "exists", "bytes", "parsed", "ok", "reason"} when
+    # spec.deliverable was set, else None. `ok` is null on a dry run (declared,
+    # not checked). Checked on the filesystem of the lane's actual working
+    # tree, never through `git status` -- see `_check_deliverable`.
+    deliverable: dict | None = None
     commit: dict | None = None
     usage: dict | None = None
     budget: dict | None = None
     breaker: dict | None = None
     answer_path: str | None = None
     diff_path: str | None = None
+    # E1: a persisted copy of the deliverable's bytes (when it exists),
+    # beside answer.txt and diff.patch, so it outlives a worktree that gets
+    # released before the caller ever sees this Result. Set whenever the
+    # file exists, regardless of `deliverable["ok"]` -- same convention as
+    # `answer_path`.
+    deliverable_path: str | None = None
     attestation_path: str | None = None
     # The same bounds the signed attestation carries, recorded here too so a
     # verifier can compare against this receipt directly instead of
@@ -177,17 +189,30 @@ class Result:
             if counted.get("timed_out"):
                 return f"{label} timed out"
             return f"{label} exited {counted.get('exit_code')}"
+        # E1: a declared deliverable that is missing, empty, unparsable, or
+        # schema-invalid is checked after the process/fleet/gate checks above
+        # (a run that never really finished must classify as whatever ended
+        # it, not as "deliverable") and before the moved-bytes checks below
+        # (the exemption those checks may apply depends on knowing this
+        # first). `ok` is None on a dry run, which is not a failure.
+        if self.deliverable is not None and self.deliverable.get("ok") is False:
+            return self.deliverable.get("reason") or (
+                f"deliverable check failed: {self.deliverable.get('path')}"
+            )
         no_op = self.git_verdict.get("checked") and self.git_verdict.get("no_op")
         if self.mode == "write" and no_op and not self.no_op_ok:
             return "write dispatch moved no bytes"
         # The mirror image: a research dispatch that edited the tree ignored
         # its read-only setting (agy's read mode did exactly that live,
         # 2026-09-03), and in a shared checkout that is the collision
-        # isolation exists to prevent. The bytes are the evidence.
+        # isolation exists to prevent. The bytes are the evidence. E1's
+        # deliverable_only exemption lifts this by exactly the declared
+        # file: a read lane may write its own product.
         if (
             self.mode == "read"
             and self.git_verdict.get("checked")
             and not self.git_verdict.get("no_op")
+            and not self.git_verdict.get("deliverable_only")
         ):
             return "read dispatch moved bytes"
         # A read dispatch's answer IS its work. Exit 0 with nothing said is
@@ -302,6 +327,7 @@ class Result:
             "ports": (self.lane_env or {}).get("ports", []),
             "answer_path": self.answer_path,
             "diff_path": self.diff_path,
+            "deliverable_path": self.deliverable_path,
             "attestation_path": self.attestation_path,
             "run_dir": self.run_dir,
             "session_id": self.session_id,
@@ -311,6 +337,7 @@ class Result:
             "cancelled": self.cancelled,
             "taint": self.taint,
             "agent": self.agent,
+            "deliverable": self.deliverable,
         }
 
 
@@ -344,6 +371,138 @@ def _surface_result(policy: str, before: Surface, after: Surface) -> dict:
         "digest_after": after.digest,
         "touched": bool(changed),
         "changed": changed,
+    }
+
+
+_SCHEMA_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
+    "string": lambda v: isinstance(v, str),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "array": lambda v: isinstance(v, list),
+    "object": lambda v: isinstance(v, dict),
+}
+
+
+def _schema_mismatch(data: object, schema: dict) -> str | None:
+    """E1's own minimal check, the same scope as a verdict checklist's
+    contract: every name in `required` is present, and every present
+    property whose schema declares a `type` has a value of that type. Not a
+    general JSON Schema validator."""
+    if not isinstance(data, dict):
+        return "top level is not a JSON object"
+    for name in schema.get("required") or []:
+        if name not in data:
+            return f"missing required property {name!r}"
+    for name, subschema in (schema.get("properties") or {}).items():
+        if name not in data or not isinstance(subschema, dict):
+            continue
+        expected = subschema.get("type")
+        # JSON Schema allows "type" to be a list of alternatives (or anything
+        # else); item 3's own scope is a single declared type name, so
+        # anything else is not checked rather than raised on -- a schema
+        # that could not have been anticipated must not crash the dispatch.
+        checker = _SCHEMA_TYPE_CHECKS.get(expected) if isinstance(expected, str) else None
+        if checker is not None and not checker(data[name]):
+            return f"property {name!r} must be of type {expected}"
+    return None
+
+
+def _repo_relative(cwd: str, path: str) -> str:
+    """`path`, declared relative to `cwd`, expressed relative to the repo's
+    toplevel instead -- what `changed_entry_paths` (git status, always
+    root-relative) actually names. Falls back to `path` unchanged when the
+    toplevel can't be found, so a non-repo cwd degrades to the old behavior
+    rather than raising."""
+    top = git_run(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return path
+    try:
+        prefix = Path(cwd).resolve().relative_to(Path(top.stdout.strip()).resolve())
+    except ValueError:
+        return path
+    return (prefix / path).as_posix()
+
+
+def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
+    """E1: a lane's product can be a file, not just its reply. Checked on
+    the filesystem of the lane's actual working tree (its worktree when
+    isolated; `spec.cwd` already points there by the time this is called),
+    never through `git status`: an operator's own global excludes can hide
+    an untracked file from Git entirely, which is exactly how one fixture's
+    own deliverable went missing from its receipt (C7)."""
+    declared = spec.deliverable
+    if declared is None:
+        return None
+    path = declared["path"]
+    if dry_run:
+        return {
+            "path": path,
+            "exists": None,
+            "bytes": None,
+            "parsed": None,
+            "ok": None,
+            "reason": None,
+        }
+    full = Path(spec.cwd) / path
+    if not full.is_file():
+        return {
+            "path": path,
+            "exists": False,
+            "bytes": None,
+            "parsed": None,
+            "ok": False,
+            "reason": f"deliverable missing: {path}",
+        }
+    size = full.stat().st_size
+    if size == 0:
+        return {
+            "path": path,
+            "exists": True,
+            "bytes": 0,
+            "parsed": None,
+            "ok": False,
+            "reason": f"deliverable empty: {path}",
+        }
+    schema_path = declared.get("schema")
+    if not schema_path:
+        return {
+            "path": path,
+            "exists": True,
+            "bytes": size,
+            "parsed": None,
+            "ok": True,
+            "reason": None,
+        }
+    try:
+        data = json.loads(full.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {
+            "path": path,
+            "exists": True,
+            "bytes": size,
+            "parsed": False,
+            "ok": False,
+            "reason": f"deliverable does not parse: {path}",
+        }
+    schema = json.loads(Path(schema_path).read_text())
+    problem = _schema_mismatch(data, schema)
+    if problem is not None:
+        return {
+            "path": path,
+            "exists": True,
+            "bytes": size,
+            "parsed": True,
+            "ok": False,
+            "reason": f"deliverable does not match schema: {problem}",
+        }
+    return {
+        "path": path,
+        "exists": True,
+        "bytes": size,
+        "parsed": True,
+        "ok": True,
+        "reason": None,
     }
 
 
@@ -1057,6 +1216,7 @@ def dispatch(
             stage=spec.stage,
             lane=lane,
             mission=mission,
+            deliverable=_check_deliverable(spec, dry_run=True),
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1352,6 +1512,22 @@ def dispatch(
             if reproduce_state.get("interrupted"):
                 interrupted = True
 
+        # E1: after the fleet exits, before the gate. A dry run never reaches
+        # here (dispatch() returns earlier), so this is always a real check.
+        deliverable_state = _check_deliverable(spec, dry_run=False)
+        deliverable_path: str | None = None
+        if deliverable_state is not None and deliverable_state.get("exists"):
+            # Persisted now, while spec.cwd (the worktree, when isolated) still
+            # exists: a clean isolated worktree is released before this dispatch
+            # returns, and a downstream lane's {{lanes.<name>.deliverable}} must
+            # still be able to read it afterwards.
+            dest = run_dir / "deliverable"
+            try:
+                shutil.copyfile(Path(spec.cwd) / deliverable_state["path"], dest)
+                deliverable_path = str(dest)
+            except OSError:
+                pass
+
         # Commit before the Git verdict is taken, so it describes the state
         # the caller is actually left with.
         commit: CommitOutcome | None = None
@@ -1444,6 +1620,29 @@ def dispatch(
 
         after = GitState.capture(spec.cwd)
         git_verdict = compare(spec.cwd, before, after)
+        if (
+            spec.mode == "read"
+            and spec.deliverable is not None
+            and git_verdict.checked
+            and not git_verdict.no_op
+            and before.head == after.head
+            and before.branch == after.branch
+        ):
+            # E1: a read lane may move exactly its declared deliverable. Any
+            # other change -- a second file, a commit, a branch move -- must
+            # still fail the ordinary read-only check below. `changed` names
+            # are repo-root-relative (git status runs at the toplevel), while
+            # `spec.deliverable["path"]` is cwd-relative; a cwd that is a
+            # subdirectory of the repo (an ordinary, supported shape) needs
+            # the same prefix joined on before the two can compare equal.
+            changed = changed_entry_paths(before, after)
+            deliverable_repo_path = _repo_relative(spec.cwd, spec.deliverable["path"])
+            if changed and changed == {deliverable_repo_path}:
+                git_verdict.deliverable_only = True
+                git_verdict.notes.append(
+                    f"read dispatch moved only its declared deliverable: "
+                    f"{spec.deliverable['path']}"
+                )
         git_verdict.notes.extend(output.notes)
         if resume_note:
             git_verdict.notes.append(resume_note)
@@ -1567,6 +1766,8 @@ def dispatch(
         tests=tests.to_dict() if tests else None,
         test_surface=surface_state,
         reproduce=reproduce_state,
+        deliverable=deliverable_state,
+        deliverable_path=deliverable_path,
         commit=commit.to_dict() if commit else None,
         usage=usage_dict,
         budget=budget.to_dict() if budget is not None else None,
