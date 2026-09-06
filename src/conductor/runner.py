@@ -1660,16 +1660,32 @@ def dispatch(
                 _register_live_group(proc.pid)
                 if spec.fleet == "script" and proc.stdin is not None:
                     # E6: the prompt, when there is one, is delivered on
-                    # stdin; an empty prompt just closes it at once. A
-                    # command that never reads stdin at all (exits before
-                    # this write lands) must not be mistaken for a spawn
-                    # failure.
-                    try:
-                        proc.stdin.write(spec.prompt.encode())
-                    except (BrokenPipeError, OSError):
-                        pass
-                    finally:
-                        proc.stdin.close()
+                    # stdin; an empty prompt just closes it at once. Fed
+                    # from a thread, not written here directly: a prompt
+                    # bigger than the pipe's kernel buffer blocks until the
+                    # command reads it, and a command that never reads
+                    # stdin at all (sleeping, or simply not looking) would
+                    # otherwise block this dispatch's own timeout from ever
+                    # starting to enforce itself. The thread is daemonic and
+                    # unjoined -- `_wait`'s own kill closes the command's end
+                    # of the pipe, which is what actually unblocks a stuck
+                    # write, and nothing here needs to wait for that.
+                    def _feed_stdin(pipe, data: bytes) -> None:
+                        try:
+                            pipe.write(data)
+                        except (BrokenPipeError, OSError):
+                            pass
+                        finally:
+                            try:
+                                pipe.close()
+                            except OSError:
+                                pass
+
+                    threading.Thread(
+                        target=_feed_stdin,
+                        args=(proc.stdin, spec.prompt.encode()),
+                        daemon=True,
+                    ).start()
                 if (
                     spec.stall_timeout
                     or spec.loop_limit

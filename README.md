@@ -989,9 +989,24 @@ costs nothing in a way the ledger can verify rather than fail closed.
 
 ```json
 {
-  "fleet": "script",
-  "command": "ruff check src && ruff format --check src",
-  "stage": "build"
+  "prompt": "lint, then review the result",
+  "lanes": [
+    {
+      "name": "lint",
+      "fleet": "script",
+      "command": "ruff check src && ruff format --check src",
+      "stage": "build",
+      "no_op_ok": true
+    },
+    {
+      "name": "review",
+      "fleet": "claude",
+      "mode": "read",
+      "stage": "review",
+      "needs": ["lint"],
+      "prompt": "the lint lane's own output: {{lanes.lint.answer}}"
+    }
+  ]
 }
 ```
 

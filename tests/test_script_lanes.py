@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -343,17 +344,21 @@ def test_hygiene_flags_a_script_review_lane_over_a_script_build_lane(tmp_path):
 
 
 def test_write_build_lane_lands_a_commit_and_reads_free(repo, home):
+    # A real gate the script's own edit must satisfy: it checks seed.txt's
+    # content, so a script that failed to make the edit would fail this
+    # gate rather than being read as "clean" on isolation state alone.
     mission = mission_from_dict(
         {
             "name": "script-build",
             "prompt": "x",
             "max_cost_usd": 5.0,
+            "test": "grep -qx work seed.txt",
             "lanes": [
                 {
                     "name": "build",
                     "fleet": "script",
                     "stage": "build",
-                    "command": "echo work >> seed.txt && git add -A && git commit -qm work",
+                    "command": "echo work > seed.txt && git add -A && git commit -qm work",
                 }
             ],
         },
@@ -367,12 +372,14 @@ def test_write_build_lane_lands_a_commit_and_reads_free(repo, home):
     assert attempt["free"] is True
     assert attempt["unpriced"] is False
     assert attempt["cost_usd"] == 0.0
+    assert attempt["tests"] == 0  # the gate actually ran and passed
     assert lane["clean"] is True
     assert result.budget["spent_usd"] == 0.0
     assert result.budget["unverifiable"] is False
     assert result.budget["unpriced_dispatches"] == 0
     receipt = json.loads(Path(result.mission_dir, "lanes", "build.json").read_text())
     assert receipt["attempts"][0]["free"] is True
+    assert receipt["attempts"][0]["tests"] == 0
 
 
 def test_read_review_lane_answer_is_stdout_with_no_diff(repo, home):
@@ -420,6 +427,25 @@ def test_empty_prompt_closes_stdin_at_once(repo, home):
     )
     assert result.ok is True
     assert result.exit_code == 0
+
+
+def test_timeout_still_applies_when_the_prompt_outgrows_the_pipe_buffer(repo, home):
+    """A prompt bigger than a pipe's kernel buffer (~64KiB), fed to a
+    command that never reads stdin and does not exit on its own: the
+    dispatch's own `timeout` must still be the thing that ends it, not the
+    prompt write blocking the main thread until the command happens to
+    stop. Regression: delivering the prompt with a plain, synchronous
+    `proc.stdin.write()` before the wait loop starts means `timeout` is not
+    yet running while that write blocks."""
+    big_prompt = "x" * (1024 * 1024)  # 1 MiB, far past any pipe buffer
+    started = time.monotonic()
+    result = dispatch(
+        _spec(repo, mode="read", prompt=big_prompt, command="sleep 5", timeout=1),
+        home=home,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 4, f"dispatch took {elapsed:.1f}s against a 1s timeout"
+    assert result.timed_out is True
 
 
 def test_fix_stage_script_lane_obeys_the_reproduce_gate(repo, home, git_out):
@@ -485,3 +511,18 @@ def test_record_and_replay_a_script_lane(repo, home, tmp_path):
     assert result.ok is True
     fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
     assert golden.check(fixture) == []
+
+
+def test_readme_script_lanes_section_shows_a_two_lane_mission_example():
+    """The spec asks for one example mission with a script build lane and a
+    model review lane, not just a bare script-lane fragment -- the pairing
+    (a stage: build script lane feeding a stage: review model lane) is the
+    part worth showing, since it is what makes a script lane useful inside
+    a pipeline rather than standing alone."""
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Script lanes", 1)[1].split("\n### ", 1)[0]
+    assert '"fleet": "script"' in section
+    assert '"stage": "build"' in section
+    assert '"stage": "review"' in section
+    assert '"mode": "read"' in section
+    assert '"lanes"' in section  # a mission, not a lone lane fragment
