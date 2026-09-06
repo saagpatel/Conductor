@@ -45,9 +45,9 @@ import time
 import tomllib
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import attest
 from . import collisions as collisions_mod
@@ -349,6 +349,9 @@ class Lane:
     # D2: the lanes this lane inherited taint from, in mission order; empty
     # when the lane is tainted only by its own `taint: true`.
     taint_from: list[str] = field(default_factory=list)
+    # E7: this lane's fleet is the operator, not a dispatch -- see _human_lane.
+    # Load-derived from `fleet: "human"`, never set directly by a mission file.
+    human: bool = False
 
 
 @dataclass
@@ -531,6 +534,11 @@ class Mission:
                     f"lane '{lane.name}': an adversarial lane must declare a base -- "
                     "the lane it attacks"
                 )
+            if lane.human:
+                # E7: a human lane's attempt is never dispatched -- Spec.validate
+                # (below) must never see it, and none of the stage/mode rules
+                # that follow apply to a lane with no dispatch at all.
+                continue
             for attempt in lane.attempts:
                 if attempt.mode == "write" and not attempt.isolated():
                     raise MissionInvalid(f"lane '{lane.name}': write lanes must isolate")
@@ -727,6 +735,7 @@ class Mission:
     def _validate_graph(self, names: set[str]) -> None:
         """Needs and bases name real lanes, never the lane itself, and form
         no cycle; every template reference is to a declared need."""
+        by_name = {lane.name: lane for lane in self.lanes}
         for lane in self.lanes:
             for need in lane.needs:
                 if need not in names:
@@ -735,6 +744,14 @@ class Mission:
                     raise MissionInvalid(f"lane '{lane.name}' needs itself")
             if lane.base is not None and lane.base not in lane.needs:
                 raise MissionInvalid(f"lane '{lane.name}': base '{lane.base}' must be a need")
+            # E7: a human lane holds no commit and no fleet session -- naming
+            # one as another lane's base or resume is refused here, the same
+            # place an unknown or self-referential base/resume already is.
+            if lane.base is not None and by_name[lane.base].human:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': base '{lane.base}' is a human lane, "
+                    "which holds no commit to build on"
+                )
             if lane.resume is not None:
                 if lane.resume not in names:
                     raise MissionInvalid(
@@ -745,6 +762,11 @@ class Mission:
                 if lane.resume not in lane.needs and lane.resume != lane.base:
                     raise MissionInvalid(
                         f"lane '{lane.name}': resume '{lane.resume}' must be in needs or be base"
+                    )
+                if by_name[lane.resume].human:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': resume '{lane.resume}' is a human lane, "
+                        "which holds no session to resume"
                     )
             for attempt in lane.attempts:
                 for ref_lane, ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
@@ -758,6 +780,14 @@ class Mission:
                         raise MissionInvalid(
                             f"lane '{lane.name}' references lanes.{ref_lane}.{ref_field} "
                             f"but does not list '{ref_lane}' in needs"
+                        )
+                    elif (
+                        ref_field in ("diff", "test_touched", "verdict")
+                        and by_name[ref_lane].human
+                    ):
+                        raise MissionInvalid(
+                            f"lane '{lane.name}' references lanes.{ref_lane}.{ref_field}, but "
+                            f"'{ref_lane}' is a human lane with no {ref_field}"
                         )
         # Cycle check: a lane can never wait on something that waits on it.
         needs = {lane.name: set(lane.needs) for lane in self.lanes}
@@ -844,6 +874,7 @@ class Mission:
             "taint",
             "tainted",
             "taint_from",
+            "human",
         }
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
@@ -866,6 +897,8 @@ class Mission:
                 raise MissionInvalid(
                     f"mission snapshot lane {index} taint_from must be a list of strings"
                 )
+            if not isinstance(raw_lane["human"], bool):
+                raise MissionInvalid(f"mission snapshot lane {index} human must be true or false")
             attempts = raw_lane["attempts"]
             if not isinstance(attempts, list) or not attempts:
                 raise MissionInvalid(
@@ -1122,8 +1155,16 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         if not isinstance(raw_lane, dict):
             raise MissionInvalid(f"lane {i} must be an object")
         _reject_unknown(raw_lane, _LANE_KEYS, f"lane {i}")
-        primary_fields = _attempt_fields(raw_lane, base_dir, defaults)
         lane_where = f"lane '{raw_lane['name']}'" if raw_lane.get("name") else f"lane {i}"
+        if raw_lane.get("fleet") == "human":
+            lane = _human_lane(raw_lane, base_dir, cwd, lane_where, defaults, lanes)
+            lanes.append(lane)
+            # E7: a human lane is tainted at load, always -- see _human_lane --
+            # so every downstream lane that reads its answer inherits taint
+            # from it exactly the way it would from any other tainted lane.
+            tainted_by_name[lane.name] = (True, list(lane.taint_from))
+            continue
+        primary_fields = _attempt_fields(raw_lane, base_dir, defaults)
         primary = _attempt(primary_fields, where=lane_where)
         attempts = [primary]
         for j, raw_fb in enumerate(raw_lane.get("fallback") or []):
@@ -1627,6 +1668,100 @@ def _default_lane_name(primary: Attempt, existing: list[Lane]) -> str:
     while f"{base}-{n}" in taken:
         n += 1
     return f"{base}-{n}"
+
+
+# E7: human lanes -- a lane whose fleet is the operator rather than a fleet
+# CLI. Never dispatched (Attempt.spec is never called for one, and fleets.py
+# never hears about it), so its attempt carries only the ask and, optionally,
+# a deliverable path; every other field it could set would describe a
+# dispatch that never happens.
+_HUMAN_ATTEMPT_ALLOWED = frozenset({"fleet", "prompt", "deliverable"})
+
+
+def _validate_human_attempt(attempt: Attempt, where: str) -> None:
+    """Every Attempt field but the ask and its optional deliverable must sit
+    at Attempt's own default -- whether the mission file set it directly on
+    this lane or it arrived through a mission-level default cascading onto
+    it the way it would onto any other lane (a mission-level `test`, most
+    concretely: D1 cascades it onto every lane already)."""
+    reference = Attempt(fleet="human", prompt=attempt.prompt)
+    for f in fields(Attempt):
+        if f.name in _HUMAN_ATTEMPT_ALLOWED:
+            continue
+        if getattr(attempt, f.name) != getattr(reference, f.name):
+            raise MissionInvalid(f"{where}: a human lane may not set {f.name}")
+
+
+def _human_deliverable_path(mission_cwd: str, path: str) -> Path:
+    """E1's shape check (repo-relative, no `..`, resolves inside cwd),
+    mirrored from fleets.Spec._validate_deliverable: a human lane's `Spec`
+    is never built, let alone validated, so this is the only place its
+    declared path is checked before the operator is asked to produce it."""
+    p = PurePosixPath(path)
+    if p.is_absolute():
+        raise MissionInvalid(f"deliverable path must be repo-relative, not absolute: {path!r}")
+    if ".." in p.parts:
+        raise MissionInvalid(f"deliverable path must not contain '..': {path!r}")
+    root = Path(mission_cwd).resolve()
+    resolved = (root / path).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise MissionInvalid(f"deliverable path resolves outside cwd: {path!r}")
+    return resolved
+
+
+def _human_lane(
+    raw_lane: dict,
+    base_dir: Path,
+    mission_cwd: str,
+    where: str,
+    defaults: dict,
+    existing: list[Lane],
+) -> Lane:
+    """A lane whose fleet is the operator: it carries `name`, `prompt` or
+    `prompt_file` (the ask, which may use templates), `needs`, and an
+    optional `deliverable {path}`. Everything else that names a dispatch,
+    a place in the cascade or a pipeline, or a commit/session to build on
+    or resume makes no sense with nothing dispatched, so it is refused here,
+    at load, rather than left to fail once the mission actually runs."""
+    if raw_lane.get("fallback"):
+        raise MissionInvalid(f"{where}: a human lane may not set fallback")
+    if raw_lane.get("cascade") is True:
+        raise MissionInvalid(f"{where}: a human lane may not set cascade")
+    if raw_lane.get("stage") is not None:
+        raise MissionInvalid(f"{where}: a human lane may not set stage")
+    if raw_lane.get("branch") is not None:
+        raise MissionInvalid(f"{where}: a human lane may not set branch")
+    needs, lane_base, lane_resume = _lane_graph_fields(raw_lane, where=where)
+    if lane_base is not None:
+        raise MissionInvalid(f"{where}: a human lane may not set base")
+    if lane_resume is not None:
+        raise MissionInvalid(f"{where}: a human lane may not set resume")
+    primary_fields = _attempt_fields(raw_lane, base_dir, defaults)
+    primary = _attempt(primary_fields, where=where)
+    _validate_human_attempt(primary, where)
+    if primary.deliverable is not None:
+        deliverable = primary.deliverable
+        unknown = sorted(set(deliverable) - {"path"})
+        if unknown:
+            raise MissionInvalid(
+                f"{where}: a human lane's deliverable may only set 'path', "
+                f"not {', '.join(unknown)}"
+            )
+        path = deliverable.get("path")
+        if not isinstance(path, str) or not path:
+            raise MissionInvalid(f"{where}: deliverable needs a non-empty 'path'")
+        _human_deliverable_path(mission_cwd, path)
+    lane_name = str(raw_lane.get("name") or _default_lane_name(primary, existing))
+    return Lane(
+        name=lane_name,
+        attempts=[primary],
+        needs=needs,
+        cascaded=False,
+        taint=True,
+        tainted=True,
+        taint_from=["human"],
+        human=True,
+    )
 
 
 # --- running ----------------------------------------------------------------
@@ -2441,6 +2576,32 @@ def _artifact_matches(recorded: str | None, expected: Path) -> bool:
         return False
 
 
+def _human_lane_result(mission: Mission, lane: Lane, mission_dir: Path) -> LaneResult | None:
+    """E7: the answered state of a human lane, or None while it is still
+    waiting on the operator. `run_mission`'s pause-answer handling is the
+    only writer of `answers/<lane>.txt`; once it exists (and the lane's
+    declared deliverable, if any, exists too) there is nothing left to run."""
+    answer_path = mission_dir / "answers" / f"{lane.name}.txt"
+    if not answer_path.is_file():
+        return None
+    deliverable = lane.attempts[0].deliverable
+    deliverable_path: str | None = None
+    if deliverable is not None:
+        resolved = _human_deliverable_path(mission.cwd, deliverable["path"])
+        if not resolved.is_file():
+            return None
+        deliverable_path = str(resolved)
+    return LaneResult(
+        name=lane.name,
+        ok=True,
+        needs=list(lane.needs),
+        tainted=True,
+        taint_from=list(lane.taint_from),
+        answer_path=str(answer_path),
+        deliverable_path=deliverable_path,
+    )
+
+
 def _trusted_lane(
     mission: Mission,
     mission_dir: Path,
@@ -2452,6 +2613,27 @@ def _trusted_lane(
     """Whether a completed receipt is enough to skip every effect of a lane."""
     if result.name != lane.name:
         return False
+    if lane.human:
+        # E7: a human lane has no run receipt; its answer file (and declared
+        # deliverable) on disk is the whole record. The receipt's own
+        # `answer_path` must point at that file, the same artifact check
+        # every other lane's answer gets.
+        if result.ok is not True or result.attempts:
+            return False
+        if not _artifact_matches(
+            result.answer_path, mission_dir / "answers" / f"{lane.name}.txt"
+        ):
+            return False
+        if not (mission_dir / "answers" / f"{lane.name}.txt").is_file():
+            return False
+        deliverable = lane.attempts[0].deliverable
+        if deliverable is not None:
+            resolved = _human_deliverable_path(mission.cwd, deliverable["path"])
+            if not resolved.is_file():
+                return False
+            if not _artifact_matches(result.deliverable_path, resolved):
+                return False
+        return True
     if result.skipped is not None:
         # A lane cancelled because another sink already passed is a settled
         # outcome of a mission that succeeded, not unfinished work; rerunning
@@ -2662,6 +2844,18 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     rerun: set[str] = set()
     prior_ok = bool((prior_result or {}).get("ok"))
     for lane in mission.lanes:
+        if lane.human:
+            # E7: an answered human lane needs no run receipt -- its answer
+            # (and declared deliverable) on disk are the whole record; an
+            # unanswered one is re-asked, the same as any lane that never
+            # settled.
+            answered = _human_lane_result(mission, lane, mission_dir)
+            if answered is not None and _trusted_lane(mission, mission_dir, lane, answered):
+                answered.kept = True
+                kept[lane.name] = answered
+            else:
+                rerun.add(lane.name)
+            continue
         old = previous.get(lane.name)
         if old is not None and _trusted_lane(mission, mission_dir, lane, old, prior_ok=prior_ok):
             old.kept = True
@@ -2712,6 +2906,71 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
 _PAUSE_RECORD_FIELDS = ("kind", "lane", "spent_usd", "threshold", "asked_at", "question")
 
 
+def _answer_human_pause(
+    mission: Mission,
+    mission_dir: Path,
+    pause_path: Path,
+    pause_doc: dict,
+    *,
+    answer: str | None,
+    answer_file: str | None,
+) -> dict | None:
+    """E7: resolve a `kind: human` pause. `--answer stop` stops the mission
+    exactly like any other pause (the caller treats the returned record the
+    same way); `--answer continue` makes no sense with nothing dispatched to
+    resume, so it is refused; anything else is the operator's answer text,
+    written to `answers/<lane>.txt` the way any lane's answer is kept. The
+    history records the answer's length and when it landed, never the text
+    itself a second time -- it is already on disk, once."""
+    if answer is not None and answer_file is not None:
+        raise MissionInvalid("--answer and --answer-file are mutually exclusive")
+    if answer == "stop":
+        resolved = {key: pause_doc.get(key) for key in _PAUSE_RECORD_FIELDS}
+        resolved["answer"] = "stop"
+        resolved["answered_at"] = datetime.now(UTC).isoformat()
+        pause_doc["answer"] = "stop"
+        pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
+        pause_path.write_text(json.dumps(pause_doc, indent=2))
+        return resolved
+    if answer == "continue":
+        raise MissionInvalid("a human lane needs an answer")
+    if answer_file is not None:
+        try:
+            text = Path(answer_file).expanduser().read_text()
+        except OSError as exc:
+            raise MissionInvalid(f"cannot read --answer-file: {exc}") from exc
+    elif answer is not None:
+        text = answer
+    else:
+        raise MissionInvalid(
+            f"mission is paused: {pause_doc.get('question')}; "
+            "resume with --answer TEXT, --answer-file PATH, or --answer stop"
+        )
+    lane_name = pause_doc.get("lane")
+    lane = next((candidate for candidate in mission.lanes if candidate.name == lane_name), None)
+    if lane is None:
+        raise MissionInvalid(f"paused lane '{lane_name}' is no longer in the mission")
+    deliverable = lane.attempts[0].deliverable
+    if deliverable is not None:
+        resolved_deliverable = _human_deliverable_path(mission.cwd, deliverable["path"])
+        if not resolved_deliverable.is_file():
+            raise MissionInvalid(
+                f"lane '{lane_name}' declares a deliverable at '{resolved_deliverable}', "
+                "which does not exist"
+            )
+    answers_dir = mission_dir / "answers"
+    answers_dir.mkdir(exist_ok=True)
+    (answers_dir / f"{lane_name}.txt").write_text(text)
+    resolved = {key: pause_doc.get(key) for key in _PAUSE_RECORD_FIELDS}
+    resolved["answer"] = "text"
+    resolved["answer_length"] = len(text)
+    resolved["answered_at"] = datetime.now(UTC).isoformat()
+    pause_doc["answer"] = "answered"
+    pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
+    pause_path.write_text(json.dumps(pause_doc, indent=2))
+    return None
+
+
 def run_mission(
     mission: Mission,
     *,
@@ -2719,7 +2978,9 @@ def run_mission(
     dry_run: bool = False,
     resume_dir: Path | None = None,
     answer: str | None = None,
+    answer_file: str | None = None,
     dispatcher: Callable[..., Result] | None = None,
+    human_answers: dict[str, str] | None = None,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
@@ -2748,22 +3009,30 @@ def run_mission(
         pause_path = mission_dir / "pause.json"
         pause_doc = _json_object(pause_path)
         if pause_doc is not None and pause_doc.get("answer") is None:
-            if answer is None:
-                raise MissionInvalid(
-                    f"mission '{mission_id}' is paused: {pause_doc.get('question')}; "
-                    "resume with --answer continue or --answer stop"
+            if pause_doc.get("kind") == "human":
+                stop_answer = _answer_human_pause(
+                    mission, mission_dir, pause_path, pause_doc, answer=answer,
+                    answer_file=answer_file,
                 )
-            if answer not in ("continue", "stop"):
-                raise MissionInvalid(f"--answer must be 'continue' or 'stop', got {answer!r}")
-            resolved = {key: pause_doc.get(key) for key in _PAUSE_RECORD_FIELDS}
-            resolved["answer"] = answer
-            resolved["answered_at"] = datetime.now(UTC).isoformat()
-            pause_doc["answer"] = answer
-            pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
-            pause_path.write_text(json.dumps(pause_doc, indent=2))
-            if answer == "stop":
-                stop_answer = resolved
-        elif answer is not None:
+            else:
+                if answer_file is not None:
+                    raise MissionInvalid("--answer-file only applies to a human lane pause")
+                if answer is None:
+                    raise MissionInvalid(
+                        f"mission '{mission_id}' is paused: {pause_doc.get('question')}; "
+                        "resume with --answer continue or --answer stop"
+                    )
+                if answer not in ("continue", "stop"):
+                    raise MissionInvalid(f"--answer must be 'continue' or 'stop', got {answer!r}")
+                resolved = {key: pause_doc.get(key) for key in _PAUSE_RECORD_FIELDS}
+                resolved["answer"] = answer
+                resolved["answered_at"] = datetime.now(UTC).isoformat()
+                pause_doc["answer"] = answer
+                pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
+                pause_path.write_text(json.dumps(pause_doc, indent=2))
+                if answer == "stop":
+                    stop_answer = resolved
+        elif answer is not None or answer_file is not None:
             raise MissionInvalid(f"mission '{mission_id}' is not paused")
 
     running, lock_notes = _acquire_running_lock(mission_dir)
@@ -2793,6 +3062,7 @@ def run_mission(
             is_resume=resume_dir is not None,
             stop_answer=stop_answer,
             dispatcher=dispatcher,
+            human_answers=human_answers,
         )
     finally:
         try:
@@ -2812,6 +3082,7 @@ def _execute_mission(
     is_resume: bool,
     stop_answer: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
+    human_answers: dict[str, str] | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -2823,12 +3094,26 @@ def _execute_mission(
     lanes_dir.mkdir(exist_ok=True)
     verdicts_dir = mission_dir / "verdicts"
     verdicts_dir.mkdir(exist_ok=True)
+    asks_dir = mission_dir / "asks"
+    asks_dir.mkdir(exist_ok=True)
     chain = _ReceiptChain(mission_dir, mission_id, base)
 
     ledger = Ledger(mission.max_cost_usd)
     ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
     started = time.monotonic()
     done: dict[str, LaneResult] = dict(resume.kept)
+    # E7 (review finding): a kept human lane never goes through `settle` (it
+    # was never dispatched, so there is no run to wait on), but `settle` is
+    # the only other writer of `lanes/<lane>.json` -- without this, the
+    # on-disk receipt from the original park (`ok: false`, `skipped: "paused:
+    # waiting for the operator"`) would outlive the answer that resolved it,
+    # so anything reading it later (salvage, a golden recording, an
+    # inspector) would see the pause, not the answer.
+    for lane in mission.lanes:
+        if lane.human and lane.name in done:
+            (lanes_dir / f"{lane.name}.json").write_text(
+                json.dumps(done[lane.name].to_dict(), indent=2)
+            )
     sink_names = {lane.name for lane in mission.sinks()}
     # B5 early cancel: a per-lane cancel event, created the moment a lane is
     # dispatched, plus the reason it fired -- written before the event is set,
@@ -3309,6 +3594,61 @@ def _execute_mission(
                             )
                         )
                         continue
+                    if lane.human:
+                        # E7: a human lane's own park replaces the ordinary
+                        # pause.before/spend check entirely -- it never fires
+                        # on top of its own. A dry run rehearses past it (as
+                        # it rehearses past every other pause point) rather
+                        # than blocking a resume rehearsal on an answer that
+                        # was never going to be dispatched anyway.
+                        if dry_run:
+                            rehearsed = fresh_lane_result(lane)
+                            rehearsed.ok = True
+                            settle(rehearsed)
+                            continue
+                        if human_answers is not None and lane.name in human_answers:
+                            # golden.replay: the recorded answer stands in for
+                            # the operator -- no pause, no dispatch, no ask.
+                            (answers_dir / f"{lane.name}.txt").write_text(
+                                human_answers[lane.name]
+                            )
+                            answered = _human_lane_result(mission, lane, mission_dir)
+                            settle(
+                                answered
+                                or fresh_lane_result(
+                                    lane,
+                                    skipped=(
+                                        "human lane deliverable missing after "
+                                        "recorded answer"
+                                    ),
+                                )
+                            )
+                            continue
+                        ask_text = _with_prefix(
+                            mission,
+                            _render(lane.attempts[0].prompt, mission, done, dry_run=dry_run),
+                        )
+                        ask_path = asks_dir / f"{lane.name}.txt"
+                        ask_path.write_text(ask_text)
+                        first_line = next(
+                            (line for line in ask_text.strip().splitlines() if line.strip()), ""
+                        )
+                        pause_info = {
+                            "kind": "human",
+                            "lane": lane.name,
+                            "spent_usd": None,
+                            "threshold": None,
+                            "reason": f"lane {lane.name} is waiting for the operator",
+                            "question": (
+                                f"{first_line} answer with --answer TEXT or "
+                                "--answer-file PATH"
+                            ),
+                            "ask_path": str(ask_path),
+                        }
+                        settle(
+                            fresh_lane_result(lane, skipped="paused: waiting for the operator")
+                        )
+                        continue
                     fired = (
                         None
                         if dry_run
@@ -3352,21 +3692,19 @@ def _execute_mission(
         # not a parked mission waiting on an operator answer: nothing
         # here is written and `interrupted` (below) carries the result.
         prior_pause = _json_object(mission_dir / "pause.json") or {}
-        (mission_dir / "pause.json").write_text(
-            json.dumps(
-                {
-                    "kind": pause_info["kind"],
-                    "lane": pause_info["lane"],
-                    "spent_usd": pause_info["spent_usd"],
-                    "threshold": pause_info["threshold"],
-                    "asked_at": datetime.now(UTC).isoformat(),
-                    "question": pause_info["question"],
-                    "answer": None,
-                    "answers": prior_pause.get("answers") or [],
-                },
-                indent=2,
-            )
-        )
+        new_pause_doc = {
+            "kind": pause_info["kind"],
+            "lane": pause_info["lane"],
+            "spent_usd": pause_info["spent_usd"],
+            "threshold": pause_info["threshold"],
+            "asked_at": datetime.now(UTC).isoformat(),
+            "question": pause_info["question"],
+            "answer": None,
+            "answers": prior_pause.get("answers") or [],
+        }
+        if "ask_path" in pause_info:
+            new_pause_doc["ask_path"] = pause_info["ask_path"]
+        (mission_dir / "pause.json").write_text(json.dumps(new_pause_doc, indent=2))
         if mission.notify and "pause" in mission.notify["events"]:
             notifications.append(
                 notify_mod.emit(
@@ -3390,6 +3728,8 @@ def _execute_mission(
             "threshold": pause_info["threshold"],
             "question": pause_info["question"],
         }
+        if "ask_path" in pause_info:
+            pause_park["ask_path"] = pause_info["ask_path"]
     lane_results = [done[lane.name] for lane in mission.lanes]
     # B5 mechanical ranking: bytes and gate results, no model judgment, over
     # the sink lanes that were actually dispatched (not skipped or cancelled).
@@ -4266,6 +4606,25 @@ def _run_resolve(
     }
 
 
+def _human_report_row(lane: LaneResult) -> str:
+    """E7: a human lane has no attempt to show -- its whole record is the
+    answer file (mtime for when, length for how much) beside its taint."""
+    label = "human"
+    if lane.answer_path and Path(lane.answer_path).is_file():
+        answer_file = Path(lane.answer_path)
+        answered_at = (
+            datetime.fromtimestamp(answer_file.stat().st_mtime, UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        length = len(answer_file.read_text(errors="replace").strip())
+        label = f"human, answered {answered_at} ({length} chars)"
+    return (
+        f"| {lane.name} | {label} | {lane.ok} | | | | no | | | {_taint_label(lane)} | "
+        "| | | | - | no | |"
+    )
+
+
 def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = None) -> str:
     cost = _usd(attempt.get("cost_usd"))
     if attempt.get("unpriced"):
@@ -4342,7 +4701,13 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         "taint | agent | cost_usd | tokens | tools | cached | resumed | dur_s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    human_lanes = {declared.name for declared in mission.lanes if declared.human}
     for lane in lanes:
+        if lane.name in human_lanes and not lane.skipped:
+            # E7: an answered human lane has no attempt at all -- the
+            # skipped branch below already covers it while still parked.
+            lines.append(_human_report_row(lane))
+            continue
         if lane.skipped:
             # A lane cancelled mid-run still has an attempt, but the table
             # must flag it the same way a lane cancelled before it ever
@@ -4373,11 +4738,18 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     if result.paused and "answer" not in result.paused:
         # An `answer` on `paused` means this is a resolved (`stop`) record,
         # not a mission still waiting on the operator; only the latter gets
-        # the resume line.
+        # the resume line. E7: a human pause's own answer forms are text or
+        # a file, never `continue` (refused: "a human lane needs an
+        # answer") -- the resume line must say so, not the lane/spend forms.
+        resume_forms = (
+            "--answer TEXT, --answer-file PATH, or --answer stop"
+            if result.paused["kind"] == "human"
+            else "--answer continue|stop"
+        )
         lines += [
             "",
             f"**Paused**: {result.paused['question']} Resume with: "
-            f"conductor mission --resume {result.mission_id} --answer continue|stop",
+            f"conductor mission --resume {result.mission_id} {resume_forms}",
         ]
     if result.budget.get("exceeded"):
         lines += ["", f"**Budget exceeded**: {json.dumps(result.budget)}"]

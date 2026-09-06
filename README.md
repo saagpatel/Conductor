@@ -478,6 +478,10 @@ Resume an interrupted or failed mission in its existing directory:
 conductor mission --resume MISSION_ID
 ```
 
+`--answer-file PATH` reads a file's content as the answer, for a `kind:
+"human"` pause (see Human lanes, above) only -- it is refused on a `kind:
+"lane"` or `kind: "spend"` pause, and mutually exclusive with `--answer`.
+
 `MISSION_ID` is the directory name under `$CONDUCTOR_HOME/missions`. Conductor
 loads that directory's versioned `mission.json` snapshot, keeps each lane whose
 receipt is ok and not skipped, and reruns missing, failed, skipped, interrupted,
@@ -1365,6 +1369,71 @@ records nothing. `conductor missions` shows `"paused": true` while
 
 Evidence (`docs/ROADMAP-2026-09.md` item C2): LangGraph `interrupt()`,
 Microsoft request/response events.
+
+### Human lanes
+
+A lane whose fleet is the operator, not a CLI:
+
+```json
+{
+  "name": "approve",
+  "fleet": "human",
+  "prompt": "Does this match the brief? {{lanes.build.diff}}",
+  "needs": ["build"],
+  "deliverable": {"path": "sign-off.txt"}
+}
+```
+
+It carries `name`, `prompt` or `prompt_file` (the ask -- it may use the same
+`{{lanes.<name>.answer}}` / `.diff` / `.deliverable` templates any lane's
+prompt can), `needs`, and an optional `deliverable {path}`. Every other
+attempt key, `fallback`, `cascade`, `stage`, `branch`, `base`, `resume`, and
+being named as another lane's `base` or `resume` are refused at load, the
+lane named and the reason: nothing is ever dispatched, so none of them mean
+anything, and `Spec.validate` never sees this lane's attempt at all.
+
+A human lane is tainted at load, always: what comes back is operator-pasted
+text, arriving the way a fleet's own output does -- outside the trust the
+mission's own prompt carries -- so `taint_from` records `human`, and every
+taint rule (see below) applies unchanged: never a `branch`, refused on a
+fleet that cannot enforce it downstream, fenced in a receiving prompt.
+`{{lanes.<name>.test_touched}}`, `.diff`, and `.verdict` are refused
+referencing one at load -- it has none of those; `.answer` and `.deliverable`
+work exactly as they do for any lane.
+
+When the scheduler reaches a human lane, it renders the ask (templates and
+`prefix` included, like any dispatched prompt) to `asks/<lane>.txt`, records
+the lane not started (`skipped: "paused: waiting for the operator"`, no
+cost), and parks the mission exactly like a `pause.before` lane does -- a
+human lane never fires `pause.before` or the spend pause on top of its own
+park. `pause.json` gains `kind: "human"`, the lane, and `ask_path`;
+`question` is the ask's first line plus `answer with --answer TEXT or
+--answer-file PATH`.
+
+Resume with the answer:
+
+```
+conductor mission --resume MISSION_ID --answer "looks right, ship it"
+conductor mission --resume MISSION_ID --answer-file notes.txt
+conductor mission --resume MISSION_ID --answer stop
+```
+
+`--answer` and `--answer-file` are mutually exclusive; `--answer-file`'s
+content becomes the answer verbatim. Either is written to `answers/<lane>.txt`
+-- the same place any lane's answer lives -- and the mission continues;
+`continue` is refused (`a human lane needs an answer`) and `stop` stops it
+like any other pause. When the lane declared a `deliverable`, its file must
+already exist at answer time (the same path rules a deliverable's `path`
+always follows) or the resume is refused naming the path. `pause.json`'s
+`answers` history records the answer's length and when it landed, never the
+text itself a second time -- it is already on disk, once. A `kind: "lane"`
+or `kind: "spend"` pause still accepts only `continue`/`stop`, and refuses
+`--answer-file`.
+
+On a later resume an answered human lane needs no run receipt: its answer
+file (and declared deliverable) on disk are the whole record, so it is kept,
+not re-asked. `report.md` shows it as `human, answered <timestamp> (<n>
+chars)` rather than an attempt row.
 
 #### Notifications
 
