@@ -337,6 +337,14 @@ def shape_a(
             "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n",
             "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
             + FIX_PROMPT_ADVERSARIAL_BLOCK,
+        ).replace(
+            "This lane runs under conductor's reproduce gate: a fix with no test change is "
+            "refused, and a test that already passes on the current tree is refused.",
+            "This lane runs under conductor's reproduce gate. When the adversarial block above "
+            "carries a test that failed on the build (the lane found a defect), that test is "
+            "already at this tree's base and is your reproducing check: fix the source so it "
+            "passes, with no further test change required. Otherwise a fix with no test change "
+            "is refused, and a test that already passes on the current tree is refused.",
         )
     fix: dict = {
         "name": "fix",

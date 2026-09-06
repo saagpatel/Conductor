@@ -511,3 +511,21 @@ def test_shape_a_without_the_adversarial_flag_is_unchanged(repo, tmp_path):
 
     mission = mission_from_dict(raw, base_dir=spec.parent)
     assert all(lane.stage != "adversarial" for lane in mission.lanes)
+
+
+def test_shape_a_adversarial_fix_prompt_explains_the_inherited_check(repo, tmp_path):
+    """Grok's third E16 finding: the fix prompt must not tell the agent a
+    source-only fix is refused when the inherited check makes it exactly
+    what is wanted."""
+    from conductor.shape import cap_arithmetic, shape_a
+
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("x")
+    raw = shape_a(
+        spec=spec_path, repo=repo, test="true", caps=cap_arithmetic(1, 1), adversarial=True
+    )
+    fix_prompt = next(lane["prompt"] for lane in raw["lanes"] if lane["name"] == "fix")
+    assert "is your reproducing check" in fix_prompt
+    plain = shape_a(spec=spec_path, repo=repo, test="true", caps=cap_arithmetic(1, 1))
+    plain_fix = next(lane["prompt"] for lane in plain["lanes"] if lane["name"] == "fix")
+    assert "is your reproducing check" not in plain_fix
