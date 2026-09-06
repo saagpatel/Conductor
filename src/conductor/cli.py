@@ -722,6 +722,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             scheduler=args.scheduler,
             grok_runs_suite=args.grok_runs_suite,
             cap_grace_usd=args.cap_grace_usd,
+            adversarial=args.adversarial,
         )
         out = Path(args.out).expanduser().resolve() if args.out else None
         mission_dir = out.parent if out else None
@@ -738,6 +739,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             branch=args.branch or "",
             build_commit=args.build_commit or "",
             fix_commit=args.fix_commit or "",
+            adversarial=args.adversarial,
         )
         base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
         if out is None:
@@ -1001,6 +1003,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=shape.USD_CLAUDE_GRACE,
         help=f"grace band on the build and fix (claude) lanes (E24); 0 disables it, "
         f"ceiling ${CAP_GRACE_CEILING_USD:.2f} (default ${shape.USD_CLAUDE_GRACE:.2f})",
+    )
+    p_shape_a.add_argument(
+        "--adversarial",
+        action="store_true",
+        help="add an adversarial lane that writes a test failing on the build's tip (E16); "
+        "the fix lane builds on it and inherits a reproduced check",
     )
     p_shape_a.add_argument("--name", help="mission name (default: the spec's stem)")
     p_shape_a.add_argument(

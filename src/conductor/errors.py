@@ -38,6 +38,7 @@ KINDS: tuple[str, ...] = (
     "agent",
     "deliverable",
     "taint",
+    "adversarial",
     "rate_limit",
     "transport",
     "refusal",
@@ -234,6 +235,10 @@ def error_kind(result: Result) -> str | None:
     # stream's init event and the deny hook's own log, never a fleet's word.
     if error_text.startswith("taint hooks not enforced:"):
         return "taint"
+    # E16: conductor's own check, from the git diff against the adversarial
+    # lane's base -- never a fleet's word, like `agent` and `taint` above.
+    if error_text.startswith("adversarial lane changed source:"):
+        return "adversarial"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):

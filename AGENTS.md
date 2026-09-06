@@ -102,6 +102,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    E24 adds a smaller, opt-in per-lane `cap_grace_usd` for the same trap: a band folded into the same
    native cap so the terminal message itself has room to finish without moving rule 2's estimate.
 
+`conductor shape a --adversarial` (E16) adds a lane whose deliverable is a test that fails
+on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
+is inherited rather than re-earned.
+
 ## Reviewer prompts: no quotas, ever
 
 A review lane measures what is there. The evidence (`docs/research/2026-09-04-research-frontier-models.md` §6):

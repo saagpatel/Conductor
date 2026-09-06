@@ -60,11 +60,13 @@ from .verdicts import Verdict as ChecklistVerdict
 from .verify import git_run
 
 REQUIRE = ("all", "any")
-# A lane's place in a pipeline. "review" lanes are read mode, "build" and
-# "fix" lanes are write mode; a lane may leave stage unset and be none of
-# these. A stage is also what a mission's `policy` restricts by vendor.
-STAGES = ("build", "review", "fix")
-_STAGE_MODE = {"build": "write", "review": "read", "fix": "write"}
+# A lane's place in a pipeline. "review" lanes are read mode, "build",
+# "fix", and "adversarial" lanes are write mode; a lane may leave stage
+# unset and be none of these. A stage is also what a mission's `policy`
+# restricts by vendor. "adversarial" (E16) is appended, never inserted, so
+# every existing message that joins STAGES keeps its old text as a prefix.
+STAGES = ("build", "review", "fix", "adversarial")
+_STAGE_MODE = {"build": "write", "review": "read", "fix": "write", "adversarial": "write"}
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # Fields an attempt may set, in the order they cascade mission -> lane -> attempt.
@@ -519,6 +521,16 @@ class Mission:
                     f"lane '{lane.name}': stage must be one of {', '.join(STAGES)}, "
                     f"got {lane.stage!r}"
                 )
+            # E16: an adversarial lane's whole point is a check that fails
+            # against another lane's tip -- it must name which lane, and
+            # every attempt must allow the test-surface change that check is
+            # (`test_policy: clean` would trip the clean gate on the diff
+            # that is the deliverable, by construction).
+            if lane.stage == "adversarial" and lane.base is None:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': an adversarial lane must declare a base -- "
+                    "the lane it attacks"
+                )
             for attempt in lane.attempts:
                 if attempt.mode == "write" and not attempt.isolated():
                     raise MissionInvalid(f"lane '{lane.name}': write lanes must isolate")
@@ -526,6 +538,12 @@ class Mission:
                     raise MissionInvalid(
                         f"lane '{lane.name}': stage '{lane.stage}' lanes must be "
                         f"{_STAGE_MODE[lane.stage]} mode"
+                    )
+                if lane.stage == "adversarial" and attempt.test_policy != "allow":
+                    raise MissionInvalid(
+                        f"lane '{lane.name}' ({attempt.label()}): an adversarial lane must "
+                        "set test_policy: allow on every attempt -- its deliverable is a "
+                        "test-surface change"
                     )
                 try:
                     attempt.spec(attempt.effective_cwd(self.cwd), taint=lane.tainted).validate()
@@ -2880,6 +2898,17 @@ def _execute_mission(
             if why:
                 out.skipped = f"cannot build on {lane.base}: {why}"
                 return
+        # E16: a fix lane built on an adversarial lane whose final attempt
+        # actually reproduced something inherits that check -- its own
+        # reproduce step must not demand a fresh test-surface change when
+        # the failing test already sits at its base commit.
+        inherited_check: str | None = None
+        if lane.stage == "fix" and lane.base is not None:
+            base_lane = done.get(lane.base)
+            if base_lane is not None and base_lane.stage == "adversarial" and base_lane.attempts:
+                last_reproduce = base_lane.attempts[-1].get("reproduce") or {}
+                if last_reproduce.get("verdict") == "reproduced":
+                    inherited_check = lane.base
         resume_failed = False
 
         def dispatch_one(
@@ -2935,7 +2964,13 @@ def _execute_mission(
                 # lane and mission without joining through the mission
                 # snapshot; golden.replay's dispatcher has its own fixed
                 # signature and predates these two fields.
-                result = dispatch(spec, lane=lane.name, mission=mission_id, **dispatch_kwargs)
+                result = dispatch(
+                    spec,
+                    lane=lane.name,
+                    mission=mission_id,
+                    inherited_check=inherited_check,
+                    **dispatch_kwargs,
+                )
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
                 (Path(result.run_dir) / "result.json").write_text(

@@ -442,9 +442,11 @@ class Spec:
     tool_idle_timeout: int | None = None  # no tool call before kill; 0 disables
     test_surface: list[str] | None = None  # None uses surface.DEFAULT_TEST_SURFACE
     test_policy: str = "clean"
-    # A pipeline stage (mission.STAGES: build, review, fix), or None outside
-    # a staged pipeline. A "fix" dispatch in write mode is the only one that
-    # triggers runner.dispatch's reproduce-before-fix gate.
+    # A pipeline stage (mission.STAGES: build, review, fix, adversarial), or
+    # None outside a staged pipeline. A "fix" or "adversarial" dispatch in
+    # write mode is the only kind that triggers runner.dispatch's
+    # reproduce-before-fix gate (E16 points it at the adversarial lane's own
+    # base and reads the verdict the other way round).
     stage: str | None = None
     # C4: per-lane setup, teardown, and port allocation. A worktree isolates
     # files, not ports, sockets, scratch databases, or gitignored config.
