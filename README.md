@@ -265,13 +265,33 @@ meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
 ceiling (see below). A key the loader does not know is refused, so `need`
 cannot quietly turn a dependent lane into a root.
 
-Attempt keys are `fleet`, `model`, `effort`, `mode`, `prompt`, `prompt_file`,
+Attempt keys are `fleet`, `model`, `effort`, `mode`, `cwd`, `prompt`, `prompt_file`,
 `timeout`, `stall_timeout`, `loop_limit`, `max_tool_calls`, `test`, `test_policy`,
 `test_surface`, `commit`, `isolate`, `cap_usd`, `no_op_ok`, `schema`, `verdict`,
 and `deliverable`.
 `test_policy` is `clean` (the default),
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
+
+#### Per-lane `cwd`: more than one repository per mission
+
+The mission's own `cwd` is only the default. `cwd` cascades like `schema`
+(mission → lane → fallback), so a lane, or one of its own fallbacks, may
+name a different repository; a relative path resolves against the mission
+file's own directory, exactly like the mission-level `cwd` does. Everything
+that site is actually about follows that lane's own resolved cwd: where its
+attempt dispatches, where its branch is created and renamed, and which other
+sinks its diff can conflict with (two sinks sharing a cwd are grouped and
+compared with `git merge-tree`; sinks in different repositories are never
+paired). A lane's receipt carries the `cwd` it actually ran in, and
+`report.md`'s per-lane section names it when it differs from the mission's.
+Two lanes may claim the same `branch` name as long as they land in different
+repositories -- the same name twice in the same repository is refused at
+load, as before. A mission's `resolve` lane always dispatches from the
+mission's own `cwd`, so it is refused at load when its sink lanes span more
+than one repository -- the resolver never crosses repositories. The three
+`notify` hooks (pause, end, breaker) likewise always run in the mission's
+own `cwd`, never a lane's.
 
 ### Deliverables: a file as the verdict
 
