@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import attest, golden, prices, shape
 from .errors import error_kind
-from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
+from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec, cli_version
 from .gc import cmd_gc
 from .mission import (
     STAGES,
@@ -44,6 +44,7 @@ def cmd_fleets(args: argparse.Namespace) -> int:
                 "binary": fleet.binary,
                 "installed": bool(path),
                 "path": path or "",
+                "version": cli_version(fleet.name),
                 "vendor": fleet.vendor,
                 "cap": fleet.cap,
                 "default_model": fleet.default_model,
@@ -62,7 +63,11 @@ def cmd_fleets(args: argparse.Namespace) -> int:
         return 0
     for row in rows:
         mark = "ok " if row["installed"] else "MISSING"
-        print(f"[{mark}] {row['fleet']:<12} {row['binary']:<13} {row['vendor']}  cap: {row['cap']}")
+        version = f"  version: {row['version']}" if row["version"] else ""
+        print(
+            f"[{mark}] {row['fleet']:<12} {row['binary']:<13} {row['vendor']}  "
+            f"cap: {row['cap']}{version}"
+        )
         for m in row["models"]:
             default = " (default)" if m["name"] == row["default_model"] else ""
             note = f"  # {m['note']}" if m["note"] else ""
@@ -601,6 +606,10 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
             print(f"{fixture_dir.name}: {line}")
         if diffs:
             any_diff = True
+        # E22: version drift is a note, never a check failure -- printed
+        # alongside the projection diffs but never added to any_diff.
+        for line in golden.version_drift(fixture_dir):
+            print(f"{fixture_dir.name}: {line}")
     return 1 if any_diff else 0
 
 

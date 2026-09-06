@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -762,3 +764,61 @@ _BUILDERS = {
     "antigravity": _build_antigravity,
     "cursor": _build_cursor,
 }
+
+
+# --- CLI versions (E22) --------------------------------------------------
+# Every vendor CLI prints its own version on `--version`; conductor asserts
+# behavior against a version at a point in time (D2's deny list, D3's inline
+# personas, the Cursor stream-json parser, agy's status-not-exit-code rule),
+# and a silent vendor release can move under any of that. Recording the
+# version on the receipt turns "which build ran this" from a guess into
+# something checkable on bytes.
+
+_VERSION_CACHE: dict[str, str | None] = {}
+
+
+def clear_version_cache() -> None:
+    """Empty the per-process version cache; tests need a clean slate."""
+    _VERSION_CACHE.clear()
+
+
+def _first_nonempty_line(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def cli_version(fleet_name: str, *, timeout: float = 10.0) -> str | None:
+    """The fleet binary's own version line, cached per process by binary
+    path so a mission with many lanes on the same fleet probes it once.
+
+    Never raises and never prints: an unknown fleet, a binary that is not
+    installed, a non-zero exit, a hang past `timeout`, or a spawn failure
+    (OSError) all come back as None rather than stopping the caller.
+    """
+    fleet = FLEETS.get(fleet_name)
+    if fleet is None:
+        return None
+    path = shutil.which(fleet.binary)
+    if path is None:
+        return None
+    if path in _VERSION_CACHE:
+        return _VERSION_CACHE[path]
+    try:
+        proc = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        version = None
+    else:
+        version = None
+        if proc.returncode == 0:
+            version = _first_nonempty_line(proc.stdout) or _first_nonempty_line(proc.stderr)
+    _VERSION_CACHE[path] = version
+    return version
