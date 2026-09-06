@@ -192,9 +192,18 @@ class Result:
             # touched the test surface is the trap AGENTS.md rule 3 exists
             # for -- the base tree's tests ran against the new source, not a
             # broken build. Name the touched files so that is not re-derived
-            # by hand from the receipt every time.
+            # by hand from the receipt every time. `infra_error` (worktree
+            # add/read-tree/apply failing in `_git_failure`) means the gate
+            # command never ran at all, so it is excluded even when the
+            # surface was touched -- that failure has nothing to do with
+            # the fixtures the diff changed.
             changed = (self.test_surface or {}).get("changed") or []
-            if clean.get("ran") and (self.test_surface or {}).get("touched") and changed:
+            if (
+                clean.get("ran")
+                and not clean.get("infra_error")
+                and (self.test_surface or {}).get("touched")
+                and changed
+            ):
                 return (
                     f"{label} exited {counted.get('exit_code')} after the diff touched "
                     f"{len(changed)} test-surface files: {_test_surface_note(changed)}"

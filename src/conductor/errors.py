@@ -153,11 +153,16 @@ def _gate_test_surface_failed(result: Result) -> bool:
     """A narrower `_gate_failed`: only the clean gate's plain "exited N"
     failure (not a timeout or an interruption, which keep their own kind),
     and only when the diff itself is what touched the test surface -- the
-    trap AGENTS.md rule 3 exists for, distinct from an ordinary broken build."""
+    trap AGENTS.md rule 3 exists for, distinct from an ordinary broken build.
+
+    Excludes an `infra_error` outcome (`runner._git_failure`: worktree add,
+    read-tree, or git apply failing before the gate command ever ran) --
+    that is a transplant-machinery failure, not evidence the gate command
+    itself was tripped up by the touched fixtures."""
     clean = (result.test_surface or {}).get("clean_gate") or {}
     if not clean.get("ran") or result.gate_passed:
         return False
-    if clean.get("interrupted") or clean.get("timed_out"):
+    if clean.get("interrupted") or clean.get("timed_out") or clean.get("infra_error"):
         return False
     surface = result.test_surface or {}
     return bool(surface.get("touched") and surface.get("changed"))

@@ -154,6 +154,21 @@ def test_the_touched_file_list_truncates_after_five_and_counts_the_rest():
     assert error_kind(result) == "gate_test_surface"
 
 
+def test_a_transplant_infra_failure_is_not_the_test_surface_trap():
+    """`_git_failure` (worktree add / read-tree / git apply failing) sets
+    `ran=True, exit_code=1, infra_error=True` on the `clean_gate` dict --
+    the gate command itself never ran. That must stay the plain 'clean
+    gate exited N' message and kind `gate`, not `gate_test_surface`, even
+    when the surface was touched: attributing a git-plumbing failure to
+    'the diff touched the test surface' sends the lead to rerun with
+    `test_policy: allow` for a problem that has nothing to do with a
+    fixture the diff changed."""
+    result = _clean_gate_result(["tests/conftest.py"], exit_code=1, infra_error=True)
+
+    assert result.failure() == "clean gate exited 1"
+    assert error_kind(result) == "gate"
+
+
 @pytest.mark.parametrize(
     "clean_overrides,label",
     [
