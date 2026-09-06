@@ -1536,8 +1536,9 @@ instead of reading as within budget.
 `--cap-grace-usd` (or `cap_grace_usd` on a lane or an attempt) adds a small,
 opt-in band on top of `--cap-usd`, so Claude Code's own terminal message has
 room to finish instead of being cut off mid-summary: `--max-budget-usd`
-carries `cap_usd + cap_grace_usd` as one figure, so a run that lands inside
-the band still stops itself, but is not over budget. It is enforceable on
+carries `cap_usd + cap_grace_usd` as one figure, so a run that finishes
+inside the band is an ordinary success with `grace_used` above zero, and a
+run Claude Code stops on that figure is over budget as before. It is enforceable on
 the `claude` fleet only (the only native cap; a watcher-killed run never
 gets a terminal message to finish), refused without a `cap_usd`, refused
 above a $0.50 ceiling, and stated per lane or per attempt -- never on a
