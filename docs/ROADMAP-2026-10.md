@@ -19,6 +19,13 @@ re-proposed. Every item ships through Shape A (Sonnet 5 builds, Gemini 3.7 Flash
 Grok 4.6 review cold, Sonnet fixes, the lead judges on bytes), one release per item, with
 the cap rules in `AGENTS.md`.
 
+## Shipped since this was written
+
+| item | version | shape | cost |
+|---|---|---|---|
+| E5 Shape A launcher, E21 probe | in 0.27.0 | lead work, group 0 | under $0.10 |
+| E11 ledger report | 0.27.0 | Shape A on 0.26.0 via `conductor shape a`, in parallel with E1; fix salvaged | $7.69 |
+
 ## What "general" means here
 
 Today a lane is judged one of two ways: a write lane on the bytes it moved and the gate
