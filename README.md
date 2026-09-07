@@ -875,6 +875,28 @@ one is a diff. `--inline` keeps every prompt inside the mission file. The
 `prefix` stays inline either way: it is a cache key, and `prefix_file`
 already exists for the operator.
 
+#### Verdict markers and fix dispositions
+
+`REVIEW_TAIL` (the shared close of both review prompts) asks the reviewer
+to number every item it reports and end the reply with exactly one final
+line: `NO_FINDINGS` when there is nothing to report, or `FINDINGS: N`
+naming how many items it numbered. `verdicts.review_verdict` reads that
+line, not the whole reply, so a reviewer's narration ahead of its verdict
+(Grok routinely writes some) no longer reads as a finding the way
+`answer.strip() == "NO_FINDINGS"` did. `FIX_PROMPT` in turn asks for one
+`DISPOSITION: <review-gemini or review-grok> <item number>
+<fixed, refused, already, or wording>: <reason>` line per item either
+reviewer numbered -- `fixed` for one it changed code for, `refused` (with
+the reason it is wrong) for one it rejected, `already` for one already
+true before the fix, `wording` for one that only asked for a comment or
+message change. `verdicts.fix_dispositions` parses every such line
+anywhere in the reply, in order; a line that opens with `DISPOSITION:` but
+does not match the shape is skipped and counted, never raised. Both
+parsers feed the ledger report's reviewer finding rate and reviewer
+precision tables (see "Ledger report" below). Editing either prompt moves
+its `prompt_versions()` id by construction (E17); no fixture needs
+touching for that alone (see "What a fixture holds").
+
 #### Cost forecast
 
 Before anything dispatches, `conductor shape a` (and `run_mission` itself,
@@ -2083,7 +2105,7 @@ three; `conductor report` joins it back to its mission snapshot under
 `$CONDUCTOR_HOME/missions` to recover its lane and stage, the same way
 `conductor spend --by mission` already joins a run to its mission name.
 
-The report has five sections, in this order:
+The report has six sections, in this order:
 
 - **Vendor and stage**: runs, ok count, cost, unpriced runs, mean and
   median duration, cap misses (`kind == "cap"`), gate failures
@@ -2093,7 +2115,20 @@ The report has five sections, in this order:
   pipeline).
 - **Error kinds**: count and cost per `errors.error_kind`.
 - **Reviewer finding rate**: among `stage: review` dispatches that wrote an
-  answer, the share whose answer is not exactly `NO_FINDINGS`, per vendor.
+  answer, `verdicts.review_verdict` parses the LAST non-empty line (a
+  trailing code fence is skipped first): exactly `NO_FINDINGS` counts as
+  zero findings, `FINDINGS: N` counts as `N`, and anything else is
+  `unparsed`, its own column -- a reviewer that narrates before its verdict
+  (Grok routinely does) used to read every one of those narrations as a
+  finding, since the old check was `answer.strip() == "NO_FINDINGS"` against
+  the whole reply. `rate` divides by parsed runs only, excluding
+  `unparsed` from the denominator.
+- **Reviewer precision**: per reviewer vendor, over missions that have both
+  a `stage: review` lane whose verdict parsed and a `stage: fix` lane that
+  recorded dispositions (see below): findings written, and how many of
+  them the fix lane marked fixed, refused, already true, or wording-only.
+  `precision` is `fixed / (fixed + refused)`, blank under three total
+  dispositions -- not enough to read as a rate.
 - **Missions**: cost, whether the mission was ok, how many lanes it
   declared, whether any lane hit its cap, and how many times
   `conductor salvage` was run against it (`salvaged`, 0 when
@@ -2108,6 +2143,17 @@ The report has five sections, in this order:
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`
 could otherwise count it (see the Salvage subsection above).
+
+A mission lane's own receipt (`lanes/<name>.json`) carries the same parse:
+a `stage: review` lane gets `review` (`verdicts.review_verdict` over its
+own answer), a `stage: fix` lane gets `dispositions` (every `DISPOSITION:`
+line `verdicts.fix_dispositions` found, in order) and
+`dispositions_malformed` (how many opened with `DISPOSITION:` but did not
+match the shape). `report.md`'s lane table carries a short `review/fix`
+column reading the same thing -- `NO_FINDINGS`, `3 findings`, `unparsed`,
+or `2 fixed, 1 refused`. A mission recorded before this shipped carries
+neither key on its lane receipts; they load as `None` and the report skips
+it the same way it skips any other lane with nothing to compute from.
 
 ### Per-dispatch caps
 

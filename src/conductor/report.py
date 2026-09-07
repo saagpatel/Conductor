@@ -23,6 +23,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import fleets
+from . import verdicts as verdicts_mod
 from .paths import conductor_home
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
@@ -30,7 +31,8 @@ from .spend import _collate_run_ids, _number, _parse_bound
 from .spend import _read_run as _spend_read_run
 
 REVIEW_STAGE = "review"
-NO_FINDINGS = "NO_FINDINGS"
+FIX_STAGE = "fix"
+DISPOSITIONS = ("fixed", "refused", "already", "wording")
 
 
 def _money(value: Decimal) -> str:
@@ -110,6 +112,14 @@ def _scan_missions(
     receipt already carries would only ever match an unrelated, joined
     (unstaged) run and never the staged one, splitting one mission's runs
     across two group keys and leaving the id-keyed row's `ok`/`lanes` unset.
+
+    F1: `meta[mission]` also carries `review_lanes` (`{lane_name: {"vendor",
+    "findings"}}`, from every `stage: review` lane's own `review` verdict
+    and its final attempt's fleet/model) and `fix_dispositions` (the
+    `dispositions` list from a `stage: fix` lane, or None when no fix lane
+    on this mission recorded one) -- the join `_build_report`'s reviewer
+    precision table needs between a disposition's named reviewer lane and
+    that lane's vendor, without a second pass over the same file.
     """
     join: dict[str, tuple[str, str | None, str | None]] = {}
     meta: dict[str, dict[str, object]] = {}
@@ -129,10 +139,14 @@ def _scan_missions(
         ok = raw.get("ok")
         salvage_dir = result_file.parent / "salvage"
         salvaged = len(list(salvage_dir.glob("*.json"))) if salvage_dir.is_dir() else 0
+        review_lanes: dict[str, dict[str, object]] = {}
+        fix_dispositions: list[object] | None = None
         meta[mission] = {
             "ok": ok if isinstance(ok, bool) else None,
             "lanes": len(lane_list),
             "salvaged": salvaged,
+            "review_lanes": review_lanes,
+            "fix_dispositions": fix_dispositions,
         }
         for lane_raw in lane_list:
             if not isinstance(lane_raw, dict):
@@ -146,6 +160,20 @@ def _scan_missions(
                 for attempt in attempts:
                     if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
                         join.setdefault(attempt["run_id"], (mission, lane_name, stage))
+            if stage == REVIEW_STAGE and isinstance(lane_raw.get("review"), dict):
+                attempts = lane_raw.get("attempts")
+                last = attempts[-1] if isinstance(attempts, list) and attempts else None
+                fleet = last.get("fleet") if isinstance(last, dict) else None
+                model = last.get("model") if isinstance(last, dict) else None
+                if isinstance(fleet, str) and lane_name:
+                    findings = lane_raw["review"].get("findings")
+                    review_lanes[lane_name] = {
+                        "vendor": _vendor(fleet, model if isinstance(model, str) else ""),
+                        "findings": findings if isinstance(findings, int) else 0,
+                    }
+            if stage == FIX_STAGE and isinstance(lane_raw.get("dispositions"), list):
+                fix_dispositions = lane_raw["dispositions"]
+                meta[mission]["fix_dispositions"] = fix_dispositions
         collates: list[object] = []
         collate = raw.get("collate")
         if isinstance(collate, dict):
@@ -289,16 +317,58 @@ class ReviewerFindingRow:
     vendor: str
     runs: int = 0
     findings: int = 0
+    # F1: `runs` whose final line did not parse as `NO_FINDINGS` or
+    # `FINDINGS: N` -- narration `report._is_no_findings` used to read as a
+    # finding. Included in `runs`, excluded from `rate`'s denominator.
+    unparsed: int = 0
 
     def rate(self) -> float | None:
-        return round(self.findings / self.runs, 3) if self.runs else None
+        parsed = self.runs - self.unparsed
+        return round(self.findings / parsed, 3) if parsed else None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "vendor": self.vendor,
             "runs": self.runs,
             "findings": self.findings,
+            "unparsed": self.unparsed,
             "rate": self.rate(),
+        }
+
+
+@dataclass
+class ReviewerPrecisionRow:
+    """F1: item 4 -- per reviewer vendor, over missions that have both a
+    review lane and a fix lane with dispositions, how many of that
+    reviewer's findings the fix lane fixed versus refused as wrong.
+    `precision` is blank (n/a) under three total dispositions: three
+    dispositions is not enough to read as a rate."""
+
+    vendor: str
+    findings: int = 0
+    fixed: int = 0
+    refused: int = 0
+    already: int = 0
+    wording: int = 0
+
+    def total(self) -> int:
+        return self.fixed + self.refused + self.already + self.wording
+
+    def precision(self) -> float | None:
+        denom = self.fixed + self.refused
+        if self.total() < 3 or denom == 0:
+            return None
+        return round(self.fixed / denom, 3)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "vendor": self.vendor,
+            "findings": self.findings,
+            "fixed": self.fixed,
+            "refused": self.refused,
+            "already": self.already,
+            "wording": self.wording,
+            "precision": self.precision(),
         }
 
 
@@ -343,6 +413,7 @@ class Report:
     vendor_stage: list[VendorStageRow]
     error_kinds: list[ErrorKindRow]
     reviewer_finding_rate: list[ReviewerFindingRow]
+    reviewer_precision: list[ReviewerPrecisionRow]
     missions: list[MissionRow]
     rules: Rules
     skipped: int = 0
@@ -352,18 +423,23 @@ class Report:
             "vendor_stage": [row.to_dict() for row in self.vendor_stage],
             "error_kinds": [row.to_dict() for row in self.error_kinds],
             "reviewer_finding_rate": [row.to_dict() for row in self.reviewer_finding_rate],
+            "reviewer_precision": [row.to_dict() for row in self.reviewer_precision],
             "missions": [row.to_dict() for row in self.missions],
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
         }
 
 
-def _is_no_findings(answer_path: str) -> bool | None:
+def _is_no_findings(answer_path: str) -> dict | None:
+    """F1: a thin call to `verdicts.review_verdict` over the answer text --
+    the parser conductor now trusts instead of `text.strip() ==
+    "NO_FINDINGS"`, which a reviewer's own narration before its verdict
+    line defeated."""
     try:
         text = Path(answer_path).read_text()
     except OSError:
         return None
-    return text.strip() == NO_FINDINGS
+    return verdicts_mod.review_verdict(text)
 
 
 def _build_report(
@@ -386,11 +462,14 @@ def _build_report(
                 kind_row.cost_usd += run.cost_usd
 
         if run.stage == REVIEW_STAGE and run.answer_path:
-            found = _is_no_findings(run.answer_path)
-            if found is not None:
+            verdict = _is_no_findings(run.answer_path)
+            if verdict is not None:
                 row = reviewer.setdefault(vendor, ReviewerFindingRow(vendor=vendor))
                 row.runs += 1
-                row.findings += int(not found)
+                if verdict["verdict"] == "unparsed":
+                    row.unparsed += 1
+                else:
+                    row.findings += verdict["findings"]
 
         if run.mission is not None:
             mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
@@ -399,6 +478,7 @@ def _build_report(
             if run.kind == "cap":
                 mission_row.capped = True
 
+    precision: dict[str, ReviewerPrecisionRow] = {}
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
@@ -406,6 +486,30 @@ def _build_report(
         mission_row.salvaged = (
             meta.get("salvaged", 0) if isinstance(meta.get("salvaged"), int) else 0
         )
+
+        # F1 item 4: only a mission with both a review lane whose verdict
+        # parsed and a fix lane that recorded dispositions (even an empty
+        # list -- the field's presence is what "with dispositions" means)
+        # joins a disposition's named reviewer lane back to its vendor.
+        review_lanes = meta.get("review_lanes")
+        fix_dispositions = meta.get("fix_dispositions")
+        if not review_lanes or not isinstance(review_lanes, dict) or fix_dispositions is None:
+            continue
+        for info in review_lanes.values():
+            row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
+            row.findings += info["findings"]
+        for item in fix_dispositions:
+            if not isinstance(item, dict):
+                continue
+            lane_name = item.get("lane")
+            disposition = item.get("disposition")
+            info = review_lanes.get(lane_name) if isinstance(lane_name, str) else None
+            if info is None or disposition not in DISPOSITIONS:
+                continue
+            row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
+            setattr(row, disposition, getattr(row, disposition) + 1)
+
+    precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
 
     vendor_stage_rows = sorted(
         vendor_stage.values(), key=lambda r: (-r.cost_usd, r.vendor, r.stage or "")
@@ -454,6 +558,7 @@ def _build_report(
         vendor_stage=vendor_stage_rows,
         error_kinds=error_kind_rows,
         reviewer_finding_rate=reviewer_rows,
+        reviewer_precision=precision_rows,
         missions=mission_rows,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
@@ -541,11 +646,34 @@ def _print_report(rpt: Report) -> None:
         ],
     )
     _print_section(
-        "Reviewer finding rate (stage=review, answer written, not NO_FINDINGS)",
-        ("vendor", "runs", "findings", "rate"),
+        "Reviewer finding rate (stage=review, final line NO_FINDINGS or FINDINGS: N)",
+        ("vendor", "runs", "findings", "unparsed", "rate"),
         [
-            (d["vendor"], _cell(d["runs"]), _cell(d["findings"]), _cell(d["rate"]))
+            (
+                d["vendor"],
+                _cell(d["runs"]),
+                _cell(d["findings"]),
+                _cell(d["unparsed"]),
+                _cell(d["rate"]),
+            )
             for d in (row.to_dict() for row in rpt.reviewer_finding_rate)
+        ],
+    )
+    _print_section(
+        "Reviewer precision (findings fixed vs. refused, over missions with a fix "
+        "lane's dispositions)",
+        ("vendor", "findings", "fixed", "refused", "already", "wording", "precision"),
+        [
+            (
+                d["vendor"],
+                _cell(d["findings"]),
+                _cell(d["fixed"]),
+                _cell(d["refused"]),
+                _cell(d["already"]),
+                _cell(d["wording"]),
+                _cell(d["precision"]),
+            )
+            for d in (row.to_dict() for row in rpt.reviewer_precision)
         ],
     )
     _print_section(
