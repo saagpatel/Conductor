@@ -4283,6 +4283,12 @@ def _execute_mission(
                 summary["retry"] = retry_index
             if resume_note:
                 summary["note"] = resume_note
+            elif result.gate and result.gate.get("skipped"):
+                # F3: a read lane whose own gate and clean gate were both
+                # skipped (nothing but a no-op or its E1 deliverable moved) --
+                # the report line says so instead of looking like the gate
+                # silently never ran.
+                summary["note"] = "gate skipped (read lane)"
             if result.cancelled:
                 # dispatch()'s own receipt only knows the generic default
                 # reason; the mission knows which lane actually won, so the
