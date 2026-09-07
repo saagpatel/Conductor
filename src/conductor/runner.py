@@ -1818,6 +1818,18 @@ def _reproduce_receipt(
             # Neither verdict fails an adversarial lane; the caller still
             # withholds the commit (see dispatch()'s reproduce_blocks_commit).
             return state, None
+        # A fix whose every change sits under the test surface, and whose
+        # transplanted tests pass on the base, hardened tests without fixing
+        # anything: correct work, wrong stage. Named so the lead reads "run
+        # it as a build lane" instead of "the check is wrong" (the F21
+        # approvals fix lane, 2026-09-07, was salvaged by hand for this).
+        outside = changed_paths_since(spec.cwd, before.head, exclude=surface_before.patterns)
+        if not outside:
+            return (
+                {**state, "test_only": True},
+                "reproduce gate passed on the base: every change is under the test surface "
+                "and the stricter tests pass there too; run this as a build lane",
+            )
         return state, "reproduce gate passed on the base: the check does not reproduce the finding"
     return {**outcome, "verdict": "reproduced"}, None
 

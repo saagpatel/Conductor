@@ -324,6 +324,43 @@ def test_reproduce_gate_refuses_a_check_that_already_passes_on_the_base(
     assert "-reproduce" not in git_out(repo, "worktree", "list")
 
 
+def test_reproduce_gate_names_a_fix_that_only_hardened_tests(repo, home, fake_fleet):
+    """The F21 approvals fix lane (2026-09-07) widened an import-cycle guard
+    and pinned a stamp: every change under the test surface, and the
+    stricter tests passed on the base. The gate refused it as a check that
+    "does not reproduce the finding", which reads as a wrong test; the work
+    was right and the stage was wrong, so the refusal says so."""
+    (repo / "app.txt").write_text("fine\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "check.py").write_text("raise SystemExit(0)\n")
+    _commit(repo)
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "printf 'import pathlib\\nassert pathlib.Path(\"app.txt\").exists()\\n'"
+            " > tests/check.py",
+        ]
+    )
+
+    result = dispatch(
+        _spec(repo, stage="fix"),
+        home=home,
+        test_command="python tests/check.py",
+        commit_message="test: harden",
+    )
+
+    assert result.reproduce["verdict"] == "not-reproduced"
+    assert result.reproduce["test_only"] is True
+    assert result.error == (
+        "reproduce gate passed on the base: every change is under the test surface "
+        "and the stricter tests pass there too; run this as a build lane"
+    )
+    assert result.ok is False
+    assert result.commit is None
+    assert error_kind(result) == "reproduce"
+
+
 def test_reproduce_gate_commits_a_fix_whose_check_fails_on_the_base(
     repo, home, fake_fleet, git_out
 ):

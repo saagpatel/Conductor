@@ -85,7 +85,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    shape the old fixtures build, both builders were right and both were rejected. The lead then reads
    every edit to an existing test. The same holds for a fix lane that re-records or rewrites test fixtures:
    the clean gate runs the base tree's tests against the new fixtures and fails (C7's fix was salvaged
-   from its kept worktree for exactly this).
+   from its kept worktree for exactly this). **Test-only hardening is a build-stage lane, never a
+   fix lane:** a `fix` lane whose every change sits under the test surface, and whose stricter tests
+   pass on the base, is refused by the reproduce gate with `run this as a build lane` (F21 slice 2's
+   fix lane was salvaged by hand for this before the refusal was named).
 4. **Every spec says: keep existing call signatures working** (new parameters as keywords with
    defaults). The first Sonnet build changed one and the clean gate rejected a green run.
 5. **Reviewers that run the suite pass `--basetemp` under `$TMPDIR`.** A read lane that leaves pytest

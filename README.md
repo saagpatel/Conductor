@@ -1542,6 +1542,13 @@ Three outcomes besides a normal reproduction:
 - the base run **passes**: the new or changed check reproduces nothing, no
   commit, ordinary gate skipped —
   `reproduce gate passed on the base: the check does not reproduce the finding`;
+  when every change sits under the test surface, so the fleet hardened tests
+  without fixing anything, the same refusal reads
+  `reproduce gate passed on the base: every change is under the test surface
+  and the stricter tests pass there too; run this as a build lane` and the
+  receipt's `reproduce` block carries `test_only: true`. That is correct work
+  at the wrong stage: rerun it as a `stage: build` lane (with
+  `test_policy: allow`), whose clean gate is the check that fits it;
 - the fleet changed nothing at all, or wrote only its declared deliverable
   (Shape A's fix lane writes `dispositions.json` even after three
   NO_FINDINGS reviews): this gate has nothing to do with it; the existing
