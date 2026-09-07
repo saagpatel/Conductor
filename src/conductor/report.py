@@ -926,8 +926,12 @@ def _build_report(
         # all here) is undispositioned too -- previously only a mission with
         # no fix lane at all reached this column, so a vendor whose lane
         # parsed but went unnamed was counted in `findings` and nowhere else.
+        # A lane that reported zero findings has nothing a disposition could
+        # ever name, so it is not "left out" the way an unnamed lane with
+        # findings is; skip it rather than inflate `basis()` with a lane a
+        # fix lane could never have dispositioned.
         for lane_name, info in review_lanes.items():
-            if info.get("unparsed"):
+            if info.get("unparsed") or not info.get("findings"):
                 continue
             if lane_name in dispositioned_lanes:
                 continue

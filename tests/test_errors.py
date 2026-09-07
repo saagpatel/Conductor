@@ -590,3 +590,18 @@ def test_readme_error_kinds_code_block_matches_kinds_exactly():
     block = section.split("```\n", 1)[1].split("```", 1)[0]
     listed = tuple(block.replace(",", " ").split())
     assert listed == KINDS
+
+
+def test_readme_error_kinds_parenthetical_discloses_every_order_divergence():
+    # W11 peer review (Opus): the block above is pinned to `KINDS`' declared
+    # order, not `error_kind`'s check order, and the intro sentence above it
+    # says "checked in this order, first match wins" -- so every kind whose
+    # checked position differs from its declared one needs to be named here,
+    # not just `deliverable`, or the sentence reads as true when it is not.
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Structured error kinds", 1)[1]
+    parenthetical = " ".join(section.split("```", 2)[2].split())
+    assert "`taint` and `settings` are listed after `deliverable` too" in parenthetical
+    assert "`gate_test_surface` is listed after `gate` but is actually checked first" in (
+        parenthetical
+    )

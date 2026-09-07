@@ -912,6 +912,49 @@ def test_report_reviewer_precision_one_vendor_two_lanes_one_dispositioned(home: 
     assert google_row.missions == 1
 
 
+def test_report_reviewer_precision_zero_findings_lane_is_not_undispositioned(home: Path):
+    # W11 peer review (Opus): a review lane that reported NO_FINDINGS has
+    # nothing a disposition could ever name, so a mission whose fix lane
+    # dispositioned only the other vendor's findings must not read the
+    # zero-findings vendor as undispositioned too -- it was never left out
+    # of anything, unlike an unnamed lane that actually reported findings.
+    _write_receipt(
+        home,
+        "20260101T000000Z-w11d-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="w11d",
+    )
+    _write_mission(
+        home,
+        "w11d",
+        name="mission-w11d",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=0
+            ),
+            _review_lane(
+                "review-grok", fleet="cursor", model="cursor-grok-4.6-medium", findings=2
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-grok", "index": 2, "disposition": "fixed", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    google_row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert google_row.undispositioned == 0
+    assert google_row.findings == 0
+    xai_row = next(r for r in rpt.reviewer_precision if r.vendor == "xai")
+    assert xai_row.undispositioned == 0
+    assert xai_row.missions == 1
+
+
 def test_report_reviewer_precision_basis_and_columns_in_json_and_printed(
     home: Path, monkeypatch, capsys
 ):

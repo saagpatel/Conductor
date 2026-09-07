@@ -493,7 +493,11 @@ gate_test_surface, no_op, read_moved_bytes, no_answer, commit, unknown
 
 (`deliverable` is listed here beside `agent` -- both are conductor's own
 checks, not a fleet's -- but is actually tested for later, after `gate`, to
-match `Result.failure()`'s own order: see "Deliverables" above.)
+match `Result.failure()`'s own order: see "Deliverables" above. `taint` and
+`settings` are listed after `deliverable` too, but both are actually checked
+earlier, right after `setup` and before `refused`; `gate_test_surface` is
+listed after `gate` but is actually checked first. This block follows
+`errors.KINDS`'s declared order, not the sequence `error_kind` checks.)
 
 `parse` is checked that early on purpose: a dispatch that raised while its
 output was being read comes back with no priced usage, which the cap check
