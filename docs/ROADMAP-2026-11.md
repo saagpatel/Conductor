@@ -31,6 +31,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F12 Claude read lanes under --restricted and --permission-prompts none; deliverable read lanes can write | 0.54.0 | Shape A via the launcher, build green under cap, both reviewers NO_FINDINGS, landed by conductor land | $8.63 |
 | F2 wall clock on the ledger | 0.55.0 | Shape A via the launcher, build green under cap, Grok's three findings all fixed on the resumed thread, landed by conductor land | $15.69 |
 | F8 golden fixtures for the Phase E shapes | 0.56.0 | lead work, four consumer recordings, five scratch missions | $1.58 |
+| F9 Shape B and Shape C receipts; golden source placeholder landed from the Shape B sitting | 0.57.0 | Shape B twice (scratch, then conductor via land), Shape C once, three Opus verifiers | $11.85 |
 
 Status 2026-09-07, end of the first Phase F sitting: every build item that survived Group 0
 is shipped (F1, F2, F3, F5, F6, F7, F12, F13; F4 was already on the tree, F14 dropped on its
@@ -44,8 +45,11 @@ end event accepted by notification-hub; bridge-db unreachable from the lead's se
 fix mission, $2.08, closed the re-audit's agreed shapes on a second harness branch). F8 ran
 (`docs/research/2026-09-07-f8-golden-fixtures.md`, 0.56.0: nine fixtures, $0.50 on the ledger
 plus about $1.08 the pre-fix replays billed into throwaway homes, five replay defects fixed in
-code). F9 shapes and the other consumers are not yet run. The last two build releases were landed
-by `conductor land`.
+code). F9 ran (`docs/research/2026-09-07-f9-shape-b-c.md`, 0.57.0, $11.85: Shape B's sitting
+split on the scratch spec and was unanimous and right on the conductor spec, landed by `conductor
+land`; Shape C's Opus reviewer found six defects still on the tree and three spec gaps the pair
+had passed, now F15). The other consumers are not yet run. The last three build releases were
+landed by `conductor land`.
 
 ## What the receipts say
 
@@ -209,7 +213,7 @@ one-line candidates; a script lane; a human lane answered; a plan lane parked an
 a two-repo collision), each under $2, so a Phase F refactor that changes a receipt shape is a
 fixture diff. Lead work plus about $10 of fleet spend. Depends on C7, E17.
 
-**F9. Shape B and Shape C receipts.** The September reset listed both as shapes worth running
+**F9. Shape B and Shape C receipts.** *Shipped 0.57.0, see the status above.* The September reset listed both as shapes worth running
 and neither ran. Shape B: two builders on one one-item spec (Sonnet 5 at `hard`, Gemini 3.7 Flash)
 with an E4 sitting of two judges over both orders, conductor keeping the winner; the receipt is
 whether the judges pick the build that passed the gate, and what the pair cost against one
@@ -217,6 +221,21 @@ Sonnet build. Shape C: Opus 5 as a third cold reviewer beside Gemini and Grok on
 Group 1 missions; the receipt is whether it reports anything the pair missed, with F1's
 dispositions saying whether what it reported was real. About $12 for B and $9 for C. Depends
 on E4, F1 for the C receipt to be readable.
+
+**F15. What Shape C found (from F9).** Opus 5's cold review of the F3, F1, and F2 build commits,
+verified on bytes (`docs/research/2026-09-07-f9-shape-b-c.md`). Defects still on the tree: (1) a
+read lane whose fleet deletes its worktree comes back ok with `tests: null`, because `verify`
+maps a vanished tree to a no-op and F3's skip then never gates it (`verify.py`, `runner.py`);
+(2) `conductor report`'s precision table admits a review lane whose verdict did not parse, with
+`findings` coerced to 0, and drops a disposition naming an unknown lane with no printed signal
+(`report.py`); (3) `gate_s` omits the reproduce gate and setup/teardown, `idle_s` resets on
+resume beside whole-life columns, and `busy` exceeds 1.0 whenever lanes overlap (`mission.py`,
+`report.py`). Spec items passed as built but not built: the `c5-review-fix` projection backfill
+F3 asked for; F1's schema-checked `dispositions.json` deliverable and per-finding confidence with
+the calibration line. Latent: `settle()` reads an answer without `errors="replace"`; a rehydrated
+disposition row is indexed unvalidated; a second fix lane overwrites the first's dispositions in
+the report. Two or three Shape A missions, about $6 each, the F1 spec gap sized as its own item.
+Depends on F9.
 
 **F10. First consumers.** The four missions the September roadmap named, each now buildable:
 the cross-vendor core-guard audit (three read lanes over the guard and its test file in the
