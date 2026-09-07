@@ -42,8 +42,8 @@ The `system`/`init` event's tool list, verbatim:
 `WebSearch` survives `--restricted`, so restricted mode is not an egress block: the model
 can still search the web. It cannot fetch a URL or shell out.
 
-The model attempted nothing in plan mode. It answered "I'm in plan mode, which prevents me
-from executing non-readonly actions", so `permission_denials` was `[]`. Bytes: `git status`
+The model attempted nothing in plan mode, so `permission_denials` was `[]`. It answered
+"I'm in plan mode, which prevents me from executing non-readonly actions". Bytes: `git status`
 was clean apart from the run directory. `../outside/` was empty.
 
 ### Run 2: `--restricted --permission-mode bypassPermissions`
@@ -72,7 +72,7 @@ tools to the working directory.
 says so in the tool result rather than failing silently. Both writes appear in
 `result.permission_denials` with the full `tool_input`. The in-worktree write was denied
 for an unrelated reason: this scratch repository sits under `<home>/.claude`, which Claude
-Code treats as a sensitive path, not a property of `--restricted`. Bytes: `../outside/`
+Code treats as a sensitive path. That denial is not a property of `--restricted`. Bytes: `../outside/`
 empty, no `inside.txt`.
 
 ### Runs 4-6: `--permission-prompts none` alone
@@ -90,7 +90,7 @@ verbatim:
 
 ```
 Permission for this tool use was denied. It requires approval, and this session has no
-approval surface. Nobody can answer a permission prompt here, so it was denied
+approval surface — nobody can answer a permission prompt here — so it was denied
 automatically. The action was NOT performed; do not claim it succeeded, and do not retry
 it: this action, and anything el[ided]
 ```
@@ -112,7 +112,7 @@ green. A non-empty one is a lane that was stopped from doing something.
 
 `--effort xhigh` on "reply OK" with Haiku 4.5: **accepted**, exit 0, normal result event,
 $0.047, `modelUsage` reporting `thinkingTokens: 311`. Haiku is documented as having no
-effort dial. The CLI takes the flag regardless, and the run completes. `--help` lists
+effort dial. The CLI takes the flag regardless, and the run behaves. `--help` lists
 `low, medium, high, xhigh, max`.
 
 ## F13, Antigravity
@@ -211,7 +211,7 @@ https://example.com with the web fetch tool and quote its title, write `probe` t
 
 Exit 0, `subtype: success`, `is_error: false`. Every step succeeded. `system`/`init`
 reports `permissionMode: "default"` and the model as `Cursor Grok 4.6 Medium`. Event kinds
-seen: `thinking`, `assistant`, `tool_call` with `subtype` `started` then `completed`,
+seen: `system`/`init`, `thinking`, `assistant`, `tool_call` with `subtype` `started` then `completed`,
 `interaction_query` (`request` then `response`), `result`.
 
 - `webFetchToolCall` completed with `result.success` carrying the page markdown
@@ -282,8 +282,8 @@ live. The 2026-09-06 finding had been read out of the bundle only.
   still exits 0 with `subtype: success`, so an empty list is the only green. A conductor
   read lane should assert it. It is not a blanket block: safe-listed Bash commands (`echo`)
   still run under `--permission-mode default`.
-- **`--effort xhigh` is accepted** by `claude` 2.1.263, whose choices are `low, medium,
-  high, xhigh, max`, including on Haiku 4.5, which has no documented effort dial.
+- **`--effort xhigh` is accepted** by `claude` 2.1.263, including on Haiku 4.5, which has
+  no documented effort dial. The CLI's choices are `low, medium, high, xhigh, max`.
   `_CLAUDE_EFFORT` can carry a fourth level without a CLI refusal. Whether it buys anything
   was not measured.
 - **agy emits no `denied_actions` in any shape.** Plan mode's refusal is legible only as an
@@ -295,7 +295,7 @@ live. The 2026-09-06 finding had been read out of the bundle only.
   scope. This is a better E21 enforcement check than parsing "loaded N named hooks" out of
   `--log-file`: it is structured, it is free, and it can run before the paid dispatch.
 - **Cursor's `--sandbox enabled` blocks nothing observable**: with it on, the web fetch
-  returned the page and the shell wrote a file outside the repository, exactly as with
+  returned the page and the shell wrote a file outside the repository, as with
   `--sandbox disabled`. Do not treat it as confinement.
 - **It composes with `.cursor/cli.json` only in the sense that it does not interfere**: with
   both, the deny rules held on bytes. Two shell calls were denied, twice, with
