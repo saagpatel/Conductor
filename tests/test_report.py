@@ -344,7 +344,9 @@ def test_report_reviewer_precision_counts_an_unparsed_review_verdict_separately(
     assert row.unparsed == 1
 
 
-def test_report_disposition_naming_an_unknown_lane_is_counted_not_dropped(home: Path):
+def test_report_disposition_naming_an_unknown_lane_is_counted_not_dropped(
+    home: Path, monkeypatch, capsys
+):
     # F15 item 3: a well-formed disposition naming a lane that never ran as
     # `stage: review` on this mission used to vanish with no counter.
     _write_receipt(
@@ -376,6 +378,13 @@ def test_report_disposition_naming_an_unknown_lane_is_counted_not_dropped(home: 
     assert rpt.dispositions_unknown_lane == 1
     row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
     assert row.fixed == 1
+    # Grok, F15 mission 1: the printed report is the ledger the lead reads,
+    # so the counter has to survive there too, not only on the JSON object.
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert "dispositions naming an unknown lane: 1" in printed
+    assert "malformed disposition lines: 0" in printed
 
 
 def test_report_sums_dispositions_malformed_across_fix_lanes(home: Path):
