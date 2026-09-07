@@ -24,6 +24,14 @@ that restores the old prefix list as a discouragement, not a boundary.
 |---|---|---|---|
 | G wave 1: trust boundaries (D3-D8, D19, W1, W2, W5) | 0.61.0 | lead with four Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 | G wave 2: spend and lifecycle (D1, D2, D9-D15), plus salvage, collisions, the build prompt, and two README claims from wave 3 | 0.62.0 | lead with four Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
+| G wave 3: measurement (D18, D20, D21) | 0.63.0 | lead with one Opus subagent in a worktree, gated on the merged tree | $0 |
+
+Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
+review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
+weaknesses, W1, W2, W5 are fixed, W3 (resume authenticates paths, not bytes), W4 (deliverable copy
+before the gates, teardown after capture), and W6 to W10 are open and carry into Phase H as
+record. Not yet verified live: no tainted lane has run under the shell deny; the first tainted
+Antigravity lane of the next consumer is the drill (Phase H item 1).
 
 ## Waves
 
