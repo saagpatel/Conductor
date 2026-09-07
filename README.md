@@ -405,7 +405,10 @@ and still copied into the mission's `deliverables/` directory beforehand,
 same as any other deliverable; only the commit is affected. When the
 excluded path was the only change in the tree, nothing is committed and the
 run's `ok` is unaffected by that, the same as any other no-op write lane
-with `no_op_ok` set.
+with `no_op_ok` set. In an isolated worktree the excluded file is also removed after
+every capture and verdict, with a note on the receipt, so the worktree is released clean
+and a later lane may build on the tip; the captured copy under the run directory is the
+deliverable. In the operator's own checkout nothing is removed.
 
 ### Cheap-first cascade
 
@@ -1103,6 +1106,19 @@ fix lane's `base` onto it (its `resume` stays
 `FIX_PROMPT` an `<adversarial>` block carrying that lane's answer and diff. The file
 is written beside the spec (or at `--out`), never overwritten without `--force`, and
 `--dry-run` runs `conductor mission --dry-run` on it.
+
+Every Shape A build lane declares an evidence map (Phase H item 6, operator decision
+2026-09-07): `evidence.json` at the repository root, a `commit: false` deliverable against
+`evidence.schema.json` written beside the mission file, one entry per spec item with its
+status (`built`, `partial`, `not_built`), the files changed for it, the tests that exercise
+it, the check the builder ran, and a note. The three reviewers get it in an `<evidence>`
+block after the diff, with the instruction to read it as a claim: an item whose files or
+tests are not in the change, a check that was not run, or a spec item the map does not name
+is reportable like any other finding. The outside review asked for this before any paid
+spec-fidelity stage; the three F15 items Shape C caught as passed-but-not-built had no
+artifact naming them at all. The map never lands in the repository: the harness keeps it
+out of the commit and removes it from the isolated worktree after capture (below), so the
+build's tip stays clean for the reviewers to build on.
 
 `--opus-review` is Shape C (F9) as an option on the same launcher: a `review-opus` lane,
 Opus 5 at `hard` reading cold beside Gemini and Grok with the same no-quota tail, at a

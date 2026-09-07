@@ -128,6 +128,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
 is inherited rather than re-earned.
 
+Every Shape A build lane writes `evidence.json`, a map from spec item to files, tests, and the
+check run, that the reviewers read as a claim beside the diff (Phase H item 6). A spec item the
+map does not name is a finding.
+
 `conductor shape a --opus-review` (F9 Shape C, Phase H) adds Opus 5 at `hard` as a third cold
 reviewer at a $4.00 cap, with `self_judging: allow` on the mission because the build is Sonnet.
 About three times the pair's cost; for lifecycle, security, and spec-risk work, not the default.

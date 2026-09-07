@@ -643,3 +643,56 @@ def test_readme_lists_deliverable_among_the_template_and_taint_surfaces():
     assert "{{lanes.<name>.deliverable}}" in templates_section
     taint_section = text.split("Taint spreads forward", 1)[1].split("\n\n", 1)[0]
     assert "deliverable" in taint_section
+
+
+# --- Evidence map (Phase H item 6): a commit-false deliverable leaves the ---
+# --- isolated worktree clean so later lanes can build on the tip ----------
+
+
+def test_commit_false_deliverable_is_removed_from_the_isolated_worktree_after_capture(
+    repo, home, fake_fleet
+):
+    """A build lane's `evidence.json` (commit: false) used to stay behind as
+    an untracked file: the worktree was kept as dirty, `clean` read False,
+    and `LaneResult.buildable()` refused every reviewer based on it. After
+    every capture and verdict, the file is removed and the worktree released
+    clean; the captured copy in the run directory is the deliverable."""
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            f"echo done > report.txt; echo '{{\"items\": []}}' > evidence.json; "
+            f"echo '{_OK_ANSWER}'",
+        ]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "evidence.json", "commit": False}),
+        commit_message="feat: add report",
+        home=home,
+        isolate=True,
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable["ok"] is True
+    assert Path(result.deliverable_path).read_text().strip() == '{"items": []}'
+    assert result.isolation["clean"] is True
+    assert result.isolation["kept"] is False
+    assert not Path(result.isolation["worktree"]).exists()
+    assert any("removed from the worktree after capture" in n for n in result.git_verdict["notes"])
+    log = subprocess.run(
+        ["git", "show", "--stat", result.commit["sha"]], cwd=repo, capture_output=True, text=True
+    ).stdout
+    assert "report.txt" in log and "evidence.json" not in log
+
+
+def test_commit_false_deliverable_stays_in_a_non_isolated_checkout(repo, home, fake_fleet):
+    fake_fleet(
+        ["sh", "-c", f"echo done > report.txt; echo receipt > record.json; echo '{_OK_ANSWER}'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "record.json", "commit": False}),
+        commit_message="feat: add report",
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+    assert (repo / "record.json").read_text().strip() == "receipt"
+    assert not any("removed from the worktree" in n for n in result.git_verdict["notes"])

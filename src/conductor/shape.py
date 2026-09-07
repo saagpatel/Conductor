@@ -456,8 +456,79 @@ BUILD_PROMPT = (
     "harness commits. Do not special-case a test to make it pass: a test that passes for "
     "the wrong reason is worse than a failing one, and the reviewers read every test edit. "
     "Investigate before answering: read the code a change touches before changing it.\n\n"
+    "Before you finish, write an evidence map to a file named evidence.json at the "
+    "repository root: a JSON object {\"items\": [...]}, one entry per spec item in the "
+    "spec's own order, each {\"item\": <the item's number or its first words>, \"status\": "
+    "\"built\", \"partial\", or \"not_built\", \"files\": [<paths you changed for it>], "
+    "\"tests\": [<test functions or files that exercise it>], \"check\": <the command you ran "
+    "that proves it, or \"none\">, \"note\": <one sentence, empty if nothing to say>}. "
+    "An item you did not build is written as not_built with the reason in its note; the "
+    "map is read by the reviewers beside your diff, so a claim it cannot support is a "
+    "finding against the build. The harness keeps evidence.json out of the commit.\n\n"
     "<spec>\n{{mission.prompt}}\n</spec>"
 )
+
+# Evidence map (Phase H item 6, operator decision 2026-09-07): the build lane's
+# own map from spec item to files, tests, and the check it ran, as an E1
+# deliverable with `commit: false`, handed to the reviewers beside the diff.
+# The outside review asked for this before any paid spec-fidelity stage: the
+# three spec items Shape C caught as "passed as built, not built" (F15) had no
+# artifact that named them at all.
+EVIDENCE_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "description": (
+                "One entry per spec item, in the spec's order: "
+                '{"item": <number or first words>, "status": "built", "partial", or '
+                '"not_built", "files": [<paths changed>], "tests": [<tests that exercise '
+                'it>], "check": <the command run, or "none">, "note": <one sentence>}.'
+            ),
+        }
+    },
+}
+
+EVIDENCE_BLOCK = "<evidence>\n{{lanes.build.deliverable}}\n</evidence>\n\n"
+
+EVIDENCE_REVIEW_NOTE = (
+    "The evidence block is the builder's own map from each spec item to the files, tests, "
+    "and check behind it. Treat it as a claim: an item whose files or tests are not in the "
+    "change, a check that was not run, or a spec item the map does not name is reportable "
+    "the same as any other item, with the map's entry as the citation. "
+)
+
+
+def write_evidence_schema(base_dir: Path) -> Path:
+    """`evidence.json`'s schema, written beside the mission file like the
+    dispositions schema, so the build lane's `deliverable.schema` path
+    resolves wherever the mission is launched from."""
+    path = Path(base_dir) / "evidence.schema.json"
+    path.write_text(json.dumps(EVIDENCE_SCHEMA, indent=2) + "\n")
+    return path
+
+
+def write_shape_schemas(base_dir: Path) -> tuple[Path, Path]:
+    """Both schema files a Shape A mission's deliverables name, beside the
+    mission file: `dispositions.schema.json` (fix lane) and
+    `evidence.schema.json` (build lane)."""
+    return write_dispositions_schema(base_dir), write_evidence_schema(base_dir)
+
+
+def review_prompt_with_evidence(prompt: str) -> str:
+    """A Shape A review prompt with the build's evidence map after its
+    `<change>` block and the note on how to read it ahead of the review
+    tail. Only `shape_a` uses this: the salvage follow-on has no build lane
+    and so no map."""
+    change_end = "</change>\n\n"
+    assert change_end in prompt
+    return prompt.replace(change_end, change_end + EVIDENCE_BLOCK, 1).replace(
+        "Report anything that could cause incorrect behavior",
+        EVIDENCE_REVIEW_NOTE + "Report anything that could cause incorrect behavior",
+        1,
+    )
 
 
 def build_prompt(test: str) -> str:
@@ -567,6 +638,11 @@ def shape_a(
         "cap_usd": caps.build_cap,
         "test_policy": test_policy,
         "commit": build_commit,
+        "deliverable": {
+            "path": "evidence.json",
+            "schema": "evidence.schema.json",
+            "commit": False,
+        },
         "prompt": build_prompt(test),
     }
     if ports:
@@ -621,7 +697,9 @@ def shape_a(
         "base": "build",
         "timeout": 1200,
         "cap_usd": caps.grok_cap,
-        "prompt": GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT,
+        "prompt": review_prompt_with_evidence(
+            GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT
+        ),
     }
     if caps.cap_grace_usd:
         review_grok["cap_grace_usd"] = caps.cap_grace_usd
@@ -637,7 +715,7 @@ def shape_a(
             "base": "build",
             "timeout": 1800,
             "cap_usd": caps.opus_cap,
-            "prompt": OPUS_REVIEW_PROMPT,
+            "prompt": review_prompt_with_evidence(OPUS_REVIEW_PROMPT),
         }
         if caps.cap_grace_usd:
             review_opus["cap_grace_usd"] = caps.cap_grace_usd
@@ -705,7 +783,7 @@ def shape_a(
                 "base": "build",
                 "timeout": 1200,
                 "cap_usd": caps.gemini_cap,
-                "prompt": GEMINI_REVIEW_PROMPT,
+                "prompt": review_prompt_with_evidence(GEMINI_REVIEW_PROMPT),
             },
             review_grok,
             *([review_opus] if review_opus is not None else []),

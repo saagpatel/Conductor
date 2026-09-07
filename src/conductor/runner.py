@@ -2738,6 +2738,31 @@ def dispatch(
     if include_exclude_file is not None:
         include_exclude_file.unlink(missing_ok=True)
     if iso is not None:
+        if (
+            iso.active
+            and deliverable_path is not None
+            and spec.deliverable is not None
+            and spec.deliverable.get("commit") is False
+        ):
+            # Evidence map (Phase H item 6): a `commit: false` deliverable is
+            # a receipt, and its home is the run directory it was captured
+            # into above. Left in the worktree it is an untracked file, the
+            # worktree is kept as dirty, and `LaneResult.buildable()` refuses
+            # every later lane that names this one as its base -- a build
+            # lane that writes `evidence.json` would strand its own reviewers.
+            # Removed only after every capture and verdict above, in an
+            # isolated worktree only, never from the operator's own checkout.
+            try:
+                (Path(spec.cwd) / spec.deliverable["path"]).unlink()
+                git_verdict.notes.append(
+                    f"deliverable {spec.deliverable['path']} removed from the worktree after "
+                    "capture (commit: false)"
+                )
+            except OSError as exc:
+                git_verdict.notes.append(
+                    f"deliverable {spec.deliverable['path']} could not be removed after "
+                    f"capture: {exc}"
+                )
         worktrees.release(iso)
         if iso.active:
             git_verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")

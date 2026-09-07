@@ -70,7 +70,7 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     spec = _spec(tmp_path)
     caps = shape.cap_arithmetic(2, 1)
     raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps)
-    shape.write_dispositions_schema(spec.parent)
+    shape.write_shape_schemas(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
     names = [lane.name for lane in mission.lanes]
     assert names == ["build", "review-gemini", "review-grok", "fix"]
@@ -177,7 +177,7 @@ def test_paths_are_relative_to_the_mission_dir_when_under_it(repo, tmp_path):
     )
     assert raw["prompt_file"] == "specs/widget.md"
     assert raw["cwd"] == "repo"
-    shape.write_dispositions_schema(tmp_path)
+    shape.write_shape_schemas(tmp_path)
     mission = mission_from_dict(raw, base_dir=tmp_path)
     assert mission.cwd == str(repo)
 
@@ -522,7 +522,7 @@ def test_opus_review_adds_a_third_cold_reviewer_the_mission_accepts(repo, tmp_pa
     spec = _spec(tmp_path)
     caps = shape.cap_arithmetic(2, 1, opus_review=True)
     raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps, opus_review=True)
-    shape.write_dispositions_schema(spec.parent)
+    shape.write_shape_schemas(spec.parent)
     # Loads: the Sonnet build and the Opus reviewer share a vendor, and the
     # mission declares the lift itself rather than leaving the lead to add it.
     mission = mission_from_dict(raw, base_dir=spec.parent)
@@ -629,4 +629,73 @@ def test_cli_opus_review_writes_the_lane_and_prints_its_cap(
     assert '"ok": true' in printed  # the dry run accepted the self-judging lift
     raw = json.loads(out.read_text())
     assert raw["self_judging"] == "allow"
-    assert (out.parent / "prompts" / "review-opus.md").read_text() == shape.OPUS_REVIEW_PROMPT
+    written = (out.parent / "prompts" / "review-opus.md").read_text()
+    assert written == shape.review_prompt_with_evidence(shape.OPUS_REVIEW_PROMPT)
+
+
+# --- Evidence map: the build lane's deliverable (Phase H item 6) ------------
+
+
+def test_build_lane_declares_the_evidence_map_and_reviewers_read_it(repo, tmp_path):
+    spec = _spec(tmp_path)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=shape.cap_arithmetic(1, 1))
+    shape.write_shape_schemas(spec.parent)
+    mission = mission_from_dict(raw, base_dir=spec.parent)
+    assert [lane.name for lane in mission.lanes] == ["build", "review-gemini", "review-grok", "fix"]
+    build = raw["lanes"][0]
+    assert build["deliverable"] == {
+        "path": "evidence.json",
+        "schema": "evidence.schema.json",
+        "commit": False,
+    }
+    assert "evidence.json" in build["prompt"] and '"not_built"' in build["prompt"]
+    assert (spec.parent / "evidence.schema.json").is_file()
+    schema = json.loads((spec.parent / "evidence.schema.json").read_text())
+    assert schema["required"] == ["items"]
+    for lane in raw["lanes"][1:3]:
+        prompt = lane["prompt"]
+        assert "<evidence>\n{{lanes.build.deliverable}}\n</evidence>" in prompt
+        assert prompt.index("</change>") < prompt.index("<evidence>")
+        assert prompt.index("<evidence>") < prompt.index("Report anything")
+        assert "Treat it as a claim" in prompt
+        assert "NO_FINDINGS" in prompt and "at least" not in prompt
+    assert "<evidence>" not in raw["lanes"][3]["prompt"]
+
+
+def test_opus_reviewer_reads_the_evidence_map_too(repo, tmp_path):
+    spec = _spec(tmp_path)
+    caps = shape.cap_arithmetic(1, 1, opus_review=True)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps, opus_review=True)
+    assert "<evidence>\n{{lanes.build.deliverable}}\n</evidence>" in raw["lanes"][3]["prompt"]
+
+
+def test_followon_has_no_evidence_block_because_it_has_no_build_lane(repo, tmp_path):
+    raw = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test="true",
+        caps=shape.cap_arithmetic(1, 1),
+        name="salvaged",
+    )
+    for lane in raw["lanes"]:
+        assert "<evidence>" not in lane["prompt"]
+        assert "deliverable" not in lane or lane["deliverable"]["path"] != "evidence.json"
+
+
+def test_cli_writes_the_evidence_schema_beside_the_mission(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = _spec(tmp_path)
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    code = main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "1", "--modules", "1", "--out", str(out), "--dry-run",
+        ]
+    )
+    assert code == 0
+    assert (out.parent / "evidence.schema.json").is_file()
+    assert '"ok": true' in capsys.readouterr().out
