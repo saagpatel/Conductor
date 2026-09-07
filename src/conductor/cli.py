@@ -799,6 +799,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             adversarial=args.adversarial,
             tests_items=args.tests_items,
             findings=args.findings,
+            opus_review=args.opus_review,
         )
         out = Path(args.out).expanduser().resolve() if args.out else None
         mission_dir = out.parent if out else None
@@ -817,6 +818,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             fix_commit=args.fix_commit or "",
             adversarial=args.adversarial,
             ceiling=ceiling,
+            opus_review=args.opus_review,
         )
         base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
         if out is None:
@@ -1146,6 +1148,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add an adversarial lane that writes a test failing on the build's tip (E16); "
         "the fix lane builds on it and inherits a reproduced check",
+    )
+    p_shape_a.add_argument(
+        "--opus-review",
+        action="store_true",
+        help="Shape C (F9): add Opus 5 at hard as a third cold reviewer beside Gemini and "
+        "Grok, at the $4.00 cap; the mission carries self_judging: allow because the build "
+        "is Sonnet, and the fix lane reads all three reviews",
     )
     p_shape_a.add_argument(
         "--tests-items",

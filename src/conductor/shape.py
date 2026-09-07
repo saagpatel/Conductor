@@ -42,6 +42,7 @@ USD_ADVERSARIAL = 3.0  # E16: one test that fails on the current tree, plus room
 USD_GEMINI_READ = 1.0  # rule 7: Gemini reads only on this shape
 USD_GROK_READ = 1.5  # rule 7: Grok reading only
 USD_GROK_SUITE = 2.0  # rule 7: Grok when it runs the suite
+USD_OPUS_READ = 3.0  # F9 Shape C: Opus 5 reads cold; $2.40 to $2.76 per mission on the receipt
 USD_MISSION_SLACK = 1.5  # room for a retry's partial spend before the mission budget sinks
 USD_CLAUDE_GRACE = 0.25  # E24: default grace band on the build and fix (claude) lanes
 
@@ -88,6 +89,19 @@ GROK_READ_ONLY_PROMPT = GROK_REVIEW_PROMPT.replace(
     "is written inside this working tree. CHANGE NOTHING.",
     "read whatever you need. Do not run the test suite; the lead runs it. Read the diff "
     "and the code it touches. CHANGE NOTHING.",
+)
+
+# F9 Shape C, a launcher option since Phase H: Opus 5 as a third cold reviewer
+# beside Gemini and Grok. On the receipt (docs/research/2026-09-07-f9-shape-b-c.md)
+# it reported nothing false, found six defects the pair missed, and caught
+# three spec items the pair had passed as built, at about three times the
+# pair's cost. Same no-quota tail as the other two; reads only, like Gemini.
+OPUS_REVIEW_PROMPT = (
+    "Review the change below against the spec. The change is applied in the current "
+    "working directory; read whatever you need, including code the diff does not touch. "
+    "Do not run the test suite; the lead runs it. Change nothing.\n\n"
+    "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
+    + REVIEW_TAIL
 )
 
 ADVERSARIAL_PROMPT = (
@@ -166,6 +180,34 @@ FIX_PROMPT_ADVERSARIAL_BLOCK = (
     "<adversarial>\n{{lanes.adversarial.answer}}\n\n{{lanes.adversarial.diff}}\n</adversarial>\n\n"
 )
 
+# F9 Shape C: the third review block, inserted right after the Grok block
+# (and before any adversarial block) when `shape_a(opus_review=True)`.
+FIX_PROMPT_OPUS_BLOCK = "<review_opus>\n{{lanes.review-opus.answer}}\n</review_opus>\n\n"
+
+
+def fix_prompt_with_opus(prompt: str) -> str:
+    """`FIX_PROMPT` (or a variant of it) rewritten for three reviewers: the
+    Opus block follows the Grok block, and every "two reviewers", "either
+    reviewer", "both reviews" reads for three, so the dispositions contract
+    names the third lane too."""
+    grok_block = "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
+    return (
+        prompt.replace(grok_block, grok_block + FIX_PROMPT_OPUS_BLOCK)
+        .replace(
+            "Two reviewers from other vendors read the change; their reports follow, each "
+            "with its items numbered.",
+            "Three reviewers read the change, two from other vendors and Opus 5 from yours; "
+            "their reports follow, each with its items numbered.",
+        )
+        .replace(
+            '{"lane": "review-gemini" or "review-grok", "index": ',
+            '{"lane": "review-gemini", "review-grok", or "review-opus", "index": ',
+        )
+        .replace("If both reviews say NO_FINDINGS", "If every review says NO_FINDINGS")
+        .replace("either reviewer numbered", "any reviewer numbered")
+        .replace("when both reviews said NO_FINDINGS", "when every review said NO_FINDINGS")
+    )
+
 
 class ShapeInvalid(ValueError):
     """The launcher's inputs cannot produce a Shape A mission."""
@@ -190,6 +232,9 @@ class CapArithmetic:
     tests_items: int = 0
     # F6: expected review findings, at a dollar each on the fix cap.
     findings: int = DEFAULT_FINDINGS
+    # F9 Shape C: whether this shape carries the Opus review lane; its term
+    # joins the mission budget only when it does.
+    opus_review: bool = False
 
     @property
     def build_terms(self) -> list[tuple[str, float]]:
@@ -246,8 +291,26 @@ class CapArithmetic:
         return round(sum(v for _, v in self.adversarial_terms), 2)
 
     @property
+    def opus_terms(self) -> list[tuple[str, float]]:
+        # Rule 10: every Claude cap, read lanes included, carries the summary
+        # dollar; the F9 lanes finished at $2.40 to $2.76 under a $3.00 cap.
+        return [("Opus cold read", USD_OPUS_READ), ("Claude summary", USD_CLAUDE_SUMMARY)]
+
+    @property
+    def opus_cap(self) -> float:
+        return round(sum(v for _, v in self.opus_terms), 2)
+
+    @property
+    def review_caps(self) -> float:
+        """Every review lane's cap, so the follow-on shape sums the same set."""
+        total = self.gemini_cap + self.grok_cap
+        if self.opus_review:
+            total += self.opus_cap
+        return total
+
+    @property
     def mission_budget(self) -> float:
-        lanes = self.build_cap + self.gemini_cap + self.grok_cap + self.fix_cap
+        lanes = self.build_cap + self.review_caps + self.fix_cap
         if self.adversarial:
             lanes += self.adversarial_cap
         return round(lanes + USD_MISSION_SLACK, 2)
@@ -263,6 +326,8 @@ class CapArithmetic:
             f"review-grok cap: ${self.grok_cap:.2f} "
             + ("(runs the suite; rule 7)" if self.grok_runs_suite else "(reads only; rule 7)"),
         ]
+        if self.opus_review:
+            lines.append(line("review-opus cap", self.opus_terms, self.opus_cap))
         if self.adversarial:
             lines.append(line("adversarial cap", self.adversarial_terms, self.adversarial_cap))
         lines.append(line("fix cap", self.fix_terms, self.fix_cap))
@@ -289,6 +354,7 @@ def cap_arithmetic(
     adversarial: bool = False,
     tests_items: int = 0,
     findings: int = DEFAULT_FINDINGS,
+    opus_review: bool = False,
 ) -> CapArithmetic:
     if spec_items < 1:
         raise ShapeInvalid("--items must be at least 1")
@@ -311,6 +377,7 @@ def cap_arithmetic(
         adversarial=adversarial,
         tests_items=tests_items,
         findings=findings,
+        opus_review=opus_review,
     )
 
 
@@ -434,6 +501,7 @@ def shape_a(
     fix_commit: str = "",
     adversarial: bool = False,
     ceiling: dict | None = None,
+    opus_review: bool = False,
 ) -> dict:
     """The Shape A mission as a dict ready for `mission_from_dict` or `json.dump`.
 
@@ -456,6 +524,12 @@ def shape_a(
     `ceiling` is the mission's E9 rolling-spend ceiling dict, `{"per_hour_usd", "per_day_usd"}`
     (see `parse_ceiling`); `None` (the default) writes `CEILING_NONE`, the same as `--ceiling
     none`.
+
+    `opus_review` (F9 Shape C) adds `review-opus`, Opus 5 at `hard` reading cold beside the
+    pair, at `caps.opus_cap`. The build is Sonnet, the same vendor, so the mission carries
+    `self_judging: allow` and the review policy admits `anthropic`; the fix lane needs the third
+    review and its prompt carries a `<review_opus>` block. Concurrency rises to three so the
+    reviewers still run side by side (rule 11).
     """
     spec = Path(spec).expanduser().resolve()
     repo = Path(repo).expanduser().resolve()
@@ -533,6 +607,10 @@ def shape_a(
             "passes, with no further test change required. Otherwise a fix with no test change "
             "is refused, and a test that already passes on the current tree is refused.",
         )
+    if opus_review:
+        # After the adversarial rewrite, so the Opus block lands between the
+        # Grok block and the adversarial one: reviews first, then the test.
+        fix_prompt = fix_prompt_with_opus(fix_prompt)
     review_grok: dict = {
         "name": "review-grok",
         "stage": "review",
@@ -547,6 +625,23 @@ def shape_a(
     }
     if caps.cap_grace_usd:
         review_grok["cap_grace_usd"] = caps.cap_grace_usd
+    review_opus: dict | None = None
+    if opus_review:
+        review_opus = {
+            "name": "review-opus",
+            "stage": "review",
+            "fleet": "claude",
+            "model": "opus",
+            "effort": "hard",
+            "mode": "read",
+            "base": "build",
+            "timeout": 1800,
+            "cap_usd": caps.opus_cap,
+            "prompt": OPUS_REVIEW_PROMPT,
+        }
+        if caps.cap_grace_usd:
+            review_opus["cap_grace_usd"] = caps.cap_grace_usd
+    reviewers = ["review-gemini", "review-grok"] + (["review-opus"] if opus_review else [])
     fix: dict = {
         "name": "fix",
         "stage": "fix",
@@ -560,11 +655,7 @@ def shape_a(
         # session); mission.py's resume rule requires `resume` to be a need
         # or the base, so `build` must be named here explicitly once `base`
         # is no longer `build` itself.
-        "needs": (
-            ["build", "review-gemini", "review-grok", "adversarial"]
-            if adversarial
-            else ["review-gemini", "review-grok"]
-        ),
+        "needs": (["build", *reviewers, "adversarial"] if adversarial else reviewers),
         "resume": "build",
         "no_op_ok": True,
         "timeout": 1800,
@@ -584,16 +675,16 @@ def shape_a(
         fix["cap_grace_usd"] = caps.cap_grace_usd
     policy = {
         "build": {"vendors": ["anthropic"]},
-        "review": {"vendors": ["google", "xai"]},
+        "review": {"vendors": ["google", "xai", "anthropic"] if opus_review else ["google", "xai"]},
         "fix": {"vendors": ["anthropic"]},
     }
     if adversarial:
         policy["adversarial"] = {"vendors": ["anthropic"]}
-    return {
+    mission: dict = {
         "name": mission_name,
         "cwd": rel(repo),
         "prompt_file": rel(spec),
-        "concurrency": 2,
+        "concurrency": 3 if opus_review else 2,
         "require": "all",
         "max_cost_usd": caps.mission_budget,
         "test": test,
@@ -617,10 +708,16 @@ def shape_a(
                 "prompt": GEMINI_REVIEW_PROMPT,
             },
             review_grok,
+            *([review_opus] if review_opus is not None else []),
             *([adversarial_lane] if adversarial_lane is not None else []),
             fix,
         ],
     }
+    if opus_review:
+        # The build and the third reviewer share a vendor; mission load refuses
+        # that pair unless the lift is declared (README, "Self-judging").
+        mission["self_judging"] = "allow"
+    return mission
 
 
 def shape_a_followon(
@@ -638,6 +735,7 @@ def shape_a_followon(
     spec_prompt: str = "",
     base_sha: str = "",
     ceiling: dict | None = None,
+    opus_review: bool = False,
 ) -> dict:
     """E23: the review-and-fix mission for a salvage the lead has already
     committed by hand (AGENTS.md rule 6). Identical in shape to `shape_a`
@@ -690,6 +788,7 @@ def shape_a_followon(
     )
     gemini_prompt = GEMINI_REVIEW_PROMPT.replace("{{lanes.build.diff}}", change_block)
     grok_prompt = GROK_READ_ONLY_PROMPT.replace("{{lanes.build.diff}}", change_block)
+    opus_prompt = OPUS_REVIEW_PROMPT.replace("{{lanes.build.diff}}", change_block)
     if mission_dir is not None:
         patch_path = Path(mission_dir).expanduser().resolve() / f"{mission_name}-diff.patch"
         patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -708,6 +807,22 @@ def shape_a_followon(
     }
     if caps.cap_grace_usd:
         review_grok["cap_grace_usd"] = caps.cap_grace_usd
+    review_opus: dict | None = None
+    if opus_review:
+        review_opus = {
+            "name": "review-opus",
+            "stage": "review",
+            "fleet": "claude",
+            "model": "opus",
+            "effort": "hard",
+            "mode": "read",
+            "timeout": 1800,
+            "cap_usd": caps.opus_cap,
+            "prompt": opus_prompt,
+        }
+        if caps.cap_grace_usd:
+            review_opus["cap_grace_usd"] = caps.cap_grace_usd
+    reviewers = ["review-gemini", "review-grok"] + (["review-opus"] if opus_review else [])
     fix: dict = {
         "name": "fix",
         "stage": "fix",
@@ -715,7 +830,7 @@ def shape_a_followon(
         "model": "sonnet",
         "effort": "standard",
         "mode": "write",
-        "needs": ["review-gemini", "review-grok"],
+        "needs": reviewers,
         "no_op_ok": True,
         "timeout": 1800,
         "cap_usd": caps.fix_cap,
@@ -728,25 +843,25 @@ def shape_a_followon(
             "schema": "dispositions.schema.json",
             "commit": False,
         },
-        "prompt": FIX_PROMPT,
+        "prompt": fix_prompt_with_opus(FIX_PROMPT) if opus_review else FIX_PROMPT,
     }
     if caps.cap_grace_usd:
         fix["cap_grace_usd"] = caps.cap_grace_usd
 
-    return {
+    mission: dict = {
         "name": mission_name,
         "cwd": str(worktree),
         "prompt": mission_prompt,
-        "concurrency": 2,
+        "concurrency": 3 if opus_review else 2,
         "require": "all",
-        "max_cost_usd": round(
-            caps.gemini_cap + caps.grok_cap + caps.fix_cap + USD_MISSION_SLACK, 2
-        ),
+        "max_cost_usd": round(caps.review_caps + caps.fix_cap + USD_MISSION_SLACK, 2),
         "test": test,
         "template_max_chars": 160000,
         "ceiling": dict(ceiling) if ceiling is not None else dict(CEILING_NONE),
         "policy": {
-            "review": {"vendors": ["google", "xai"]},
+            "review": {
+                "vendors": ["google", "xai", "anthropic"] if opus_review else ["google", "xai"]
+            },
             "fix": {"vendors": ["anthropic"]},
         },
         "prefix": _prefix(worktree, about),
@@ -764,6 +879,10 @@ def shape_a_followon(
                 "prompt": gemini_prompt,
             },
             review_grok,
+            *([review_opus] if review_opus is not None else []),
             fix,
         ],
     }
+    # No build lane here, so no self-judging pair to lift: the third reviewer
+    # and the fix lane share a vendor, but a fix is not a judge of a review.
+    return mission

@@ -128,6 +128,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
 is inherited rather than re-earned.
 
+`conductor shape a --opus-review` (F9 Shape C, Phase H) adds Opus 5 at `hard` as a third cold
+reviewer at a $4.00 cap, with `self_judging: allow` on the mission because the build is Sonnet.
+About three times the pair's cost; for lifecycle, security, and spec-risk work, not the default.
+
 ## Reviewer prompts: no quotas, ever
 
 A review lane measures what is there. The evidence (`docs/research/2026-09-04-research-frontier-models.md` §6):

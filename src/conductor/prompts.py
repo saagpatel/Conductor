@@ -43,6 +43,7 @@ def prompt_versions() -> dict[str, str]:
         "shape_gemini_review": _id(shape_mod.GEMINI_REVIEW_PROMPT),
         "shape_grok_review": _id(shape_mod.GROK_REVIEW_PROMPT),
         "shape_grok_read_only": _id(shape_mod.GROK_READ_ONLY_PROMPT),
+        "shape_opus_review": _id(shape_mod.OPUS_REVIEW_PROMPT),
         "shape_fix": _id(shape_mod.FIX_PROMPT),
         "shape_build": _id(shape_mod.BUILD_PROMPT),
         "shape_prefix": _id(shape_mod._prefix(_SAMPLE_REPO, None)),

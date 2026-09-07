@@ -1104,6 +1104,18 @@ fix lane's `base` onto it (its `resume` stays
 is written beside the spec (or at `--out`), never overwritten without `--force`, and
 `--dry-run` runs `conductor mission --dry-run` on it.
 
+`--opus-review` is Shape C (F9) as an option on the same launcher: a `review-opus` lane,
+Opus 5 at `hard` reading cold beside Gemini and Grok with the same no-quota tail, at a
+$4.00 cap ($3.00 for the read plus the rule 10 summary dollar; the three F9 lanes finished
+at $2.40 to $2.76). The build is Sonnet, so the mission file carries `self_judging: allow`
+and the review policy admits `anthropic`; the fix lane needs all three reviews, its prompt
+gains a `<review_opus>` block after the Grok one (before any `<adversarial>` block), and
+the dispositions contract names the third lane. Concurrency rises to three so the reviewers
+still run side by side. On the F9 receipt Opus reported nothing false, found six defects
+the pair missed, and caught three spec items the pair had passed as built, at about three
+times the pair's cost; use it on lifecycle, security, and spec-risk work, not by default
+(the outside review's reading, `docs/review/2026-09-07-astra-notes.md`, table 10 item 2).
+
 Four more terms round out the arithmetic (F6, all in `shape.py` and `cli.py`):
 
 - **`--tests-items N`** (default 0): spec items, already counted once in `--items`, that

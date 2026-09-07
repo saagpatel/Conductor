@@ -513,3 +513,120 @@ def test_cli_inline_still_writes_the_dispositions_schema(
     assert code == 0
     assert not (out.parent / "prompts").exists()
     assert (out.parent / "dispositions.schema.json").is_file()
+
+
+# --- F9 Shape C as a launcher option (Phase H item 4) -----------------------
+
+
+def test_opus_review_adds_a_third_cold_reviewer_the_mission_accepts(repo, tmp_path):
+    spec = _spec(tmp_path)
+    caps = shape.cap_arithmetic(2, 1, opus_review=True)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps, opus_review=True)
+    shape.write_dispositions_schema(spec.parent)
+    # Loads: the Sonnet build and the Opus reviewer share a vendor, and the
+    # mission declares the lift itself rather than leaving the lead to add it.
+    mission = mission_from_dict(raw, base_dir=spec.parent)
+    names = [lane.name for lane in mission.lanes]
+    assert names == ["build", "review-gemini", "review-grok", "review-opus", "fix"]
+    assert raw["self_judging"] == "allow"
+    assert raw["policy"]["review"] == {"vendors": ["google", "xai", "anthropic"]}
+    assert raw["concurrency"] == 3
+    opus = raw["lanes"][3]
+    assert opus["fleet"] == "claude" and opus["model"] == "opus" and opus["effort"] == "hard"
+    assert opus["mode"] == "read" and opus["base"] == "build"
+    assert opus["cap_usd"] == caps.opus_cap == 4.0
+    assert opus["cap_grace_usd"] == caps.cap_grace_usd
+    assert "NO_FINDINGS" in opus["prompt"] and "at least" not in opus["prompt"]
+    assert "Do not run the test suite" in opus["prompt"]
+    fix = raw["lanes"][4]
+    assert fix["needs"] == ["review-gemini", "review-grok", "review-opus"]
+    assert "<review_opus>\n{{lanes.review-opus.answer}}\n</review_opus>" in fix["prompt"]
+    assert fix["prompt"].index("</review_grok>") < fix["prompt"].index("<review_opus>")
+    assert "Three reviewers" in fix["prompt"] and "Two reviewers" not in fix["prompt"]
+    assert '"review-opus"' in fix["prompt"]
+    assert "both reviews" not in fix["prompt"] and "either reviewer" not in fix["prompt"]
+    assert raw["max_cost_usd"] == caps.mission_budget
+    from conductor.prompts import prompt_versions
+
+    assert "shape_opus_review" in prompt_versions()
+
+
+def test_without_opus_review_the_shape_is_unchanged(repo, tmp_path):
+    spec = _spec(tmp_path)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=shape.cap_arithmetic(2, 1))
+    names = [lane["name"] for lane in raw["lanes"]]
+    assert names == ["build", "review-gemini", "review-grok", "fix"]
+    assert "self_judging" not in raw
+    assert raw["concurrency"] == 2
+    assert "review_opus" not in raw["lanes"][3]["prompt"]
+
+
+def test_opus_review_with_adversarial_keeps_the_block_order(repo, tmp_path):
+    spec = _spec(tmp_path)
+    caps = shape.cap_arithmetic(2, 1, opus_review=True, adversarial=True)
+    raw = shape.shape_a(
+        spec=spec, repo=repo, test="true", caps=caps, opus_review=True, adversarial=True
+    )
+    names = [lane["name"] for lane in raw["lanes"]]
+    assert names == ["build", "review-gemini", "review-grok", "review-opus", "adversarial", "fix"]
+    fix = raw["lanes"][-1]
+    assert fix["needs"] == ["build", "review-gemini", "review-grok", "review-opus", "adversarial"]
+    prompt = fix["prompt"]
+    assert prompt.index("<review_opus>") < prompt.index("<adversarial>")
+    assert "When the adversarial block above" in prompt
+
+
+def test_opus_review_cap_arithmetic_adds_its_own_line_and_budget_term():
+    plain = shape.cap_arithmetic(2, 1)
+    with_opus = shape.cap_arithmetic(2, 1, opus_review=True)
+    assert with_opus.opus_cap == 4.0
+    assert with_opus.mission_budget == round(plain.mission_budget + 4.0, 2)
+    assert "review-opus cap: $3.00 Opus cold read + $1.00 Claude summary = $4.00" in (
+        with_opus.render()
+    )
+    assert "review-opus" not in plain.render()
+
+
+def test_followon_carries_the_opus_reviewer_when_asked(repo, tmp_path):
+    caps = shape.cap_arithmetic(1, 1, opus_review=True)
+    raw = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test="true",
+        caps=caps,
+        name="salvaged",
+        opus_review=True,
+    )
+    names = [lane["name"] for lane in raw["lanes"]]
+    assert names == ["review-gemini", "review-grok", "review-opus", "fix"]
+    opus = raw["lanes"][2]
+    assert "git show abc123" in opus["prompt"] and "{{lanes.build.diff}}" not in opus["prompt"]
+    assert raw["policy"]["review"]["vendors"] == ["google", "xai", "anthropic"]
+    assert raw["lanes"][3]["needs"] == ["review-gemini", "review-grok", "review-opus"]
+    assert "<review_opus>" in raw["lanes"][3]["prompt"]
+    assert raw["max_cost_usd"] == round(1.0 + 1.5 + 4.0 + caps.fix_cap + shape.USD_MISSION_SLACK, 2)
+    assert "self_judging" not in raw
+
+
+def test_cli_opus_review_writes_the_lane_and_prints_its_cap(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = _spec(tmp_path)
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    code = main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "1", "--modules", "1", "--opus-review", "--out", str(out), "--dry-run",
+        ]
+    )
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "5 lanes" in printed
+    assert "review-opus cap: $3.00 Opus cold read + $1.00 Claude summary = $4.00" in printed
+    assert '"ok": true' in printed  # the dry run accepted the self-judging lift
+    raw = json.loads(out.read_text())
+    assert raw["self_judging"] == "allow"
+    assert (out.parent / "prompts" / "review-opus.md").read_text() == shape.OPUS_REVIEW_PROMPT
