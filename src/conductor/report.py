@@ -488,6 +488,13 @@ class ReviewerPrecisionRow:
     # disposition count above, since a fix lane's dispositions against an
     # unparsed verdict are not real dispositions against real findings.
     unparsed: int = 0
+    # W7: the selection this row's `precision` actually rests on -- distinct
+    # missions whose dispositions contributed to it, and `stage: review`
+    # lanes on this vendor that parsed but whose mission recorded no
+    # dispositions at all (so they count in `reviewer_finding_rate`, never
+    # here, and were previously invisible on this table).
+    missions: int = 0
+    undispositioned: int = 0
     # F15 mission 2 item 4: the confidence (1-10) of every review item whose
     # (lane, index) a fix lane's disposition matched -- refused and fixed
     # kept apart so a calibration line can compare them.
@@ -509,6 +516,16 @@ class ReviewerPrecisionRow:
         if not self.findings:
             return None
         return round(self.fixed / self.findings, 3)
+
+    def basis(self) -> str:
+        """W7: `precision` is fixer agreement over a selection, not a truth
+        figure -- this spells the selection's two denominators out in
+        prose, the same numbers as the `missions` and `undispositioned`
+        columns."""
+        return (
+            f"fixer agreement over {self.missions} mission(s) with dispositions; "
+            f"{self.undispositioned} review lane(s) not dispositioned"
+        )
 
     def calibration(self) -> dict[str, object]:
         """Mean confidence (1 decimal) of the findings this vendor's own
@@ -533,11 +550,14 @@ class ReviewerPrecisionRow:
             "already": self.already,
             "wording": self.wording,
             "unparsed": self.unparsed,
+            "missions": self.missions,
+            "undispositioned": self.undispositioned,
             "precision": self.precision(),
             "refused_confidences": list(self.refused_confidences),
             "fixed_confidences": list(self.fixed_confidences),
             "calibration": self.calibration(),
             "corrected_rate": self.corrected_rate(),
+            "basis": self.basis(),
         }
 
 
@@ -827,20 +847,43 @@ def _build_report(
         )
         mission_row.landed = meta.get("landed", 0) if isinstance(meta.get("landed"), int) else 0
 
+        review_lanes = meta.get("review_lanes")
+        review_lanes = review_lanes if isinstance(review_lanes, dict) else {}
+        fix_dispositions = meta.get("fix_dispositions")
+        # W7: no fix lane recorded dispositions on this mission (no fix lane
+        # at all, or one that ran without a `dispositions` list) -- every
+        # parsed review lane here would otherwise vanish from the precision
+        # table with no trace; tally it as undispositioned instead so the
+        # selection the table rests on is visible. It still counts in
+        # `reviewer_finding_rate`, which reads runs directly, not this join.
+        if fix_dispositions is None:
+            for info in review_lanes.values():
+                if info.get("unparsed"):
+                    continue
+                row = precision.setdefault(
+                    info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"])
+                )
+                row.undispositioned += 1
+            continue
+        if not review_lanes:
+            continue
         # F1 item 4: only a mission with both a review lane whose verdict
         # parsed and a fix lane that recorded dispositions (even an empty
         # list -- the field's presence is what "with dispositions" means)
         # joins a disposition's named reviewer lane back to its vendor.
-        review_lanes = meta.get("review_lanes")
-        fix_dispositions = meta.get("fix_dispositions")
-        if not review_lanes or not isinstance(review_lanes, dict) or fix_dispositions is None:
-            continue
+        mission_vendors: set[str] = set()
         for info in review_lanes.values():
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             if info.get("unparsed"):
                 row.unparsed += 1
             else:
                 row.findings += info["findings"]
+            mission_vendors.add(info["vendor"])
+        # W7: this mission's dispositions are part of the selection every
+        # vendor with a review lane here is scored over, whether or not a
+        # disposition below actually names one of that vendor's lanes.
+        for vendor in mission_vendors:
+            precision[vendor].missions += 1
         for item in _unique_dispositions(name, fix_dispositions, counts=disposition_counts):
             lane_name = item["lane"]
             disposition = item["disposition"]
@@ -1063,7 +1106,18 @@ def _print_report(rpt: Report) -> None:
     _print_section(
         "Reviewer precision (findings fixed vs. refused, over missions with a fix "
         "lane's dispositions)",
-        ("vendor", "findings", "fixed", "refused", "already", "wording", "unparsed", "precision"),
+        (
+            "vendor",
+            "findings",
+            "fixed",
+            "refused",
+            "already",
+            "wording",
+            "unparsed",
+            "precision",
+            "missions",
+            "undispositioned",
+        ),
         [
             (
                 d["vendor"],
@@ -1074,6 +1128,8 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["wording"]),
                 _cell(d["unparsed"]),
                 _cell(d["precision"]),
+                _cell(d["missions"]),
+                _cell(d["undispositioned"]),
             )
             for d in (row.to_dict() for row in rpt.reviewer_precision)
         ],
@@ -1092,6 +1148,10 @@ def _print_report(rpt: Report) -> None:
             f"{len(row.refused_confidences)}, fixed mean confidence {fixed_mean} over "
             f"{len(row.fixed_confidences)}, corrected finding rate {corrected}"
         )
+        # W7: precision is fixer agreement, not truth -- name the selection
+        # it rests on right under the table, in the same numbers as the
+        # `missions`/`undispositioned` columns.
+        print(f"  {row.vendor}: {d['basis']}")
     print(
         f"  dispositions naming an unknown lane: {rpt.dispositions_unknown_lane}"
         f"  |  malformed disposition lines: {rpt.dispositions_malformed}"

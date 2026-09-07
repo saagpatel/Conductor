@@ -2620,7 +2620,17 @@ The report has seven sections, in this order:
   `--json` carries `dispositions_duplicate` and `dispositions_unmatched`
   beside the other two. A review lane whose receipt parsed no `items` at
   all (one recorded before findings were numbered) cannot match an index
-  either way, so its dispositions still count as before.
+  either way, so its dispositions still count as before. W7: precision is
+  fixer agreement, not a truth figure, and it is scored only over the
+  mission selection described above, so two more columns name that
+  selection's size: `missions`, the distinct missions whose dispositions
+  contributed to a vendor's row, and `undispositioned`, the `stage: review`
+  lanes on that vendor that parsed but whose mission recorded no
+  dispositions at all (counted in reviewer finding rate, not here). Both
+  are printed after `precision` and carried in `--json` too, and a `basis`
+  string spells the same two numbers out in prose, printed as its own line
+  under the table: "fixer agreement over N mission(s) with dispositions; M
+  review lane(s) not dispositioned".
 - **Missions**: cost, whether the mission was ok, how many lanes it
   declared, whether any lane hit its cap, how many times
   `conductor salvage` was run against it (`salvaged`, 0 when

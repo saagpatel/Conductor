@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from conductor.cli import main
-from conductor.report import WallClockRow, report
+from conductor.report import ReviewerPrecisionRow, WallClockRow, report
 from conductor.runner import Result
 
 
@@ -681,8 +681,10 @@ def test_report_reviewer_precision_blank_under_three_dispositions(home: Path):
 
 def test_report_reviewer_precision_skips_a_mission_with_no_fix_dispositions(home: Path):
     # A review lane with no fix lane recording `dispositions` at all (an
-    # older mission, or one still awaiting its fix) contributes nothing --
-    # "findings written" without a paired fix is not a precision figure.
+    # older mission, or one still awaiting its fix) contributes no
+    # findings/fixed/refused -- "findings written" without a paired fix is
+    # not a precision figure. W7: it is no longer invisible, though -- it
+    # still surfaces as `undispositioned` on the vendor's row.
     _write_receipt(
         home,
         "20260101T000000Z-m4-build",
@@ -704,7 +706,147 @@ def test_report_reviewer_precision_skips_a_mission_with_no_fix_dispositions(home
         ],
     )
     rpt = report(home)
-    assert not any(r.vendor == "google" for r in rpt.reviewer_precision)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.findings == 0
+    assert row.total() == 0
+    assert row.missions == 0
+    assert row.undispositioned == 1
+
+
+def test_report_reviewer_precision_missions_and_undispositioned_columns(home: Path):
+    # W7: one vendor's row spans a mission with dispositions and one
+    # without -- `missions` counts only the first, `undispositioned` only
+    # the second, and a different vendor's own row is unaffected by either.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m5-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m5",
+    )
+    _write_mission(
+        home,
+        "m5",
+        name="mission-five",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    _write_receipt(
+        home,
+        "20260101T010000Z-m6-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m6",
+    )
+    _write_mission(
+        home,
+        "m6",
+        name="mission-six",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=2
+            ),
+            # No fix lane at all: this mission recorded no dispositions.
+        ],
+    )
+    _write_receipt(
+        home,
+        "20260101T020000Z-m7-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m7",
+    )
+    _write_mission(
+        home,
+        "m7",
+        name="mission-seven",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-grok", fleet="cursor", model="cursor-grok-4.6-medium", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-grok", "index": 1, "disposition": "refused", "reason": "r2"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    google_row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert google_row.missions == 1
+    assert google_row.undispositioned == 1
+    xai_row = next(r for r in rpt.reviewer_precision if r.vendor == "xai")
+    assert xai_row.missions == 1
+    assert xai_row.undispositioned == 0
+
+
+def test_report_reviewer_precision_basis_and_columns_in_json_and_printed(
+    home: Path, monkeypatch, capsys
+):
+    # W7: the basis sentence and the two new columns are visible in both
+    # the JSON payload and the printed table, not just on the dataclass.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m8-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m8",
+    )
+    _write_mission(
+        home,
+        "m8",
+        name="mission-eight",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(r for r in payload["reviewer_precision"] if r["vendor"] == "google")
+    assert row["missions"] == 1
+    assert row["undispositioned"] == 0
+    assert row["basis"] == (
+        "fixer agreement over 1 mission(s) with dispositions; 0 review lane(s) not dispositioned"
+    )
+
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert "missions" in printed
+    assert "undispositioned" in printed
+    assert (
+        "google: fixer agreement over 1 mission(s) with dispositions; 0 review lane(s) not "
+        "dispositioned" in printed
+    )
+
+
+def test_reviewer_precision_row_defaults_missions_and_undispositioned_to_zero():
+    # W7: a row built the way every review-only vendor (no dispositions at
+    # all) or old code path builds it -- never assigning `missions` or
+    # `undispositioned` -- reads as 0 rather than failing.
+    row = ReviewerPrecisionRow(vendor="google")
+    assert row.missions == 0
+    assert row.undispositioned == 0
+    d = row.to_dict()
+    assert d["missions"] == 0
+    assert d["undispositioned"] == 0
 
 
 def test_report_mission_rows_with_capped_lane(home: Path):
