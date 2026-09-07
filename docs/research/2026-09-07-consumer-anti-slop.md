@@ -36,9 +36,9 @@ first of those still waits for the next Shape A on code.
 | edit | green: 1168 words to 1182, 47 lines changed, gate 0, committed on `feat/anti-slop-f15-doc` | $0.56 |
 | review-gemini, first attempt | failed on bytes: `taint hooks not enforced: agy loaded 1 named hook(s), expected 30`; its answer (NO_FINDINGS, after "I have launched the command") did not count | $0.10 |
 | review-opus | 8 findings, confidence 4 to 7, every one cited to a line | $0.77 |
-| review-gemini, rerun after the fix below | 1 finding, confidence 10, the same 23-word parenthetical as Opus's item 3 | $0.20 |
+| review-gemini, rerun after the fix below | 1 finding, confidence 10, the same 23-word parenthetical as Opus's item 3 | $0.10 |
 
-$1.63. Wall clock 10 minutes across the two processes, concurrency 3, `paused_s 0`.
+$1.53 on the mission receipt (an earlier draft of this table listed the Gemini lane's cumulative $0.20 as the rerun and summed to $1.63; the outside review caught it). Wall clock 10 minutes across the two processes, concurrency 3, `paused_s 0`.
 
 The editor's own note named its least certain edit ("real" was on the ban list, so "Grok's
 finding was real and test-only" became "held, and applied only to the test"); neither reviewer
