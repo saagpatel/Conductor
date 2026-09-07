@@ -2532,6 +2532,13 @@ class LaneResult:
     # with `DISPOSITION:` but did not match the required shape. None
     # alongside `dispositions is None`, otherwise a non-negative count.
     dispositions_malformed: int | None = None
+    # W3: sha256 of each artifact this lane left behind, keyed "answer",
+    # "diff", "deliverable" -- only for the ones that exist. Resume rehashes
+    # the files on disk against these before trusting the receipt, so a
+    # rewritten answer or a swapped deliverable is caught even though it sits
+    # exactly where the receipt says it does. Empty on a receipt written
+    # before this field existed, which is trusted on path alone with a note.
+    artifact_sha256: dict[str, str] = field(default_factory=dict)
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -2633,6 +2640,14 @@ class LaneResult:
             raise ValueError("lane receipt taint_from must be a list of strings")
         if "untrusted_output" in raw and not isinstance(raw["untrusted_output"], bool):
             raise ValueError("lane receipt untrusted_output must be true or false")
+        if "artifact_sha256" in raw and not (
+            isinstance(raw["artifact_sha256"], dict)
+            and all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in raw["artifact_sha256"].items()
+            )
+        ):
+            raise ValueError("lane receipt artifact_sha256 must be an object of strings")
         if raw.get("plan") is not None and not isinstance(raw["plan"], dict):
             raise ValueError("lane receipt plan must be an object or null")
         if raw.get("review") is not None and not isinstance(raw["review"], dict):
@@ -3667,6 +3682,78 @@ def _artifact_matches(recorded: str | None, expected: Path) -> bool:
         return False
 
 
+def _artifact_digest(recorded: str | None) -> str | None:
+    """The sha256 of one artifact file, or None when there is nothing to hash.
+
+    W3: a symlink is never hashed. W5 already refuses one as a lane artifact,
+    and hashing through it would bind bytes from outside the mission
+    directory into the receipt as if the lane had produced them."""
+    if not recorded:
+        return None
+    try:
+        path = Path(recorded)
+        if path.is_symlink() or not path.is_file():
+            return None
+    except OSError:
+        return None
+    return attest.file_sha256(path)
+
+
+def _artifact_paths(result: LaneResult) -> tuple[tuple[str, str | None], ...]:
+    return (
+        ("answer", result.answer_path),
+        ("diff", result.diff_path),
+        ("deliverable", result.deliverable_path),
+    )
+
+
+def _record_artifact_digests(result: LaneResult) -> LaneResult:
+    """W3: bind the bytes of this lane's artifacts into its receipt."""
+    digests: dict[str, str] = {}
+    for kind, recorded in _artifact_paths(result):
+        digest = _artifact_digest(recorded)
+        if digest is not None:
+            digests[kind] = digest
+    result.artifact_sha256 = digests
+    return result
+
+
+def _artifact_bytes_match(
+    lane_name: str,
+    result: LaneResult,
+    digests: dict[str, str],
+    notes: list[str] | None,
+) -> bool:
+    """W3: whether every artifact this receipt records still hashes to what
+    the receipt recorded when the lane settled.
+
+    `_artifact_matches` only says the file is where the receipt claims and is
+    a regular file; the bytes inside it are what a downstream lane actually
+    consumes through {{lanes.<name>.answer}}, so they are what resume has to
+    authenticate. A receipt written before this field existed records no
+    digest, and is trusted on its paths as before with a note saying so."""
+    for kind, recorded in _artifact_paths(result):
+        actual = _artifact_digest(recorded)
+        if actual is None:
+            continue
+        expected = digests.get(kind)
+        if expected is None:
+            if notes is not None:
+                notes.append(
+                    f"lane '{lane_name}': receipt records no digest for its {kind}; "
+                    "trusted on path only"
+                )
+            continue
+        if expected != actual:
+            if notes is not None:
+                notes.append(
+                    f"lane '{lane_name}': {kind} bytes differ from the receipt's digest; "
+                    "not trusted"
+                )
+            return False
+    return True
+
+
 def _human_lane_result(mission: Mission, lane: Lane, mission_dir: Path) -> LaneResult | None:
     """E7: the answered state of a human lane, or None while it is still
     waiting on the operator. `run_mission`'s pause-answer handling is the
@@ -3685,14 +3772,16 @@ def _human_lane_result(mission: Mission, lane: Lane, mission_dir: Path) -> LaneR
         if not resolved.is_file():
             return None
         deliverable_path = str(resolved)
-    return LaneResult(
-        name=lane.name,
-        ok=True,
-        needs=list(lane.needs),
-        tainted=True,
-        taint_from=list(lane.taint_from),
-        answer_path=str(answer_path),
-        deliverable_path=deliverable_path,
+    return _record_artifact_digests(
+        LaneResult(
+            name=lane.name,
+            ok=True,
+            needs=list(lane.needs),
+            tainted=True,
+            taint_from=list(lane.taint_from),
+            answer_path=str(answer_path),
+            deliverable_path=deliverable_path,
+        )
     )
 
 
@@ -3705,8 +3794,16 @@ def _trusted_lane(
     prior_ok: bool = False,
     prior_result: dict | None = None,
     notes: list[str] | None = None,
+    digests: dict[str, str] | None = None,
 ) -> bool:
-    """Whether a completed receipt is enough to skip every effect of a lane."""
+    """Whether a completed receipt is enough to skip every effect of a lane.
+
+    W3: `digests` are the artifact hashes to authenticate the files on disk
+    against, defaulting to the ones this receipt itself carries. A human lane
+    passes the durable receipt's digests explicitly, because the `result` it
+    is checked against was just rebuilt from the same files."""
+    if digests is None:
+        digests = result.artifact_sha256
     if result.name != lane.name:
         return False
     if lane.plan:
@@ -3754,7 +3851,7 @@ def _trusted_lane(
                 return False
             if not _artifact_matches(result.deliverable_path, resolved):
                 return False
-        return True
+        return _artifact_bytes_match(lane.name, result, digests, notes)
     if result.skipped is not None:
         # A lane cancelled because another sink already passed is a settled
         # outcome of a mission that succeeded, not unfinished work; rerunning
@@ -3779,6 +3876,8 @@ def _trusted_lane(
     if result.verdict is not None and not (
         mission_dir / "verdicts" / f"{lane.name}.json"
     ).is_file():
+        return False
+    if not _artifact_bytes_match(lane.name, result, digests, notes):
         return False
     # E26: the repository this receipt's commits actually landed in, not
     # necessarily the mission's default.
@@ -4121,7 +4220,18 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             # unanswered one is re-asked, the same as any lane that never
             # settled.
             answered = _human_lane_result(mission, lane, mission_dir)
-            if answered is not None and _trusted_lane(mission, mission_dir, lane, answered):
+            # W3: `answered` was rebuilt from the files on disk, so its own
+            # digests are whatever is there now; the durable receipt from the
+            # run that answered the pause is what they must match.
+            recorded = previous.get(lane.name)
+            if answered is not None and _trusted_lane(
+                mission,
+                mission_dir,
+                lane,
+                answered,
+                notes=notes,
+                digests=None if recorded is None else recorded.artifact_sha256,
+            ):
                 answered.kept = True
                 kept[lane.name] = answered
             else:
@@ -4975,6 +5085,10 @@ def _execute_mission(
             out.deliverable_path = _keep(
                 result.deliverable_path, deliverables_dir / f"{lane.name}-deliverable"
             )
+            # W3: the bytes of those three files, as they stand now, so a
+            # resume can tell this lane's own output from anything edited
+            # into its place afterwards.
+            _record_artifact_digests(out)
             out.cwd = attempt_cwd
             iso = result.isolation or {}
             if not dry_run:
