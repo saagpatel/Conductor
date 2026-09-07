@@ -272,6 +272,29 @@ def test_reproduce_gate_refuses_a_source_only_fix_with_no_check(repo, home, fake
     assert result.commit is None
 
 
+def test_reproduce_gate_skips_a_fix_that_wrote_only_its_deliverable(repo, home, fake_fleet):
+    """F19: Shape A's fix lane writes `dispositions.json` even when every
+    reviewer said NO_FINDINGS and it changed nothing else. That is the
+    "changed nothing" case, not a source change without a check: the lane
+    settles ok, verdict skipped, no error (the F18 fix lane failed here on
+    2026-09-07 with kind `unknown`)."""
+    (repo / "tests").mkdir()
+    (repo / "tests" / "check.py").write_text("raise SystemExit(0)\n")
+    _commit(repo)
+    fake_fleet(["sh", "-c", "printf '[]' > dispositions.json"])
+
+    result = dispatch(
+        _spec(repo, stage="fix", deliverable={"path": "dispositions.json", "commit": False}),
+        home=home,
+        test_command="python tests/check.py",
+    )
+
+    assert result.reproduce["verdict"] == "skipped"
+    assert result.reproduce["tail"] == "the fleet wrote only its declared deliverable"
+    assert result.error is None
+    assert result.ok is True
+
+
 def test_reproduce_gate_refuses_a_check_that_already_passes_on_the_base(
     repo, home, fake_fleet, git_out
 ):

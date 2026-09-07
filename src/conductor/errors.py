@@ -46,6 +46,7 @@ KINDS: tuple[str, ...] = (
     "adversarial",
     "plan",
     "denied",
+    "reproduce",
     "rate_limit",
     "transport",
     "refusal",
@@ -279,6 +280,14 @@ def error_kind(result: Result) -> str | None:
     # word, like `agent`, `taint`, and `plan` above.
     if error_text.startswith("permission denied:"):
         return "denied"
+    # F19: the reproduce-before-fix gate's own refusals (a fix or adversarial
+    # lane without a reproducing check, or a check that already passes on the
+    # base) -- conductor's own verdict on the transplanted test surface,
+    # never a fleet's word. Read as `unknown` until the F18 fix lane hit it.
+    if " without a reproducing check:" in error_text or error_text.startswith(
+        "reproduce gate passed on the base:"
+    ):
+        return "reproduce"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):

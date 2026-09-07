@@ -261,6 +261,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "adversarial",
         "plan",
         "denied",
+        "reproduce",
         "rate_limit",
         "transport",
         "refusal",
@@ -312,6 +313,7 @@ _KIND_OVERRIDES: dict[str, dict] = {
     "adversarial": dict(error="adversarial lane changed source: diff outside allowed files"),
     "plan": dict(error="plan: child mission depth exceeded"),
     "denied": dict(error="permission denied: Bash(rm -rf)"),
+    "reproduce": dict(error="fix without a reproducing check: no test-surface change"),
     "rate_limit": dict(fleet_error="Rate limit exceeded, please retry"),
     "transport": dict(fleet_error="ECONNRESET while streaming the response"),
     "refusal": dict(
@@ -653,7 +655,8 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         " agent," in section
     )
     assert (
-        "adversarial, plan, denied, rate_limit, transport, refusal, fleet_error, exit," in section
+        "adversarial, plan, denied, reproduce, rate_limit, transport, refusal, fleet_error, "
+        "exit," in section
     )
     assert (
         "gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit,"

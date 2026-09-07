@@ -487,7 +487,7 @@ order, first match wins:
 
 ```
 interrupted, cancelled, parse, cap, breaker, timeout, setup, taint, settings, refused, agent,
-adversarial, plan, denied, rate_limit, transport, refusal, fleet_error, exit,
+adversarial, plan, denied, reproduce, rate_limit, transport, refusal, fleet_error, exit,
 gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit, unknown
 ```
 
@@ -1456,8 +1456,13 @@ Three outcomes besides a normal reproduction:
 - the base run **passes**: the new or changed check reproduces nothing, no
   commit, ordinary gate skipped —
   `reproduce gate passed on the base: the check does not reproduce the finding`;
-- the fleet changed nothing at all: this gate has nothing to do with it; the
-  existing no-op handling applies unchanged.
+- the fleet changed nothing at all, or wrote only its declared deliverable
+  (Shape A's fix lane writes `dispositions.json` even after three
+  NO_FINDINGS reviews): this gate has nothing to do with it; the existing
+  no-op handling applies unchanged, verdict `skipped` (F19).
+
+Both refusals classify as kind `reproduce` (F19): conductor's own verdict on
+the transplanted test surface, never a fleet's word.
 
 The receipt gains a `reproduce` block: `ran`, `exit_code`, `timed_out`,
 `tail`, `worktree`, `patch_bytes`, and `verdict` — `reproduced`,

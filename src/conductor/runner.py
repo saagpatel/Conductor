@@ -1479,6 +1479,16 @@ def _reproduce_receipt(
     moved = not compare(spec.cwd, before, GitState.capture(spec.cwd)).no_op
     if not moved:
         return _reproduce_skip("skipped", "the fleet made no changes"), None
+    # F19: a fix lane whose only write is its declared deliverable (Shape A's
+    # `dispositions.json` after three NO_FINDINGS reviews) changed no source
+    # and no check, so there is nothing to reproduce and nothing to refuse;
+    # it is the "changed nothing" case, not the "changed source without a
+    # check" one. Live: the F18 fix lane answered NO_CHANGES with an empty
+    # dispositions list and was failed here, kind `unknown` (2026-09-07).
+    if spec.deliverable and before.head:
+        changed = changed_paths_since(spec.cwd, before.head)
+        if changed == [str(spec.deliverable["path"])]:
+            return _reproduce_skip("skipped", "the fleet wrote only its declared deliverable"), None
     if spec.stage == "fix" and inherited_check:
         return (
             {
