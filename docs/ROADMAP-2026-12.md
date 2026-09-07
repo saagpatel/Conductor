@@ -23,6 +23,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | item | version | shape | cost |
 |---|---|---|---|
 | G wave 1: trust boundaries (D3-D8, D19, W1, W2, W5) | 0.61.0 | lead with four Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
+| G wave 2: spend and lifecycle (D1, D2, D9-D15), plus salvage, collisions, the build prompt, and two README claims from wave 3 | 0.62.0 | lead with four Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 
 ## Waves
 
