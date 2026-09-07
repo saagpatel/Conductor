@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from conductor.outputs import parse
+from conductor.outputs import INCOMPLETE, parse
 
 CLAUDE = (
     '{"duration_api_ms":1730,"stop_reason":"end_turn","result":"PONG",'
@@ -447,3 +447,15 @@ def test_a_nan_in_an_agy_step_still_prices_the_other_steps():
     )
     out = parse("antigravity", stream)
     assert out.usage.input_tokens == 100 and out.usage.output_tokens == 5
+
+
+def test_a_cut_short_agy_stream_is_marked_incomplete():
+    """D15: no result event means the turn never finished. The status is
+    conductor's own, not a fleet's word, so `error` stays None."""
+    stream = (
+        '{"event":"step_update","step_update":{"step_index":1,'
+        '"usage":{"input_tokens":10}}}'
+    )
+    out = parse("antigravity", stream)
+    assert out.status == INCOMPLETE and out.error is None and out.parsed is True
+    assert out.notes and "without a result event" in out.notes[0]

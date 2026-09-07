@@ -95,6 +95,13 @@ class FleetOutput:
         }
 
 
+# D15: the status conductor stamps on a stream that stopped before its
+# fleet's own terminal event. It is not a fleet's word -- no fleet reports
+# it -- so `runner.Result.failure` can read it as "this turn never
+# finished" without having to know each fleet's envelope.
+INCOMPLETE = "incomplete"
+
+
 def usable_int(value: object) -> int | None:
     """A token count a fleet actually reported, or None for anything that is
     not one.
@@ -325,8 +332,18 @@ def _parse_antigravity(text: str) -> FleetOutput:
         payload = payload["result"]
     elif event is not None:
         # The last thing printed was a step, not the result: cut short.
+        # D15: the steps' usage is still real and still priced, but a turn
+        # that never reached its result event did not finish. Saying so with
+        # a status (rather than an `error`, which reads as the fleet's own
+        # word) is what keeps a write lane that exited 0, moved bytes, and
+        # passed its gate from settling as ok on a truncated stream.
         return FleetOutput(
-            answer="", usage=agy_step_usage(text), parsed=True, session_id=session_id
+            answer="",
+            usage=agy_step_usage(text),
+            parsed=True,
+            status=INCOMPLETE,
+            session_id=session_id,
+            notes=["antigravity stream ended without a result event; usage is the steps' own"],
         )
     out = _parse_envelope("antigravity", payload, text)
     out.session_id = session_id

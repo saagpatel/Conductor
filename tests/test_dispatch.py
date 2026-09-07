@@ -487,3 +487,27 @@ def test_a_deliverable_schema_that_is_a_json_array_is_a_failed_check(repo, home,
     assert runner_mod._schema_mismatch({"a": 1}, json.loads(schema.read_text())) == (
         "schema file is not a JSON object"
     )
+
+
+def test_a_truncated_agy_stream_fails_even_with_a_green_gate(repo, home, fake_fleet):
+    """D15: exit 0, bytes moved, gate green -- and a stream that stopped
+    mid-step. Every other check passes, so without a terminal-event check
+    the lane settles as ok on a turn that never finished."""
+    step = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {"step_index": 1, "state": "DONE", "usage": {"input_tokens": 900}},
+        }
+    )
+    fake_fleet(["sh", "-c", f"printf '%s\\n' {json.dumps(step)}; echo work > new.txt"])
+    result = dispatch(
+        spec_for(repo, fleet="antigravity", mode="write"), home=home, test_command="true"
+    )
+
+    assert result.exit_code == 0
+    assert result.git_verdict["no_op"] is False
+    assert result.gate_passed is True
+    assert result.ok is False
+    assert result.failure() == "fleet stream ended without a terminal event"
+    assert result.to_dict()["kind"] == "transport"
+    assert result.usage["input_tokens"] == 900  # the steps' own usage is still priced

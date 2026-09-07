@@ -16,7 +16,7 @@ import pytest
 
 from conductor.budget import _Tail
 from conductor.fleets import DispatchRefused, Spec, build_argv
-from conductor.outputs import parse
+from conductor.outputs import INCOMPLETE, parse
 from conductor.runner import dispatch
 
 
@@ -208,7 +208,11 @@ def test_antigravity_stream_result_is_unwrapped_and_steps_sum_to_it():
     assert finished.usage.input_tokens == 300
 
     cut_short = parse("antigravity", "\n".join(lines))
-    assert cut_short.answer == "" and cut_short.error is None and cut_short.parsed
+    # D15: no result event means the turn never finished. The status is
+    # conductor's own reading of the stream, not a fleet's word, so `error`
+    # stays None and `runner.Result.failure` fails the run on the status.
+    assert cut_short.answer == "" and cut_short.parsed
+    assert cut_short.status == INCOMPLETE and cut_short.error is None
     assert cut_short.usage.input_tokens == 300
     assert cut_short.usage.output_tokens == 11 + 4  # thinking bills as output
     assert cut_short.usage.thinking_tokens == 4

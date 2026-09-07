@@ -65,7 +65,11 @@ with no answer, since the answer is a read dispatch's only work product.
 The verdict hashes porcelain status plus every dirty and untracked file's
 contents, so editing an already-dirty file cannot hide behind an unchanged count.
 Structured Codex and Cursor streams must end in `turn.completed` and `result`
-respectively; a cut-short stream may retain its answer, but fails closed.
+respectively; a cut-short stream may retain its answer, but fails closed. An
+Antigravity stream that stops before its own `result` event fails the same
+way, on a status of `incomplete` rather than a fleet-reported error --
+without it a write lane that exited 0, moved bytes, and passed its gate on a
+truncated stream had nothing left to fail on.
 
 ## What a result looks like
 
@@ -91,8 +95,9 @@ That run exited 0 and is still a failure. `ok` means the process succeeded
 **and** bytes moved (for write dispatches) **and** the gate passed **and**
 any requested commit landed; `failure` names which of those did not hold
 (here, `"write dispatch moved no bytes"`), so the caller never has to
-reconstruct the reason from the raw fields. One more failure names itself
-there: `"parse failed: ..."` for a run that was paid for and then
+reconstruct the reason from the raw fields. Two more failures name themselves
+there: `"fleet stream ended without a terminal event"` for a turn that never
+finished, and `"parse failed: ..."` for a run that was paid for and then
 raised while conductor was reading its output -- the receipt is written
 anyway, with whatever price was recoverable, because a run directory holding
 only `stdout.log` is spend that `conductor spend` and `conductor report`
@@ -204,6 +209,7 @@ Each is now pinned by a test.
 | `claude` | `--max-budget-usd` is the only native dollar cap on any fleet. When it trips: exit 1, `is_error`, `subtype: error_max_budget_usd`, the reason under `errors` ("Reached maximum budget ($0.01)"), no `result` text, and the spend so far still reported. |
 | `codex` | Prints usage on stdout exactly once, at `turn.completed`. But it appends a `token_count` event with cumulative totals to its session rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread_id>.jsonl`) after every model response: 52 of them in one 12-minute run. That file, found by the `thread_id` in the first stdout event, is how conductor caps Codex mid-run. |
 | `antigravity` | `--output-format stream-json` prints a `step_update` carrying that step's own usage after every model response (three steps summed exactly to the final figure). conductor now always runs agy this way. |
+| `antigravity` | A stream whose last event is a `step_update` rather than the wrapped `result` was cut short (conductor's kill, or agy's own crash). The steps' usage is still real and is still priced, but the turn did not finish: conductor stamps `status: incomplete` on it and fails the run, exit code, bytes, and gate notwithstanding. |
 | `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes on any fleet is no longer `ok`. |
 | `cursor` | Reports usage once, in its final `result`, in both `json` and `stream-json` modes. A cap on Cursor is a verdict after the run, never a stop. |
 | `cursor` | The `json` envelope's `result` is only the **last** assistant message. On a four-fleet brainstorm, grok-4.6 spent 15K output tokens and its envelope held 680 characters of "writing the answer now". conductor runs Cursor in `stream-json` and keeps every assistant message, and a read dispatch that returns no answer is no longer `ok` on any fleet. |

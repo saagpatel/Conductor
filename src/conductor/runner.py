@@ -50,7 +50,7 @@ from .fleets import (
     taint_disallowed_tools,
     taint_hook_files,
 )
-from .outputs import FleetOutput, agy_init_event, claude_init_event, json_line
+from .outputs import INCOMPLETE, FleetOutput, agy_init_event, claude_init_event, json_line
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -234,6 +234,12 @@ class Result:
         # A fleet that says it failed is believed, whatever its exit code.
         if self.fleet_error:
             return f"fleet reported: {self.fleet_error}"
+        # D15: and a fleet that never said anything terminal did not finish.
+        # A stream cut short mid-step can still leave an exit code of 0, bytes
+        # moved, and a green gate behind it -- every other check below then
+        # passes and the lane settles as ok on a turn that never ended.
+        if self.fleet_status == INCOMPLETE:
+            return "fleet stream ended without a terminal event"
         # F15: a vanished working tree is never ok, whatever the mode and
         # whatever the gate did or did not do with a directory that no
         # longer exists -- checked ahead of the gate below so a read lane

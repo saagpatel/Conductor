@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .outputs import INCOMPLETE
 from .verify import NO_OP_COMMIT_REASONS
 
 if TYPE_CHECKING:
@@ -285,6 +286,12 @@ def error_kind(result: Result) -> str | None:
         if _is_refusal(result.fleet, fleet_text, result.fleet_status):
             return "refusal"
         return "fleet_error"
+    # D15: a stream that stopped before its fleet's terminal event is the
+    # same class of failure as the cut-short streams the transport table
+    # above already matches on their `error` text; this one carries a status
+    # instead, because no fleet reported it.
+    if result.fleet_status == INCOMPLETE:
+        return "transport"
     if result.exit_code not in (0, None):
         return "exit"
     if _gate_test_surface_failed(result):
