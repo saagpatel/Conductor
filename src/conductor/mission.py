@@ -2688,6 +2688,27 @@ def _usd(value: float | None) -> str:
     return "" if value is None else f"{value:.4f}"
 
 
+_MISSION_STAMP = re.compile(r"^(\d{8}T\d{6}Z)")
+
+
+def _mission_launched_at(mission_id: str) -> str:
+    """F2 (review finding): a mission resumed for the first time after this
+    field shipped has no prior `wall.launched_at` to carry -- but its own id
+    already opens with the UTC stamp of its first launch (`run_mission`
+    mints it once, at claim time, and a resume never remints it), the same
+    anchor `spend._run_time` reads off a run id. Recovering it from there
+    keeps `launched_at` truthful; stamping "now" would silently reset the
+    clock on exactly the mission this field exists to account for."""
+    match = _MISSION_STAMP.match(mission_id)
+    if match is None:
+        return datetime.now(UTC).isoformat()
+    try:
+        parsed = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return datetime.now(UTC).isoformat()
+    return parsed.isoformat()
+
+
 def _paused_seconds(mission_dir: Path) -> float:
     """F2: `pause.json`'s own `answers` history already carries both
     boundaries of every pause this mission ever parked on -- `asked_at` from
@@ -2710,14 +2731,20 @@ def _paused_seconds(mission_dir: Path) -> float:
     return total
 
 
-def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float:
+def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
     """F2: every lane's own gate and clean-gate time, summed from the
     authoritative run receipts under `base/runs` (never the lane's own
     attempt summary, which keeps only the gate's exit code) -- across every
     attempt this mission ever dispatched, kept lanes included, so a resume
-    never loses an earlier resume's gate time."""
+    never loses an earlier resume's gate time.
+
+    Review finding: a receipt whose gate actually ran (`ran: true`) but
+    carries no `duration_s` predates that field -- its time is unknown, not
+    zero, so it makes the whole figure `None` rather than silently summing
+    the rest as if that gate cost nothing."""
     total = 0.0
     seen: set[str] = set()
+    incomplete = False
     for lane in lane_results:
         for attempt in [*lane.previous_attempts, *lane.attempts]:
             run_id = attempt.get("run_id")
@@ -2728,16 +2755,20 @@ def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float:
             if receipt is None:
                 continue
             tests = receipt.get("tests")
-            if isinstance(tests, dict):
+            if isinstance(tests, dict) and tests.get("ran"):
                 duration = tests.get("duration_s")
                 if isinstance(duration, int | float) and not isinstance(duration, bool):
                     total += float(duration)
+                else:
+                    incomplete = True
             clean = (receipt.get("test_surface") or {}).get("clean_gate")
             if isinstance(clean, dict) and clean.get("ran"):
                 duration = clean.get("duration_s")
                 if isinstance(duration, int | float) and not isinstance(duration, bool):
                     total += float(duration)
-    return total
+                else:
+                    incomplete = True
+    return None if incomplete else total
 
 
 def _cache_summary(
@@ -4230,12 +4261,18 @@ def _execute_mission(
     # F2: the mission's very first launch, carried across every resume from
     # the prior result.json's own `wall.launched_at` -- never reset, so
     # `wall_s` always measures the whole mission's life, not just this run.
+    # A resume of a mission that predates this field has no such prior value
+    # to carry; recovering it from the mission id's own stamp (review
+    # finding) keeps it truthful instead of resetting to "now". A fresh
+    # launch needs no recovery -- its own start, at full precision, is
+    # already correct.
     prior_wall = (resume.prior_result or {}).get("wall")
-    launched_at = (
-        prior_wall["launched_at"]
-        if isinstance(prior_wall, dict) and isinstance(prior_wall.get("launched_at"), str)
-        else datetime.now(UTC).isoformat()
-    )
+    if isinstance(prior_wall, dict) and isinstance(prior_wall.get("launched_at"), str):
+        launched_at = prior_wall["launched_at"]
+    elif is_resume:
+        launched_at = _mission_launched_at(mission_id)
+    else:
+        launched_at = datetime.now(UTC).isoformat()
     done: dict[str, LaneResult] = dict(resume.kept)
     # E7 (review finding): a kept human lane never goes through `settle` (it
     # was never dispatched, so there is no run to wait on), but `settle` is
@@ -5276,12 +5313,13 @@ def _execute_mission(
         if isinstance(attempt.get("duration_s"), int | float)
         and not isinstance(attempt.get("duration_s"), bool)
     )
+    gate_seconds = _gate_seconds(lane_results, base)
     wall = {
         "launched_at": launched_at,
         "finished_at": finished_at,
         "wall_s": round(wall_s, 1),
         "paused_s": round(_paused_seconds(mission_dir), 1),
-        "gate_s": round(_gate_seconds(lane_results, base), 1),
+        "gate_s": None if gate_seconds is None else round(gate_seconds, 1),
         "lanes_s": round(lanes_s, 1),
         "idle_s": round(idle_total, 1),
     }
@@ -6343,8 +6381,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     ]
     if result.wall:
         w = result.wall
+        gates = "n/a" if w["gate_s"] is None else f"{w['gate_s']}s"
         lines.append(
-            f"- wall: {w['wall_s']}s (paused {w['paused_s']}s, gates {w['gate_s']}s, "
+            f"- wall: {w['wall_s']}s (paused {w['paused_s']}s, gates {gates}, "
             f"lanes {w['lanes_s']}s, idle {w['idle_s']}s)"
         )
     if result.chain:
