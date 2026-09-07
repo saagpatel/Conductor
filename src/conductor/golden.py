@@ -848,13 +848,35 @@ def replay(
         return Result.from_dict({**recorded_result, **overrides})
 
     mission_result = run_mission(
-        mission, home=home, dispatcher=dispatcher, human_answers=human_answers or None
+        mission,
+        home=home,
+        dispatcher=dispatcher,
+        human_answers=human_answers or None,
+        notifier=_replay_notifier,
     )
     return Replay(
         differences=differences,
         projection=projection(mission_result),
         result=mission_result,
     )
+
+
+def _replay_notifier(config: dict, event: dict) -> dict:
+    """F8: what a replay records in place of `notify.emit`. An offline
+    replay never runs a mission's notify command: the recorded command is
+    the operator's hook (a scrubbed one is not even a real path), and a
+    `golden check` that delivered a notification, or failed one, would be a
+    side effect on every run of the suite. The event name is what the
+    projection pins, so a change that moves a settle boundary into or out of
+    the notify path is a fixture diff."""
+    del config
+    return {
+        "event": event.get("event"),
+        "ok": True,
+        "exit_code": 0,
+        "timed_out": False,
+        "error": None,
+    }
 
 
 def _fresh_replay(fixture_dir: Path, *, cwds: dict[str, str] | None = None) -> Replay:
@@ -937,7 +959,13 @@ def projection(result: MissionResult) -> dict:
         # item), which no test here has ever exercised through a still-paused
         # recording.
         paused = {key: value for key, value in paused.items() if key != "child_path"}
-    return {
+    # F8: which settle boundaries reached the notify hook, in order. Only
+    # when any did: a fixture recorded without `notify` (both C5 fixtures)
+    # keeps a byte-identical projection, and an event's own outcome is
+    # never pinned -- a replay's notifier always answers ok (above), and a
+    # live hook's exit code is the operator's machine, not the routing.
+    notified = [note.get("event") for note in data.get("notifications") or []]
+    projected = {
         "ok": data.get("ok"),
         "require": data.get("require"),
         "notes": data.get("notes"),
@@ -953,6 +981,9 @@ def projection(result: MissionResult) -> dict:
         "cache_hit_rate": (data.get("cache") or {}).get("hit_rate"),
         "lanes": lanes,
     }
+    if notified:
+        projected["notifications"] = notified
+    return projected
 
 
 def _diff_projection(expected: object, actual: object, path: str = "$") -> list[str]:

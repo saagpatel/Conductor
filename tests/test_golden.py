@@ -510,6 +510,98 @@ def test_run_mission_with_a_dispatcher_never_calls_runner_dispatch(
     assert "feature/golden" not in branches
 
 
+# --- F8: replay never runs the notify hook --------------------------------
+
+
+def _record_notify_mission(repo, home, monkeypatch, tmp_path, notify_file: Path) -> Path:
+    fake_fleets(monkeypatch, {"claude": say("done", 0.01)})
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "notify": {"command": f"cat >> {notify_file}"},
+        "lanes": [{"name": "a", "fleet": "claude"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.ok is True
+    assert [n["event"] for n in result.notifications] == ["end"]
+    return Path(result.mission_dir)
+
+
+def test_replay_records_the_notify_event_without_running_the_command(
+    repo, home, monkeypatch, tmp_path
+):
+    notify_file = tmp_path / "events.jsonl"
+    mission_dir = _record_notify_mission(repo, home, monkeypatch, tmp_path, notify_file)
+    live_lines = notify_file.read_text().splitlines()
+    assert len(live_lines) == 1
+
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    assert golden.check(fixture) == []
+    # `record` replays once and `check` replays once more: neither ran the
+    # hook, or the live run's single line would have company.
+    assert notify_file.read_text().splitlines() == live_lines
+    expected = json.loads((fixture / "expected.json").read_text())
+    assert expected["notifications"] == ["end"]
+    replayed = golden._fresh_replay(fixture)
+    assert replayed.result.notifications == [
+        {"event": "end", "ok": True, "exit_code": 0, "timed_out": False, "error": None}
+    ]
+
+
+def test_replay_notifier_ignores_the_hook_outcome_but_pins_the_event(
+    repo, home, monkeypatch, tmp_path
+):
+    # A hook that fails live (exit 1) is a note on the live result, never on
+    # the projection: the fixture pins that `end` reached the hook, not what
+    # the operator's machine answered.
+    fake_fleets(monkeypatch, {"claude": say("done", 0.01)})
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "notify": {"command": "exit 1"},
+        "lanes": [{"name": "a", "fleet": "claude"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.notifications[0]["ok"] is False
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    assert golden.check(fixture) == []
+    assert json.loads((fixture / "expected.json").read_text())["notifications"] == ["end"]
+
+
+def test_projection_omits_notifications_when_none_fired(repo, home, monkeypatch, tmp_path):
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    assert "notifications" not in json.loads((fixture / "expected.json").read_text())
+
+
+def test_run_mission_notifier_stands_in_for_emit(repo, home, monkeypatch, tmp_path):
+    from conductor import notify as notify_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("notify.emit must not be called when a notifier is given")
+
+    monkeypatch.setattr(notify_mod, "emit", boom)
+    fake_fleets(monkeypatch, {"claude": say("done", 0.01)})
+    seen: list[tuple[dict, dict]] = []
+
+    def notifier(config, event):
+        seen.append((config, event))
+        return {"event": event["event"], "ok": True, "exit_code": 0, "timed_out": False}
+
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "notify": {"command": "true"},
+        "lanes": [{"name": "a", "fleet": "claude"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home, notifier=notifier)
+    assert [event["event"] for _, event in seen] == ["end"]
+    assert seen[0][0]["command"] == "true"
+    assert result.notifications == [
+        {"event": "end", "ok": True, "exit_code": 0, "timed_out": False}
+    ]
+
+
 # --- CLI -----------------------------------------------------------------
 
 

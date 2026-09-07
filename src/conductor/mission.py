@@ -4103,6 +4103,7 @@ def run_mission(
     human_answers: dict[str, str] | None = None,
     unattended: bool = False,
     mission_id: str | None = None,
+    notifier: Callable[[dict, dict], dict] | None = None,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
@@ -4226,6 +4227,7 @@ def run_mission(
             unattended=unattended,
             ceiling_result=ceiling_result,
             forecast_result=forecast_result,
+            notifier=notifier,
         )
     finally:
         try:
@@ -4254,6 +4256,7 @@ def _execute_mission(
     unattended: bool = False,
     ceiling_result: dict | None = None,
     forecast_result: forecast_mod.Forecast | None = None,
+    notifier: Callable[[dict, dict], dict] | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -4337,6 +4340,17 @@ def _execute_mission(
     # scheduler's own thread, never a lane worker's, so plain list.append
     # needs no lock.
     notifications: list[dict] = []
+
+    def _emit(event: dict) -> None:
+        # F8: `notifier` stands in for `notify.emit` the way `dispatcher`
+        # stands in for `runner.dispatch` -- golden.replay passes one that
+        # records the event without running the mission's command, so an
+        # offline replay never shells out to an operator's hook (a fixture's
+        # recorded command, scrubbed or not, is never a replay's to run).
+        if notifier is not None:
+            notifications.append(notifier(mission.notify, event))
+        else:
+            notifications.append(notify_mod.emit(mission.notify, event, cwd=mission.cwd))
 
     def fresh_lane_result(lane: Lane, *, skipped: str | None = None) -> LaneResult:
         old = resume.previous.get(lane.name)
@@ -4748,21 +4762,17 @@ def _execute_mission(
             and lane_result.breaker
             and "breaker" in mission.notify["events"]
         ):
-            notifications.append(
-                notify_mod.emit(
-                    mission.notify,
-                    {
-                        "event": "breaker",
-                        "mission_id": mission_id,
-                        "lane": lane_result.name,
-                        "breaker": lane_result.breaker,
-                        "run_id": (
-                            lane_result.attempts[-1]["run_id"] if lane_result.attempts else None
-                        ),
-                        "cost_usd": lane_result.cost_usd,
-                    },
-                    cwd=mission.cwd,
-                )
+            _emit(
+                {
+                    "event": "breaker",
+                    "mission_id": mission_id,
+                    "lane": lane_result.name,
+                    "breaker": lane_result.breaker,
+                    "run_id": (
+                        lane_result.attempts[-1]["run_id"] if lane_result.attempts else None
+                    ),
+                    "cost_usd": lane_result.cost_usd,
+                }
             )
 
     # E10: a plan lane's launch decision. Only a resume can reach here with a
@@ -5049,20 +5059,16 @@ def _execute_mission(
                 new_pause_doc[key] = pause_info[key]
         (mission_dir / "pause.json").write_text(json.dumps(new_pause_doc, indent=2))
         if mission.notify and "pause" in mission.notify["events"]:
-            notifications.append(
-                notify_mod.emit(
-                    mission.notify,
-                    {
-                        "event": "pause",
-                        "mission_id": mission_id,
-                        "kind": pause_info["kind"],
-                        "lane": pause_info["lane"],
-                        "spent_usd": pause_info["spent_usd"],
-                        "threshold": pause_info["threshold"],
-                        "question": pause_info["question"],
-                    },
-                    cwd=mission.cwd,
-                )
+            _emit(
+                {
+                    "event": "pause",
+                    "mission_id": mission_id,
+                    "kind": pause_info["kind"],
+                    "lane": pause_info["lane"],
+                    "spent_usd": pause_info["spent_usd"],
+                    "threshold": pause_info["threshold"],
+                    "question": pause_info["question"],
+                }
             )
         pause_park = {
             "kind": pause_info["kind"],
@@ -5432,26 +5438,22 @@ def _execute_mission(
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     if mission.notify and not dry_run and pause_park is None and "end" in mission.notify["events"]:
-        notifications.append(
-            notify_mod.emit(
-                mission.notify,
-                {
-                    "event": "end",
-                    "mission_id": mission_id,
-                    "ok": result.ok,
-                    "name": result.name,
-                    "cost_usd": result.cost_usd,
-                    "lanes": [
-                        {
-                            "name": lane.name,
-                            "ok": lane.ok,
-                            "kind": lane.kinds[-1] if lane.kinds else None,
-                        }
-                        for lane in lane_results
-                    ],
-                },
-                cwd=mission.cwd,
-            )
+        _emit(
+            {
+                "event": "end",
+                "mission_id": mission_id,
+                "ok": result.ok,
+                "name": result.name,
+                "cost_usd": result.cost_usd,
+                "lanes": [
+                    {
+                        "name": lane.name,
+                        "ok": lane.ok,
+                        "kind": lane.kinds[-1] if lane.kinds else None,
+                    }
+                    for lane in lane_results
+                ],
+            }
         )
         report_path.write_text(_report(mission, result, lane_results))
         (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
