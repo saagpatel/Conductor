@@ -542,3 +542,23 @@ def test_untainted_antigravity_lane_runs_no_preflight(repo, home, fake_fleet, mo
     assert result.ok is True, result.failure()
     assert called == []
     assert result.taint_enforcement is None
+
+
+def test_the_real_hooks_preflight_argv_is_the_probed_shape(tmp_path):
+    """Cross-vendor review (Grok): every test above swaps the argv builder
+    for a script, so nothing exercised the production argv. This pins it to
+    the shape the 2026-09-07 probe ran: the free `/hooks` query, stream-json,
+    the lane's cwd as the only added directory, no model, effort, or schema."""
+    from conductor.fleets import build_agy_hooks_argv
+
+    argv = build_agy_hooks_argv(str(tmp_path))
+    assert argv == [
+        "agy",
+        "-p",
+        "/hooks",
+        "--output-format",
+        "stream-json",
+        "--add-dir",
+        str(tmp_path),
+    ]
+    assert "--model" not in argv and "--json-schema" not in argv

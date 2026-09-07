@@ -713,8 +713,9 @@ enforced: <reason>`, kind `taint`, and the lane is not committed. The
 receipt gains `taint_enforcement`: `{"preflight": {"ok", "loaded", "detail"},
 "hooks_written", "hooks_loaded", "tools_seen", "uncovered", "denied_calls"}`
 (`denied_calls` counts the stream's own "denied by pre-tool hook" tool
-errors; `preflight` is omitted on a run that never reached spawn), `null`
-when the lane is not a tainted antigravity dispatch. Cursor's
+errors; on a run the preflight itself refused, `spawned` is false and the block
+carries `preflight` with `ok` false and nothing else), `null` when the lane is
+not a tainted antigravity dispatch. Cursor's
 `.cursor/cli.json` has no rule kind for its native web fetch and search
 tools (`Shell`, `Write`, and `Mcp` only), so a tainted lane there would keep
 network egress whatever the config said; taint on Cursor (and on Codex,
