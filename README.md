@@ -1818,9 +1818,17 @@ refuses the export, exactly as `golden record` refuses a leaking fixture.
 Before scrubbing anything, `export` verifies the mission on bytes with the
 exporting machine's own key -- the same checks `conductor attest` runs, for
 the chain and, individually, for every run's attestation -- and records the
-verdict in `manifest.json`: `chain.verified_at_export`, one row per link
-(`index`, `lane`, `run_id`, `verified`, `problems`), and one entry per run id
-under `attestations` (`verified_at_export`, `problems`). `files` lists every
+verdict in `manifest.json`: `chain.state` and `chain.verified_at_export`,
+`chain.problems`, one row per link (`index`, `lane`, `run_id`, `verified`,
+`problems`), and one entry per run id under `attestations`
+(`verified_at_export`, `problems`). `chain.state` is the same state string
+`conductor attest` reports, from the same validator: a mission with no
+chain.json at all used to export as `verified_at_export: true`, because the
+only thing that could contradict it was a chain file that existed and was
+bad. `missing`, `malformed`, `empty`, and `partial` each say so now, and
+`verified_at_export` is exactly `state == "verified"`. `conductor export`
+prints the state alongside the boolean, and `ExportResult` carries it as
+`chain_state_at_export`. `files` lists every
 bundled file by its bundle-relative path with three numbers: `sha256` (the
 scrubbed bytes actually in the bundle), `sha256_original` (the file's digest
 on the exporting machine, before scrubbing), and `bytes`. `verifiable_here`
