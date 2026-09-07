@@ -34,6 +34,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | Ledger in-flight figures live in pause.json and running.json; settings digest check for Claude write lanes; land dry-run flag | 0.70.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; one scratch-repo dispatch | $0.07 |
 | W11 undispositioned sharpened, README error kinds pinned to KINDS; 0.69.0 and 0.70.0 receipts read live on the mission | 0.71.0 | Shape A via the launcher with --opus-review, landed by conductor land | $5.30 |
 | F17 launcher raises a warned lane's cap to the forecast p80 and records the caps block; plan-digest refusal drilled live | 0.72.0 | lead with one Opus subagent in a worktree, gated on the merged tree; one scratch plan-lane mission | $0.04 |
+| F18 KINDS is the check order of error_kind; F19 a fix lane that wrote only its deliverable skips the reproduce gate, reproduce refusals get their own kind | 0.73.0 | Shape A via the launcher with --opus-review, build lane landed by conductor land after the fix lane failed on F19; lead fix | $4.14 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -61,7 +62,10 @@ README kinds block, and read every 0.69.0 and 0.70.0 receipt live on the mission
 (`docs/research/2026-09-07-consumer-live-receipts-0-70.md`). Both closed in 0.72.0: the launcher raises a
 warned lane's cap to the forecast p80 and records every cap's basis on the mission file (F17), and
 the plan-digest refusal fired live on a scratch plan lane. Every fail-closed check in the inventory
-that a finished mission or a scratch repository can reach now has a live receipt.
+that a finished mission or a scratch repository can reach now has a live receipt. 0.73.0 made
+`KINDS` the true check order (F18) and, from that mission's own fix lane failing after three
+NO_FINDINGS reviews, fixed the reproduce gate to skip a deliverable-only write and gave its refusals
+kind `reproduce` (F19). Open: nothing from the review; the next work is spec-shaped.
 
 ## Waves
 
