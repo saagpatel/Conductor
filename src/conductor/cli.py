@@ -445,6 +445,7 @@ def cmd_salvage(args: argparse.Namespace) -> int:
             _invalid("--emit refused: a gate is red")
             return 3
         try:
+            ceiling = shape.parse_ceiling(args.ceiling)
             caps = shape.cap_arithmetic(args.items, args.modules, scheduler=args.scheduler)
             snapshot = json.loads((home / "missions" / mission_id / "mission.json").read_text())
             spec_prompt = snapshot.get("prompt") if isinstance(snapshot, dict) else None
@@ -458,6 +459,7 @@ def cmd_salvage(args: argparse.Namespace) -> int:
                 fix_commit=args.fix_commit or "",
                 about=args.about,
                 spec_prompt=spec_prompt if isinstance(spec_prompt, str) else "",
+                ceiling=ceiling,
             )
         except (salvage_mod.SalvageInvalid, shape.ShapeInvalid, MissionInvalid, OSError) as exc:
             _invalid(str(exc))
@@ -713,9 +715,18 @@ def _write_lane_prompts(raw: dict, base_dir: Path) -> None:
         lane["prompt_file"] = f"prompts/{lane['name']}.md"
 
 
+def _ceiling_line(raw_ceiling: dict) -> str:
+    per_hour = raw_ceiling["per_hour_usd"]
+    per_day = raw_ceiling["per_day_usd"]
+    hour = "none" if per_hour is None else f"${per_hour:.2f}"
+    day = "none" if per_day is None else f"${per_day:.2f}"
+    return f"ceiling: per_hour {hour}, per_day {day}"
+
+
 def cmd_shape_a(args: argparse.Namespace) -> int:
     """E5: write a Shape A mission from a spec, print the cap arithmetic, validate it."""
     try:
+        ceiling = shape.parse_ceiling(args.ceiling)
         caps = shape.cap_arithmetic(
             args.items,
             args.modules,
@@ -723,6 +734,8 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             grok_runs_suite=args.grok_runs_suite,
             cap_grace_usd=args.cap_grace_usd,
             adversarial=args.adversarial,
+            tests_items=args.tests_items,
+            findings=args.findings,
         )
         out = Path(args.out).expanduser().resolve() if args.out else None
         mission_dir = out.parent if out else None
@@ -740,6 +753,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             build_commit=args.build_commit or "",
             fix_commit=args.fix_commit or "",
             adversarial=args.adversarial,
+            ceiling=ceiling,
         )
         base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
         if out is None:
@@ -750,6 +764,14 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 3
+        # Cross-vendor review (Grok): the preflight runs before anything is
+        # written beside the mission file, so a refused launch leaves no
+        # prompts/*.md behind for the lead to clean up.
+        if args.skip_preflight:
+            preflight_note = "gate preflight: skipped (--skip-preflight)"
+        else:
+            shape.gate_preflight(Path(args.repo), args.test)
+            preflight_note = "gate preflight: passed"
         if not args.inline:
             _write_lane_prompts(raw, base_dir)
         mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
@@ -757,6 +779,8 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
     print(f"shape {shape.SHAPE_VERSION}: {len(mission.lanes)} lanes, mission '{mission.name}'")
+    print(preflight_note)
+    print(_ceiling_line(raw["ceiling"]))
     print(caps.render())
     # E14: a low cap is easier to fix before the launch than after it, so
     # this is printed against the real conductor home right here -- whether
@@ -1042,6 +1066,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="add an adversarial lane that writes a test failing on the build's tip (E16); "
         "the fix lane builds on it and inherits a reproduced check",
     )
+    p_shape_a.add_argument(
+        "--tests-items",
+        type=int,
+        default=0,
+        metavar="N",
+        help="spec items, already counted in --items, that are tests; counted twice in the "
+        "build cap (rule 11)",
+    )
+    p_shape_a.add_argument(
+        "--findings",
+        type=int,
+        default=shape.DEFAULT_FINDINGS,
+        metavar="N",
+        help="expected review findings, at $1.00 each on the fix cap "
+        f"(default {shape.DEFAULT_FINDINGS}, the median Grok finding count on this repository)",
+    )
+    p_shape_a.add_argument(
+        "--ceiling",
+        default="none",
+        metavar="none|default|H,D",
+        help="the mission's E9 rolling-spend ceiling: 'none' (default) writes null bounds -- "
+        "an attended launch is watched, so the ceiling follows --unattended, not this "
+        "launcher; 'default' copies ceiling.py's own constants; 'H,D' sets both explicitly",
+    )
+    p_shape_a.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="skip running the gate command once in a throwaway worktree before writing "
+        "the mission file",
+    )
     p_shape_a.add_argument("--name", help="mission name (default: the spec's stem)")
     p_shape_a.add_argument(
         "--about", help="one phrase naming the repo for the shared prefix, e.g. 'the X service'"
@@ -1122,6 +1176,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_salvage.add_argument("--fix-commit", help="fix lane commit message")
     p_salvage.add_argument(
         "--about", help="one phrase naming the repo for the shared prefix, e.g. 'the X service'"
+    )
+    p_salvage.add_argument(
+        "--ceiling",
+        default="none",
+        metavar="none|default|H,D",
+        help="the follow-on mission's E9 rolling-spend ceiling; see 'shape a --ceiling'",
     )
     p_salvage.add_argument("--json", action="store_true")
     p_salvage.set_defaults(func=cmd_salvage)

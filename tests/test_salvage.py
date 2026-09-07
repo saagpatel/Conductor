@@ -270,6 +270,47 @@ def test_emit_writes_a_loadable_no_build_followon_mission_with_the_diff_in_its_p
     assert fix_lane.attempts[0].test_policy == "allow"
 
 
+def test_emit_ceiling_defaults_to_none_and_forwards_an_explicit_value(repo, home, fake_fleet):
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="exit 1")
+    result = salvage(home, mission_id, lane)
+    _commit_the_salvage(result.worktree)
+    caps = cap_arithmetic(1, 1)
+
+    default_dict = emit(
+        result, home / "followon-default.json", test=result.test_command, caps=caps, name="c1"
+    )
+    assert default_dict["ceiling"] == {"per_hour_usd": None, "per_day_usd": None}
+
+    explicit_dict = emit(
+        result,
+        home / "followon-explicit.json",
+        test=result.test_command,
+        caps=caps,
+        name="c2",
+        ceiling={"per_hour_usd": 5.0, "per_day_usd": 10.0},
+    )
+    assert explicit_dict["ceiling"] == {"per_hour_usd": 5.0, "per_day_usd": 10.0}
+
+
+def test_cli_salvage_emit_ceiling_flag(repo, home, fake_fleet, monkeypatch, capsys):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="true")
+    result = salvage(home, mission_id, lane)
+    _commit_the_salvage(result.worktree)
+    capsys.readouterr()
+
+    out = home / "followon.json"
+    code = main(
+        [
+            "salvage", mission_id, "--lane", lane, "--emit", str(out),
+            "--items", "1", "--modules", "1", "--ceiling", "5,10",
+        ]
+    )
+    assert code == 0
+    raw = json.loads(out.read_text())
+    assert raw["ceiling"] == {"per_hour_usd": 5.0, "per_day_usd": 10.0}
+
+
 def test_report_counts_salvage_receipts_per_mission(repo, home, fake_fleet):
     mission_id, lane = _run_lane(repo, home, fake_fleet, test="exit 1")
     salvage(home, mission_id, lane)
