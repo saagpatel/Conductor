@@ -2511,10 +2511,16 @@ The report has seven sections, in this order:
   `$CONDUCTOR_HOME/missions/<id>/land/`).
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
-  and fix stages, how many runs were killed at their cap after their own
-  gate had already passed -- a green run lost at the cap, the case the rule
-  was written for). A figure with nothing to compute from reads `n/a`,
-  never `0`, so a missing stage is never mistaken for a clean one.
+  and fix stages, the runs killed at their cap). D21: a cap loss is
+  reported in three cohorts -- `gate passed`, `gate failed`, `gate not run`
+  -- beside the stage's `total`, because a receipt's `gate_passed` is also
+  True when no gate ran at all (`runner._gate_passed` reads "nothing to
+  fail" as not-failed, which is right for `ok` and wrong here). A run the
+  watcher kills at its cap never reaches its gate -- `runner.dispatch` gates
+  only when the run had no error -- so it now lands in `gate not run`
+  instead of reading as a green run lost at the cap, which is the case rule
+  10's dollar was written for. A stage with no Claude run at all reads
+  `n/a`, never `0`, so a missing stage is never mistaken for a clean one.
 - **Wall clock**: one row per mission ever recorded, from that mission's own
   `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
   "paused_s", "gate_s", "lanes_s", "idle_s"}`. `launched_at` is the

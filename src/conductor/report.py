@@ -107,6 +107,11 @@ class Run(_SpendRun):
     mode: str | None = None
     answer_path: str | None = None
     gate_passed: bool = True
+    # D21: whether a gate actually ran. `gate_passed` is True when none did
+    # (runner._gate_passed reads "nothing to fail" as not-failed), which is
+    # right for `ok` and wrong for "capped after its gate passed": a
+    # watcher-killed run never reaches the gate at all.
+    gate_ran: bool = False
     # E24: how much of the grace band this run drew on, and whether it
     # finished inside the band (grace used, and not over budget) -- the
     # two figures rule 10 reports per stage.
@@ -260,6 +265,19 @@ def _scan_missions(
     return join, meta
 
 
+def _gate_ran(tests: object, surface: object) -> bool:
+    """D21: whether this receipt's own gate, or the clean gate that replaces
+    it, actually ran -- the same choice `runner._gate_passed` makes between
+    the two blocks, asked about the run rather than the verdict. A run
+    killed at its cap never reaches either (`runner.dispatch` gates only
+    when `error is None`), so its `gate_passed: True` means "not checked"."""
+    surface_dict = surface if isinstance(surface, dict) else {}
+    clean = surface_dict.get("clean_gate")
+    clean_dict = clean if isinstance(clean, dict) else {}
+    counted = clean_dict if clean_dict.get("ran") else tests
+    return bool(isinstance(counted, dict) and counted.get("ran"))
+
+
 def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -> Run | None:
     base = _spend_read_run(path)
     if base is None:
@@ -286,6 +304,7 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         else 0.0
     )
     gate_passed = _runner_gate_passed(raw.get("tests"), raw.get("test_surface"))
+    gate_ran = _gate_ran(raw.get("tests"), raw.get("test_surface"))
 
     usage = raw.get("usage")
     raw_input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
@@ -329,6 +348,7 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         mode=_str_field(raw, "mode"),
         answer_path=_str_field(raw, "answer_path"),
         gate_passed=gate_passed,
+        gate_ran=gate_ran,
         grace_used=grace_used,
         finished_in_band=finished_in_band,
     )
@@ -578,8 +598,15 @@ class WallClockRow:
 @dataclass
 class Rules:
     """The figures behind AGENTS.md rules 7 (reviewer cap misses and finding
-    rate, per vendor) and 10 (a green Claude build or fix run lost at its
-    cap), so the lead can compare the prose against the receipts directly."""
+    rate, per vendor) and 10 (a Claude build or fix run lost at its cap), so
+    the lead can compare the prose against the receipts directly.
+
+    D21: `cap_losses[stage]` is `"n/a"` when the stage has no Claude run at
+    all, else `{"gate_passed", "gate_failed", "gate_not_run", "total"}` over
+    that stage's capped runs. The three cohorts are kept apart because a run
+    killed at its cap usually never reaches its gate, and counting "no gate
+    ran" as passed read not-checked as green -- rule 10's dollar is about a
+    run that had already earned its verdict."""
 
     review: list[dict[str, object]]
     cap_losses: dict[str, object]
@@ -856,7 +883,16 @@ def _build_report(
         if not matches:
             cap_losses[stage] = "n/a"
         else:
-            cap_losses[stage] = sum(1 for r in matches if r.kind == "cap" and r.gate_passed)
+            # D21: a cap loss is only rule 10's case when a gate actually ran
+            # and passed. A watcher-killed run never gets that far, and
+            # counting its "no gate ran" as passed read not-checked as green.
+            capped = [r for r in matches if r.kind == "cap"]
+            cap_losses[stage] = {
+                "gate_passed": sum(1 for r in capped if r.gate_ran and r.gate_passed),
+                "gate_failed": sum(1 for r in capped if r.gate_ran and not r.gate_passed),
+                "gate_not_run": sum(1 for r in capped if not r.gate_ran),
+                "total": len(capped),
+            }
         grace_total = sum((r.grace_used for r in matches if r.grace_used), Decimal("0"))
         grace[stage] = {
             "used_usd": _money(grace_total),
@@ -1062,8 +1098,8 @@ def _print_report(rpt: Report) -> None:
             for d in (row.to_dict() for row in rpt.wall_clock)
         ],
     )
-    print("Rules: AGENTS.md 7 (review cap misses and finding rate) and 10 (a green Claude")
-    print("build or fix run lost at its cap)")
+    print("Rules: AGENTS.md 7 (review cap misses and finding rate) and 10 (a Claude build")
+    print("or fix run lost at its cap, split by what its own gate actually did)")
     _print_section(
         "  rule 7: review vendors",
         ("vendor", "cap_misses", "finding_rate"),
@@ -1073,11 +1109,17 @@ def _print_report(rpt: Report) -> None:
         ],
     )
     _print_section(
-        "  rule 10: Claude runs capped after their gate passed",
-        ("stage", "count"),
+        "  rule 10: Claude runs capped, by what their own gate did",
+        ("stage", "gate passed", "gate failed", "gate not run", "total"),
         [
-            (stage, _cell(count))
-            for stage, count in rpt.rules.cap_losses.items()
+            (
+                stage,
+                _cell(cohorts["gate_passed"]) if isinstance(cohorts, dict) else _cell(cohorts),
+                _cell(cohorts["gate_failed"]) if isinstance(cohorts, dict) else _cell(cohorts),
+                _cell(cohorts["gate_not_run"]) if isinstance(cohorts, dict) else _cell(cohorts),
+                _cell(cohorts["total"]) if isinstance(cohorts, dict) else _cell(cohorts),
+            )
+            for stage, cohorts in rpt.rules.cap_losses.items()
             if stage != "grace"
         ],
     )

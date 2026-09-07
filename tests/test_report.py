@@ -800,8 +800,10 @@ def test_report_mission_identity_matches_what_dispatch_stamps_on_the_receipt(hom
 
 
 def test_report_rules_section_reports_n_a_when_no_data(home: Path):
-    # A green Claude build lost at its cap (rule 10): no gate ran, so
-    # runner._gate_passed reads that as passed, the case the rule names.
+    # D21: a Claude build killed at its cap before any gate ran. Its
+    # receipt's `gate_passed` is True only because nothing ran, so it lands
+    # in the `gate_not_run` cohort, never in `gate_passed` -- rule 10's
+    # dollar is about a run that had already earned its verdict.
     _write_receipt(
         home,
         "20260101T000000Z-claude-buildcap",
@@ -823,7 +825,12 @@ def test_report_rules_section_reports_n_a_when_no_data(home: Path):
         stage="review",
     )
     rpt = report(home)
-    assert rpt.rules.cap_losses["build"] == 1
+    assert rpt.rules.cap_losses["build"] == {
+        "gate_passed": 0,
+        "gate_failed": 0,
+        "gate_not_run": 1,
+        "total": 1,
+    }
     assert rpt.rules.cap_losses["fix"] == "n/a"
     review_entry = next(r for r in rpt.rules.review if r["vendor"] == "anthropic")
     assert review_entry["cap_misses"] == 1
@@ -1124,3 +1131,53 @@ def test_report_prints_the_duplicate_and_unmatched_counts(home: Path, monkeypatc
     printed = capsys.readouterr().out
     assert "duplicate dispositions: 1" in printed
     assert "dispositions naming no reported finding: 1" in printed
+
+
+def test_report_cap_loss_counts_a_gate_that_ran_and_passed(home: Path):
+    # D21: the case rule 10's dollar is actually about -- the gate ran, it
+    # passed, and the run was then lost at its cap. Beside it, a capped run
+    # whose gate ran and failed, so the two never share a cohort.
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-gated-cap",
+        fleet="claude",
+        model="claude-sonnet-5",
+        ok=False,
+        kind="cap",
+        stage="build",
+        tests={"ran": True, "exit_code": 0, "timed_out": False, "interrupted": False},
+    )
+    _write_receipt(
+        home,
+        "20260101T010000Z-claude-failed-cap",
+        fleet="claude",
+        model="claude-sonnet-5",
+        ok=False,
+        kind="cap",
+        stage="build",
+        tests={"ran": True, "exit_code": 1, "timed_out": False, "interrupted": False},
+    )
+    rpt = report(home)
+    assert rpt.rules.cap_losses["build"] == {
+        "gate_passed": 1,
+        "gate_failed": 1,
+        "gate_not_run": 0,
+        "total": 2,
+    }
+
+
+def test_report_prints_the_three_cap_loss_cohorts(home: Path, monkeypatch, capsys):
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-uncapped-gate",
+        fleet="claude",
+        model="claude-sonnet-5",
+        ok=False,
+        kind="cap",
+        stage="build",
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert "rule 10: Claude runs capped, by what their own gate did" in printed
+    assert "gate not run" in printed
