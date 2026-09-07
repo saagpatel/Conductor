@@ -488,11 +488,13 @@ class ReviewerPrecisionRow:
     # disposition count above, since a fix lane's dispositions against an
     # unparsed verdict are not real dispositions against real findings.
     unparsed: int = 0
-    # W7: the selection this row's `precision` actually rests on -- distinct
-    # missions whose dispositions contributed to it, and `stage: review`
-    # lanes on this vendor that parsed but whose mission recorded no
-    # dispositions at all (so they count in `reviewer_finding_rate`, never
-    # here, and were previously invisible on this table).
+    # W7/W11: the selection this row's `precision` actually rests on --
+    # distinct missions whose dispositions contributed to it, and `stage:
+    # review` lanes on this vendor that parsed but received no landed
+    # disposition of their own, whether their mission recorded no
+    # dispositions at all or recorded some naming only other lanes (so they
+    # count in `reviewer_finding_rate`, never here, and were previously
+    # invisible on this table).
     missions: int = 0
     undispositioned: int = 0
     # F15 mission 2 item 4: the confidence (1-10) of every review item whose
@@ -883,6 +885,10 @@ def _build_report(
         # the selection `precision` is actually scored over, never an
         # inflated one a vendor's own findings had no say in.
         mission_vendors: set[str] = set()
+        # W11: a lane that received at least one matched disposition is
+        # dispositioned -- tracked per lane name, not per vendor, since two
+        # lanes on one vendor on one mission can differ (one named, one not).
+        dispositioned_lanes: set[str] = set()
         for item in _unique_dispositions(name, fix_dispositions, counts=disposition_counts):
             lane_name = item["lane"]
             disposition = item["disposition"]
@@ -903,6 +909,7 @@ def _build_report(
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             setattr(row, disposition, getattr(row, disposition) + 1)
             mission_vendors.add(info["vendor"])
+            dispositioned_lanes.add(lane_name)
             if disposition in ("fixed", "refused"):
                 confidence = _matched_confidence(info.get("items"), item.get("index"))
                 if confidence is not None:
@@ -914,6 +921,18 @@ def _build_report(
                     target.append(confidence)
         for vendor in mission_vendors:
             precision[vendor].missions += 1
+        # W11: a parsed review lane that named no landed disposition on a
+        # mission that recorded dispositions (for other lanes, or none at
+        # all here) is undispositioned too -- previously only a mission with
+        # no fix lane at all reached this column, so a vendor whose lane
+        # parsed but went unnamed was counted in `findings` and nowhere else.
+        for lane_name, info in review_lanes.items():
+            if info.get("unparsed"):
+                continue
+            if lane_name in dispositioned_lanes:
+                continue
+            row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
+            row.undispositioned += 1
 
     precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
     # F15 item 3: every fix lane's own `dispositions_malformed` count, summed

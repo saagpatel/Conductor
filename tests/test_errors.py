@@ -560,10 +560,12 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         "interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent,"
         in section
     )
+    assert "deliverable, taint," in section
     assert (
-        "transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op," in section
+        "settings, adversarial, plan, denied, rate_limit, transport, refusal, fleet_error,"
+        in section
     )
-    assert "read_moved_bytes, no_answer, commit, unknown" in section
+    assert "gate_test_surface, no_op, read_moved_bytes, no_answer, commit, unknown" in section
     assert "cap kill that also timed out is `cap`, not `timeout`" in section
     assert "rate limit is `rate_limit`, not `fleet_error`" in section
     assert "I can't help` or `I cannot help`" in section
@@ -580,3 +582,11 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
     assert "(kind: <kind>)" in section
     assert "docs/ROADMAP-2026-09.md` item C5" in section
     assert "error_handlers" in section
+
+
+def test_readme_error_kinds_code_block_matches_kinds_exactly():
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Structured error kinds", 1)[1]
+    block = section.split("```\n", 1)[1].split("```", 1)[0]
+    listed = tuple(block.replace(",", " ").split())
+    assert listed == KINDS
