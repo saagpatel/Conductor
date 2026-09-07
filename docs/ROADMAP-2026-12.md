@@ -39,6 +39,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | Review item 1: current support matrix at the README entry | 0.75.0 | lead, no fleet | $0 |
 | Review item 2: cost per landed item on the ledger report | 0.76.0 | lead, no fleet | $0 |
 | F20 one effect inventory (spend.effects) read by resume, report, spend, and export | 0.77.0 | Shape A via the launcher with --opus-review, landed by conductor land | $7.64 |
+| F21 slice 1: graph policy extracted to graph.py, D3 and D4 pinned | 0.78.0 | Shape A via the launcher with --opus-review, landed by conductor land | $8.45 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -73,8 +74,8 @@ kind `reproduce` (F19). Five review items remain, approved in order: the README 
 (shipped 0.75.0), cost per landed item on the report (shipped 0.76.0, read live at $1.99 over
 today's four mapped missions), one effect inventory shared by `mission.py`
 and `report.py` (shipped 0.77.0 as `spend.effects`, F20), `mission.py` extracted by invariant with
-signatures intact (F21, three slices, one release each: graph policy, approval consumption, attempt
-lifecycle), and non-code artifact acceptance with a before/after validator.
+signatures intact (F21, three slices, one release each: graph policy shipped 0.78.0, then approval
+consumption, then attempt lifecycle), and non-code artifact acceptance with a before/after validator.
 
 ## Waves
 
