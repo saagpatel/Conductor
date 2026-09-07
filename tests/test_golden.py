@@ -108,6 +108,20 @@ def test_scrub_guard_does_not_read_raw_base64_as_an_env_secret(tmp_path):
     assert golden.scrub_guard(tmp_path) == []
 
 
+def test_scrub_guard_does_not_read_a_signature_ending_in_key_as_an_env_secret(tmp_path):
+    """A 44-character DSSE signature is under the 64-character decode
+    threshold; it still must not read as `...KEY=` to the plain-text scan."""
+    sig = "A" * 40 + "KEY="
+    assert len(sig) == 44
+    (tmp_path / "receipt.json").write_text(f'{{"sig": "{sig}"}}\n')
+    assert golden.scrub_guard(tmp_path) == []
+
+
+def test_scrub_guard_still_finds_a_long_alphanumeric_secret_value(tmp_path):
+    (tmp_path / "env.txt").write_text("MY_SECRET_KEY=" + "a" * 48 + "\n")
+    assert golden.scrub_guard(tmp_path) == ["env.txt:1: env secret"]
+
+
 def test_scrub_guard_decodes_a_base64_blob_and_finds_the_user_home(tmp_path):
     # A DSSE-style payload: real secrets base64-encoded inside a JSON field,
     # the way attestation.json carries its statement. Plain-text scanning

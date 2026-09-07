@@ -202,6 +202,29 @@ def _decode_base64_runs(line: str) -> list[str]:
     return decoded
 
 
+_MASKABLE_B64_RE = re.compile(r"[A-Za-z0-9+/=]{40,}")
+
+
+def _mask_base64_runs(line: str) -> str:
+    """The line with every base64-shaped run of 40+ characters replaced by
+    `<b64>`, for the plain-text scan only. A DSSE signature is 44 characters
+    and a payload far longer; either can spell "key" before its "=" padding
+    and read as an env secret to a plain-text scan, which is not a leak. A
+    run is masked only when its "=" signs are trailing padding (at most
+    two, at the end): `KEY=<40 alphanumerics>` has its "=" in the middle
+    and is left alone, so a real secret assignment is still caught. The
+    decoded scan in `scrub_guard` still sees everything inside a run."""
+
+    def mask(match: re.Match[str]) -> str:
+        run = match.group(0)
+        stripped = run.rstrip("=")
+        if "=" in stripped or len(run) - len(stripped) > 2:
+            return run
+        return "<b64>"
+
+    return _MASKABLE_B64_RE.sub(mask, line)
+
+
 def scrub_guard(path: str | Path, *, extra: list[tuple[str, str]] | None = None) -> list[str]:
     """Every occurrence in a fixture directory of the user's home path, the
     conductor home, any of `extra`'s (path, label) pairs, or any of the
@@ -233,7 +256,7 @@ def scrub_guard(path: str | Path, *, extra: list[tuple[str, str]] | None = None)
             # alphabet can spell "key" before its "=" padding and read as an
             # env secret to a plain-text scan, which is not a leak, only
             # base64. The decoded scan below still sees everything inside it.
-            for name in _pattern_hits(_BASE64_RUN_RE.sub(" ", line), patterns):
+            for name in _pattern_hits(_mask_base64_runs(line), patterns):
                 findings.append(f"{rel}:{line_no}: {name}")
             for decoded in _decode_base64_runs(line):
                 for name in _pattern_hits(decoded, patterns):
