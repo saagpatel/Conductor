@@ -376,17 +376,32 @@ def test_answer_continue_launches_the_child_through_the_fake_fleet(
     assert child_block["ok"] is True
     assert child_block["paused"] is False
     assert child_block["mission_id"] in resumed.children
+    assert child_block["state"] == "finished"
+    assert child_block["rolled_up"] is True
     assert any(
         note.startswith(f"child '{child_block['mission_id']}' spent")
-        and "not rolled into this budget" in note
+        and "rolled into this budget" in note
+        and "not rolled" not in note
         for note in resumed.notes
     )
+
+    # item 1: the child's own cost (0.2, the CHILDBUILD dispatch) lands in
+    # the parent's ledger alongside its own plan-lane cost (0.1, writing the
+    # deliverable) -- budget, cost_usd, and children_cost_usd all see it.
+    assert resumed.cost_usd == pytest.approx(0.3)
+    assert resumed.budget["spent_usd"] == pytest.approx(0.3)
+    assert resumed.children_cost_usd == pytest.approx(0.2)
 
     child_snapshot = json.loads(
         (Path(child_block["report_path"]).parent / "mission.json").read_text()
     )
     assert child_snapshot["depth"] == 1
     assert child_snapshot["parent"] == {"mission_id": resumed.mission_id, "lane": "plan"}
+    # item 1: the parent had a budget (10.0, 9.9 remaining once the plan
+    # lane's own cost is seeded), so the child's own cap is clamped and
+    # flagged, even when -- as here -- the clamp does not actually lower it.
+    assert child_snapshot["budget_from_parent"] is True
+    assert child_snapshot["max_cost_usd"] == 5.0
 
     child_result = json.loads(
         (Path(child_block["report_path"]).parent / "result.json").read_text()
