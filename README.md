@@ -1747,6 +1747,18 @@ with the outcome, and `conductor missions` rows carry
 `"resolve": "ok" | "failed" | "skipped" | null`. The ledger's blocker rules
 apply before the resolver starts, exactly as they do before the collate.
 
+A resume that dispatches a second resolver (the first one failed, or a sink
+lane reran) keeps the first one's outcome in `previous_resolves`, oldest
+first -- what `previous_collates` already does for the collate -- so a paid
+resolver is never overwritten by its own rerun. Resume accounting, the
+mission's token and cache totals, `conductor spend --by mission`, and
+`conductor report`'s join all read it; it is absent on a receipt written
+before this, and every reader treats that as an empty list. The resolver's
+and the collate's own run receipts also carry `lane` (`resolve`,
+`collate`, `collate:<judge>:<order>`) and `mission`, the same two fields a
+lane's dispatch stamps, so an auxiliary run is attributable on its own
+bytes rather than only through the mission snapshot.
+
 #### Collisions across repositories
 
 A mission whose lanes span more than one repository (per-lane `cwd`, E26)

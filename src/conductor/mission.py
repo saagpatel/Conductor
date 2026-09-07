@@ -2664,6 +2664,11 @@ class MissionResult:
     resumes: list[dict] = field(default_factory=list)
     resumed_from: dict | None = None
     previous_collates: list[dict] = field(default_factory=list)
+    # D13: superseded `resolve` outcomes, oldest first -- the same shape
+    # `previous_collates` keeps for the collate, so a rerun that dispatches a
+    # second resolver does not overwrite the first one's paid record. Absent
+    # on a receipt written before D13; every reader defaults it to [].
+    previous_resolves: list[dict] = field(default_factory=list)
     # {"winner": <lane>, "cancelled": [<lane>, ...]} the moment early_cancel cut
     # the rest of the mission short; null when nothing was cancelled.
     early_cancel: dict | None = None
@@ -2907,6 +2912,8 @@ def _cache_summary(
     previous_collates: list[dict],
     collate_out: dict | None,
     resolve_out: dict | None = None,
+    *,
+    previous_resolves: list[dict] | None = None,
 ) -> dict:
     """B2: the mission's whole cache picture, one place. `hit_rate` is what
     share of everything read came from the cache rather than paying for it
@@ -2914,7 +2921,12 @@ def _cache_summary(
     input_tokens = sum(lane.input_tokens for lane in lane_results)
     cache_read = sum(lane.cache_read_tokens for lane in lane_results)
     cache_write = sum(lane.cache_write_tokens for lane in lane_results)
-    for item in [*previous_collates, collate_out or {}, resolve_out or {}]:
+    for item in [
+        *previous_collates,
+        *(previous_resolves or []),
+        collate_out or {},
+        resolve_out or {},
+    ]:
         input_tokens += int(item.get("input_tokens") or 0)
         cache_read += int(item.get("cache_read_tokens") or 0)
         cache_write += int(item.get("cache_write_tokens") or 0)
@@ -3791,6 +3803,14 @@ def _run_receipt_spend(
     resolve = (prior_result or {}).get("resolve")
     if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
         attempts.setdefault(resolve["run_id"], resolve)
+    # D13: a rerun's superseded resolvers are paid dispatches too, and
+    # without this the earlier resolver's spend was invisible to every
+    # resume. Absent on a receipt written before D13.
+    previous_resolves = (prior_result or {}).get("previous_resolves")
+    if isinstance(previous_resolves, list):
+        for old_resolve in previous_resolves:
+            if isinstance(old_resolve, dict) and isinstance(old_resolve.get("run_id"), str):
+                attempts.setdefault(old_resolve["run_id"], old_resolve)
 
     spent = 0.0
     unpriced = 0
@@ -5463,18 +5483,31 @@ def _execute_mission(
                 # that one repository's group, never another's.
                 collisions=_collisions_for_cwd(collisions_out, mission.cwd),
                 dispatcher=dispatcher,
+                mission_id=mission_id,
             )
 
     # D1: the resolver lane, dispatched after the collate (or right after the
     # sinks when there is none) so it can see which lane a rank collate named
     # strongest.
     resolve_out: dict | None = None
+    prior_resolves = (resume.prior_result or {}).get("previous_resolves")
+    previous_resolves = (
+        [dict(item) for item in prior_resolves if isinstance(item, dict)]
+        if isinstance(prior_resolves, list)
+        else []
+    )
     if pause_park is not None:
         pass  # consistent with the collate: a parked mission starts nothing new
     elif mission.resolve is not None and resume.resolve == "kept":
         prior_resolve = (resume.prior_result or {}).get("resolve")
         resolve_out = dict(prior_resolve) if isinstance(prior_resolve, dict) else None
     elif mission.resolve is not None:
+        # D13: a rerun dispatches a second resolver; the first one's record
+        # is paid work, so it is retained the way a superseded collate is
+        # rather than overwritten.
+        prior_resolve = (resume.prior_result or {}).get("resolve")
+        if isinstance(prior_resolve, dict):
+            previous_resolves.append(dict(prior_resolve))
         if dry_run:
             resolve_out = {"ran": False, "reason": "dry run"}
         elif not stop_requested():
@@ -5490,6 +5523,7 @@ def _execute_mission(
                 collisions=collisions_out,
                 strongest=resolve_strongest,
                 dispatcher=dispatcher,
+                mission_id=mission_id,
             )
 
     early_cancel_out = (
@@ -5625,10 +5659,17 @@ def _execute_mission(
         tokens=(
             sum(lane.tokens for lane in lane_results)
             + sum(int(item.get("tokens") or 0) for item in previous_collates)
+            + sum(int(item.get("tokens") or 0) for item in previous_resolves)
             + int((collate_out or {}).get("tokens") or 0)
             + int((resolve_out or {}).get("tokens") or 0)
         ),
-        cache=_cache_summary(lane_results, previous_collates, collate_out, resolve_out),
+        cache=_cache_summary(
+            lane_results,
+            previous_collates,
+            collate_out,
+            resolve_out,
+            previous_resolves=previous_resolves,
+        ),
         wall=wall,
         duration_s=duration,
         budget=budget_state,
@@ -5643,6 +5684,7 @@ def _execute_mission(
         resumes=resumes,
         resumed_from=resume_entry,
         previous_collates=previous_collates,
+        previous_resolves=previous_resolves,
         early_cancel=early_cancel_out,
         ranking=ranking,
         chain=None if dry_run else chain.to_result(),
@@ -6013,6 +6055,7 @@ def _dispatch_aux(
     *,
     label: str,
     home: Path,
+    mission_id: str | None = None,
     prompt_versions: dict | None = None,
     **live_kwargs,
 ) -> Result:
@@ -6021,7 +6064,13 @@ def _dispatch_aux(
     are keyed by its name -- `collate`, `collate:<judge>:<order>`, `resolve`)
     when the mission runs offline, live otherwise. Before this the three
     sites called `dispatch` directly, so the first judge-sitting fixture
-    replayed its four judges against real vendors on every `golden check`."""
+    replayed its four judges against real vendors on every `golden check`.
+
+    D13: the live call carries `lane=label` and `mission=mission_id`, the
+    same two fields a lane's own dispatch stamps (E11), so an auxiliary run
+    receipt is attributable on its own bytes rather than only through a
+    later join against the mission snapshot. The replay branch already keys
+    on `label` and takes a fixed signature, so it is unchanged."""
     if dispatcher is not None:
         return dispatcher(
             spec,
@@ -6038,7 +6087,13 @@ def _dispatch_aux(
             cancel=None,
         )
     return dispatch(
-        spec, isolate=True, home=home, prompt_versions=prompt_versions or {}, **live_kwargs
+        spec,
+        isolate=True,
+        home=home,
+        lane=label,
+        mission=mission_id,
+        prompt_versions=prompt_versions or {},
+        **live_kwargs,
     )
 
 
@@ -6052,6 +6107,7 @@ def _run_collate(
     ranking: list[dict],
     collisions: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
+    mission_id: str | None = None,
 ) -> dict:
     col = mission.collate
     assert col is not None
@@ -6072,6 +6128,7 @@ def _run_collate(
             tainted=tainted,
             collisions=collisions,
             dispatcher=dispatcher,
+            mission_id=mission_id,
         )
     why = ledger.blocker()
     if why:
@@ -6108,6 +6165,7 @@ def _run_collate(
         ),
         label="collate",
         home=base,
+        mission_id=mission_id,
         prompt_versions=used_versions,
     )
     ledger.add(result)
@@ -6301,6 +6359,7 @@ def _run_rank_collate(
     tainted: bool = False,
     collisions: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
+    mission_id: str | None = None,
 ) -> dict:
     """A sitting of M judges (E4; judge 1 is the collate's own fleet/model,
     judges 2..M are `col.judges`), each dispatched once per lane order
@@ -6361,6 +6420,7 @@ def _run_rank_collate(
             ),
             label=f"collate:{judge_index}:{label}",
             home=base,
+            mission_id=mission_id,
             prompt_versions={"rank_contract": rank_contract_version},
         )
         ledger.add(result)
@@ -6556,6 +6616,7 @@ def _run_resolve(
     collisions: dict | None,
     strongest: str | None,
     dispatcher: Callable[..., Result] | None = None,
+    mission_id: str | None = None,
 ) -> dict:
     """D1's resolver lane: one write-mode, isolated dispatch from the sinks'
     own repository, gated by the mission's own `test`, only when the sinks
@@ -6603,6 +6664,7 @@ def _run_resolve(
         ),
         label="resolve",
         home=base,
+        mission_id=mission_id,
         prompt_versions=used_versions,
         test_command=mission.test,
         commit_message=res.commit,

@@ -18,6 +18,8 @@ from conductor.cli import main
 from conductor.collisions import merge_conflicts, overlap, touched_files
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from conductor.report import _scan_missions
+from conductor.spend import summarize
 
 
 def antigravity_envelope(text: str) -> list[str]:
@@ -539,3 +541,85 @@ def test_readme_documents_collisions_and_resolve():
     assert '"hotspots": <count or null>' in section
     assert "no hotspots" in section
     assert '"resolve": "ok" | "failed" | "skipped" | null' in section
+
+
+# --- D13: auxiliary attempts get the ordinary accounting path -------------------
+
+
+def _resolver_envelope() -> str:
+    return json.dumps({"result": "merged", "usage": {"input_tokens": 100, "output_tokens": 5}})
+
+
+def test_the_resolvers_receipt_carries_its_mission_and_lane(repo, home, monkeypatch, tmp_path):
+    """D13: an auxiliary dispatch stamps `lane` and `mission` on its own run
+    receipt, the way a lane's dispatch does, so it is attributable on bytes
+    rather than only through a later join against the mission snapshot."""
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            return ["sh", "-c", f"echo merged > resolved.txt && echo '{_resolver_envelope()}'"]
+        return HOTSPOT_BUILD[spec.prompt.split()[0]]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+
+    result = run_mission(mission, home=home)
+
+    assert result.resolve["ran"] is True and result.resolve["ok"] is True
+    receipt = json.loads((home / "runs" / result.resolve["run_id"] / "result.json").read_text())
+    assert receipt["lane"] == "resolve"
+    assert receipt["mission"] == result.mission_id
+
+
+def test_a_rerun_resolver_keeps_the_first_run_and_both_are_attributed(
+    repo, home, monkeypatch, tmp_path
+):
+    """D13: `previous_resolves` is to the resolver what `previous_collates`
+    is to the collate. Without it a rerun overwrote the first resolver's
+    record, so its paid dispatch was invisible to resume accounting, to
+    `conductor spend --by mission`, and to the report's own join."""
+    calls = {"cursor": 0}
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            calls["cursor"] += 1
+            if calls["cursor"] == 1:
+                # ran and was paid for, but landed nothing: not keepable on
+                # resume, so the next run dispatches a second resolver.
+                return ["sh", "-c", f"echo '{_resolver_envelope()}'; exit 1"]
+            return ["sh", "-c", f"echo merged > resolved.txt && echo '{_resolver_envelope()}'"]
+        return HOTSPOT_BUILD[spec.prompt.split()[0]]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+
+    first = run_mission(mission, home=home)
+    assert first.resolve["ran"] is True and first.resolve["ok"] is False
+    assert first.previous_resolves == []
+
+    raw = json.loads((Path(first.mission_dir) / "mission.json").read_text())
+    resumed = run_mission(
+        Mission.from_snapshot(raw), home=home, resume_dir=Path(first.mission_dir)
+    )
+
+    assert calls["cursor"] == 2
+    assert resumed.resolve["ok"] is True
+    assert [item["run_id"] for item in resumed.previous_resolves] == [first.resolve["run_id"]]
+    saved = json.loads((Path(resumed.mission_dir) / "result.json").read_text())
+    assert saved["previous_resolves"] == resumed.previous_resolves
+
+    both = {first.resolve["run_id"], resumed.resolve["run_id"]}
+    assert len(both) == 2
+
+    # `conductor spend --by mission` attributes both resolvers to the mission.
+    rows, _total, _skipped = summarize(home, since=None, until=None, by="mission")
+    grouped = {row.group: row for row in rows}
+    # `_mission_map` groups by the snapshot's friendly name when it has one.
+    assert grouped[first.name].runs == 4  # two sinks plus both resolvers
+    assert "(standalone)" not in grouped
+
+    # The report's own join names the mission for every resolver run, the way
+    # it already did for a collate.
+    join, _meta = _scan_missions(home)
+    for run_id in both:
+        assert join[run_id][0] == first.mission_id
