@@ -2882,6 +2882,20 @@ def _verdict_label(verdict: dict | None) -> str | None:
 _DISPOSITION_ORDER = ("fixed", "refused", "already", "wording")
 
 
+def _read_lane_text(path: str | None) -> str | None:
+    """A lane's persisted answer or deliverable, for `settle()` to parse:
+    None when the lane wrote none or the file cannot be read. Decoded with
+    `errors="replace"` like every other answer read in this module (F15
+    latent item): a fleet's captured final message is not guaranteed valid
+    UTF-8, and one bad byte must not kill the mission after the spend."""
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
 def _review_fix_label(lane: LaneResult) -> str:
     """F1: the ledger's short column -- a review lane's parsed verdict, or
     a fix lane's tallied dispositions. Empty for every other lane."""
@@ -4772,12 +4786,7 @@ def _execute_mission(
         # parse both from the lane's own persisted answer, once, here, so
         # every path that reaches settle() (a live run, a skip, a kept or
         # salvaged lane) gets the same treatment on whatever text it wrote.
-        answer_text: str | None = None
-        if lane_result.answer_path:
-            try:
-                answer_text = Path(lane_result.answer_path).read_text()
-            except OSError:
-                answer_text = None
+        answer_text = _read_lane_text(lane_result.answer_path)
         if lane_result.stage == "review" and answer_text is not None:
             lane_result.review = verdicts_mod.review_verdict(answer_text)
         elif lane_result.stage == "fix":
@@ -4789,10 +4798,7 @@ def _execute_mission(
             deliverable_dispositions: list[dict] | None = None
             deliverable_malformed = 0
             if lane_result.deliverable_path:
-                try:
-                    deliverable_text = Path(lane_result.deliverable_path).read_text()
-                except OSError:
-                    deliverable_text = None
+                deliverable_text = _read_lane_text(lane_result.deliverable_path)
                 if deliverable_text is not None:
                     deliverable_dispositions, deliverable_malformed = (
                         verdicts_mod.parse_dispositions_deliverable(deliverable_text)

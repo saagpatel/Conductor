@@ -25,7 +25,13 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
-from conductor.mission import LaneResult, _review_fix_label, mission_from_dict, run_mission
+from conductor.mission import (
+    LaneResult,
+    _read_lane_text,
+    _review_fix_label,
+    mission_from_dict,
+    run_mission,
+)
 from conductor.verdicts import (
     dispositions_malformed,
     fix_dispositions,
@@ -518,3 +524,16 @@ def test_every_report_table_row_has_the_header_cell_count(repo, home, monkeypatc
     rows = [line for line in table[1:] if not line.startswith("|---")]
     assert rows, report
     assert {line.count("|") for line in rows} == {width}, "\n".join(rows)
+
+
+def test_read_lane_text_survives_an_undecodable_byte_and_a_missing_file(tmp_path):
+    """F15 latent item: `settle()` runs on every lane completion path after
+    the spend, so its answer read must never raise on a stray byte."""
+    answer = tmp_path / "answer.txt"
+    answer.write_bytes(b"narration \xff\nNO_FINDINGS\n")
+    text = _read_lane_text(str(answer))
+    assert text is not None
+    assert text.endswith("NO_FINDINGS\n")
+    assert review_verdict(text)["verdict"] == "no_findings"
+    assert _read_lane_text(str(tmp_path / "missing.txt")) is None
+    assert _read_lane_text(None) is None

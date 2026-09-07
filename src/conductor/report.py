@@ -227,7 +227,10 @@ def _scan_missions(
                 if isinstance(malformed, int) and not isinstance(malformed, bool):
                     meta[mission]["fix_dispositions_malformed"] += malformed
                 if isinstance(lane_raw.get("dispositions"), list):
-                    fix_dispositions = lane_raw["dispositions"]
+                    # F15 latent item: a mission with more than one `stage:
+                    # fix` lane keeps every lane's dispositions, not the
+                    # last one's -- the list is per mission, so extend it.
+                    fix_dispositions = (fix_dispositions or []) + lane_raw["dispositions"]
                     meta[mission]["fix_dispositions"] = fix_dispositions
         collates: list[object] = []
         collate = raw.get("collate")

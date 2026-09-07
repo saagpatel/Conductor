@@ -922,3 +922,39 @@ def test_report_wall_clock_table_is_bounded_by_since_like_every_other_table(home
     assert {row.mission for row in rpt.wall_clock} == {"m-new"}
     unbounded = report(home)
     assert {row.mission for row in unbounded.wall_clock} == {"m-new", "m-old"}
+
+
+def test_report_keeps_every_fix_lanes_dispositions_on_a_multi_fix_mission(home: Path):
+    """F15 latent item: `fix_dispositions` was a per-mission single slot
+    overwritten per fix lane, so a second `stage: fix` lane's dispositions
+    never reached the precision table."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-m7-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m7",
+    )
+    second_fix = _fix_lane(
+        [{"lane": "review-gemini", "index": 2, "disposition": "refused", "reason": "r2"}]
+    ) | {"name": "fix-2"}
+    _write_mission(
+        home,
+        "m7",
+        name="mission-seven",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=2
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+            second_fix,
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.fixed == 1
+    assert row.refused == 1
