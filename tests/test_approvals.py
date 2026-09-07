@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from test_plan_lanes import _child_raw, _plan_lane, _snapshot, _write_deliverable_argv, envelope
@@ -199,12 +200,68 @@ def test_launch_refuses_a_child_edited_after_the_park(repo, home, monkeypatch, t
     assert pause_after["child_sha256"] == original_sha256
 
 
+# --- item 3: the monkeypatch hazard, the other half -------------------------
+
+
+def test_launch_plan_child_stamps_the_launched_child_with_the_patched_clock(
+    repo, home, monkeypatch, tmp_path
+):
+    """`_launch_plan_child` also calls `datetime.now(UTC)`, for the
+    launched child's own mission-id stamp -- the other half of item 3's
+    monkeypatch hazard, alongside `_answer_human_pause`'s `answered_at`
+    (pinned in tests/test_human.py's
+    `test_answer_text_resumes_and_the_answer_is_fenced_downstream`). The
+    call site stays in mission.py, passed down as `stamp=`, for the same
+    reason: so a test patching `conductor.mission.datetime` still governs
+    it. If that stamp were ever computed inside approvals.py's own
+    `datetime` instead, this patch would silently stop applying and the
+    launched child's mission id would carry the real clock instead of the
+    frozen one."""
+    child = _child_raw(repo, max_cost_usd=5.0, name="child-a")
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: _write_deliverable_argv(child, cost=0.1)
+    )
+    mission = mission_from_dict(
+        {"cwd": str(repo), "max_cost_usd": 10.0, "lanes": [_plan_lane()]}, base_dir=tmp_path
+    )
+    first = run_mission(mission, home=home)
+    assert first.paused["kind"] == "child"
+
+    from conductor import mission as mission_mod
+
+    frozen = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    )
+    real_datetime = mission_mod.datetime
+    monkeypatch.setattr(mission_mod, "datetime", FrozenDatetime)
+    try:
+        resumed = run_mission(
+            _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="continue"
+        )
+    finally:
+        monkeypatch.setattr(mission_mod, "datetime", real_datetime)
+
+    assert resumed.ok is True
+    assert len(resumed.children) == 1
+    assert resumed.children[0].startswith(frozen.strftime("%Y%m%dT%H%M%SZ"))
+
+
 # --- structural: approvals.py must never import mission at module level ----
 
 
 class _MissionImportVisitor(ast.NodeVisitor):
-    """Finds every `from .mission import ...` / `import conductor.mission`
-    that is not inside a function body or a `TYPE_CHECKING` block."""
+    """Finds every `from .mission import ...`, `from . import mission[ as
+    x]`, `from conductor.mission import ...`, or `import conductor.mission`
+    that is not inside a function body or a `TYPE_CHECKING` block -- every
+    spelling that names `conductor.mission` and would reintroduce the
+    module cycle if hoisted to module scope."""
 
     def __init__(self) -> None:
         self.violations: list[ast.AST] = []
@@ -237,7 +294,21 @@ class _MissionImportVisitor(ast.NodeVisitor):
             self.visit(child)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 1 and node.module == "mission" and not self._guarded():
+        if self._guarded():
+            return
+        # `from .mission import ...` (level 1, module "mission"),
+        # `from . import mission[ as x]` (level 1, module None, an alias
+        # named "mission" -- the exact spelling this file's own lazy
+        # imports use inside function bodies), and the absolute spelling
+        # `from conductor.mission import ...` (level 0) all name the same
+        # module and would reintroduce the same cycle at module scope.
+        if node.level == 1 and node.module == "mission":
+            self.violations.append(node)
+        elif node.level == 1 and node.module is None and any(
+            alias.name == "mission" for alias in node.names
+        ):
+            self.violations.append(node)
+        elif node.level == 0 and node.module == "conductor.mission":
             self.violations.append(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -260,3 +331,35 @@ def test_approvals_has_no_module_level_import_of_mission():
     visitor = _MissionImportVisitor()
     visitor.visit(tree)
     assert visitor.violations == []
+
+
+def test_the_import_cycle_guard_also_catches_the_relative_module_spelling():
+    """Cross-vendor review of f21-approvals: the guard above must reject
+    `from . import mission` (and `... as mission_mod`) hoisted to module
+    scope exactly as it rejects `from .mission import ...` -- both name
+    the same module and reintroduce the same cycle. This is the single
+    most likely regression, since it is the exact spelling `approvals.py`
+    already uses eight times inside function bodies for the lazy import;
+    a check that only looked for `from .mission import ...` would miss
+    `from . import mission as mission_mod` moved to module level (`ast`
+    represents it as `ImportFrom` with `module is None`, not `"mission"`)."""
+    poisoned = (
+        "from __future__ import annotations\n"
+        "from . import mission as mission_mod\n"
+        "def f():\n"
+        "    pass\n"
+    )
+    visitor = _MissionImportVisitor()
+    visitor.visit(ast.parse(poisoned, filename="poisoned.py"))
+    assert len(visitor.violations) == 1
+
+
+def test_the_import_cycle_guard_also_catches_the_absolute_spelling():
+    """Same regression, absolute form: `from conductor.mission import ...`
+    names the same module as `from .mission import ...` but is a level-0
+    import (`ast.ImportFrom.level == 0`, `module == "conductor.mission"`),
+    which the level-1-only check would miss."""
+    poisoned = "from conductor.mission import load_mission\n"
+    visitor = _MissionImportVisitor()
+    visitor.visit(ast.parse(poisoned, filename="poisoned.py"))
+    assert len(visitor.violations) == 1
