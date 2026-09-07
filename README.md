@@ -1954,6 +1954,19 @@ and the collate's own run receipts also carry `lane` (`resolve`,
 lane's dispatch stamps, so an auxiliary run is attributable on its own
 bytes rather than only through the mission snapshot.
 
+F20: all four readers discover a mission's paid dispatches through one
+walker, `spend.effects(snapshot, lanes=...)`, which yields one `Effect`
+(`run_id`, `kind` of `attempt | collate | order | resolve`, the lane name
+and stage for an attempt, `superseded` for an entry a rerun replaced, and
+the summary `record` the receipt carried) per distinct run id, first
+occurrence wins. It is the versioned adapter for every receipt generation:
+`previous_collates` and judge `orders` from E4, `resolve` and
+`previous_resolves` from D13, a bare `final` string from before either. A
+resume prices the freshly loaded lane receipts first and fills in from the
+prior snapshot, so a lane's own record wins a run id the snapshot also
+names. A structural test keeps `report`, `mission`, and `export` from
+growing a hand-written walk of their own again.
+
 #### Collisions across repositories
 
 A mission whose lanes span more than one repository (per-lane `cwd`, E26)
