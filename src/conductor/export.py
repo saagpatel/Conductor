@@ -250,23 +250,18 @@ def _lane_run_ids(mission_dir: Path) -> set[str]:
     then `attempts`), which can include a retried or superseded attempt the
     chain's own links never name (a link only ever names a lane's final
     attempt)."""
-    run_ids: set[str] = set()
     lanes_dir = mission_dir / "lanes"
     if not lanes_dir.is_dir():
-        return run_ids
+        return set()
+    lane_receipts: list[dict] = []
     for lane_file in sorted(lanes_dir.glob("*.json")):
         try:
             data = json.loads(lane_file.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        if not isinstance(data, dict):
-            continue
-        for key in ("previous_attempts", "attempts"):
-            for attempt in data.get(key) or []:
-                run_id = attempt.get("run_id") if isinstance(attempt, dict) else None
-                if isinstance(run_id, str):
-                    run_ids.add(run_id)
-    return run_ids
+        if isinstance(data, dict):
+            lane_receipts.append(data)
+    return {effect.run_id for effect in spend.effects(lanes=lane_receipts)}
 
 
 # --- export ------------------------------------------------------------

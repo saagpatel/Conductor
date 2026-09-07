@@ -22,12 +22,12 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from . import fleets
+from . import fleets, spend
 from . import verdicts as verdicts_mod
 from .paths import conductor_home
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
-from .spend import _collate_run_ids, _number, _parse_bound
+from .spend import _number, _parse_bound
 from .spend import _read_run as _spend_read_run
 
 BUILD_STAGE = "build"
@@ -142,10 +142,10 @@ def _scan_missions(
     for every attempt and collate dispatch it named, and `mission -> {"ok",
     "lanes"}` read from the snapshot's own top-level `ok` and lane count.
 
-    A lane attempt joins to its declared name and stage; a collate or
-    `previous_collates` run (`spend._collate_run_ids`), and a `resolve` or
-    `previous_resolves` run (D13), join to the mission alone, since none of
-    them is a lane and none carries a stage of its own.
+    A lane attempt joins to its declared name and stage; every other effect
+    `spend.effects` finds (a collate, a collate order, or a resolve) joins to
+    the mission alone, since none of them is a lane and none carries a stage
+    of its own.
 
     `mission` here is the snapshot directory's own name (`result_file.parent.
     name`) -- the same `mission_id` `mission.py`'s dispatch_one stamps
@@ -215,6 +215,11 @@ def _scan_missions(
             # report lists that mission with blanks, never skips it.
             "wall": raw.get("wall") if isinstance(raw.get("wall"), dict) else None,
         }
+        for effect in spend.effects(raw):
+            if effect.kind == "attempt":
+                join.setdefault(effect.run_id, (mission, effect.lane, effect.stage))
+            else:
+                join.setdefault(effect.run_id, (mission, None, None))
         for lane_raw in lane_list:
             if not isinstance(lane_raw, dict):
                 continue
@@ -222,13 +227,6 @@ def _scan_missions(
             stage = _str_field(lane_raw, "stage")
             if stage == BUILD_STAGE and meta[mission]["items"] is None:
                 meta[mission]["items"] = _evidence_items(lane_raw)
-            for key in ("previous_attempts", "attempts"):
-                attempts = lane_raw.get(key)
-                if not isinstance(attempts, list):
-                    continue
-                for attempt in attempts:
-                    if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
-                        join.setdefault(attempt["run_id"], (mission, lane_name, stage))
             if stage == REVIEW_STAGE and isinstance(lane_raw.get("review"), dict):
                 attempts = lane_raw.get("attempts")
                 last = attempts[-1] if isinstance(attempts, list) and attempts else None
@@ -262,30 +260,6 @@ def _scan_missions(
                     # last one's -- the list is per mission, so extend it.
                     fix_dispositions = (fix_dispositions or []) + lane_raw["dispositions"]
                     meta[mission]["fix_dispositions"] = fix_dispositions
-        collates: list[object] = []
-        collate = raw.get("collate")
-        if isinstance(collate, dict):
-            collates.append(collate)
-        previous_collates = raw.get("previous_collates")
-        if isinstance(previous_collates, list):
-            collates.extend(previous_collates)
-        for one_collate in collates:
-            if isinstance(one_collate, dict):
-                for run_id in _collate_run_ids(one_collate):
-                    join.setdefault(run_id, (mission, None, None))
-        # D13: the resolver is an auxiliary dispatch like the collate, and
-        # its superseded reruns are paid work too. Both keys are absent on a
-        # snapshot written before D13.
-        resolves: list[object] = []
-        resolve = raw.get("resolve")
-        if isinstance(resolve, dict):
-            resolves.append(resolve)
-        previous_resolves = raw.get("previous_resolves")
-        if isinstance(previous_resolves, list):
-            resolves.extend(previous_resolves)
-        for one_resolve in resolves:
-            if isinstance(one_resolve, dict) and isinstance(one_resolve.get("run_id"), str):
-                join.setdefault(one_resolve["run_id"], (mission, None, None))
     return join, meta
 
 
