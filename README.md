@@ -9,6 +9,49 @@ conductor dispatch --fleet claude --model sonnet --effort hard --mode write \
   --cwd ~/Projects/thing --test "pytest -q" "Refactor the parser per docs/spec.md"
 ```
 
+## Current support
+
+Policy as of 2026-09-07, not history. This table is what a mission may do
+today; when it and an older section, a research report under `docs/research/`,
+or a fleet note in `AGENTS.md` disagree, this table wins and the older text is
+the record of how the rule was learned. Nothing below is deleted from that
+record; it is separated from it.
+
+| Fleet | Status | Models | Structured output | Taint | Restricted | Persona | Cost |
+|---|---|---|---|---|---|---|---|
+| `claude` | preferred | opus, sonnet, haiku | `schema`, `verdict` | yes, shell denied by default | read lanes only | yes | reported by the fleet |
+| `antigravity` | preferred, never runs the test suite | gemini-3.8-flash, gemini-3.7-flash | write lanes only; refused on read | yes, PreToolUse hook counted before spend | refused | refused | estimated from list prices |
+| `cursor` | preferred | grok-4.6, composer-2.5 | refused | refused | refused | refused | estimated from list prices |
+| `codex` | paused since 2026-09-04, operator decision | terra, sol, luna | `schema`, `verdict` | refused | refused | refused | estimated from list prices |
+| `script` | always | none, a shell command | refused | refused | refused | refused | none |
+
+Every fleet takes `mode: read | write`, `effort: cheap | standard | hard |
+max` (Antigravity stops at `high`, Composer ignores effort), a `cap_usd`, and
+a `deliverable`. "Refused" means `Spec.validate` raises `DispatchRefused`
+before anything spawns, with the reason and the route to use instead; a
+paused fleet is refused by policy in the lead's hands, not by the code, which
+still knows how to drive it. Every write lane is judged on bytes, whatever
+the fleet reported.
+
+Standing policy alongside the table:
+
+- **Shape A is the measured default:** Sonnet 5 builds at `hard`, Gemini 3.7
+  Flash and Grok 4.6 review cold in parallel, Sonnet fixes on the build's
+  thread. `conductor shape a` writes it; `--opus-review` adds Opus 5 as a
+  third reviewer, `--adversarial` adds a lane whose deliverable is a failing
+  test. Caps follow `AGENTS.md` rule 2, and the launcher raises a build or fix
+  cap that the forecast warns is low to the forecast p80.
+- **Reviewers carry no quota.** Every review, judge, and collate prompt says
+  an empty answer is complete; the template is in `AGENTS.md`.
+- **Shelved, not to be re-proposed without the operator raising it:** the
+  Codex lanes above; OpenCode, OpenRouter, Ollama, pi, and local models; cloud
+  offload for this repository. Their sections in `AGENTS.md` and
+  `docs/research/` are the probe record, not a routing recommendation.
+- **Where the rules live:** the allowlist and every refusal in
+  `src/conductor/fleets.py`; list prices, dated, in `src/conductor/prices.py`
+  with `$CONDUCTOR_HOME/prices.json` as the override; the per-lane keys under
+  "Missions" below; the error kinds under "Structured error kinds".
+
 ## Why it exists
 
 Four agent CLIs live here, each with its own flags, its own effort vocabulary,
@@ -28,7 +71,7 @@ are unattended runs at 3am.
 | Fleet | Binary | Models permitted | Why only these |
 |---|---|---|---|
 | `claude` | `claude` | opus, sonnet, haiku | Anthropic first-party |
-| `codex` | `codex` | terra, sol, luna (GPT-5.6) | OpenAI first-party |
+| `codex` | `codex` | terra, sol, luna (GPT-5.6) | OpenAI first-party; paused, see "Current support" |
 | `antigravity` | `agy` | gemini-3.8-flash, gemini-3.7-flash | Google first-party |
 | `cursor` | `cursor-agent` | grok-4.6, composer-2.5 | Cursor's included pool |
 | `script` | `sh` | `sh` | not a model at all -- a shell command; see "Script lanes" |

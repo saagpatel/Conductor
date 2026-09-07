@@ -255,3 +255,46 @@ def test_a_broken_schema_file_is_refused_before_spawn(tmp_path):
         build_argv(spec(fleet="claude", schema=str(bad)))
     with pytest.raises(DispatchRefused, match="unreadable"):
         build_argv(spec(fleet="codex", schema=str(tmp_path / "missing.json")))
+
+
+# --- README ---------------------------------------------------------------
+
+
+def _current_support_section() -> str:
+    from pathlib import Path
+
+    readme = Path(__file__).parents[1] / "README.md"
+    text = readme.read_text()
+    head, section = text.split("\n## Current support\n", 1)
+    # The matrix sits at the entry point: before "Why it exists", after the
+    # one-line dispatch example and nothing else.
+    assert "\n## " not in head
+    return section.split("\n## ", 1)[0]
+
+
+def test_readme_current_support_matrix_names_every_fleet_and_model():
+    section = _current_support_section()
+    rows = [line for line in section.splitlines() if line.startswith("| `")]
+    named = {row.split("`")[1] for row in rows}
+    assert named == set(FLEETS)
+    for name, fleet in FLEETS.items():
+        row = next(row for row in rows if row.startswith(f"| `{name}`"))
+        for model in fleet.models:
+            if name != "script":
+                assert model.name in row, (name, model.name)
+
+
+def test_readme_current_support_states_policy_not_history():
+    section = _current_support_section()
+    assert "Policy as of 2026-09-07, not history." in section
+    assert "this table wins" in section
+    assert "| `codex` | paused since 2026-09-04, operator decision |" in section
+    assert "| `antigravity` | preferred, never runs the test suite |" in section
+    assert "Reviewers carry no quota." in section
+    assert "Shelved, not to be re-proposed without the operator raising it" in section
+    for refused in (
+        "| `cursor` | preferred | grok-4.6, composer-2.5 | refused | refused | refused | refused |",
+        "write lanes only; refused on read",
+        "read lanes only",
+    ):
+        assert refused in section
