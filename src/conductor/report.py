@@ -860,7 +860,10 @@ def _build_report(
         # `reviewer_finding_rate`, which reads runs directly, not this join.
         if fix_dispositions is None:
             for info in review_lanes.values():
-                if info.get("unparsed"):
+                # W11's guard applies here too: a lane that reported nothing
+                # was never left out of anything, on a mission with no fix
+                # lane just as on one whose dispositions named other lanes.
+                if info.get("unparsed") or not info.get("findings"):
                     continue
                 row = precision.setdefault(
                     info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"])

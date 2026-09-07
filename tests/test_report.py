@@ -955,6 +955,45 @@ def test_report_reviewer_precision_zero_findings_lane_is_not_undispositioned(hom
     assert xai_row.missions == 1
 
 
+def test_report_reviewer_precision_zero_findings_lane_not_undispositioned_without_fix_lane(
+    home: Path,
+):
+    # The no-fix-lane branch used to count every parsed lane, zero findings
+    # included, while the with-dispositions branch (W11) skipped them: the
+    # same NO_FINDINGS lane read as undispositioned on one mission shape and
+    # not on the other. Both branches now apply the same guard.
+    _write_receipt(
+        home,
+        "20260101T000000Z-w11e-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="w11e",
+    )
+    _write_mission(
+        home,
+        "w11e",
+        name="mission-w11e",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=0
+            ),
+            _review_lane(
+                "review-grok", fleet="cursor", model="cursor-grok-4.6-medium", findings=2
+            ),
+            # No fix lane at all.
+        ],
+    )
+    rpt = report(home)
+    # No disposition and no counted lane ever touched the google vendor, so
+    # it has no row at all; a row that did exist would have to read zero.
+    google_rows = [r for r in rpt.reviewer_precision if r.vendor == "google"]
+    assert all(r.undispositioned == 0 for r in google_rows)
+    xai_row = next(r for r in rpt.reviewer_precision if r.vendor == "xai")
+    assert xai_row.undispositioned == 1
+
+
 def test_report_reviewer_precision_basis_and_columns_in_json_and_printed(
     home: Path, monkeypatch, capsys
 ):
