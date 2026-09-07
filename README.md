@@ -2229,7 +2229,11 @@ verdict. Conductor never blocks on it beyond `timeout`, and whether it
 succeeded never changes `ok`, an exit code, or a pause -- it is recorded,
 in order, as `notifications: [{"event", "ok", "exit_code", "timed_out",
 "error"}, ...]` on the mission result and as a `## Notifications` section in
-`report.md`. A dry run emits nothing, and neither does a golden replay:
+`report.md`. The command runs in its own process group, which is killed
+whole on timeout so a background child it spawned cannot outlive the
+mission that fired it, and its output goes to a temporary file of which
+only a bounded tail is read back for the failure reason. A dry run emits
+nothing, and neither does a golden replay:
 `mission.run_mission(..., notifier=...)` takes a callable in place of
 `notify.emit`, the way `dispatcher` stands in for `runner.dispatch`, and
 `golden.replay` passes one that records the event name without running the
