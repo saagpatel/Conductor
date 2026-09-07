@@ -6,6 +6,7 @@ summarized on the mission result.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -334,3 +335,81 @@ def test_escalation_counts_only_lanes_the_cascade_actually_reached(tmp_path):
     assert esc["lanes"] == 1
     assert esc["cheap_ok"] == 1
     assert esc["cascade_usd"] == 0.1
+
+
+def test_a_resume_trusts_a_kept_lane_when_git_cannot_run_under_load(
+    repo, home, monkeypatch, tmp_path
+):
+    """The load flake on record: a kept lane's trust check spawns git, and a
+    spawn refused under load (EAGAIN) read as 'commit missing' until the
+    check learned to tell GIT_UNRUN from a real no."""
+    from conductor import mission as mission_mod
+    from conductor.verify import GIT_UNRUN
+
+    def fake_build(spec):
+        return ["sh", "-c", f"echo real > real.txt && echo '{envelope('real', 0.20)}'"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    raw = {
+        "cwd": str(repo),
+        "mode": "write",
+        "commit": "feat: x",
+        "lanes": [{"name": "a", "fleet": "claude", "prompt": "do lane-a thing"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    real_git_run = mission_mod.git_run
+    refused: list[tuple[str, ...]] = []
+
+    def git_refused_under_load(cwd, *args, **kwargs):
+        if args[:1] == ("cat-file",):
+            refused.append(args)
+            return subprocess.CompletedProcess(["git", *args], GIT_UNRUN, "", "EAGAIN")
+        return real_git_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(mission_mod, "git_run", git_refused_under_load)
+    snapshot = json.loads(Path(first.mission_dir, "mission.json").read_text())
+    second = run_mission(
+        Mission.from_snapshot(snapshot), home=home, resume_dir=Path(first.mission_dir)
+    )
+
+    assert refused, "the trust check consulted git for the tip commit"
+    assert second.resumed_from["kept"] == ["a"]
+    assert second.resumed_from["rerun"] == []
+    assert any("git could not run" in note for note in second.notes)
+
+
+def test_a_resume_still_reruns_a_lane_whose_tip_git_says_is_missing(
+    repo, home, monkeypatch, tmp_path
+):
+    from conductor import mission as mission_mod
+
+    def fake_build(spec):
+        return ["sh", "-c", f"echo real > real.txt && echo '{envelope('real', 0.20)}'"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    raw = {
+        "cwd": str(repo),
+        "mode": "write",
+        "commit": "feat: x",
+        "lanes": [{"name": "a", "fleet": "claude", "prompt": "do lane-a thing"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    real_git_run = mission_mod.git_run
+
+    def git_says_no(cwd, *args, **kwargs):
+        if args[:1] == ("cat-file",):
+            return subprocess.CompletedProcess(["git", *args], 128, "", "missing")
+        return real_git_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(mission_mod, "git_run", git_says_no)
+    snapshot = json.loads(Path(first.mission_dir, "mission.json").read_text())
+    second = run_mission(
+        Mission.from_snapshot(snapshot), home=home, resume_dir=Path(first.mission_dir)
+    )
+    assert "a" in second.resumed_from["rerun"]

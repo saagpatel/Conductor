@@ -60,7 +60,7 @@ from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
-from .verify import git_run
+from .verify import GIT_UNRUN, git_run
 
 REQUIRE = ("all", "any")
 # A lane's place in a pipeline. "review" lanes are read mode, "build",
@@ -3276,6 +3276,7 @@ def _trusted_lane(
     *,
     prior_ok: bool = False,
     prior_result: dict | None = None,
+    notes: list[str] | None = None,
 ) -> bool:
     """Whether a completed receipt is enough to skip every effect of a lane."""
     if result.name != lane.name:
@@ -3355,21 +3356,50 @@ def _trusted_lane(
     # necessarily the mission's default.
     repo = result.cwd or mission.cwd
     if result.tip_sha and result.tip_sha != result.base_sha:
-        commit = git_run(repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
-        if commit.returncode != 0:
+        commit = _git_answer(repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
+        if commit is None:
+            _note_git_unrun(notes, lane.name, "tip commit")
+        elif commit.returncode != 0:
             return False
     if lane.branch:
         if not result.tip_sha or result.branch != lane.branch:
             return False
-        branch = git_run(
+        branch = _git_answer(
             repo,
             "rev-parse",
             "--verify",
             f"refs/heads/{lane.branch}^{{commit}}",
         )
-        if branch.returncode != 0 or branch.stdout.strip() != result.tip_sha:
+        if branch is None:
+            _note_git_unrun(notes, lane.name, "branch tip")
+        elif branch.returncode != 0 or branch.stdout.strip() != result.tip_sha:
             return False
     return True
+
+
+def _git_answer(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """A git result the trust check may read, or None when git never ran.
+
+    `git_run` reports a spawn failure or a hung git as `GIT_UNRUN`, which is
+    not a verdict on the repository. Five recorded resumes under machine load
+    (two or three suites gating at once) dropped a kept lane into `rerun` and
+    paid for its work again because the first shape of this check read that
+    code as "the commit is missing". One retry covers a momentary refusal; a
+    second `GIT_UNRUN` is reported to the caller as no answer, never as no.
+    """
+    for _ in range(2):
+        proc = git_run(repo, *args)
+        if proc.returncode != GIT_UNRUN:
+            return proc
+    return None
+
+
+def _note_git_unrun(notes: list[str] | None, lane_name: str, what: str) -> None:
+    if notes is not None:
+        notes.append(
+            f"lane '{lane_name}': git could not run to confirm its {what}; the receipt "
+            "was trusted as recorded"
+        )
 
 
 def _salvage_previous_lane(lane: Lane, raw: dict) -> LaneResult:
@@ -3658,7 +3688,13 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             continue
         old = previous.get(lane.name)
         if old is not None and _trusted_lane(
-            mission, mission_dir, lane, old, prior_ok=prior_ok, prior_result=prior_result
+            mission,
+            mission_dir,
+            lane,
+            old,
+            prior_ok=prior_ok,
+            prior_result=prior_result,
+            notes=notes,
         ):
             old.kept = True
             kept[lane.name] = old

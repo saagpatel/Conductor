@@ -24,6 +24,13 @@ from pathlib import Path
 
 GIT_TIMEOUT = 30
 
+# `git_run` answers with this return code when git never ran at all: a cwd the
+# fleet deleted, a hung git, or a spawn refused under load (fork exhaustion
+# returns EAGAIN as an OSError). It is non-zero, so every caller that reads
+# "non-zero means the command failed" keeps that reading; a caller that must
+# tell "git said no" from "git said nothing" compares against it.
+GIT_UNRUN = -1
+
 
 def killpg(pid: int) -> None:
     """SIGKILL the process group a child started with start_new_session leads.
@@ -56,7 +63,7 @@ def git_run(
     except (OSError, subprocess.TimeoutExpired) as exc:
         # A cwd the fleet deleted, or a hung git, must read as a failed
         # command rather than an exception in the middle of a 3am run.
-        return subprocess.CompletedProcess(["git", *args], 1, "", str(exc))
+        return subprocess.CompletedProcess(["git", *args], GIT_UNRUN, "", str(exc))
 
 
 _git = git_run
