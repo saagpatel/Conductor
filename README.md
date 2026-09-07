@@ -661,13 +661,15 @@ Declare it on the lane that quotes the outside text:
  "prompt": "Summarize this issue and suggest a fix:\n{{mission.prompt}}"}
 ```
 
-Taint spreads forward, computed at load time to a fixed point in mission
-order (a lane can only reference an earlier one): a lane is tainted when it
-declares `taint: true` itself, when any attempt's prompt references a tainted
-lane's `{{lanes.<name>.answer}}`, `.diff`, `.verdict`, `.test_touched`, or
-`.deliverable`, or when it `resume`s a tainted lane's session. `Lane.taint_from` names the lanes
-it inherited from, in mission order, empty when the lane is tainted only by
-its own `taint: true`. Every attempt of a tainted lane dispatches with taint
+Taint spreads forward along the lane graph, computed at load time to a fixed
+point over every lane in the mission whatever order they are declared in (a
+`needs` edge may point forward, so a lane may reference one declared after
+it): a lane is tainted when it declares `taint: true` itself, when any
+attempt's prompt references a tainted lane's `{{lanes.<name>.answer}}`,
+`.diff`, `.verdict`, `.test_touched`, or `.deliverable`, or when it
+`resume`s a tainted lane's session. `Lane.taint_from` names the lanes it
+inherited from, in mission order, empty when the lane is tainted only by its
+own `taint: true`. Every attempt of a tainted lane dispatches with taint
 set on its `Spec`, cascade attempts included — the ladder does not launder a
 tainted lane back to trusted.
 
@@ -686,7 +688,13 @@ what gets published. A `collate` is refused at load, naming the tainted
 lane(s), when any sink it could collate over is tainted and the collate's own
 fleet is not claude or antigravity; when a candidate sink actually is
 tainted, the collate's own `Spec` — prose or rank, every dispatch — is
-tainted too.
+tainted too. The `resolve` lane is bounded the same way, and refused with the
+same message (`resolve over tainted lane(s) ...`): it pastes every candidate
+sink's patch into its prompt, so any tainted or untrusted-output sink makes
+the resolver's own write-mode `Spec` tainted, and each such candidate's patch
+carries the tainted fence. What loads is the conservative bound over every
+sink; what dispatches is recomputed from the candidates that actually
+produced a patch, and recorded as `tainted` on the resolve receipt.
 
 When `_render` pastes a tainted lane's answer, diff, verdict, or
 `test_touched` into another prompt, the fence note says so in the bytes
