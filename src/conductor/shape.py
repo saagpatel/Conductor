@@ -39,10 +39,11 @@ USD_CLAUDE_GRACE = 0.25  # E24: default grace band on the build and fix (claude)
 REVIEW_TAIL = (
     "Report anything that could cause incorrect behavior, a test failure, or a misleading "
     "result, including a spec item that is missing or only partly implemented. Omit pure "
-    "style and naming. For each item: file and line, what goes wrong, one sentence of "
-    "consequence, your confidence 1-10. If nothing meets that bar, reply exactly: "
-    "NO_FINDINGS. Either answer is complete. Put the entire review in this reply; the "
-    "reply is the only thing the next agent receives."
+    "style and naming. Number each item. For each item: file and line, what goes wrong, one "
+    "sentence of consequence, your confidence 1-10. End the reply with exactly one final "
+    "line: NO_FINDINGS if there is nothing to report, or FINDINGS: N where N is the number "
+    "of items you numbered above. Either answer is complete. Put the entire review in this "
+    "reply; the reply is the only thing the next agent receives."
 )
 
 GEMINI_REVIEW_PROMPT = (
@@ -84,17 +85,22 @@ ADVERSARIAL_PROMPT = (
 
 FIX_PROMPT = (
     "The spec below is already implemented on this branch, by you earlier in this thread. "
-    "Two reviewers from other vendors read the change; their reports follow.\n\n"
+    "Two reviewers from other vendors read the change; their reports follow, each with its "
+    "items numbered.\n\n"
     "<spec>\n{{mission.prompt}}\n</spec>\n\n"
     "<review_gemini>\n{{lanes.review-gemini.answer}}\n</review_gemini>\n\n"
     "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
     "For each reported item, first write a test that fails on the current tree because of "
-    "it; then fix only what that test proves, and say which items you rejected and why. "
-    "This lane runs under conductor's reproduce gate: a fix with no test change is refused, "
-    "and a test that already passes on the current tree is refused. If both reviews say "
-    "NO_FINDINGS or nothing reproduces, change nothing and reply NO_CHANGES. Keep existing "
-    "call signatures working. Run the gate named in the spec before finishing, with "
-    "--basetemp under $TMPDIR. Do not commit; the harness commits."
+    "it; then fix only what that test proves. This lane runs under conductor's reproduce "
+    "gate: a fix with no test change is refused, and a test that already passes on the "
+    "current tree is refused. If both reviews say NO_FINDINGS or nothing reproduces, change "
+    "nothing and reply NO_CHANGES. For every item either reviewer numbered, add one line: "
+    "DISPOSITION: <review-gemini or review-grok> <item number> "
+    "<fixed, refused, already, or wording>: <reason>. Use fixed for an item you changed code "
+    "for; refused, with the reason it is wrong, for one you rejected; already for one that "
+    "was already true before this fix; wording for one that only asked for a comment or "
+    "message change. Keep existing call signatures working. Run the gate named in the spec "
+    "before finishing, with --basetemp under $TMPDIR. Do not commit; the harness commits."
 )
 
 # E16: appended to FIX_PROMPT, right after the two review blocks, only when

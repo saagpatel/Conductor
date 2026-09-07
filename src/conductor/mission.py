@@ -55,6 +55,7 @@ from . import ceiling as ceiling_mod
 from . import collisions as collisions_mod
 from . import forecast as forecast_mod
 from . import notify as notify_mod
+from . import verdicts as verdicts_mod
 from .errors import KINDS, error_kind
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
@@ -2392,6 +2393,19 @@ class LaneResult:
     # the pause with continue. None on every other lane, and on a plan lane
     # whose own dispatch never got that far.
     plan: dict | None = None
+    # F1: a `stage: review` lane's answer, parsed by `verdicts.review_verdict`
+    # -- {"verdict": "no_findings"|"findings"|"unparsed", "findings": int|None}.
+    # None on every other stage, and on a review lane with no answer to read.
+    review: dict | None = None
+    # F1: a `stage: fix` lane's `DISPOSITION:` lines, parsed by
+    # `verdicts.fix_dispositions`, in order. None on every other stage, and
+    # on a fix lane with no answer to read; an empty list is a fix that
+    # wrote no disposition at all (still parsed, just nothing reported).
+    dispositions: list[dict] | None = None
+    # F1: how many lines `verdicts.dispositions_malformed` skipped -- opened
+    # with `DISPOSITION:` but did not match the required shape. None
+    # alongside `dispositions is None`, otherwise a non-negative count.
+    dispositions_malformed: int | None = None
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -2495,6 +2509,19 @@ class LaneResult:
             raise ValueError("lane receipt untrusted_output must be true or false")
         if raw.get("plan") is not None and not isinstance(raw["plan"], dict):
             raise ValueError("lane receipt plan must be an object or null")
+        if raw.get("review") is not None and not isinstance(raw["review"], dict):
+            raise ValueError("lane receipt review must be an object or null")
+        if raw.get("dispositions") is not None and not isinstance(raw["dispositions"], list):
+            raise ValueError("lane receipt dispositions must be a list or null")
+        if raw.get("dispositions") is not None and not all(
+            isinstance(item, dict) for item in raw["dispositions"]
+        ):
+            raise ValueError("lane receipt dispositions must contain objects")
+        if raw.get("dispositions_malformed") is not None and (
+            isinstance(raw["dispositions_malformed"], bool)
+            or not isinstance(raw["dispositions_malformed"], int)
+        ):
+            raise ValueError("lane receipt dispositions_malformed must be an int or null")
         return cls(**raw)
 
 
@@ -2706,6 +2733,29 @@ def _verdict_label(verdict: dict | None) -> str | None:
     passed = sum(item.get("ok") is True for item in criteria)
     state = "pass" if verdict.get("passed") else "fail"
     return f"{state} {passed}/{len(criteria)}"
+
+
+_DISPOSITION_ORDER = ("fixed", "refused", "already", "wording")
+
+
+def _review_fix_label(lane: LaneResult) -> str:
+    """F1: the ledger's short column -- a review lane's parsed verdict, or
+    a fix lane's tallied dispositions. Empty for every other lane."""
+    if lane.review is not None:
+        verdict = lane.review.get("verdict")
+        if verdict == "no_findings":
+            return "NO_FINDINGS"
+        if verdict == "findings":
+            return f"{lane.review.get('findings')} findings"
+        return "unparsed"
+    if lane.dispositions is not None:
+        counts: dict[str, int] = {}
+        for item in lane.dispositions:
+            counts[item["disposition"]] = counts.get(item["disposition"], 0) + 1
+        return ", ".join(
+            f"{counts[kind]} {kind}" for kind in _DISPOSITION_ORDER if kind in counts
+        )
+    return ""
 
 
 def _taint_label(lane: LaneResult) -> str:
@@ -4524,6 +4574,24 @@ def _execute_mission(
                     out.attempts[-1]["branch"] = lane.branch
 
     def settle(lane_result: LaneResult) -> None:
+        # F1: a reviewer narrates before its verdict and a fix lane's
+        # disposition of each finding is otherwise prose with no receipt --
+        # parse both from the lane's own persisted answer, once, here, so
+        # every path that reaches settle() (a live run, a skip, a kept or
+        # salvaged lane) gets the same treatment on whatever text it wrote.
+        if lane_result.answer_path:
+            try:
+                answer_text = Path(lane_result.answer_path).read_text()
+            except OSError:
+                answer_text = None
+            if answer_text is not None:
+                if lane_result.stage == "review":
+                    lane_result.review = verdicts_mod.review_verdict(answer_text)
+                elif lane_result.stage == "fix":
+                    lane_result.dispositions = verdicts_mod.fix_dispositions(answer_text)
+                    lane_result.dispositions_malformed = verdicts_mod.dispositions_malformed(
+                        answer_text
+                    )
         done[lane_result.name] = lane_result
         # A per-lane receipt as each lane ends, so a crash mid-mission does
         # not lose every finished stage with the final result.json.
@@ -6092,8 +6160,8 @@ def _human_report_row(lane: LaneResult) -> str:
         length = len(answer_file.read_text(errors="replace").strip())
         label = f"human, answered {answered_at} ({length} chars)"
     return (
-        f"| {lane.name} | {label} | {lane.ok} | | | | no | | | {_taint_label(lane)} | "
-        f"{_untrusted_output_label(lane)} | | | | | - | no | |"
+        f"| {lane.name} | {label} | {lane.ok} | | {_review_fix_label(lane)} | | | no | | | "
+        f"{_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | no | |"
     )
 
 
@@ -6104,7 +6172,8 @@ def _attempt_report_row(lane: LaneResult, attempt: dict, label: str | None = Non
     agent_name = (attempt.get("agent") or {}).get("name") or ""
     return (
         f"| {lane.name} | {label or attempt['attempt']} | {attempt['ok']} | "
-        f"{_verdict_label(attempt.get('verdict_data')) or ''} | {attempt['exit_code']} | "
+        f"{_verdict_label(attempt.get('verdict_data')) or ''} | {_review_fix_label(lane)} | "
+        f"{attempt['exit_code']} | "
         f"{attempt['no_op']} | {_test_touched(attempt.get('test_surface'))} | "
         f"{attempt['commits']} | {attempt.get('branch') or ''} | {_taint_label(lane)} | "
         f"{_untrusted_output_label(lane)} | "
@@ -6178,10 +6247,10 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         lines.append(f"- Errors: {parts}")
     lines += [
         "",
-        "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
-        "taint | untrusted_output | agent | cost_usd | tokens | tools | cached | resumed | "
-        "dur_s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| lane | attempt | ok | verdict | review/fix | exit | no_op | test_touched | commits | "
+        "branch | taint | untrusted_output | agent | cost_usd | tokens | tools | cached | "
+        "resumed | dur_s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     human_lanes = {declared.name for declared in mission.lanes if declared.human}
     for lane in lanes:
@@ -6198,8 +6267,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 lines.append(_attempt_report_row(lane, lane.attempts[-1], "(skipped)"))
             else:
                 lines.append(
-                    f"| {lane.name} | (skipped) | False | | | | no | | | "
-                    f"{_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | no | |"
+                    f"| {lane.name} | (skipped) | False | | {_review_fix_label(lane)} | | | no "
+                    f"| | | {_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | "
+                    "no | |"
                 )
             continue
         if lane.kept and lane.attempts:

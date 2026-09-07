@@ -275,6 +275,81 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
     )
 
 
+_FENCE_LINE = re.compile(r"^`{3,}$")
+_FINDINGS_LINE = re.compile(r"FINDINGS: (0|[1-9][0-9]*)")
+_DISPOSITION_PREFIX = "DISPOSITION:"
+_DISPOSITION_LINE = re.compile(
+    r"^DISPOSITION:\s+(?P<lane>\S+)\s+(?P<index>\d+)\s+"
+    r"(?P<disposition>fixed|refused|already|wording):\s*(?P<reason>.+)$"
+)
+
+
+def _final_marker_line(answer: str) -> str:
+    """The last non-empty line of a review answer, with a trailing code
+    fence (an answer wrapped in ```...```) skipped so the marker under it
+    is still found."""
+    lines = answer.splitlines()
+    index = len(lines) - 1
+    while index >= 0:
+        stripped = lines[index].strip()
+        if not stripped or _FENCE_LINE.fullmatch(stripped):
+            index -= 1
+            continue
+        return stripped
+    return ""
+
+
+def review_verdict(answer: str) -> dict:
+    """A review lane narrates before its verdict; only the final line is
+    the answer conductor tallies. `NO_FINDINGS` is exact, `FINDINGS: N`
+    names a count, anything else is unparsed rather than guessed at."""
+    line = _final_marker_line(answer)
+    if line == "NO_FINDINGS":
+        return {"verdict": "no_findings", "findings": 0}
+    match = _FINDINGS_LINE.fullmatch(line)
+    if match:
+        return {"verdict": "findings", "findings": int(match.group(1))}
+    return {"verdict": "unparsed", "findings": None}
+
+
+def _parse_dispositions(answer: str) -> tuple[list[dict], int]:
+    dispositions: list[dict] = []
+    malformed = 0
+    for raw_line in answer.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_DISPOSITION_PREFIX):
+            continue
+        match = _DISPOSITION_LINE.fullmatch(line)
+        if match is None:
+            malformed += 1
+            continue
+        dispositions.append(
+            {
+                "lane": match.group("lane"),
+                "index": int(match.group("index")),
+                "disposition": match.group("disposition"),
+                "reason": match.group("reason").strip(),
+            }
+        )
+    return dispositions, malformed
+
+
+def fix_dispositions(answer: str) -> list[dict]:
+    """Every `DISPOSITION: <lane> <index> <fixed|refused|already|wording>:
+    <reason>` line in a fix lane's answer, in order. A line that starts
+    with the marker but does not match the shape is skipped, not raised;
+    `dispositions_malformed` reports how many were skipped."""
+    dispositions, _ = _parse_dispositions(answer)
+    return dispositions
+
+
+def dispositions_malformed(answer: str) -> int:
+    """The count of lines `fix_dispositions` skipped: they opened with
+    `DISPOSITION:` but did not match the required shape."""
+    _, malformed = _parse_dispositions(answer)
+    return malformed
+
+
 def _clip_line(text: object, limit: int) -> str:
     line = _one_line(text)
     return line if len(line) <= limit else line[:limit]

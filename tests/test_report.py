@@ -154,11 +154,14 @@ def test_report_counts_cap_misses_and_gate_failures(home: Path):
 
 
 def test_report_reviewer_finding_rate_no_findings_and_non_empty(home: Path):
+    # F1: the reviewer narrates before its verdict now, and only the final
+    # line -- NO_FINDINGS or FINDINGS: N -- is tallied; a "found" answer
+    # with no final marker is unparsed, not counted as a finding.
     empty = home / "runs" / "empty-answer.txt"
     empty.parent.mkdir(parents=True)
     empty.write_text("NO_FINDINGS\n")
     found = home / "runs" / "found-answer.txt"
-    found.write_text("file.py:12: off-by-one\n")
+    found.write_text("file.py:12: off-by-one\nFINDINGS: 1\n")
 
     _write_receipt(
         home,
@@ -180,7 +183,161 @@ def test_report_reviewer_finding_rate_no_findings_and_non_empty(home: Path):
     row = next(r for r in rpt.reviewer_finding_rate if r.vendor == "anthropic")
     assert row.runs == 2
     assert row.findings == 1
+    assert row.unparsed == 0
     assert row.rate() == 0.5
+
+
+def test_report_reviewer_finding_rate_excludes_unparsed_from_rate(home: Path):
+    narrated = home / "runs" / "narrated.txt"
+    narrated.parent.mkdir(parents=True)
+    narrated.write_text("looks fine to me, no further comment\n")
+
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-narrated",
+        fleet="claude",
+        model="claude-opus-5",
+        stage="review",
+        answer_path=str(narrated),
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_finding_rate if r.vendor == "anthropic")
+    assert row.runs == 1
+    assert row.unparsed == 1
+    assert row.findings == 0
+    assert row.rate() is None
+
+
+def _review_lane(name: str, *, fleet: str, model: str, findings: int) -> dict:
+    return {
+        "name": name,
+        "stage": "review",
+        "review": {"verdict": "findings", "findings": findings},
+        "attempts": [{"fleet": fleet, "model": model}],
+    }
+
+
+def _fix_lane(dispositions: list[dict]) -> dict:
+    return {"name": "fix", "stage": "fix", "dispositions": dispositions}
+
+
+def test_report_reviewer_precision_table_over_two_missions(home: Path):
+    # F1 item 4: two missions, each with a "review-gemini" lane and a fix
+    # lane whose dispositions name it. The vendor comes from the review
+    # lane's own final attempt, joined by lane name through the mission
+    # snapshot -- not from the fix lane, which never names a fleet at all.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m1-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m1",
+    )
+    _write_mission(
+        home,
+        "m1",
+        name="mission-one",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=2
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 2, "disposition": "refused", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    _write_receipt(
+        home,
+        "20260101T010000Z-m2-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m2",
+    )
+    _write_mission(
+        home,
+        "m2",
+        name="mission-two",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r3"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.findings == 3
+    assert row.fixed == 2
+    assert row.refused == 1
+    assert row.already == 0
+    assert row.wording == 0
+    assert row.precision() == round(2 / 3, 3)
+
+
+def test_report_reviewer_precision_blank_under_three_dispositions(home: Path):
+    _write_receipt(
+        home,
+        "20260101T000000Z-m3-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m3",
+    )
+    _write_mission(
+        home,
+        "m3",
+        name="mission-three",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.total() == 1
+    assert row.precision() is None
+
+
+def test_report_reviewer_precision_skips_a_mission_with_no_fix_dispositions(home: Path):
+    # A review lane with no fix lane recording `dispositions` at all (an
+    # older mission, or one still awaiting its fix) contributes nothing --
+    # "findings written" without a paired fix is not a precision figure.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m4-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m4",
+    )
+    _write_mission(
+        home,
+        "m4",
+        name="mission-four",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=4
+            ),
+            {"name": "fix", "stage": "fix"},
+        ],
+    )
+    rpt = report(home)
+    assert not any(r.vendor == "google" for r in rpt.reviewer_precision)
 
 
 def test_report_mission_rows_with_capped_lane(home: Path):
@@ -327,6 +484,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "vendor_stage",
         "error_kinds",
         "reviewer_finding_rate",
+        "reviewer_precision",
         "missions",
         "rules",
         "skipped",
