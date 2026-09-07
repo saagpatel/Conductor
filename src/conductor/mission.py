@@ -4547,6 +4547,17 @@ def _execute_mission(
             out.skipped = f"lane crashed: {type(exc).__name__}: {exc}"
         return out
 
+    def _pre_dispatch_block(lane: Lane) -> str | None:
+        """D11: the one gate every dispatch of a lane passes through -- the
+        outer attempt walk and the same-attempt retry loop alike. A dispatch
+        that landed unpriced makes `Ledger.blocker()` refuse while
+        `remaining()` still reads finite, and `rate_limit`/`transport` -- the
+        default retry kinds -- are exactly the ones that land unpriced.
+        Returns the reason nothing may start, or None."""
+        if stop_requested():
+            return "interrupted: stop requested"
+        return None if dry_run else ledger.blocker()
+
     def _run_attempts(lane: Lane, out: LaneResult) -> None:
         base_ref: str | None = None
         if lane.base is not None and not dry_run:
@@ -4742,9 +4753,7 @@ def _execute_mission(
                     f"does not handle {last_kind}"
                 )
                 continue
-            blocked = None if dry_run else ledger.blocker()
-            if stop_requested():
-                blocked = "interrupted: stop requested"
+            blocked = _pre_dispatch_block(lane)
             if blocked:
                 out.skipped = f"{blocked}; {attempt.label()} not started"
                 break
@@ -4784,6 +4793,7 @@ def _execute_mission(
             # kind, before the fallback walk moves on to a different vendor.
             retries_done = 0
             ended_backoff: str | None = None
+            refused_retry: str | None = None
             while (
                 not dry_run
                 and not result.ok
@@ -4795,6 +4805,13 @@ def _execute_mission(
                 backoff = mission.retry["backoff_s"] * (2**retries_done)
                 ended_backoff = _pollable_sleep(backoff, lane_cancel_events.get(lane.name))
                 if ended_backoff is not None:
+                    break
+                # D11: the backoff is over, but the attempt that just failed
+                # may have changed what the mission may still spend -- the
+                # retry goes through the same pre-dispatch gate the outer
+                # walk does, not straight to dispatch_one.
+                refused_retry = _pre_dispatch_block(lane)
+                if refused_retry is not None:
                     break
                 retries_done += 1
                 result, kind = dispatch_one(
@@ -4821,6 +4838,16 @@ def _execute_mission(
                 last_summary["failure"] = text
                 out.kinds[-1] = ended_backoff
                 out.skipped = text
+                break
+            if refused_retry is not None:
+                # D11: the retry never spawned. The failed attempt's own
+                # summary stays exactly as it landed (its kind is the truth
+                # about that dispatch); the lane records why nothing followed
+                # it, the same shape the outer walk's own refusal writes.
+                out.skipped = (
+                    f"{refused_retry}; retry {retries_done + 1} of "
+                    f"{attempt.label()} not started"
+                )
                 break
 
             last_kind = kind

@@ -506,6 +506,13 @@ it exactly as it would end a running dispatch, as `interrupted` or
 attempt's run id and `retry` its index; the lane's `kinds` lists every
 attempt's kind in order, retries included. A dry run never retries.
 
+A retry passes the same pre-dispatch gate the outer attempt walk does, so it
+starts nothing the mission may no longer pay for: when the attempt it is
+retrying (or any lane running beside it) came back with no priced usage at
+all, the budget is unverifiable and the retry is refused rather than
+dispatched, the lane's `skipped` reading `budget unverifiable: ...; retry
+<n> of <attempt> not started`.
+
 `MissionResult.errors` (`result.json`, `conductor missions`) tallies every
 kind seen across every lane's attempts, empty when nothing failed; when it
 is non-empty `report.md` shows one line, `Errors: <kind> x<n>, ...`, and
