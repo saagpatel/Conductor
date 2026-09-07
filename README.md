@@ -1162,9 +1162,15 @@ Landing itself: `git merge --no-ff <pinned sha>` onto the checkout (the
 message still names the branch, but what git resolves is the sha), a fresh
 worktree of the merged head under `$TMPDIR`, the gate (`--test`, else the mission
 snapshot's own `test`, else refused) under the same timeout and environment
-a lane's own gate gets, `golden check` through golden's Python API, and
-`attest.attest_mission` for the mission -- in that order, any red step
-aborting the rest. A failing step after the merge commit exists resets the
+a lane's own gate gets, `golden check`, and `attest.attest_mission` for the
+mission -- in that order, any red step aborting the rest. The golden step
+runs as a subprocess of the merged worktree's own `conductor` (`PYTHONPATH`
+at its `src`, cwd at the worktree), not through the `golden` module this
+process already imported: when what is landing is a change to golden, the
+scheduler, or the parser, the merged tree's new fixtures have to be replayed
+by the merged tree's new code. The child asserts where it imported
+`conductor` from and refuses if it is not the worktree; a merged tree with
+fixtures but no `src/conductor` of its own keeps the in-process replay. A failing step after the merge commit exists resets the
 checkout to its pre-merge HEAD (only when that commit is still HEAD and the
 tree is otherwise clean) and reports the failing step with its last twenty
 lines of output; the branch itself is never deleted, on any path. `--dry-run`

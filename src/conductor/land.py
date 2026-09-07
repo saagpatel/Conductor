@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -108,22 +110,93 @@ def _mission_test(mission_raw: dict) -> str | None:
     return test if isinstance(test, str) and test else None
 
 
-def _golden_check(worktree: Path) -> list[str]:
-    """The same replay `conductor golden check` runs against `tests/golden`
-    at the repo root, but through golden's own Python API and against the
-    merged worktree, never a subprocess of conductor calling itself."""
+# D19: the child that runs `golden check` for the merged worktree. It asserts
+# where `conductor` came from before it runs anything -- the whole point of
+# the subprocess is that the merged tree's own implementation replays the
+# merged tree's own fixtures, and an import that resolved to the running
+# `land`'s copy (a stale PYTHONPATH, an installed package ahead of it on
+# sys.path) would be exactly the silent staleness this replaces. Exit 3 is
+# that refusal; 0 and 1 are `cmd_golden_check`'s own clean and diff answers.
+_GOLDEN_CHILD = """\
+import sys
+from pathlib import Path
+
+import conductor
+
+root = Path(conductor.__file__).resolve().parent
+worktree = Path(sys.argv[1]).resolve()
+if not root.is_relative_to(worktree):
+    sys.stderr.write("golden check imported conductor from %s, not from %s\\n" % (root, worktree))
+    raise SystemExit(3)
+
+from conductor.cli import main
+
+raise SystemExit(main(["golden", "check", *sys.argv[2:]]))
+"""
+
+GOLDEN_TIMEOUT = GATE_TIMEOUT
+
+
+def _golden_check(worktree: Path, *, timeout: int = GOLDEN_TIMEOUT) -> list[str]:
+    """`conductor golden check` against the merged worktree's `tests/golden`.
+
+    D19: this used to call `golden.check` in this process, which meant the
+    merged tree's new fixtures were replayed by the *old* golden, mission,
+    and parser code -- precisely backwards when what is landing is a change
+    to those modules. The check now runs as a subprocess with the merged
+    worktree's `src` as its import root, and the child refuses (exit 3) if
+    `conductor` did not in fact resolve there.
+
+    A merged tree that is not conductor's own source (no `src/conductor`) has
+    no implementation to be stale about, so it keeps the in-process replay.
+    """
     golden_root = worktree / "tests" / "golden"
     if not golden_root.is_dir():
         return []
-    diffs: list[str] = []
-    for fixture_dir in sorted({p.parent for p in golden_root.glob("*/golden.json")}):
-        try:
-            lines = golden.check(fixture_dir)
-        except (golden.GoldenError, OSError, ValueError) as exc:
-            diffs.append(f"{fixture_dir.name}: {exc}")
-            continue
-        diffs.extend(f"{fixture_dir.name}: {line}" for line in lines)
-    return diffs
+    src = worktree / "src"
+    if not (src / "conductor" / "golden.py").is_file():
+        diffs: list[str] = []
+        for fixture_dir in sorted({p.parent for p in golden_root.glob("*/golden.json")}):
+            try:
+                lines = golden.check(fixture_dir)
+            except (golden.GoldenError, OSError, ValueError) as exc:
+                diffs.append(f"{fixture_dir.name}: {exc}")
+                continue
+            diffs.extend(f"{fixture_dir.name}: {line}" for line in lines)
+        return diffs
+
+    env = dict(os.environ)
+    # The merged worktree's source ahead of anything else the caller carried:
+    # the child's own import-root assertion is what makes that a fact rather
+    # than a hope.
+    env["PYTHONPATH"] = str(src)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # `golden check` with no directories reads `tests/golden` relative to its
+    # own cwd, and replay itself never dispatches a fleet or runs a notify
+    # command -- `golden.replay` passes its own dispatcher and notifier -- so
+    # the child has no live effect to guard against beyond where it imports
+    # from.
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _GOLDEN_CHILD, str(worktree)],
+            cwd=str(worktree),
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="surrogateescape",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"golden check did not run: {exc}"]
+    if done.returncode == 0:
+        # Clean. `cmd_golden_check` still prints E22's version-drift notes on
+        # this path, and those were never check failures.
+        return []
+    output = "\n".join(
+        line for line in (done.stdout + done.stderr).splitlines() if line.strip()
+    )
+    return output.splitlines() or [f"golden check exited {done.returncode} with no output"]
 
 
 def _gate_env(mission_id: str, lane: str, worktree: str) -> dict[str, str]:
