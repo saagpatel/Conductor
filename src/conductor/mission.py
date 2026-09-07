@@ -4547,18 +4547,39 @@ def _execute_mission(
             out.skipped = f"lane crashed: {type(exc).__name__}: {exc}"
         return out
 
+    def _cancelled_before_spawn(lane_name: str) -> str:
+        """D12: why a lane that never spawned was cut. `cancel_reasons` is
+        written before the event is set, so a worker that sees the event
+        already set can always name the winner; the default covers the
+        window where the reason has not landed yet."""
+        reason = cancel_reasons.get(lane_name, "cancelled: another lane already passed")
+        detail = reason[len("cancelled: ") :] if reason.startswith("cancelled: ") else reason
+        return f"cancelled before spawn: {detail}"
+
     def _pre_dispatch_block(lane: Lane) -> str | None:
-        """D11: the one gate every dispatch of a lane passes through -- the
-        outer attempt walk and the same-attempt retry loop alike. A dispatch
-        that landed unpriced makes `Ledger.blocker()` refuse while
-        `remaining()` still reads finite, and `rate_limit`/`transport` -- the
-        default retry kinds -- are exactly the ones that land unpriced.
-        Returns the reason nothing may start, or None."""
+        """D11/D12: the one gate every dispatch of a lane passes through --
+        the outer attempt walk and the same-attempt retry loop alike. Cancel
+        first (a lane whose winner already passed starts nothing, even under
+        a stop), then the global stop, then the ledger: a dispatch that
+        landed unpriced makes `Ledger.blocker()` refuse while `remaining()`
+        still reads finite, and `rate_limit`/`transport` -- the default retry
+        kinds -- are exactly the ones that land unpriced. Returns the reason
+        nothing may start, or None."""
+        event = lane_cancel_events.get(lane.name)
+        if event is not None and event.is_set():
+            return _cancelled_before_spawn(lane.name)
         if stop_requested():
             return "interrupted: stop requested"
         return None if dry_run else ledger.blocker()
 
     def _run_attempts(lane: Lane, out: LaneResult) -> None:
+        # D12: this worker may have sat in the pool's queue while another
+        # sink passed. Nothing of this lane's has spawned yet, so the cancel
+        # is free: record it and start nothing.
+        event = lane_cancel_events.get(lane.name)
+        if event is not None and event.is_set():
+            out.skipped = _cancelled_before_spawn(lane.name)
+            return
         base_ref: str | None = None
         if lane.base is not None and not dry_run:
             base_ref, why = done[lane.base].buildable()

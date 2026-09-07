@@ -1612,7 +1612,13 @@ cancelled lane's `LaneResult` is not ok; its `skipped` reads
 `cancelled: lane <name> already passed`, so `report.md`'s table shows it and
 `require: any` still reads true from the lane that actually passed. The
 mission result carries `early_cancel: {"winner": "<lane>", "cancelled":
-["<lane>", ...]}`, null when nothing needed cancelling. On resume, a lane
+["<lane>", ...]}`, null when nothing needed cancelling. A lane that was
+still sitting in the worker pool's queue when the winner passed never
+spawns at all: its cancel event is checked when the lane starts, again
+before every dispatch and retry, and once more immediately before the fleet
+process would be created, so a queued lane's `skipped` reads `cancelled
+before spawn: lane <name> already passed` and its receipt, if it got that
+far, is `cancelled` with `spawned: false` rather than a paid run. On resume, a lane
 `skipped` for this reason is treated as finished rather than rerun, as long
 as the mission it belongs to was itself ok — rerunning it would just repeat
 the same cancellation.

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -75,11 +76,23 @@ def _snapshot(result) -> Mission:
 def test_cancel_kills_the_fleet_priced_not_gated_not_committed(
     repo, home, fake_fleet, monkeypatch
 ):
-    fake_fleet(["sh", "-c", f"echo '{_claude_assistant_usage()}'; sleep 60"])
+    started = home / "fleet-started"
+    fake_fleet(["sh", "-c", f"echo '{_claude_assistant_usage()}'; touch {started}; sleep 60"])
     monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
     marker = repo / "gate-ran"
     cancel = threading.Event()
-    threading.Timer(0.3, cancel.set).start()
+
+    def _cancel_once_running() -> None:
+        # D12 made a pre-spawn cancel refuse to spawn at all, which is the
+        # point of this fix -- so this test, which is about killing a *running*
+        # fleet, waits for the process to exist rather than for a timer that a
+        # loaded machine can fire before Popen.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not started.exists():
+            time.sleep(0.02)
+        cancel.set()
+
+    threading.Thread(target=_cancel_once_running, daemon=True).start()
 
     result = dispatch(
         Spec(fleet="claude", model="sonnet", prompt="x", cwd=str(repo), timeout=30),
@@ -104,18 +117,39 @@ def test_cancel_kills_the_fleet_priced_not_gated_not_committed(
     assert saved["cancelled"] is True and saved["error"] == result.error
 
 
-def test_a_cancel_set_after_a_clean_exit_changes_nothing(repo, home, fake_fleet):
-    fake_fleet(["sh", "-c", f"printf '%s\\n' {json.dumps(_claude_envelope('ok'))}"])
+def test_a_cancel_set_before_dispatch_spawns_nothing(repo, home, monkeypatch):
+    """D12: a cancel that is already set when dispatch is called must not
+    start paid work. The fleet is never built, never spawned, and the receipt
+    says cancelled -- not interrupted, which is what a stop would say."""
+    marker = home / "fleet-ran"
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: [
+            "sh",
+            "-c",
+            f"touch {marker}; printf '%s\\n' {json.dumps(_claude_envelope('ok'))}",
+        ],
+    )
     cancel = threading.Event()
     cancel.set()  # already set before the fast fleet even spawns
 
     result = dispatch(
-        Spec(fleet="claude", prompt="x", cwd=str(repo)), home=home, cancel=cancel
+        Spec(fleet="claude", prompt="x", cwd=str(repo)),
+        home=home,
+        cancel=cancel,
+        cancel_reason="lane b already passed",
     )
 
-    assert result.ok is True
-    assert result.cancelled is False
-    assert result.error is None
+    assert result.ok is False
+    assert result.cancelled is True
+    assert result.interrupted is False
+    assert result.spawned is False
+    assert result.error == "cancelled: lane b already passed; not spawned"
+    assert result.usage is None
+    assert not marker.exists()
+    saved = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert saved["cancelled"] is True and saved["spawned"] is False
 
 
 # --- item 2: early cancel under require: any --------------------------------
@@ -174,6 +208,55 @@ def test_early_cancel_kills_a_running_lane_and_skips_a_pending_one(
 
     saved = json.loads((Path(result.mission_dir) / "result.json").read_text())
     assert saved["early_cancel"]["winner"] == "fast"
+
+
+def test_early_cancel_stops_a_queued_lane_before_it_spawns(repo, home, monkeypatch, tmp_path):
+    """D12: with more ready sinks than workers, a lane can still be sitting in
+    the pool's queue when another sink passes. Its fleet must never spawn: the
+    cancel is checked at the top of the lane, again before every dispatch, and
+    once more immediately before Popen."""
+    marker = tmp_path / "queued-fleet-ran"
+
+    def build(spec: Spec) -> list[str]:
+        if "QUEUED" in spec.prompt:
+            return ["sh", "-c", f"touch {marker}; sleep 60"]
+        return ["sh", "-c", f"printf '%s\\n' {json.dumps(_claude_envelope('ok'))}"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 1,  # both sinks are ready; only one may run at a time
+        "require": "any",
+        "early_cancel": True,
+        "lanes": [
+            {"name": "fast", "fleet": "claude", "prompt": "FAST"},
+            # `setup` runs before the fleet is spawned, so the winner's cancel
+            # always lands while this lane is still short of its own Popen.
+            {
+                "name": "queued",
+                "fleet": "claude",
+                "prompt": "QUEUED",
+                "setup": "sleep 1",
+                "timeout": 30,
+            },
+        ],
+    }
+
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    assert result.ok is True
+    assert by_name["fast"]["ok"] is True
+    assert not marker.exists(), "the queued lane's fleet must never have spawned"
+    queued = by_name["queued"]
+    assert queued["ok"] is False
+    assert "cancelled" in queued["skipped"]
+    assert result.early_cancel["winner"] == "fast"
+    assert "queued" in result.early_cancel["cancelled"]
+    for attempt in queued["attempts"]:
+        assert attempt["cancelled"] is True
+        assert "not spawned" in (attempt["error"] or "") or attempt["error"] == queued["skipped"]
 
 
 def test_a_cancelled_running_lanes_attempt_error_matches_its_skip_reason(
