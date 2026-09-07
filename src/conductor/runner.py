@@ -523,6 +523,21 @@ def _schema_mismatch(data: object, schema: dict) -> str | None:
         # changed underneath (or a Result rehydrated from an older receipt)
         # must read as a failed check, not as an AttributeError on `.get`.
         return "schema file is not a JSON object"
+    if schema.get("type") == "array":
+        # A list deliverable (a catalog, a findings list) is checked one
+        # element at a time against `items`, the same narrow contract per
+        # element. Found live 2026-09-07: a `type: array` schema refused
+        # every array with "top level is not a JSON object".
+        if not isinstance(data, list):
+            return "top level is not a JSON array"
+        items = schema.get("items")
+        if not isinstance(items, dict):
+            return None
+        for index, element in enumerate(data):
+            detail = _schema_mismatch(element, items)
+            if detail is not None:
+                return f"item {index}: {detail}"
+        return None
     if not isinstance(data, dict):
         return "top level is not a JSON object"
     required = schema.get("required")
@@ -2873,6 +2888,14 @@ def dispatch(
         ):
             # A branch must never carry a commit that failed whichever gate
             # counts; the work stays staged in the tree for the kept worktree.
+            commit = uncommit(spec.cwd, commit, before.head)
+        deliverable_failed = bool(deliverable_state) and deliverable_state.get("ok") is False
+        if commit and commit.committed and deliverable_failed:
+            # E1's check counts as a gate too: a missing, empty, unparsable,
+            # or schema-failing deliverable sank `ok` but left the commit on
+            # the branch (found live 2026-09-07, a schema mismatch with a
+            # committed sha on the same receipt), while a validator
+            # `rejected` had withheld it through `error` all along.
             commit = uncommit(spec.cwd, commit, before.head)
 
         if forbid_touched:

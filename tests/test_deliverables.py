@@ -652,6 +652,70 @@ def test_deliverable_json_wrong_typed_property_fails_schema(repo, home, fake_fle
     )
 
 
+def test_deliverable_array_schema_checks_each_item(repo, home, fake_fleet, tmp_path):
+    """Found live 2026-09-07: a `type: array` schema refused every list
+    deliverable as "top level is not a JSON object"."""
+    schema = tmp_path / "schema.json"
+    schema.write_text(
+        json.dumps(
+            {
+                "type": "array",
+                "items": {"required": ["name"], "properties": {"name": {"type": "string"}}},
+            }
+        )
+    )
+    fake_fleet(["sh", "-c", "printf '%s' '[{\"name\": \"a\"}, {\"name\": 2}]' > list.json"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "list.json", "schema": str(schema)}),
+        home=home,
+    )
+    assert (
+        result.failure()
+        == "deliverable does not match schema: item 1: property 'name' must be of type string"
+    )
+
+    fake_fleet(["sh", "-c", "printf '%s' '[{\"name\": \"a\"}]' > list.json"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "list.json", "schema": str(schema)}),
+        home=home,
+    )
+    assert result.deliverable["ok"] is True, result.failure()
+
+    fake_fleet(["sh", "-c", "printf '%s' '{\"name\": \"a\"}' > list.json"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "list.json", "schema": str(schema)}),
+        home=home,
+    )
+    assert result.failure() == "deliverable does not match schema: top level is not a JSON array"
+
+
+def test_failed_deliverable_check_keeps_the_commit_off_the_branch(
+    repo, home, fake_fleet, git_out, tmp_path
+):
+    """Found live 2026-09-07: a schema mismatch sank `ok` and the receipt
+    still carried a committed sha. E1's check counts as a gate; the work
+    stays in the tree, uncommitted, like a failed test gate."""
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object", "required": ["count"]}))
+    base = git_out(repo, "rev-parse", "HEAD")
+    fake_fleet(["sh", "-c", "printf '%s' '{}' > record.json"])
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        commit_message="feat: record",
+        home=home,
+    )
+    assert result.ok is False
+    assert (
+        result.failure()
+        == "deliverable does not match schema: missing required property 'count'"
+    )
+    assert not result.commit["committed"]
+    assert git_out(repo, "rev-parse", "HEAD") == base
+    assert (repo / "record.json").read_text() == "{}"
+
+
 def test_write_lane_deliverable_commit_false_is_kept_out_of_the_commit(repo, home, fake_fleet):
     """F15 mission 2 item 3: a dispatched write lane with `commit: false`
     has the deliverable in its receipt and not in its commit."""

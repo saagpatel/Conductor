@@ -404,7 +404,12 @@ checks. The schema check is deliberately narrow, the same shape as a
 verdict checklist's own contract: every name in `required` is present, and
 every present property whose schema declares a `type` (string, number,
 integer, boolean, array, or object) has a value of that type -- not a
-general JSON Schema validator. On a dry run the deliverable is recorded as
+general JSON Schema validator. A schema whose top-level `type` is `array`
+checks a list deliverable one element at a time against its `items` schema
+under the same contract, and reports the first mismatch as `item <n>: ...`.
+A deliverable that fails this check is judged like a failed gate: `ok`
+sinks, and a commit conductor made for the dispatch is undone so the branch
+never carries it, with the work left staged in the tree. On a dry run the deliverable is recorded as
 declared (`ok: null`) and not checked. `errors.KINDS` gains `deliverable`
 for the four failures above.
 
