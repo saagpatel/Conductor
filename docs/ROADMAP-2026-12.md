@@ -37,6 +37,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | F18 KINDS is the check order of error_kind; F19 a fix lane that wrote only its deliverable skips the reproduce gate, reproduce refusals get their own kind | 0.73.0 | Shape A via the launcher with --opus-review, build lane landed by conductor land after the fix lane failed on F19; lead fix | $4.14 |
 | undispositioned guard applied on the no-fix-lane branch too | 0.74.0 | lead fix | $0 |
 | Review item 1: current support matrix at the README entry | 0.75.0 | lead, no fleet | $0 |
+| Review item 2: cost per landed item on the ledger report | 0.76.0 | lead, no fleet | $0 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -68,7 +69,8 @@ that a finished mission or a scratch repository can reach now has a live receipt
 `KINDS` the true check order (F18) and, from that mission's own fix lane failing after three
 NO_FINDINGS reviews, fixed the reproduce gate to skip a deliverable-only write and gave its refusals
 kind `reproduce` (F19). Five review items remain, approved in order: the README support matrix
-(shipped 0.75.0), cost per landed item on the report, one effect inventory shared by `mission.py`
+(shipped 0.75.0), cost per landed item on the report (shipped 0.76.0, read live at $1.99 over
+today's four mapped missions), one effect inventory shared by `mission.py`
 and `report.py`, `mission.py` extracted by invariant with signatures intact, and non-code artifact
 acceptance with a before/after validator.
 
