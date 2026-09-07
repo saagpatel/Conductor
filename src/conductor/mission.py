@@ -72,6 +72,12 @@ REQUIRE = ("all", "any")
 STAGES = ("build", "review", "fix", "adversarial")
 _STAGE_MODE = {"build": "write", "review": "read", "fix": "write", "adversarial": "write"}
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+# F13: distinguishes "the caller passed no schema" (Collate.spec falls back
+# to its own `self.schema`) from "the caller explicitly wants no schema"
+# (`_rank_schema_for` returning None for an antigravity read lane) -- a
+# plain `None` default could not tell the two apart.
+_NOT_GIVEN = object()
 # E10: a plan lane's child may itself declare a plan lane only while it still
 # sits at depth 0 (its child, at depth 1, may not plan a grandchild) -- at
 # most one level of nesting beyond the mission that first plans.
@@ -463,7 +469,7 @@ class Collate:
         prompt: str,
         *,
         cap_usd: float | None = None,
-        schema: str | None = None,
+        schema: str | None | object = _NOT_GIVEN,
         taint: bool = False,
     ) -> Spec:
         return Spec(
@@ -474,7 +480,7 @@ class Collate:
             effort=self.effort,
             mode="read",
             timeout=self.timeout,
-            schema=self.schema if schema is None else schema,
+            schema=self.schema if schema is _NOT_GIVEN else schema,
             cap_usd=self.cap_usd if cap_usd is None else cap_usd,
             taint=taint,
         )
@@ -710,12 +716,18 @@ class Mission:
                     schema_path = _write_temp_schema(_rank_schema(names_for_rank))
                     try:
                         self.collate.spec(
-                            self.cwd, prompt, schema=schema_path, taint=collate_tainted
+                            self.cwd,
+                            prompt,
+                            schema=_rank_schema_for(self.collate.fleet, schema_path),
+                            taint=collate_tainted,
                         ).validate()
                         for i, judge in enumerate(self.collate.judges):
                             try:
                                 judge.spec(
-                                    self.cwd, prompt, schema=schema_path, taint=collate_tainted
+                                    self.cwd,
+                                    prompt,
+                                    schema=_rank_schema_for(judge.fleet, schema_path),
+                                    taint=collate_tainted,
                                 ).validate()
                             except DispatchRefused as exc:
                                 raise MissionInvalid(
@@ -1256,6 +1268,17 @@ def _rank_contract(lane_names: list[str]) -> str:
         "Your final answer must be exactly one JSON object matching this schema:\n"
         f"{schema}\n"
     )
+
+
+def _rank_schema_for(fleet: str, schema_path: str) -> str | None:
+    """F13: `--json-schema` on an antigravity read lane risks a second turn
+    that writes files (`fleets.Spec._validate_schema` refuses it outright).
+    `_rank_contract` already embeds the identical schema as prompt text and
+    `_parse_rank_answer` falls back to extracting embedded JSON
+    (`verdicts._answer_object`), so ranking on antigravity drops the flag
+    here instead of losing the only fleet outside claude and codex that can
+    judge without sharing a base lane's vendor."""
+    return None if fleet == "antigravity" else schema_path
 
 
 def _write_temp_schema(schema: dict) -> str:
@@ -5895,7 +5918,7 @@ def _run_rank_collate(
                 mission.cwd,
                 prompt,
                 cap_usd=_tighter(judge.cap_usd, ledger.remaining()),
-                schema=str(schema_path),
+                schema=_rank_schema_for(judge.fleet, str(schema_path)),
                 taint=tainted,
             ),
             isolate=True,

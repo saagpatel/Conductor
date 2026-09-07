@@ -207,7 +207,18 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   stdlib-only deny script into a tainted lane's worktree, and `runner.dispatch` refuses to trust
   its own write -- it requires the log's "loaded N" count to match what it wrote and fails the run
   as `taint hooks not enforced` if the init event's tool list still names something reaching
-  outside the worktree that no hook covered.
+  outside the worktree that no hook covered. F13 adds a cheaper, earlier check ahead of that one:
+  `-p "/hooks" --output-format stream-json` answers free in print mode (`num_turns: 0`, zero
+  usage) and names every loaded hooks file with its `source` and `enabled` flag, so
+  `runner.dispatch` runs it before the paid turn and fails the same way, before any spend, when
+  the tainted lane's own hooks file is not in the answer.
+- **`--json-schema` on a read-mode lane is refused at load (F13):** the same probe found a
+  schema'd read lane take a second turn, under `--mode plan --sandbox`, that wrote a file into
+  the working directory and ran a shell command. `Spec.validate` refuses `schema` on
+  `antigravity` in `mode: read` before spawn; write mode is unaffected. Conductor's own
+  checklist-verdict and ranking-collate schemas are generated internally and always duplicated
+  into the prompt as text, so `mission.py`/`runner.py` just drop the flag for this one fleet in
+  read mode rather than losing structured review on it.
 
 ### Grok 4.6 and Composer 2.5 (fleet `cursor`, binary `cursor-agent`)
 

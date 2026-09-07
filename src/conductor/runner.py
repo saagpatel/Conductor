@@ -37,14 +37,16 @@ from .errors import error_kind
 from .fleets import (
     FLEETS,
     TAINT_AGY_DENIED_TOOLS,
+    TAINT_AGY_HOOKS_REL,
     TAINT_DISALLOWED_TOOLS,
     DispatchRefused,
     Spec,
+    build_agy_hooks_argv,
     build_argv,
     cli_version,
     taint_hook_files,
 )
-from .outputs import FleetOutput, agy_init_event, claude_init_event
+from .outputs import FleetOutput, agy_init_event, claude_init_event, json_line
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -739,6 +741,80 @@ def _count_denied_calls(stdout_text: str) -> int:
     return sum(1 for line in stdout_text.splitlines() if _TAINT_AGY_DENIED_CALL_MARKER in line)
 
 
+_TAINT_AGY_PREFLIGHT_TIMEOUT_S = 30
+
+
+def _parse_agy_hooks_result(text: str) -> list[dict] | None:
+    """F13: the `/hooks` slash command's `command_result` event -- a free,
+    zero-turn query naming every loaded hooks file with its `source` path
+    and `enabled` flag. None when no such event parsed at all (a stream
+    that never answered), an empty list when it answered with no hooks."""
+    for line in text.splitlines():
+        event = json_line(line)
+        if event is None or event.get("event") != "command_result":
+            continue
+        command = event.get("command")
+        if not isinstance(command, dict) or command.get("name") != "hooks":
+            continue
+        data = command.get("data")
+        hooks = data.get("hooks") if isinstance(data, dict) else None
+        if not isinstance(hooks, list):
+            return []
+        return [entry for entry in hooks if isinstance(entry, dict)]
+    return None
+
+
+def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
+    """F13: before a tainted antigravity dispatch spawns its paid turn, query
+    `/hooks` in print mode -- free, `num_turns: 0`, no model spend -- and
+    require the deny hook file `taint_hook_files` just wrote to appear
+    enabled. Fails closed on a query that cannot be spawned, times out, or
+    answers with no such event; this is the first source of enforcement
+    evidence, the after-the-run 'loaded N named hooks' log-count check
+    (`_taint_agy_enforcement`) the second.
+
+    Returns the receipt's `taint_enforcement.preflight` dict and, when the
+    hooks did not visibly hold, the text `dispatch()` folds into the run's
+    `error` (prefixed `taint hooks not enforced:` so `errors.error_kind`
+    still classifies it as `taint`).
+    """
+    argv = build_agy_hooks_argv(cwd)
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_TAINT_AGY_PREFLIGHT_TIMEOUT_S,
+        )
+        stdout_text = proc.stdout
+    except subprocess.TimeoutExpired as exc:
+        stdout_text = exc.output if isinstance(exc.output, str) else ""
+        if stdout_text:
+            (run_dir / "hooks-preflight.json").write_text(stdout_text)
+        detail = f"hooks preflight timed out after {_TAINT_AGY_PREFLIGHT_TIMEOUT_S}s"
+        return {"ok": False, "loaded": [], "detail": detail}, detail
+    except OSError as exc:
+        detail = f"hooks preflight could not spawn: {exc}"
+        return {"ok": False, "loaded": [], "detail": detail}, detail
+    (run_dir / "hooks-preflight.json").write_text(stdout_text)
+    hooks = _parse_agy_hooks_result(stdout_text)
+    if hooks is None:
+        detail = "hooks preflight returned no command_result event for '/hooks'"
+        return {"ok": False, "loaded": [], "detail": detail}, detail
+
+    def _is_our_hooks_file(entry: dict) -> bool:
+        source = str(entry.get("source", ""))
+        return source.endswith(TAINT_AGY_HOOKS_REL) and entry.get("enabled") is True
+
+    match = next((entry for entry in hooks if _is_our_hooks_file(entry)), None)
+    if match is None:
+        detail = f"hooks preflight did not find {TAINT_AGY_HOOKS_REL!r} enabled among {hooks}"
+        return {"ok": False, "loaded": hooks, "detail": detail}, detail
+    return {"ok": True, "loaded": hooks, "detail": None}, None
+
+
 def _taint_agy_enforcement(
     *, hooks_written: int, stdout_text: str, log_text: str
 ) -> tuple[dict, str | None]:
@@ -1392,10 +1468,19 @@ def dispatch(
         # checklist: conductor writes both from the same Criterion objects.
         schema_path = run_dir / "verdict.schema.json"
         schema_path.write_text(json.dumps(checklist_schema(criteria), indent=2))
+        # F13: `--json-schema` on an antigravity read lane risks a second
+        # turn that writes files (fleets.Spec._validate_schema refuses it
+        # outright). The checklist contract above already embeds the same
+        # schema as prompt text and parse_verdict falls back to extracting
+        # embedded JSON, so a verdict lane on antigravity drops the flag
+        # here instead of losing the checklist mechanism entirely.
+        schema_for_spec = (
+            None if (spec.fleet == "antigravity" and spec.mode == "read") else str(schema_path)
+        )
         spec = _replace(
             spec,
             prompt=spec.prompt + checklist_contract(criteria),
-            schema=str(schema_path),
+            schema=schema_for_spec,
             verdict=None,
         )
 
@@ -1590,9 +1675,23 @@ def dispatch(
             mission=mission,
             fleet_version=fleet_version,
             prompt_versions=prompt_versions,
+            taint_enforcement=(
+                {"preflight": taint_preflight} if taint_preflight is not None else None
+            ),
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
+
+    # F13: the free `/hooks` query, before any port/setup/paid-turn spend --
+    # the deny hook `_write_taint_agy_hooks` wrote above must already show up
+    # enabled, or this dispatch is refused now rather than after a run that
+    # would fail the same way a dollar later (`_taint_agy_enforcement` below
+    # is the second, after-the-run source of the same evidence).
+    taint_preflight: dict | None = None
+    if tainted_agy:
+        taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
+        if preflight_problem is not None:
+            return _bail(f"taint hooks not enforced: {preflight_problem}")
 
     if spec.include or taint_hook_paths:
         if iso is not None and iso.active:
@@ -1826,6 +1925,11 @@ def dispatch(
                 stdout_text=_read(stdout_path),
                 log_text=_read(run_dir / "agy.log"),
             )
+            # F13: the free preflight ran before this paid turn spawned and
+            # already passed (a failing preflight bails before spawn, above)
+            # -- folded in here so the receipt carries both sources beside
+            # each other.
+            taint_enforcement["preflight"] = taint_preflight
             if taint_problem is not None and error is None:
                 error = f"taint hooks not enforced: {taint_problem}"
 
@@ -2464,6 +2568,7 @@ def _refused_result(
     mission: str | None = None,
     fleet_version: str | None = None,
     prompt_versions: dict[str, str] | None = None,
+    taint_enforcement: dict | None = None,
 ) -> Result:
     """A result for a dispatch conductor declined to spawn."""
     return Result(
@@ -2493,6 +2598,7 @@ def _refused_result(
         mission=mission,
         fleet_version=fleet_version,
         prompt_versions=dict(prompt_versions or {}),
+        taint_enforcement=taint_enforcement,
     )
 
 

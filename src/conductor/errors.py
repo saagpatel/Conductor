@@ -225,6 +225,13 @@ def error_kind(result: Result) -> str | None:
     error_text = result.error or ""
     if error_text == "setup timed out" or error_text.startswith("setup failed:"):
         return "setup"
+    # F13: the free `/hooks` preflight can now fail this closed before the
+    # paid turn ever spawns (`spawned=False`), the same prefix the
+    # after-the-run log-count check below has always used -- checked ahead
+    # of the generic `refused` catch-all so a pre-spawn taint failure keeps
+    # the same kind as a post-spawn one, like `setup` above.
+    if error_text.startswith("taint hooks not enforced:"):
+        return "taint"
     if not result.spawned and result.error:
         return "refused"
     # D3: the persona assertion writes its own `error` text directly on the
@@ -232,10 +239,6 @@ def error_kind(result: Result) -> str | None:
     # it is conductor's own check of the stream's init event).
     if error_text.startswith("agent '") and " not applied: " in error_text:
         return "agent"
-    # E21: like the agent check above, this is conductor's own check of the
-    # stream's init event and the deny hook's own log, never a fleet's word.
-    if error_text.startswith("taint hooks not enforced:"):
-        return "taint"
     # E16: conductor's own check, from the git diff against the adversarial
     # lane's base -- never a fleet's word, like `agent` and `taint` above.
     if error_text.startswith("adversarial lane changed source:"):
