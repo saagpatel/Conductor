@@ -5,7 +5,7 @@ orchestrating model can hand work to whichever fleet fits and get back a small,
 honest result instead of a transcript.
 
 ```
-conductor dispatch --fleet codex --model sol --effort hard --mode write \
+conductor dispatch --fleet claude --model sonnet --effort hard --mode write \
   --cwd ~/Projects/thing --test "pytest -q" "Refactor the parser per docs/spec.md"
 ```
 
@@ -1288,7 +1288,9 @@ lifted the same way with `self_judging: allow`.
 
 #### Reproduce before fix
 
-A `fix` lane must show its own check failing before it may edit. When a
+A `fix` lane's change is accepted only if its own check fails without it. The
+check runs after the model has worked, on the transplanted test surface, so
+this is evidence about the result, not a constraint on the editing order. When a
 `stage: fix` write dispatch's fleet has changed the test surface, conductor
 adds a detached worktree at the base commit — the mirror image of the clean
 gate above, `include` pathspecs instead of `exclude` through the same
