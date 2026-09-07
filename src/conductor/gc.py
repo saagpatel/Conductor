@@ -380,6 +380,29 @@ def _audit_items(home: Path) -> list[Item]:
     return items
 
 
+def _main_worktree(candidate: Path) -> Path | None:
+    """The repository a candidate path belongs to, as its main worktree.
+
+    A lane worktree is recorded as the `isolation.repo` of the runs that
+    ran inside it, and `git rev-parse --show-toplevel` answers with the
+    linked worktree itself, so one repository was planned once per lane
+    worktree named in a receipt: every action duplicated, and the second
+    pass of `--apply` failing on a worktree the first had already removed
+    (2026-09-07, exit 1 on a clean run). The common dir is the same for
+    every worktree of a repository; its parent is the main worktree.
+    """
+    common = git_run(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0:
+        return None
+    git_dir = Path(common.stdout.strip()).resolve()
+    if git_dir.name == ".git":
+        return git_dir.parent
+    top = git_run(candidate, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return None
+    return Path(top.stdout.strip()).resolve()
+
+
 def build_plan(
     home: Path, explicit_repos: list[str], older_than: float
 ) -> tuple[list[RepoPlan], list[Item]]:
@@ -401,13 +424,12 @@ def build_plan(
                 )
             )
             continue
-        top = git_run(candidate, "rev-parse", "--show-toplevel")
-        if top.returncode != 0:
+        repo = _main_worktree(candidate)
+        if repo is None:
             notices.append(
                 Item(str(candidate), "repo", "keep", "not a git repository", path=str(candidate))
             )
             continue
-        repo = Path(top.stdout.strip()).resolve()
         if repo in seen:
             continue
         seen.add(repo)

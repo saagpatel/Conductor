@@ -2689,7 +2689,10 @@ remove clean conductor-home worktrees, delete conductor branches whose
 commits are already reachable from `HEAD` or another non-conductor branch,
 and remove port claim files whose run has ended. `--repo` adds repositories
 to those discovered from receipts, and `--older-than` limits actions to
-older run ids.
+older run ids. A receipt whose `isolation.repo` is a lane worktree names the
+repository that worktree belongs to: repositories are identified by their
+git common dir, so one repository is planned once however many of its
+worktrees the receipts name.
 
 GC never removes a dirty worktree, a worktree outside
 `$CONDUCTOR_HOME/worktrees`, a branch outside `conductor/`, an unmerged

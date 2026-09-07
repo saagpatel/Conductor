@@ -272,3 +272,22 @@ def test_gc_keeps_a_completed_lane_worktree_while_its_mission_is_running(
     worktree = next(row for row in rows if row.get("path") == isolation.worktree)
     assert worktree["reason"] == "run in progress (no result.json)"
     assert Path(isolation.worktree).is_dir()
+
+
+def test_gc_plans_a_repository_once_when_a_lane_worktree_is_a_receipt_cwd(
+    repo: Path, home: Path
+):
+    """A run that ran inside a lane worktree records that worktree as its
+    `isolation.repo`; the plan must still be one per repository, not one
+    per worktree named (2026-09-07: four duplicates, exit 1 after a clean
+    apply)."""
+    old = "20200101T000000Z"
+    lane = worktrees.create(str(repo), f"{old}-lane", home / "worktrees")
+    _receipt(home, f"{old}-main", repo)
+    _receipt(home, f"{old}-lane", Path(lane.worktree))
+
+    plans, _notices = build_plan(home, [], 0)
+
+    assert [plan.repo for plan in plans] == [repo.resolve()]
+    removes = [item for item in plans[0].items if item.action == "remove"]
+    assert [item.path for item in removes] == [str(Path(lane.worktree).resolve())]
