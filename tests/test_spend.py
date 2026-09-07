@@ -437,6 +437,40 @@ def test_mission_run_receipt_spend_prices_a_run_named_only_under_previous_resolv
     assert unpriced == 0
 
 
+def test_mission_run_receipt_spend_prefers_the_freshly_loaded_lane_over_the_prior_snapshot(
+    home: Path,
+):
+    """Opus review finding 1: `_run_receipt_spend` calls `spend.effects`
+    with both `prior_result` (whose own `lanes` list is walked first) and
+    `lanes=[...]` (the freshly reloaded lane receipts, walked last); with
+    `effects`'s first-occurrence-wins rule that makes the stale snapshot's
+    record win over the fresh one whenever the same run id appears in both.
+    A lane whose `previous_result.json` recorded only a bare `final` string
+    for a run (`record={}`, per `spend.py`) collides with that same run
+    appearing in the freshly loaded lane's own `attempts` -- and the run's
+    own receipt directory being gone (a resume long after `runs/` was
+    pruned) means pricing falls back to the record, which the stale entry
+    left empty. The spec (item 3) requires the opposite priority: "a lane
+    attempt's record is the one kept when a run id appears in both"."""
+    run_id = "20260101T000000Z-claude-shared-run"
+    prior_result = {
+        "lanes": [{"name": "build", "stage": "build", "final": run_id}],
+    }
+    previous = {
+        "build": mission.LaneResult(
+            name="build",
+            ok=True,
+            stage="build",
+            attempts=[{"run_id": run_id, "cost_usd": 2.0}],
+        )
+    }
+
+    spent, unpriced = mission._run_receipt_spend(home, previous, prior_result)
+
+    assert spent == pytest.approx(2.0)
+    assert unpriced == 0
+
+
 def test_export_lane_run_ids_returns_a_run_named_only_under_previous_attempts(home: Path):
     mission_dir = home / "missions" / "20260101T000000Z-mission"
     lanes_dir = mission_dir / "lanes"

@@ -4287,9 +4287,16 @@ def _run_receipt_spend(
         }
         for lane in previous.values()
     ]
+    # The freshly reloaded lane receipts (`lane_dicts`) go first so their
+    # records win a run id that also appears in the prior snapshot's own
+    # `lanes` (a bare `final` string there carries no record at all); the
+    # prior snapshot's collates and resolvers, which never share a run id
+    # with a lane attempt, fill in everything `lane_dicts` does not name.
     attempts: dict[str, dict] = {
-        effect.run_id: effect.record for effect in spend.effects(prior_result, lanes=lane_dicts)
+        effect.run_id: effect.record for effect in spend.effects(lanes=lane_dicts)
     }
+    for effect in spend.effects(prior_result):
+        attempts.setdefault(effect.run_id, effect.record)
 
     spent = 0.0
     unpriced = 0
