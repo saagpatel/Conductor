@@ -344,6 +344,20 @@ general JSON Schema validator. On a dry run the deliverable is recorded as
 declared (`ok: null`) and not checked. `errors.KINDS` gains `deliverable`
 for the four failures above.
 
+The path is validated at load, but the lane runs after that, so the check
+is repeated on bytes before anything reads the file: no component from the
+working tree down may be a symlink, and the file must still resolve inside
+the working tree. A lane that plants `plan.json -> ../outside.txt` where its
+product belongs fails with `deliverable is a symlink: <path>` (or
+`deliverable resolves outside the worktree: <path>`) and nothing is
+captured; without that, the link passed `is_file()` and was copied into the
+run directory as the lane's own product, so bytes from outside the worktree
+became the declared deliverable. The rule is the simplest one that closes
+it -- no symlink at all, not even to a sibling in the same worktree -- and
+the copy itself opens the file with `O_NOFOLLOW`. A human lane's
+deliverable, and every artifact path a resumed mission trusts from a
+receipt, is held to the same rule.
+
 A write lane's deliverable is ordinary bytes, gated the same way any other
 change is. A read lane is normally held to no bytes moved at all;
 declaring a deliverable lifts that by exactly the deliverable's own path:
@@ -1763,12 +1777,26 @@ conductor attest MISSION_ID
 
 walks `chain.json` in order and verifies every link's signature, that its
 file matches the hash recorded in `chain.json`, that its `previous` field
-matches the prior link's actual file hash, and, for a link with a run, that
-the run's own `attestation.json` still matches that recorded hash and still
-agrees with `result.json` and `diff.patch`. It prints one JSON object naming
-every link's verdict and problems, exits 0 when every link verifies, 1 when
-one does not, and 3 when the mission, its chain, or the signing key does not
-exist.
+matches the prior link's actual file hash, that the signed statement names
+the mission actually being attested and the position it actually sits at,
+and, for a link with a run, that the run's own `attestation.json` still
+matches that recorded hash and still agrees with `result.json` and
+`diff.patch`. It prints one JSON object naming every link's verdict and
+problems, exits 0 when every link verifies, 1 when one does not, and 3 when
+the mission, its chain, or the signing key does not exist.
+
+A valid prefix of a chain is not a complete mission, so the report also
+carries a `state`: `verified`, `partial`, `empty`, `missing`, `malformed`,
+or `failed`. `all([])` is True, so an emptied `links` list and a chain with
+its tail lopped off both used to verify with nothing, or almost nothing,
+checked; the mission's own `result.json` records `chain: {"links", "head"}`,
+and a chain whose length or head disagrees with that record is `partial`,
+with `link_count`, `expected_link_count`, `head` and `expected_head` beside
+it. An empty chain is `empty`. Binding each statement to the requested
+mission closes the other half: a chain.json lifted from another mission used
+to chain cleanly on `previous` alone, and the report took that file's word
+for which mission it described. `verified` is now exactly `state ==
+"verified"`, and `conductor land` refuses anything else.
 
 The key lives at `$CONDUCTOR_HOME/keys/receipt.key`, directory mode 700, file
 mode 600, created on first use and never copied into a receipt. This is
@@ -1834,9 +1862,17 @@ refuses the export, exactly as `golden record` refuses a leaking fixture.
 Before scrubbing anything, `export` verifies the mission on bytes with the
 exporting machine's own key -- the same checks `conductor attest` runs, for
 the chain and, individually, for every run's attestation -- and records the
-verdict in `manifest.json`: `chain.verified_at_export`, one row per link
-(`index`, `lane`, `run_id`, `verified`, `problems`), and one entry per run id
-under `attestations` (`verified_at_export`, `problems`). `files` lists every
+verdict in `manifest.json`: `chain.state` and `chain.verified_at_export`,
+`chain.problems`, one row per link (`index`, `lane`, `run_id`, `verified`,
+`problems`), and one entry per run id under `attestations`
+(`verified_at_export`, `problems`). `chain.state` is the same state string
+`conductor attest` reports, from the same validator: a mission with no
+chain.json at all used to export as `verified_at_export: true`, because the
+only thing that could contradict it was a chain file that existed and was
+bad. `missing`, `malformed`, `empty`, and `partial` each say so now, and
+`verified_at_export` is exactly `state == "verified"`. `conductor export`
+prints the state alongside the boolean, and `ExportResult` carries it as
+`chain_state_at_export`. `files` lists every
 bundled file by its bundle-relative path with three numbers: `sha256` (the
 scrubbed bytes actually in the bundle), `sha256_original` (the file's digest
 on the exporting machine, before scrubbing), and `bytes`. `verifiable_here`

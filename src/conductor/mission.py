@@ -58,7 +58,15 @@ from . import notify as notify_mod
 from . import verdicts as verdicts_mod
 from .errors import KINDS, error_kind
 from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
-from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
+from .runner import (
+    Result,
+    _slug,
+    claim_dir,
+    conductor_home,
+    deliverable_path_problem,
+    dispatch,
+    stop_requested,
+)
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import GIT_UNRUN, git_run
@@ -3510,10 +3518,21 @@ def _check_unattended(mission: Mission) -> None:
 
 
 def _artifact_matches(recorded: str | None, expected: Path) -> bool:
+    """Whether a receipt's recorded artifact path is the file conductor
+    expects to find there.
+
+    W5: a symlink on either side is refused outright rather than compared
+    through. Every artifact conductor writes itself (an answer, a diff, a
+    captured deliverable) is a regular file, so the only way one of these
+    is a symlink is that something else put it there -- and resolving it
+    would make bytes from outside the tree read as the lane's own."""
     if recorded is None:
         return True
     try:
-        return Path(recorded).resolve() == expected.resolve() and expected.is_file()
+        recorded_path = Path(recorded)
+        if recorded_path.is_symlink() or expected.is_symlink():
+            return False
+        return recorded_path.resolve() == expected.resolve() and expected.is_file()
     except OSError:
         return False
 
@@ -3530,6 +3549,9 @@ def _human_lane_result(mission: Mission, lane: Lane, mission_dir: Path) -> LaneR
     deliverable_path: str | None = None
     if deliverable is not None:
         resolved = _human_deliverable_path(mission.cwd, deliverable["path"])
+        # W5: the same rule a dispatched lane's deliverable is held to.
+        if deliverable_path_problem(mission.cwd, deliverable["path"]) is not None:
+            return None
         if not resolved.is_file():
             return None
         deliverable_path = str(resolved)
@@ -4092,6 +4114,11 @@ def _answer_human_pause(
                 f"lane '{lane_name}' declares a deliverable at '{resolved_deliverable}', "
                 "which does not exist"
             )
+        unsafe = deliverable_path_problem(mission.cwd, deliverable["path"])
+        if unsafe is not None:
+            # W5: a symlink planted where the operator's product belongs is
+            # not the operator's product.
+            raise MissionInvalid(f"lane '{lane_name}': {unsafe}")
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
     (answers_dir / f"{lane_name}.txt").write_text(text)

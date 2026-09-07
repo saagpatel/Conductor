@@ -88,6 +88,10 @@ class ExportResult:
     bytes: int
     chain_verified_at_export: bool
     attestations_verified_at_export: tuple[int, int]
+    # D8: `verified | partial | empty | missing | malformed | failed`, the
+    # same states `conductor attest` reports. `chain_verified_at_export` is
+    # exactly `chain_state_at_export == "verified"`.
+    chain_state_at_export: str = "missing"
     leaks: list[str] = field(default_factory=list)
 
 
@@ -262,22 +266,30 @@ def export(
     replacements = _placeholder_map(home=home, cwd=cwd)
 
     chain_path = mission_dir / "receipts" / "chain.json"
-    chain_obj: dict | None = None
-    chain_invalid = False
-    if chain_path.is_file():
+    chain_present = chain_path.is_file()
+    loaded_chain: object = None
+    if chain_present:
         try:
             loaded_chain = json.loads(chain_path.read_text())
         except (OSError, json.JSONDecodeError):
             loaded_chain = None
-        if isinstance(loaded_chain, dict) and isinstance(loaded_chain.get("links"), list):
-            chain_obj = loaded_chain
-        else:
-            chain_invalid = True
-    chain_rows = attest.verify_chain_links(chain_obj, home=home, key=key) if chain_obj else []
-    # A chain.json `cmd_attest` would refuse as invalid (missing, unreadable,
-    # not an object, or without a `links` list) must never be reported as
-    # verified just because it produced zero rows to check.
-    chain_verified = not chain_invalid and all(row["verified"] for row in chain_rows)
+    # D8: one validator, shared with `conductor attest`, and a state rather
+    # than a boolean. A missing chain.json used to leave `chain_invalid`
+    # False and so exported as `verified_at_export: true` with nothing
+    # verified at all; `missing`, `malformed`, `empty` and `partial` are
+    # each their own answer now, and only `verified` is verified.
+    chain_evaluation = attest.evaluate_chain(
+        loaded_chain,
+        home=home,
+        key=key,
+        mission_id=mission_id,
+        expected=attest.recorded_chain(mission_dir),
+        present=chain_present,
+    )
+    chain_state = chain_evaluation["state"]
+    chain_problems = chain_evaluation["problems"]
+    chain_rows = chain_evaluation["rows"]
+    chain_verified = chain_state == "verified"
 
     chain_run_ids = {row["run_id"] for row in chain_rows if isinstance(row["run_id"], str)}
     run_ids = sorted(_lane_run_ids(mission_dir) | chain_run_ids)
@@ -360,7 +372,12 @@ def export(
             "exported_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "logs": logs,
             "files": files_manifest,
-            "chain": {"verified_at_export": chain_verified, "links": manifest_chain_links},
+            "chain": {
+                "state": chain_state,
+                "verified_at_export": chain_verified,
+                "problems": chain_problems,
+                "links": manifest_chain_links,
+            },
             "attestations": attestations_manifest,
             "verifiable_here": ["file digests", "chain linkage"],
             "not_verifiable_here": ["signatures"],
@@ -385,6 +402,7 @@ def export(
         bytes=total_bytes,
         chain_verified_at_export=chain_verified,
         attestations_verified_at_export=(verified_count, len(run_ids)),
+        chain_state_at_export=chain_state,
         leaks=[],
     )
 

@@ -97,6 +97,88 @@ def test_export_does_not_claim_a_corrupt_chain_verified(repo, home, monkeypatch,
     assert manifest["chain"]["verified_at_export"] is False
 
 
+# --- D8: the chain's state, not a bare boolean -----------------------------
+
+
+def test_export_reports_a_missing_chain_as_missing_not_verified(
+    repo, home, monkeypatch, tmp_path
+):
+    """D8: `chain_invalid` started False and only ever flipped for a chain
+    file that existed and was bad, so a mission with no chain.json at all
+    exported as `verified_at_export: true` with nothing verified."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    (home / "missions" / result.mission_id / "receipts" / "chain.json").unlink()
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_state_at_export == "missing"
+    assert export_result.chain_verified_at_export is False
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["chain"]["state"] == "missing"
+    assert manifest["chain"]["verified_at_export"] is False
+    assert manifest["chain"]["problems"] == ["chain.json is missing"]
+
+
+def test_export_reports_a_malformed_chain_as_malformed(repo, home, monkeypatch, tmp_path):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = home / "missions" / result.mission_id / "receipts" / "chain.json"
+    chain_path.write_text("not json")
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_state_at_export == "malformed"
+    assert export_result.chain_verified_at_export is False
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["chain"]["state"] == "malformed"
+
+
+def test_export_reports_an_empty_chain_as_empty(repo, home, monkeypatch, tmp_path):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = home / "missions" / result.mission_id / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    chain["links"] = []
+    chain_path.write_text(json.dumps(chain))
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_state_at_export == "empty"
+    assert export_result.chain_verified_at_export is False
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["chain"]["state"] == "empty"
+    assert manifest["chain"]["links"] == []
+
+
+def test_export_reports_an_intact_chain_as_verified(repo, home, monkeypatch, tmp_path):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_state_at_export == "verified"
+    assert export_result.chain_verified_at_export is True
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["chain"]["state"] == "verified"
+    assert manifest["chain"]["problems"] == []
+    assert len(manifest["chain"]["links"]) == 2
+
+
+def test_export_reports_a_truncated_chain_as_partial(repo, home, monkeypatch, tmp_path):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = home / "missions" / result.mission_id / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    chain["links"] = chain["links"][:1]
+    chain_path.write_text(json.dumps(chain))
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.chain_state_at_export == "partial"
+    assert export_result.chain_verified_at_export is False
+
+
 # --- what a bundle holds -----------------------------------------------
 
 

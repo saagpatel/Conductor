@@ -548,6 +548,49 @@ def _read_deliverable_only(
     return bool(changed) and changed == {deliverable_repo_path}
 
 
+def deliverable_path_problem(cwd: str | Path, path: str) -> str | None:
+    """W5: why `<cwd>/<path>` may not be taken as a deliverable, or None
+    when it may.
+
+    The declared path is validated at load (repo-relative, no `..`,
+    resolving inside cwd), but a lane runs after that and can plant a
+    symlink where its product was meant to be: `plan.json -> ../secret`
+    passed every later check and was copied into the run directory as the
+    lane's own bytes. The rule here is the simplest one that closes it: no
+    symlink anywhere from the working tree down to the file itself, and the
+    resolved file still under the working tree. A lane that wants its
+    product read has to write the bytes.
+    """
+    root = Path(cwd)
+    try:
+        root_resolved = root.resolve(strict=True)
+    except OSError as exc:
+        return f"deliverable working tree is unreadable: {exc}"
+    current = root_resolved
+    for part in Path(path).parts:
+        current = current / part
+        if current.is_symlink():
+            return f"deliverable is a symlink: {path}"
+    try:
+        resolved = current.resolve(strict=True)
+    except OSError:
+        return f"deliverable missing: {path}"
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        return f"deliverable resolves outside the worktree: {path}"
+    return None
+
+
+def copy_no_follow(src: Path, dst: Path) -> None:
+    """Copy `src` to `dst`, refusing (OSError) to open `src` through a
+    symlink -- the byte-level half of `deliverable_path_problem`."""
+    fd = os.open(str(src), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        with open(fd, "rb", closefd=False) as source, dst.open("wb") as out:
+            shutil.copyfileobj(source, out)
+    finally:
+        os.close(fd)
+
+
 def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
     """E1: a lane's product can be a file, not just its reply. Checked on
     the filesystem of the lane's actual working tree (its worktree when
@@ -569,6 +612,19 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
             "reason": None,
         }
     full = Path(spec.cwd) / path
+    # W5: before anything reads the file, and before the capture below
+    # copies it. `exists: False` keeps the capture's hands off a path that
+    # is refused here -- it copies whatever exists, ok or not.
+    unsafe = deliverable_path_problem(spec.cwd, path)
+    if unsafe is not None:
+        return {
+            "path": path,
+            "exists": False,
+            "bytes": None,
+            "parsed": None,
+            "ok": False,
+            "reason": unsafe,
+        }
     if not full.is_file():
         return {
             "path": path,
@@ -2134,7 +2190,7 @@ def dispatch(
             # still be able to read it afterwards.
             dest = run_dir / "deliverable"
             try:
-                shutil.copyfile(Path(spec.cwd) / deliverable_state["path"], dest)
+                copy_no_follow(Path(spec.cwd) / deliverable_state["path"], dest)
                 deliverable_path = str(dest)
             except OSError:
                 pass

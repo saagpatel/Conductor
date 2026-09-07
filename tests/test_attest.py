@@ -508,6 +508,97 @@ def test_cli_attest_flags_a_link_deleted_from_the_middle(repo, home, monkeypatch
     assert any("previous does not match" in p for p in fix_row["problems"])
 
 
+# --- D7: a valid prefix of a chain is not a complete mission ---------------
+
+
+def test_cli_attest_refuses_an_empty_chain_as_incomplete(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """`all([])` is True: a chain.json with its links emptied out used to
+    verify with nothing verified at all."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = Path(result.mission_dir) / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    chain["links"] = []
+    chain_path.write_text(json.dumps(chain))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "empty"
+    assert out["state"] in attest.CHAIN_STATES
+    assert out["verified"] is False
+    assert out["links"] == []
+    assert "chain has no links" in out["problems"]
+
+
+def test_cli_attest_reports_a_truncated_chain_as_partial(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Dropping trailing links leaves a chain that still hashes cleanly.
+    The mission's own result.json says how many links it ended with, so the
+    prefix is `partial`, with both counts, rather than verified."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _three_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = Path(result.mission_dir) / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    assert len(chain["links"]) == 3
+    chain["links"] = chain["links"][:2]
+    chain_path.write_text(json.dumps(chain))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "partial"
+    assert out["verified"] is False
+    assert all(row["verified"] for row in out["links"])
+    assert out["link_count"] == 2 and out["expected_link_count"] == 3
+    assert any("result.json records 3" in problem for problem in out["problems"])
+
+
+def test_cli_attest_refuses_a_chain_signed_for_another_mission(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """A chain.json (and its link files) lifted from another mission chains
+    cleanly on `previous` alone. Each signed statement names its own
+    mission, and that is what the requested mission is checked against."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    donor = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    target = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    assert donor.mission_id != target.mission_id
+    donor_chain = (Path(donor.mission_dir) / "receipts" / "chain.json").read_text()
+    (Path(target.mission_dir) / "receipts" / "chain.json").write_text(donor_chain)
+
+    assert main(["attest", target.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["mission_id"] == target.mission_id
+    assert out["state"] == "failed"
+    assert out["verified"] is False
+    assert any(
+        f"not '{target.mission_id}'" in problem
+        for row in out["links"]
+        for problem in row["problems"]
+    )
+
+
+def test_cli_attest_reports_a_head_that_disagrees_with_result_json(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    result_path = Path(result.mission_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    data["chain"]["head"] = "0" * 64
+    result_path.write_text(json.dumps(data))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "partial"
+    assert out["verified"] is False
+    assert out["expected_head"] == "0" * 64
+    assert out["head"] != out["expected_head"]
+    assert any("head does not match" in problem for problem in out["problems"])
+
+
 def test_cli_attest_exits_3_on_an_unknown_mission(home, monkeypatch, capsys):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     assert main(["attest", "no-such-mission"]) == 3

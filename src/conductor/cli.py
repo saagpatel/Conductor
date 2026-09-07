@@ -740,6 +740,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     "bundle_dir": str(result.bundle_dir),
                     "files": result.files,
                     "bytes": result.bytes,
+                    "chain_state_at_export": result.chain_state_at_export,
                     "chain_verified_at_export": result.chain_verified_at_export,
                     "attestations_verified_at_export": [verified, total],
                     "leaks": result.leaks,
@@ -750,6 +751,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     else:
         print(f"bundle: {result.bundle_dir}")
         print(f"files: {result.files}, bytes: {result.bytes}")
+        print(f"chain at export: {result.chain_state_at_export}")
         print(f"chain verified at export: {result.chain_verified_at_export}")
         print(f"attestations verified at export: {verified}/{total}")
     return 0

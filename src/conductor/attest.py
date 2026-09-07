@@ -259,30 +259,152 @@ def attest_mission(home: Path, mission_id: str) -> dict:
     if not isinstance(chain, dict) or not isinstance(chain.get("links"), list):
         raise AttestInvalid("chain.json is malformed")
 
-    rows = verify_chain_links(chain, home=home, key=key)
-    results = [{k: v for k, v in row.items() if k != "_statement"} for row in rows]
+    evaluation = evaluate_chain(
+        chain,
+        home=home,
+        key=key,
+        mission_id=mission_id,
+        expected=recorded_chain(mission_dir),
+    )
+    results = [
+        {k: v for k, v in row.items() if k != "_statement"} for row in evaluation["rows"]
+    ]
     return {
-        "mission_id": chain.get("mission_id", mission_id),
+        # The requested mission, never chain.json's own `mission_id`: that
+        # field is as editable as the rest of the file, so a chain lifted
+        # from another mission must not get to name itself (D7).
+        "mission_id": mission_id,
         "key_id": key_id(key),
+        "state": evaluation["state"],
         "links": results,
-        "verified": all(row["verified"] for row in results),
+        "link_count": len(results),
+        "expected_link_count": evaluation["expected_links"],
+        "head": evaluation["head"],
+        "expected_head": evaluation["expected_head"],
+        "problems": evaluation["problems"],
+        "verified": evaluation["state"] == "verified",
     }
 
 
-def verify_chain_links(chain: dict, *, home: Path, key: bytes) -> list[dict]:
+CHAIN_STATES = ("verified", "partial", "empty", "missing", "malformed", "failed")
+
+
+def recorded_chain(mission_dir: Path) -> dict | None:
+    """The `chain` block a finished mission wrote into its own
+    `result.json` (`{path, links, head}`), or None when there is none to
+    read. It is the only record of how long the chain was when the mission
+    ended, so it is what a truncated chain is measured against."""
+    try:
+        data = json.loads((Path(mission_dir) / "result.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    block = data.get("chain")
+    return block if isinstance(block, dict) else None
+
+
+def evaluate_chain(
+    chain: object,
+    *,
+    home: Path,
+    key: bytes,
+    mission_id: str | None = None,
+    expected: dict | None = None,
+    present: bool = True,
+) -> dict:
+    """One mission's receipt chain as a state rather than a bare boolean
+    (D7, D8).
+
+    A valid prefix of a chain is not a complete mission: `all([])` is True,
+    so an empty `links` list and a chain with its tail lopped off both used
+    to verify. The state distinguishes them: `missing` (no chain.json),
+    `malformed` (not an object, or no `links` list), `empty` (no links at
+    all), `failed` (a link does not verify), `partial` (every link verifies
+    but the chain is shorter than, or headed differently from, what the
+    mission's own `result.json` recorded), and `verified` (every link
+    verifies and, when `result.json` records a chain, it agrees).
+
+    `expected` is that recorded block; without one the completeness check
+    has nothing to compare against and is skipped."""
+    problems: list[str] = []
+    expected_links: int | None = None
+    expected_head: str | None = None
+    if isinstance(expected, dict):
+        recorded_links = expected.get("links")
+        recorded_head = expected.get("head")
+        expected_links = recorded_links if isinstance(recorded_links, int) else None
+        expected_head = recorded_head if isinstance(recorded_head, str) else None
+
+    def outcome(state: str, rows: list[dict], head: str | None) -> dict:
+        return {
+            "state": state,
+            "rows": rows,
+            "problems": problems,
+            "links": len(rows),
+            "expected_links": expected_links,
+            "head": head,
+            "expected_head": expected_head,
+        }
+
+    if not present:
+        problems.append("chain.json is missing")
+        return outcome("missing", [], None)
+    if not isinstance(chain, dict) or not isinstance(chain.get("links"), list):
+        problems.append("chain.json is malformed")
+        return outcome("malformed", [], None)
+
+    recorded_mission = chain.get("mission_id")
+    if (
+        mission_id is not None
+        and isinstance(recorded_mission, str)
+        and recorded_mission != mission_id
+    ):
+        problems.append(
+            f"chain.json names mission '{recorded_mission}', not '{mission_id}'"
+        )
+
+    rows = verify_chain_links(chain, home=home, key=key, mission_id=mission_id)
+    head = rows[-1]["sha256"] if rows else None
+    if not rows:
+        problems.append("chain has no links")
+        return outcome("empty", rows, head)
+    if problems or not all(row["verified"] for row in rows):
+        return outcome("failed", rows, head)
+
+    if expected_links is not None and expected_links != len(rows):
+        problems.append(
+            f"chain has {len(rows)} links; result.json records {expected_links}"
+        )
+    if expected_head is not None and expected_head != head:
+        problems.append("chain head does not match the head recorded in result.json")
+    if problems:
+        return outcome("partial", rows, head)
+    return outcome("verified", rows, head)
+
+
+def verify_chain_links(
+    chain: dict, *, home: Path, key: bytes, mission_id: str | None = None
+) -> list[dict]:
     """The per-link verification loop `cmd_attest` runs: each link's
     signature, its place in the hash chain, and, for a link with a run, that
     the run's own attestation still matches its result.json and diff.patch.
 
     Each row carries the fields `cmd_attest` prints (`index`, `lane`,
-    `run_id`, `taint`, `verified`, `problems`) plus `_statement`, the link's
-    own decoded statement (or None) -- never printed by `cmd_attest`, but
-    read by `export.export` so it does not have to decode every link a
-    second time to learn a run's expected `attestation_sha256`."""
+    `run_id`, `sha256`, `taint`, `verified`, `problems`) plus `_statement`,
+    the link's own decoded statement (or None) -- never printed by
+    `cmd_attest`, but read by `export.export` so it does not have to decode
+    every link a second time to learn a run's expected
+    `attestation_sha256`.
+
+    `mission_id`, when given, binds each signed statement to that mission
+    and to its position in the list (D7): without it a chain lifted from
+    another mission, or one whose links were reordered, chains cleanly on
+    `previous` alone and reads as verified."""
     results: list[dict] = []
     previous_sha: str | None = None
     links = chain.get("links") if isinstance(chain, dict) else None
-    for entry in links or []:
+    for position, entry in enumerate(links or []):
         index = entry.get("index") if isinstance(entry, dict) else None
         lane = entry.get("lane") if isinstance(entry, dict) else None
         recorded_sha = entry.get("sha256") if isinstance(entry, dict) else None
@@ -311,6 +433,17 @@ def verify_chain_links(chain: dict, *, home: Path, key: bytes) -> list[dict]:
                 else:
                     if statement.get("previous") != previous_sha:
                         problems.append("previous does not match the prior link")
+                    signed_mission = statement.get("mission_id")
+                    if mission_id is not None and signed_mission != mission_id:
+                        problems.append(
+                            f"link is signed for mission {signed_mission!r}, "
+                            f"not '{mission_id}'"
+                        )
+                    if statement.get("index") != position:
+                        problems.append(
+                            f"link is signed at index {statement.get('index')!r}, "
+                            f"but sits at position {position} in the chain"
+                        )
                     run_id = statement.get("run_id")
                     if isinstance(run_id, str):
                         run_problems, run_taint = verify_run_attestation(
@@ -322,6 +455,7 @@ def verify_chain_links(chain: dict, *, home: Path, key: bytes) -> list[dict]:
                 "index": index,
                 "lane": lane,
                 "run_id": run_id,
+                "sha256": actual_sha,
                 "taint": run_taint,
                 "verified": not problems,
                 "problems": problems,
