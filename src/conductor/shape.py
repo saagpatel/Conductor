@@ -17,9 +17,15 @@ one printed number would reproduce it.
 from __future__ import annotations
 
 import dataclasses
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
+from . import ceiling as ceiling_mod
 from .fleets import CAP_GRACE_CEILING_USD
+from .runner import GATE_TIMEOUT
+from .verify import git_run, run_tests
 
 SHAPE_VERSION = "a-2026-09-06"
 
@@ -29,12 +35,22 @@ USD_SCHEDULER_TAX = 2.0  # rule 2: scheduler, runner wait loop, or resume
 USD_PER_EXTRA_MODULE = 1.0  # rule 2: every module past the second
 USD_CLAUDE_SUMMARY = 1.0  # rule 10: Claude's final summary costs, on every cap
 USD_FIX_BASE = 2.0  # a fix lane is a one- or two-item spec on the resumed thread
+USD_PER_FINDING = 1.0  # F6: a dollar per expected review finding on the fix cap
+DEFAULT_FINDINGS = 4  # F6: the median Grok finding count on this repository
 USD_ADVERSARIAL = 3.0  # E16: one test that fails on the current tree, plus room to look
 USD_GEMINI_READ = 1.0  # rule 7: Gemini reads only on this shape
 USD_GROK_READ = 1.5  # rule 7: Grok reading only
 USD_GROK_SUITE = 2.0  # rule 7: Grok when it runs the suite
 USD_MISSION_SLACK = 1.5  # room for a retry's partial spend before the mission budget sinks
 USD_CLAUDE_GRACE = 0.25  # E24: default grace band on the build and fix (claude) lanes
+
+# F6: --ceiling none writes this explicit null-bounds dict. An attended launch
+# is watched, so the E9 spend ceiling follows --unattended at run time, not
+# the shape launcher (operator decision 2026-09-07): a mission carrying this
+# never checks the ceiling regardless of how it is later run.
+CEILING_NONE: dict = {"per_hour_usd": None, "per_day_usd": None}
+
+GATE_PREFLIGHT_PREFIX = "conductor-gate-preflight-"
 
 REVIEW_TAIL = (
     "Report anything that could cause incorrect behavior, a test failure, or a misleading "
@@ -122,10 +138,22 @@ class CapArithmetic:
     # E16: whether this shape carries the adversarial lane; the term (and
     # the mission budget's share of it) only appears when it does.
     adversarial: bool = False
+    # F6 rule 11: spec items that are tests, already counted once in
+    # `spec_items`; this is the second dollar each one earns.
+    tests_items: int = 0
+    # F6: expected review findings, at a dollar each on the fix cap.
+    findings: int = DEFAULT_FINDINGS
 
     @property
     def build_terms(self) -> list[tuple[str, float]]:
         terms = [(f"{self.spec_items} spec items", self.spec_items * USD_PER_SPEC_ITEM)]
+        if self.tests_items:
+            terms.append(
+                (
+                    f"tests counted twice ({self.tests_items} items)",
+                    self.tests_items * USD_PER_SPEC_ITEM,
+                )
+            )
         if self.scheduler:
             terms.append(("scheduler tax", USD_SCHEDULER_TAX))
         extra = max(0, self.modules - 2)
@@ -141,6 +169,8 @@ class CapArithmetic:
     @property
     def fix_terms(self) -> list[tuple[str, float]]:
         terms = [("fix base", USD_FIX_BASE)]
+        if self.findings:
+            terms.append((f"{self.findings} findings", self.findings * USD_PER_FINDING))
         if self.scheduler:
             terms.append(("scheduler tax", USD_SCHEDULER_TAX))
         terms.append(("Claude summary", USD_CLAUDE_SUMMARY))
@@ -210,6 +240,8 @@ def cap_arithmetic(
     grok_runs_suite: bool = False,
     cap_grace_usd: float = USD_CLAUDE_GRACE,
     adversarial: bool = False,
+    tests_items: int = 0,
+    findings: int = DEFAULT_FINDINGS,
 ) -> CapArithmetic:
     if spec_items < 1:
         raise ShapeInvalid("--items must be at least 1")
@@ -217,6 +249,12 @@ def cap_arithmetic(
         raise ShapeInvalid("--modules must be at least 1")
     if cap_grace_usd < 0 or cap_grace_usd > CAP_GRACE_CEILING_USD:
         raise ShapeInvalid(f"--cap-grace-usd must be between 0 and ${CAP_GRACE_CEILING_USD:.2f}")
+    if tests_items < 0:
+        raise ShapeInvalid("--tests-items must be zero or more")
+    if tests_items > spec_items:
+        raise ShapeInvalid("--tests-items must not exceed --items")
+    if findings < 0:
+        raise ShapeInvalid("--findings must be zero or more")
     return CapArithmetic(
         spec_items=spec_items,
         modules=modules,
@@ -224,7 +262,72 @@ def cap_arithmetic(
         grok_runs_suite=grok_runs_suite,
         cap_grace_usd=cap_grace_usd,
         adversarial=adversarial,
+        tests_items=tests_items,
+        findings=findings,
     )
+
+
+def parse_ceiling(value: str) -> dict:
+    """`--ceiling none|default|H,D`. `none` (the default) writes explicit
+    null bounds: an attended launch is watched, so the E9 spend ceiling
+    follows `--unattended` at run time, not this launcher (operator decision
+    2026-09-07). `default` reads `ceiling.py`'s own module constants live,
+    never re-typing the numbers. `H,D` sets both bounds explicitly."""
+    value = value.strip()
+    if value == "none":
+        return dict(CEILING_NONE)
+    if value == "default":
+        return {
+            "per_hour_usd": ceiling_mod.USD_PER_HOUR,
+            "per_day_usd": ceiling_mod.USD_PER_DAY,
+        }
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise ShapeInvalid("--ceiling must be 'none', 'default', or 'H,D'")
+    try:
+        per_hour, per_day = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise ShapeInvalid("--ceiling H,D must both be numbers") from None
+    if per_hour <= 0 or per_day <= 0:
+        raise ShapeInvalid("--ceiling H,D must both be positive")
+    return {"per_hour_usd": per_hour, "per_day_usd": per_day}
+
+
+def gate_preflight(repo: Path, test_command: str, *, timeout: int = GATE_TIMEOUT) -> None:
+    """F6: prove the gate command actually runs before the launcher ever
+    writes a mission file. F1 and F3 were launched with a gate that tested
+    the main checkout's source from inside a worktree (`.venv/bin/pytest`
+    with no `PYTHONPATH=src`); this reproduces exactly that failure mode by
+    running the gate once, for real, in a throwaway worktree of `repo` at
+    HEAD -- a temporary directory under `$TMPDIR`, torn down on every path,
+    never under `repo` itself. A lead-side check only; nothing inside a
+    mission ever calls this.
+    """
+    repo = Path(repo).expanduser().resolve()
+    tmp_root = tempfile.mkdtemp(prefix=GATE_PREFLIGHT_PREFIX, dir=os.environ.get("TMPDIR"))
+    worktree = Path(tmp_root) / "worktree"
+    try:
+        added = git_run(repo, "worktree", "add", "--detach", str(worktree), "HEAD")
+        if added.returncode != 0:
+            raise ShapeInvalid(
+                "gate preflight: could not create a throwaway worktree at HEAD: "
+                f"{added.stderr.strip() or added.stdout.strip()}"
+            )
+        env = dict(os.environ)
+        env["CONDUCTOR_WORKTREE"] = str(worktree)
+        outcome = run_tests(str(worktree), test_command, timeout=timeout, env=env)
+        if not outcome.passed:
+            tail = "\n".join(outcome.tail.splitlines()[-10:])
+            code = "none" if outcome.exit_code is None else str(outcome.exit_code)
+            raise ShapeInvalid(
+                f"gate preflight: the gate command exited {code} in a clean worktree at "
+                "HEAD -- it must bring its own toolchain by absolute path and PYTHONPATH=src "
+                f"when the package is imported from the tree.\n{tail}"
+            )
+    finally:
+        git_run(repo, "worktree", "remove", "--force", str(worktree))
+        git_run(repo, "worktree", "prune")
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _prefix(repo: Path, about: str | None) -> str:
@@ -255,6 +358,7 @@ def shape_a(
     build_commit: str = "",
     fix_commit: str = "",
     adversarial: bool = False,
+    ceiling: dict | None = None,
 ) -> dict:
     """The Shape A mission as a dict ready for `mission_from_dict` or `json.dump`.
 
@@ -273,6 +377,10 @@ def shape_a(
     `build`'s own thread) and inherits its check when the adversarial lane actually
     reproduced something, so the fix does not have to re-earn a test-surface change of its
     own for a defect that already has one.
+
+    `ceiling` is the mission's E9 rolling-spend ceiling dict, `{"per_hour_usd", "per_day_usd"}`
+    (see `parse_ceiling`); `None` (the default) writes `CEILING_NONE`, the same as `--ceiling
+    none`.
     """
     spec = Path(spec).expanduser().resolve()
     repo = Path(repo).expanduser().resolve()
@@ -396,6 +504,7 @@ def shape_a(
         "max_cost_usd": caps.mission_budget,
         "test": test,
         "template_max_chars": 160000,
+        "ceiling": dict(ceiling) if ceiling is not None else dict(CEILING_NONE),
         "policy": policy,
         "prefix": _prefix(repo, about),
         "pause": {"before": ["fix"]},
@@ -445,6 +554,7 @@ def shape_a_followon(
     mission_dir: Path | None = None,
     spec_prompt: str = "",
     base_sha: str = "",
+    ceiling: dict | None = None,
 ) -> dict:
     """E23: the review-and-fix mission for a salvage the lead has already
     committed by hand (AGENTS.md rule 6). Identical in shape to `shape_a`
@@ -463,7 +573,8 @@ def shape_a_followon(
     and is never part of a prompt. `spec_prompt`, when given, is the original
     mission's prompt (the spec) and leads the mission prompt, so reviewers
     judge against the same text the build did; `{{mission.prompt}}` renders
-    live to that.
+    live to that. `ceiling` is the same E9 rolling-spend dict `shape_a` takes; `None`
+    (the default) writes `CEILING_NONE`.
     """
     worktree = Path(worktree).expanduser().resolve()
     if not (worktree / ".git").exists():
@@ -532,6 +643,7 @@ def shape_a_followon(
         ),
         "test": test,
         "template_max_chars": 160000,
+        "ceiling": dict(ceiling) if ceiling is not None else dict(CEILING_NONE),
         "policy": {
             "review": {"vendors": ["google", "xai"]},
             "fix": {"vendors": ["anthropic"]},

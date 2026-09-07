@@ -845,11 +845,14 @@ It prints every term of the cap arithmetic, not just the sum, because the one re
 $2 shortfall was a module undercount that one printed number would hide:
 
 ```
+shape a-2026-09-06: 4 lanes, mission 'widget'
+gate preflight: passed
+ceiling: per_hour none, per_day none
 build cap: $5.00 5 spec items + $2.00 scheduler tax + $2.00 2 modules past the second + $1.00 Claude summary = $10.00
 review-gemini cap: $1.00 (reads only; rule 7)
 review-grok cap: $1.50 (reads only; rule 7)
-fix cap: $2.00 fix base + $2.00 scheduler tax + $1.00 Claude summary = $5.00
-mission budget: lanes $17.50 + $1.50 slack = $19.00
+fix cap: $2.00 fix base + $4.00 4 findings + $2.00 scheduler tax + $1.00 Claude summary = $9.00
+mission budget: lanes $21.50 + $1.50 slack = $23.00
 ```
 
 `--items` and `--modules` are hand counts. Conductor has no notion of a spec item or a
@@ -867,6 +870,34 @@ beside the two reviewers, moves the fix lane's `base` onto it (its `resume` stay
 `FIX_PROMPT` an `<adversarial>` block carrying that lane's answer and diff. The file
 is written beside the spec (or at `--out`), never overwritten without `--force`, and
 `--dry-run` runs `conductor mission --dry-run` on it.
+
+Four more terms round out the arithmetic (F6, all in `shape.py` and `cli.py`):
+
+- **`--tests-items N`** (default 0): spec items, already counted once in `--items`, that
+  are tests -- rule 11 sizes a spec whose tests are a fifth of the items as if they were
+  half, so each one earns a second dollar on the build cap, printed as its own term
+  (`$2.00 tests counted twice (2 items)`).
+- **`--findings N`** (default 4, the median Grok finding count on this repository): the
+  fix cap is `$2.00 fix base + $1.00 per expected finding + $1.00 Claude summary`, term by
+  term like the build cap. The old flat $3 default was raised to $7 by hand on seven of the
+  last nine missions; `--findings 4` is now that $7 without the hand edit.
+- **`--ceiling none|default|H,D`** sets the mission's E9 rolling-spend ceiling
+  (`ceiling.py`). `none` (the default) writes explicit null bounds: an attended launch is
+  watched, so the ceiling follows `--unattended` at run time, not this launcher (operator
+  decision 2026-09-07). `default` copies `ceiling.py`'s own `USD_PER_HOUR`/`USD_PER_DAY`
+  constants, read live so the launcher never re-types the numbers. `H,D` sets both bounds
+  explicitly. `shape_a_followon` takes the same keyword, and `conductor salvage --emit`
+  carries the identical `--ceiling` flag through to the follow-on mission it writes.
+- **Gate preflight**: before writing the mission file -- on a plain run and before
+  `--dry-run`'s own check -- the launcher runs `--test`'s command once, for real, in a
+  throwaway git worktree of `--repo` at HEAD (a directory under `$TMPDIR`, removed on
+  every path, never under the repo itself), under `runner.GATE_TIMEOUT`. Exit 127, a shell
+  "not found", or any other non-zero exit refuses the launch (`ShapeInvalid`, exit 3) and
+  names the exit code and the gate's last ten lines: F1 and F3 were launched with
+  `.venv/bin/pytest` and no `PYTHONPATH=src`, and their gates tested the main checkout's
+  source from inside a worktree instead of the tree they actually ran in. `--skip-preflight`
+  disables the check and says so in the printed output. The preflight is a lead-side check
+  only; nothing inside a mission ever runs it.
 
 The launcher writes each lane's prompt text to `prompts/<lane>.md` beside
 the mission file and references it with `prompt_file`, so the prompts a
@@ -936,7 +967,9 @@ lane's, so it never extends the mission's signed receipt chain.
 
 Once the lead has read the diff and committed it in the kept worktree by
 hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,
-rule 2) writes a follow-on mission there: `shape.shape_a_followon`, the
+rule 2, and `--ceiling none|default|H,D` for the follow-on mission's E9
+rolling-spend ceiling, same default and meaning as `shape a --ceiling`)
+writes a follow-on mission there: `shape.shape_a_followon`, the
 same Shape A shape as `conductor shape a` except there is no build lane --
 the kept worktree, already at the lead's commit, is the mission's `cwd`
 directly, so the two review lanes and the fix lane need no `base` and the
@@ -2441,7 +2474,9 @@ conductor golden check tests/golden/c5-build-cascade-capped --update
 - `conductor shape a --spec FILE --repo DIR --test CMD --items N --modules M`: write a
   Shape A mission from the versioned template, print every term of its cap arithmetic
   (AGENTS.md rules 2 and 10), and validate it (`--scheduler` adds the tax,
-  `--grok-runs-suite` raises Grok's cap, `--out`, `--force`, `--dry-run`)
+  `--grok-runs-suite` raises Grok's cap, `--tests-items` doubles the test items' share of
+  the build cap, `--findings` sizes the fix cap, `--ceiling` sets the mission's E9 rolling
+  spend ceiling, `--skip-preflight` skips the gate preflight, `--out`, `--force`, `--dry-run`)
 - `conductor verify`: inspect repo state, optionally run a gate
 - `conductor runs` / `conductor missions`: recent dispatches and missions
 - `conductor prices`: the effective price table after overrides

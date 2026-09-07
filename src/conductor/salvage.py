@@ -265,6 +265,7 @@ def emit(
     fix_commit: str = "",
     about: str | None = None,
     spec_prompt: str = "",
+    ceiling: dict | None = None,
 ) -> dict:
     """Write the follow-on review-and-fix mission for a salvage the lead has
     already committed. `spec_prompt` is the original mission's prompt (the
@@ -304,6 +305,7 @@ def emit(
         mission_dir=out.parent,
         spec_prompt=spec_prompt,
         base_sha=result.base_sha,
+        ceiling=ceiling,
     )
     try:
         mission: Mission = mission_from_dict(mission_dict, base_dir=out.parent, source=str(out))
