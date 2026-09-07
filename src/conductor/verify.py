@@ -321,6 +321,17 @@ def diff_since(cwd: str, base_sha: str, limit: int = DIFF_LIMIT) -> str:
     return text
 
 
+# F15 mission 2 cross-vendor review (Grok): every `CommitOutcome.reason` a
+# caller with `no_op_ok` set must read as "nothing landed, and that's fine"
+# -- not just the plain no-op, but `exclude`'s more specific reason too.
+# `runner.Result.failure()` and `errors._commit_failed` both check against
+# this set rather than the bare string, so a third such reason never has to
+# be added to both places by hand again.
+NO_OP_COMMIT_REASONS = frozenset(
+    {"nothing to commit", "nothing to commit beyond the excluded deliverable"}
+)
+
+
 @dataclass
 class CommitOutcome:
     """Result of conductor committing a dispatch's work itself."""

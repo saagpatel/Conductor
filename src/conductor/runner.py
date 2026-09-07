@@ -52,6 +52,7 @@ from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
 from .verdicts import checklist_contract, checklist_schema, parse_verdict
 from .verify import (
+    NO_OP_COMMIT_REASONS,
     CommitOutcome,
     GitState,
     TestOutcome,
@@ -301,7 +302,7 @@ class Result:
         # A requested commit that did not happen is a failure even when the
         # dispatch itself went fine: the caller asked for landed work.
         if self.commit and not self.commit.get("committed"):
-            nothing = self.commit.get("reason") == "nothing to commit"
+            nothing = self.commit.get("reason") in NO_OP_COMMIT_REASONS
             if not (self.no_op_ok and nothing):
                 return f"commit did not land: {self.commit.get('reason') or 'unknown'}"
         return None
