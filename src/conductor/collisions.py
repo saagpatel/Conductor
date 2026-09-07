@@ -13,27 +13,123 @@ from __future__ import annotations
 import itertools
 import subprocess
 
-_DIFF_GIT_RE_PREFIX = "diff --git a/"
+_DIFF_GIT_PREFIX = "diff --git "
+
+# C-style escapes git writes inside a quoted path, beside the octal bytes
+# handled separately below (`quote_c_style` in git's quote.c).
+_C_ESCAPES = {
+    '"': b'"',
+    "\\": b"\\",
+    "a": b"\a",
+    "b": b"\b",
+    "f": b"\f",
+    "n": b"\n",
+    "r": b"\r",
+    "t": b"\t",
+    "v": b"\v",
+}
+
+
+def _closing_quote(text: str) -> int:
+    """The index of the quote that closes the one at `text[0]`, or -1."""
+    index = 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            return index
+        index += 1
+    return -1
+
+
+def _unquote(token: str) -> str:
+    """A git-quoted path name (quotes included) as text.
+
+    Git writes non-printable and non-ASCII bytes as C-style escapes -- `\\t`
+    for a tab, `\\303\\251` for the two UTF-8 bytes of `e-acute` -- whenever
+    `core.quotePath` is on, which is git's default. The bytes are rebuilt and
+    decoded as UTF-8 with `surrogateescape`, so a path that is not valid UTF-8
+    round-trips through the same lossless representation the rest of the
+    stdlib uses for undecodable filenames rather than raising.
+    """
+    body = token[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out += char.encode("utf-8", "surrogateescape")
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):  # a trailing backslash: keep it as written
+            out += b"\\"
+            break
+        escape = body[index]
+        if escape in "01234567":
+            digits = ""
+            while index < len(body) and body[index] in "01234567" and len(digits) < 3:
+                digits += body[index]
+                index += 1
+            out.append(int(digits, 8) & 0xFF)
+            continue
+        out += _C_ESCAPES.get(escape, escape.encode("utf-8", "surrogateescape"))
+        index += 1
+    return out.decode("utf-8", "surrogateescape")
+
+
+def _strip_side(path: str, side: str) -> str:
+    prefix = f"{side}/"
+    return path[len(prefix) :] if path.startswith(prefix) else path
+
+
+def _header_paths(rest: str) -> tuple[str, str] | None:
+    """The `a` and `b` paths of one `diff --git` header, prefixes stripped.
+
+    Either side may be quoted, independently of the other; the unquoted form
+    is parsed exactly as before (the last ` b/` wins, so a path with spaces
+    still splits where git put the second prefix)."""
+    if rest.startswith('"'):
+        end = _closing_quote(rest)
+        if end == -1:
+            return None
+        a_path = _unquote(rest[: end + 1])
+        remainder = rest[end + 1 :]
+        if not remainder.startswith(" "):
+            return None
+        b_raw = remainder[1:]
+    else:
+        marker = rest.find(' "b/')
+        if marker == -1 or not rest.endswith('"'):
+            if not rest.startswith("a/"):
+                return None
+            plain = rest[len("a/") :]
+            split = plain.rfind(" b/")
+            if split == -1:
+                return None
+            return plain[:split], plain[split + len(" b/") :]
+        a_path = rest[:marker]
+        b_raw = rest[marker + 1 :]
+    b_path = _unquote(b_raw) if b_raw.startswith('"') and b_raw.endswith('"') else b_raw
+    return _strip_side(a_path, "a"), _strip_side(b_path, "b")
 
 
 def touched_files(patch: str) -> list[str]:
     """The repo-relative paths one unified diff touches, read from its
-    `diff --git a/<p> b/<p>` headers. A rename's old and new paths both
-    count; an add or a delete names the same path on both sides."""
+    `diff --git a/<p> b/<p>` headers, quoted or not. A rename's old and new
+    paths both count; an add or a delete names the same path on both sides."""
     paths: set[str] = set()
     for line in patch.splitlines():
-        if not line.startswith(_DIFF_GIT_RE_PREFIX):
+        if not line.startswith(_DIFF_GIT_PREFIX):
             continue
-        rest = line[len(_DIFF_GIT_RE_PREFIX) :]
-        marker = rest.rfind(" b/")
-        if marker == -1:
+        sides = _header_paths(line[len(_DIFF_GIT_PREFIX) :])
+        if sides is None:
             continue
-        a_path = rest[:marker]
-        b_path = rest[marker + len(" b/") :]
-        if a_path:
-            paths.add(a_path)
-        if b_path:
-            paths.add(b_path)
+        for path in sides:
+            if path:
+                paths.add(path)
     return sorted(paths)
 
 

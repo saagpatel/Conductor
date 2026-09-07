@@ -1652,7 +1652,10 @@ conductor computes `collisions` over whichever sinks left a diff:
 - `overlap`: which files each sink's patch touches
   (`conductor.collisions.touched_files`, read from a unified diff's
   `diff --git a/<p> b/<p>` headers; a rename counts both paths), and which
-  files two or more sinks touch -- a **hotspot**.
+  files two or more sinks touch -- a **hotspot**. Git's quoted header form
+  (`diff --git "a/caf\303\251.txt" ...`, which it writes by default for a
+  path with a tab or a non-ASCII byte) is decoded back to the path it names,
+  on either side independently, so those files count like any other.
 - `conflicts`: for every pair of sinks that both left a clean commit,
   whether `git merge-tree --write-tree --name-only` on their two tips would
   actually conflict, and on which paths. A pair whose merge would fail for
