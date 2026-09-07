@@ -688,7 +688,13 @@ what gets published. A `collate` is refused at load, naming the tainted
 lane(s), when any sink it could collate over is tainted and the collate's own
 fleet is not claude or antigravity; when a candidate sink actually is
 tainted, the collate's own `Spec` — prose or rank, every dispatch — is
-tainted too.
+tainted too. The `resolve` lane is bounded the same way, and refused with the
+same message (`resolve over tainted lane(s) ...`): it pastes every candidate
+sink's patch into its prompt, so any tainted or untrusted-output sink makes
+the resolver's own write-mode `Spec` tainted, and each such candidate's patch
+carries the tainted fence. What loads is the conservative bound over every
+sink; what dispatches is recomputed from the candidates that actually
+produced a patch, and recorded as `tainted` on the resolve receipt.
 
 When `_render` pastes a tainted lane's answer, diff, verdict, or
 `test_touched` into another prompt, the fence note says so in the bytes
