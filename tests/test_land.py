@@ -13,6 +13,7 @@ import pytest
 
 from conductor.cli import main
 from conductor.land import LandInvalid, land
+from conductor.mission import mission_from_dict, run_mission
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +25,6 @@ def _not_inside_a_lane(monkeypatch):
     first live landing (F12, 2026-09-07) failed its gate on exactly that.
     The one test that asserts the refusal sets the marker itself."""
     monkeypatch.delenv("CONDUCTOR_LANE", raising=False)
-from conductor.mission import mission_from_dict, run_mission
 
 
 def _claude_ok_argv(*shell: str) -> list[str]:
