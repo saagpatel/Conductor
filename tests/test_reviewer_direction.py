@@ -425,6 +425,35 @@ def test_reproduce_gate_refuses_a_fix_whose_validator_already_passed_on_the_base
     assert error_kind(result) == "reproduce"
 
 
+def test_reproduce_gate_refuses_a_fix_that_also_edits_unrelated_source(repo, home, fake_fleet):
+    """Peer review finding (Opus, item 6): the validator's `reproduced`
+    shortcut used to be gated only on the test surface staying untouched,
+    not on the deliverable being the fix's only change (the `accepted`
+    refusal right below it is gated on exactly that). A fix lane could pair
+    an unrelated source edit with a validator-reproduced document fix and
+    land the source edit with nothing having checked it at all."""
+    (repo / "app.py").write_text("old\n")
+    (repo / "doc.txt").write_text("before\nTODO: fix\n")
+    _commit(repo)
+    fake_fleet(["sh", "-c", "printf 'new\\n' > app.py; printf 'before\\nfixed\\n' > doc.txt"])
+
+    result = dispatch(
+        _spec(
+            repo,
+            stage="fix",
+            deliverable={"path": "doc.txt", "validator": _TODO_GATE},
+        ),
+        home=home,
+        test_command="true",
+        commit_message="fix: unrelated edit plus doc fix",
+    )
+
+    assert result.reproduce["verdict"] != "validator"
+    assert result.error == "fix without a reproducing check: no test-surface change"
+    assert result.ok is False
+    assert result.commit is None
+
+
 def test_stage_fix_mission_lane_carries_the_reproduce_block_into_its_lane_json(
     repo, home, fake_fleet
 ):

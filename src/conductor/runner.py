@@ -57,6 +57,7 @@ from .surface import Surface, missing_surface, test_surface
 from .verdicts import checklist_contract, checklist_schema, parse_verdict
 from .verify import (
     GATE_POLL_S,
+    GIT_TIMEOUT,
     NO_OP_COMMIT_REASONS,
     CommitOutcome,
     GitState,
@@ -824,11 +825,17 @@ def _validator_passed(run: dict | None) -> bool:
 
 
 def _run_validator_command(
-    cwd: str, command: str, timeout: int, env: dict[str, str] | None
+    cwd: str,
+    command: str,
+    timeout: int,
+    env: dict[str, str] | None,
+    *,
+    stop: Callable[[], bool] | None = None,
 ) -> dict:
     """F22: one before/after validator run -- the same process-group and
-    poll-loop shape as `verify.run_tests`, but this receipt's own 20-line
-    tail (`TAIL_LINES`) rather than the gate's 15."""
+    poll-loop shape as `verify.run_tests`, including the same `stop` check
+    a long-running gate gets, but this receipt's own 20-line tail
+    (`TAIL_LINES`) rather than the gate's 15."""
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
         try:
             proc = subprocess.Popen(
@@ -849,7 +856,7 @@ def _run_validator_command(
         _register_live_group(proc.pid)
         try:
             deadline = time.monotonic() + timeout
-            timed_out = False
+            timed_out = interrupted = False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -860,6 +867,9 @@ def _run_validator_command(
                     break
                 except subprocess.TimeoutExpired:
                     pass
+                if stop is not None and stop():
+                    interrupted = True
+                    break
         finally:
             _kill_live_group(proc.pid)
             proc.wait()
@@ -869,6 +879,12 @@ def _run_validator_command(
                 "timed_out": True,
                 "tail": f"timed out after {timeout}s; process group killed",
             }
+        if interrupted:
+            return {
+                "exit_code": None,
+                "timed_out": False,
+                "tail": "interrupted: stop requested; process group killed",
+            }
         out.seek(0)
         combined = out.read().strip().splitlines()
     return {
@@ -876,6 +892,43 @@ def _run_validator_command(
         "timed_out": False,
         "tail": "\n".join(combined[-TAIL_LINES:]) if combined else "(no output)",
     }
+
+
+def _git_show_bytes(cwd: str, ref: str, path: str) -> bytes | None:
+    """F22: the base commit's raw bytes for `path`, not text-decoded.
+
+    `git_run` (used everywhere else in this module) runs with `text=True`,
+    which applies universal-newline translation on read -- fine for the
+    status and diff plumbing that never round-trips through a byte
+    comparison, wrong here: a CRLF base file would otherwise reach the
+    validator's before run silently normalized to LF, judging bytes the
+    repository never held. `None` on any failure to start, run, or find
+    the blob (the caller reads that the same way a nonzero `git show`
+    would: no before run attempted).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _validator_ran_and_failed(run: dict | None) -> bool:
+    """F22: true only when a run actually produced a verdict and that
+    verdict was failure -- a run that timed out or never started proved
+    nothing, the same distinction `_reproduce_gate`'s own ladder draws
+    between `infra_error`/`timed_out` (no evidence either way) and a gate
+    that genuinely ran and failed (`runner.py`'s `_reproduce_receipt`
+    docstring)."""
+    return run is not None and not run.get("timed_out") and run.get("exit_code") not in (0, None)
 
 
 def _check_deliverable_validator(
@@ -909,14 +962,23 @@ def _check_deliverable_validator(
 
     before_run: dict | None = None
     if before.is_repo and before.head:
-        shown = git_run(spec.cwd, "show", f"{before.head}:{path}")
-        if shown.returncode == 0:
-            before_file = run_dir / "validator-before"
-            before_file.write_text(shown.stdout, errors="surrogateescape")
+        # W5/E1's own rule for this path: declared relative to `spec.cwd`,
+        # which need not be the repo toplevel, while `<rev>:<path>` git
+        # syntax resolves a bare path from the toplevel (`_repo_relative`
+        # exists for exactly this, see `_read_deliverable_only`).
+        repo_path = _repo_relative(spec.cwd, path)
+        raw = _git_show_bytes(spec.cwd, before.head, repo_path)
+        if raw is not None:
+            before_file = run_dir / f"validator-before{Path(path).suffix}"
+            before_file.write_bytes(raw)
             before_command = _validator_command(command, str(before_file))
-            before_run = _run_validator_command(spec.cwd, before_command, GATE_TIMEOUT, env)
+            before_run = _run_validator_command(
+                spec.cwd, before_command, GATE_TIMEOUT, env, stop=stop_requested
+            )
 
-    after_run = _run_validator_command(spec.cwd, after_command, GATE_TIMEOUT, env)
+    after_run = _run_validator_command(
+        spec.cwd, after_command, GATE_TIMEOUT, env, stop=stop_requested
+    )
 
     error: str | None = None
     now = _deliverable_sha256(spec.cwd, path)
@@ -925,10 +987,14 @@ def _check_deliverable_validator(
 
     if not _validator_passed(after_run):
         verdict = "rejected"
-    elif before_run is None or _validator_passed(before_run):
-        verdict = "accepted"
-    else:
+    elif _validator_ran_and_failed(before_run):
         verdict = "reproduced"
+    else:
+        # `before_run` is `None`, passed, or -- a before run that timed out
+        # or could not start -- never produced a verdict at all; none of
+        # those are evidence the base was broken, so this reads the same as
+        # "before passed or was None": nothing was demonstrated.
+        verdict = "accepted"
 
     if verdict == "rejected":
         after_tail = after_run.get("tail") or ""
@@ -1653,7 +1719,13 @@ def _reproduce_receipt(
     if spec.stage == "fix" and deliverable_validator is not None:
         verdict = deliverable_validator.get("verdict")
         surface_untouched = surface_state is None or not surface_state["touched"]
-        if verdict == "reproduced" and surface_untouched:
+        # Gated on `deliverable_only`, same as the `accepted` refusal right
+        # below: a validator that reproduced something on its own document
+        # is evidence about that document, not about an unrelated source
+        # edit riding along in the same diff. Without this, a fix lane could
+        # pair a validator-reproduced document fix with an untested source
+        # change and land both -- the source change checked by nothing.
+        if verdict == "reproduced" and surface_untouched and deliverable_only:
             before_tail = (deliverable_validator.get("before") or {}).get("tail") or ""
             return (
                 {
@@ -2592,10 +2664,20 @@ def dispatch(
 
         # F22: a declared validator runs on the before and after bytes now,
         # same reasoning as the sha256 above -- before the gate, so
-        # `_reproduce_receipt` can read its verdict.
-        validator_state, validator_error = _check_deliverable_validator(
-            spec, deliverable_state, deliverable_sha, before, run_dir, env
-        )
+        # `_reproduce_receipt` can read its verdict. Skipped on the same
+        # "did not complete cleanly" state the ordinary gate below already
+        # refuses to run against (`test_command and not timed_out and error
+        # is None`) and `_reproduce_receipt` itself refuses to build a
+        # verdict on: an already-timed-out, already-interrupted, or
+        # already-failed dispatch gets no more gate-length subprocesses
+        # spent on it, and a stop request already recorded as `error` is
+        # honored immediately instead of racing two more waits for it.
+        validator_state: dict | None = None
+        validator_error: str | None = None
+        if not (timed_out or error is not None or exit_code != 0 or output.error):
+            validator_state, validator_error = _check_deliverable_validator(
+                spec, deliverable_state, deliverable_sha, before, run_dir, env
+            )
         if validator_state is not None and deliverable_state is not None:
             deliverable_state["validator"] = validator_state
         if validator_error is not None and error is None:
