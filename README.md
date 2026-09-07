@@ -858,11 +858,12 @@ The fix lane lands on `--branch` (default `feat/<spec stem>`), `--build-commit` 
 `--fix-commit` default to conventional messages scoped to the repo name, `--ports`
 claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), and
 `--grok-runs-suite` switches Grok to the prompt that lets it run the gate at the $2.00
-cap. `--cap-grace-usd` (default $0.25, ceiling $0.50) sets the grace band (E24) on
-the build and fix lanes, the two Claude lanes whose cap is native; `--cap-grace-usd 0`
-disables it. The cap arithmetic prints the band as its own line, and it never changes
-the build or fix cap themselves. `--adversarial` (E16) adds the adversarial lane
-beside the two reviewers, moves the fix lane's `base` onto it (its `resume` stays
+cap. `--cap-grace-usd` (default $0.25, ceiling $0.50) sets the grace band (E24/F5) on
+the build and fix lanes, whose cap is native, and on the review-grok lane, whose cap
+is post-hoc; `--cap-grace-usd 0` disables it. The cap arithmetic prints the band as
+its own line, and it never changes the build, fix, or grok cap themselves.
+`--adversarial` (E16) adds the adversarial lane beside the two reviewers, moves the
+fix lane's `base` onto it (its `resume` stays
 `build`), adds `adversarial` to the vendor policy and the cap arithmetic, and gives
 `FIX_PROMPT` an `<adversarial>` block carrying that lane's answer and diff. The file
 is written beside the spec (or at `--out`), never overwritten without `--force`, and
@@ -2147,9 +2148,17 @@ opt-in band on top of `--cap-usd`, so Claude Code's own terminal message has
 room to finish instead of being cut off mid-summary: `--max-budget-usd`
 carries `cap_usd + cap_grace_usd` as one figure, so a run that finishes
 inside the band is an ordinary success with `grace_used` above zero, and a
-run Claude Code stops on that figure is over budget as before. It is enforceable on
-the `claude` fleet only (the only native cap; a watcher-killed run never
-gets a terminal message to finish), refused without a `cap_usd`, refused
+run Claude Code stops on that figure is over budget as before. F5: on a `cursor` lane
+in `mode: read`, whose cap is post-hoc (usage arrives only after the run, so the
+verdict is computed then, not while it runs), the same band widens that verdict
+instead: the run is over cap only when the estimated cost exceeds `cap_usd +
+cap_grace_usd`, so a complete review a few cents over cap_usd settles ok rather than
+failing the lane and skipping the fix stage behind it (rule 7's trap). It is
+enforceable on the `claude` fleet (native cap) and a `cursor` read lane (post-hoc cap)
+only -- refused on a `cursor` write lane (a write lane's cost is bytes, and the band
+would only buy more of them) and on every other fleet or mode, where a watcher-killed
+run never gets a terminal message to finish and there is no post-hoc verdict to widen.
+It is refused without a `cap_usd`, refused
 above a $0.50 ceiling, and stated per lane or per attempt -- never on a
 mission or a mission-level `cascade`, and a lane's own grace never cascades
 onto its fallback attempts. The receipt's `budget` gains `grace_usd` (what

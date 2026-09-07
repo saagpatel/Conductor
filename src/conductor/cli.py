@@ -868,8 +868,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument(
         "--cap-grace-usd",
         type=float,
-        help="claude only: a band on top of --cap-usd so the CLI's own terminal message can "
-        f"finish, ceiling ${CAP_GRACE_CEILING_USD:.2f}",
+        help="claude, or cursor in read mode: a band on top of --cap-usd so claude's own "
+        "terminal message can finish and a complete cursor answer a few cents over cap "
+        f"still settles ok, ceiling ${CAP_GRACE_CEILING_USD:.2f}",
     )
     p_dispatch.add_argument("--test", help="gate to run after the dispatch, in --cwd")
     p_dispatch.add_argument("--test-policy", choices=TEST_POLICIES, default="clean")
@@ -1031,8 +1032,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--cap-grace-usd",
         type=float,
         default=shape.USD_CLAUDE_GRACE,
-        help=f"grace band on the build and fix (claude) lanes (E24); 0 disables it, "
-        f"ceiling ${CAP_GRACE_CEILING_USD:.2f} (default ${shape.USD_CLAUDE_GRACE:.2f})",
+        help=f"grace band on the build and fix (claude) lanes and the review-grok (cursor "
+        f"read) lane (E24/F5); 0 disables it, ceiling ${CAP_GRACE_CEILING_USD:.2f} "
+        f"(default ${shape.USD_CLAUDE_GRACE:.2f})",
     )
     p_shape_a.add_argument(
         "--adversarial",

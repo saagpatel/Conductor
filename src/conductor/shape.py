@@ -117,7 +117,8 @@ class CapArithmetic:
     modules: int
     scheduler: bool
     grok_runs_suite: bool
-    # E24: the grace band on the build and fix (claude) lanes; 0 disables it.
+    # E24/F5: the grace band on the build and fix (claude) lanes and the
+    # review-grok (cursor read) lane; 0 disables it.
     cap_grace_usd: float = USD_CLAUDE_GRACE
     # E16: whether this shape carries the adversarial lane; the term (and
     # the mission budget's share of it) only appears when it does.
@@ -190,10 +191,10 @@ class CapArithmetic:
             lines.append(line("adversarial cap", self.adversarial_terms, self.adversarial_cap))
         lines.append(line("fix cap", self.fix_terms, self.fix_cap))
         lines.append(
-            f"grace: ${self.cap_grace_usd:.2f} per claude lane (E24, on top of its own "
-            "cap; does not change the caps above)"
+            f"grace: ${self.cap_grace_usd:.2f} per claude lane and the grok read lane "
+            "(E24/F5, on top of its own cap; does not change the caps above)"
             if self.cap_grace_usd
-            else "grace: disabled (E24)"
+            else "grace: disabled (E24/F5)"
         )
         lines.append(
             f"mission budget: lanes ${self.mission_budget - USD_MISSION_SLACK:.2f} "
@@ -350,6 +351,20 @@ def shape_a(
             "passes, with no further test change required. Otherwise a fix with no test change "
             "is refused, and a test that already passes on the current tree is refused.",
         )
+    review_grok: dict = {
+        "name": "review-grok",
+        "stage": "review",
+        "fleet": "cursor",
+        "model": "grok-4.6",
+        "effort": "standard",
+        "mode": "read",
+        "base": "build",
+        "timeout": 1200,
+        "cap_usd": caps.grok_cap,
+        "prompt": GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT,
+    }
+    if caps.cap_grace_usd:
+        review_grok["cap_grace_usd"] = caps.cap_grace_usd
     fix: dict = {
         "name": "fix",
         "stage": "fix",
@@ -413,18 +428,7 @@ def shape_a(
                 "cap_usd": caps.gemini_cap,
                 "prompt": GEMINI_REVIEW_PROMPT,
             },
-            {
-                "name": "review-grok",
-                "stage": "review",
-                "fleet": "cursor",
-                "model": "grok-4.6",
-                "effort": "standard",
-                "mode": "read",
-                "base": "build",
-                "timeout": 1200,
-                "cap_usd": caps.grok_cap,
-                "prompt": GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT,
-            },
+            review_grok,
             *([adversarial_lane] if adversarial_lane is not None else []),
             fix,
         ],
@@ -501,6 +505,19 @@ def shape_a_followon(
         patch_path.parent.mkdir(parents=True, exist_ok=True)
         patch_path.write_text(diff)
 
+    review_grok: dict = {
+        "name": "review-grok",
+        "stage": "review",
+        "fleet": "cursor",
+        "model": "grok-4.6",
+        "effort": "standard",
+        "mode": "read",
+        "timeout": 1200,
+        "cap_usd": caps.grok_cap,
+        "prompt": grok_prompt,
+    }
+    if caps.cap_grace_usd:
+        review_grok["cap_grace_usd"] = caps.cap_grace_usd
     fix: dict = {
         "name": "fix",
         "stage": "fix",
@@ -550,17 +567,7 @@ def shape_a_followon(
                 "cap_usd": caps.gemini_cap,
                 "prompt": gemini_prompt,
             },
-            {
-                "name": "review-grok",
-                "stage": "review",
-                "fleet": "cursor",
-                "model": "grok-4.6",
-                "effort": "standard",
-                "mode": "read",
-                "timeout": 1200,
-                "cap_usd": caps.grok_cap,
-                "prompt": grok_prompt,
-            },
+            review_grok,
             fix,
         ],
     }
