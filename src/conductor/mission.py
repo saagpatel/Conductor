@@ -2656,9 +2656,14 @@ class MissionResult:
     # "lanes_s", "idle_s"} -- the lead's real wall-clock cost, not just the
     # dispatch spend. `launched_at` never resets across a resume; every
     # other figure is this mission's whole life, recomputed fresh each run
-    # from durable sources (pause.json, the run receipts, the scheduler's
-    # own clock), never carried and added to. None only when a receipt
-    # predates this field (report.py and golden.py backfill from there).
+    # from durable sources: pause.json for `paused_s`, the run receipts for
+    # `gate_s` and `lanes_s`, and (F15) this mission's own prior
+    # `result.json` under `~/.conductor/missions/<id>/` -- not the
+    # scheduler's own clock, which is only this process's -- added to for
+    # `idle_s` on a resume. None only when a receipt predates this field
+    # (report.py and golden.py backfill from there). `gate_s` (F15) covers
+    # every lane's own gate, its clean-gate re-run, its reproduce gate, and
+    # its setup/teardown commands -- see `_gate_seconds`.
     wall: dict | None = None
 
     def to_dict(self) -> dict:
@@ -2768,11 +2773,17 @@ def _paused_seconds(mission_dir: Path) -> float:
 
 
 def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
-    """F2: every lane's own gate and clean-gate time, summed from the
-    authoritative run receipts under `base/runs` (never the lane's own
-    attempt summary, which keeps only the gate's exit code) -- across every
-    attempt this mission ever dispatched, kept lanes included, so a resume
-    never loses an earlier resume's gate time.
+    """F2: every lane's own gate, clean-gate, reproduce-gate, and
+    setup/teardown time, summed from the authoritative run receipts under
+    `base/runs` (never the lane's own attempt summary, which keeps only the
+    gate's exit code) -- across every attempt this mission ever dispatched,
+    kept lanes included, so a resume never loses an earlier resume's gate
+    time.
+
+    F15 item 4: `reproduce` (E16) and `lane_env.setup`/`lane_env.teardown`
+    (C4) are each their own `ran`/`duration_s` outcome, sibling to `tests`
+    and `test_surface.clean_gate` -- a multi-minute reproduce gate or a
+    lane's setup command used to land in no column of the wall block at all.
 
     Review finding: a receipt whose gate actually ran (`ran: true`) but
     carries no `duration_s` predates that field -- its time is unknown, not
@@ -2781,6 +2792,17 @@ def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
     total = 0.0
     seen: set[str] = set()
     incomplete = False
+
+    def add(outcome: object) -> None:
+        nonlocal total, incomplete
+        if not isinstance(outcome, dict) or not outcome.get("ran"):
+            return
+        duration = outcome.get("duration_s")
+        if isinstance(duration, int | float) and not isinstance(duration, bool):
+            total += float(duration)
+        else:
+            incomplete = True
+
     for lane in lane_results:
         for attempt in [*lane.previous_attempts, *lane.attempts]:
             run_id = attempt.get("run_id")
@@ -2790,20 +2812,12 @@ def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
             receipt = _json_object(base / "runs" / run_id / "result.json")
             if receipt is None:
                 continue
-            tests = receipt.get("tests")
-            if isinstance(tests, dict) and tests.get("ran"):
-                duration = tests.get("duration_s")
-                if isinstance(duration, int | float) and not isinstance(duration, bool):
-                    total += float(duration)
-                else:
-                    incomplete = True
-            clean = (receipt.get("test_surface") or {}).get("clean_gate")
-            if isinstance(clean, dict) and clean.get("ran"):
-                duration = clean.get("duration_s")
-                if isinstance(duration, int | float) and not isinstance(duration, bool):
-                    total += float(duration)
-                else:
-                    incomplete = True
+            add(receipt.get("tests"))
+            add((receipt.get("test_surface") or {}).get("clean_gate"))
+            add(receipt.get("reproduce"))
+            lane_env = receipt.get("lane_env") or {}
+            add(lane_env.get("setup"))
+            add(lane_env.get("teardown"))
     return None if incomplete else total
 
 
@@ -2880,9 +2894,16 @@ def _review_fix_label(lane: LaneResult) -> str:
         counts: dict[str, int] = {}
         for item in lane.dispositions:
             counts[item["disposition"]] = counts.get(item["disposition"], 0) + 1
-        return ", ".join(
+        label = ", ".join(
             f"{counts[kind]} {kind}" for kind in _DISPOSITION_ORDER if kind in counts
         )
+        # F15 item 3: a malformed `DISPOSITION:` line is silently skipped by
+        # the parser everywhere else; this ledger cell is the only place it
+        # is shown at all.
+        if lane.dispositions_malformed:
+            malformed = f"{lane.dispositions_malformed} malformed"
+            label = f"{label}, {malformed}" if label else malformed
+        return label
     return ""
 
 
@@ -4868,7 +4889,19 @@ def _execute_mission(
     # to submit -- accrued between a `running` dict going empty and the next
     # lane actually being submitted to the pool. Opened once, up front: the
     # loop starts with nothing running either.
-    idle_total = 0.0
+    # F15 item 5: unlike `launched_at`, this is not carried and left alone --
+    # it is carried from the prior `result.json`'s own `wall.idle_s` (the
+    # durable source; the scheduler's own clock, below, only ever spans this
+    # process) and then added to, so a resumed mission's `idle_s` is its
+    # whole life the same way `wall_s`, `paused_s`, `gate_s`, and `lanes_s`
+    # already are. A prior result with no `wall` block at all (predates F2)
+    # contributes 0, same as every other figure that backfills from there.
+    prior_idle = prior_wall.get("idle_s") if isinstance(prior_wall, dict) else None
+    idle_total = (
+        float(prior_idle)
+        if isinstance(prior_idle, int | float) and not isinstance(prior_idle, bool)
+        else 0.0
+    )
     idle_since: float | None = time.monotonic()
 
     def _fire_early_cancel(winner: str) -> None:
@@ -5385,6 +5418,11 @@ def _execute_mission(
         "gate_s": None if gate_seconds is None else round(gate_seconds, 1),
         "lanes_s": round(lanes_s, 1),
         "idle_s": round(idle_total, 1),
+        # F15 item 6: so `report.py`'s `busy` can divide by the concurrency
+        # the mission actually ran under instead of assuming 1 -- `lanes_s`
+        # is a sum across lanes, so any `concurrency` above 1 legitimately
+        # pushes it past `wall_s` on its own.
+        "concurrency": mission.concurrency,
     }
     report_path = mission_dir / "report.md"
     resume_entry: dict | None = None

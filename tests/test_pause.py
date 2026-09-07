@@ -259,6 +259,28 @@ def test_paused_s_covers_the_wait_and_launched_at_carries_from_the_first_run(
     assert resumed.wall["launched_at"] == first.wall["launched_at"]
 
 
+def test_idle_s_carries_across_a_resume_like_the_rest_of_wall(
+    repo, home, monkeypatch, tmp_path
+):
+    """F15 item 5: `idle_s` used to reset to this process's own scheduler
+    time on every resume while `wall_s`, `paused_s`, `gate_s`, and `lanes_s`
+    all spanned the mission's whole life -- a resumed mission's `idle_s`
+    must be at least what the first run already recorded."""
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.wall is not None
+
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="continue"
+    )
+    assert resumed.ok is True
+    assert resumed.wall["idle_s"] >= first.wall["idle_s"]
+
+
 def test_answer_stop_dispatches_nothing(repo, home, monkeypatch, tmp_path):
     calls = {"BUILD": 0, "REVIEW": 0, "FIX": 0}
 

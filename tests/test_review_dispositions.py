@@ -17,7 +17,7 @@ from pathlib import Path
 
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
-from conductor.mission import LaneResult, mission_from_dict, run_mission
+from conductor.mission import LaneResult, _review_fix_label, mission_from_dict, run_mission
 from conductor.verdicts import dispositions_malformed, fix_dispositions, review_verdict
 
 # --- verdicts.review_verdict -------------------------------------------------
@@ -116,6 +116,29 @@ def test_lane_result_from_dict_defaults_review_and_dispositions_to_none():
     ]
     lane.dispositions_malformed = 0
     assert LaneResult.from_dict(lane.to_dict()) == lane
+
+
+# --- mission.py: _review_fix_label shows a fix lane's malformed count -------
+
+
+def test_review_fix_label_appends_the_malformed_count_when_non_zero():
+    lane = LaneResult(
+        name="fix",
+        ok=True,
+        dispositions=[{"lane": "review", "index": 1, "disposition": "fixed", "reason": "x"}],
+        dispositions_malformed=2,
+    )
+    assert _review_fix_label(lane) == "1 fixed, 2 malformed"
+
+
+def test_review_fix_label_omits_the_malformed_count_when_zero():
+    lane = LaneResult(
+        name="fix",
+        ok=True,
+        dispositions=[{"lane": "review", "index": 1, "disposition": "fixed", "reason": "x"}],
+        dispositions_malformed=0,
+    )
+    assert _review_fix_label(lane) == "1 fixed"
 
 
 # --- mission.py: settle() computes both from the lane's own answer ----------

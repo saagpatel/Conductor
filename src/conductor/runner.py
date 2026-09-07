@@ -229,6 +229,13 @@ class Result:
         # A fleet that says it failed is believed, whatever its exit code.
         if self.fleet_error:
             return f"fleet reported: {self.fleet_error}"
+        # F15: a vanished working tree is never ok, whatever the mode and
+        # whatever the gate did or did not do with a directory that no
+        # longer exists -- checked ahead of the gate below so a read lane
+        # whose F3 skip this state also disables (see the pre-gate check
+        # above) does not fall through as ok merely because nothing ran.
+        if self.git_verdict.get("checked") and self.git_verdict.get("vanished"):
+            return "the working tree vanished during the dispatch; no work landed"
         # A gate that ran and did not exit 0 sinks the run; that includes a
         # gate that hung, which has no exit code at all.
         clean = (self.test_surface or {}).get("clean_gate") or {}
@@ -2150,9 +2157,13 @@ def dispatch(
         ):
             pre_gate_after = GitState.capture(spec.cwd)
             pre_gate_verdict = compare(spec.cwd, before, pre_gate_after)
-            if pre_gate_verdict.checked and (
-                pre_gate_verdict.no_op
-                or _read_deliverable_only(spec, before, pre_gate_after, pre_gate_verdict)
+            if (
+                pre_gate_verdict.checked
+                and not pre_gate_verdict.vanished
+                and (
+                    pre_gate_verdict.no_op
+                    or _read_deliverable_only(spec, before, pre_gate_after, pre_gate_verdict)
+                )
             ):
                 read_gate_skip = {
                     "skipped": "read lane, source unchanged",
