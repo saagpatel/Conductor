@@ -28,6 +28,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F6 launcher: ceiling, test items, fix cap by findings, gate preflight | 0.51.0 | Shape A via the launcher, salvaged on the interrupt-test flake, Grok's one finding fixed by hand | $4.83 |
 | F13 Antigravity hooks verified free before dispatch; schema refused on its read lanes | 0.52.0 | Shape A via the launcher, build green under cap, Grok's two findings fixed by hand | $7.88 |
 | F7 conductor land | 0.53.0 | Shape A via the launcher, build green under cap, Grok's two real findings fixed on the resumed thread with dispositions | $7.65 |
+| F12 Claude read lanes under --restricted and --permission-prompts none; deliverable read lanes can write | 0.54.0 | Shape A via the launcher, build green under cap, both reviewers NO_FINDINGS, landed by conductor land | $8.63 |
 
 ## What the receipts say
 
