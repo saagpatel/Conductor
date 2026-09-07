@@ -661,13 +661,15 @@ Declare it on the lane that quotes the outside text:
  "prompt": "Summarize this issue and suggest a fix:\n{{mission.prompt}}"}
 ```
 
-Taint spreads forward, computed at load time to a fixed point in mission
-order (a lane can only reference an earlier one): a lane is tainted when it
-declares `taint: true` itself, when any attempt's prompt references a tainted
-lane's `{{lanes.<name>.answer}}`, `.diff`, `.verdict`, `.test_touched`, or
-`.deliverable`, or when it `resume`s a tainted lane's session. `Lane.taint_from` names the lanes
-it inherited from, in mission order, empty when the lane is tainted only by
-its own `taint: true`. Every attempt of a tainted lane dispatches with taint
+Taint spreads forward along the lane graph, computed at load time to a fixed
+point over every lane in the mission whatever order they are declared in (a
+`needs` edge may point forward, so a lane may reference one declared after
+it): a lane is tainted when it declares `taint: true` itself, when any
+attempt's prompt references a tainted lane's `{{lanes.<name>.answer}}`,
+`.diff`, `.verdict`, `.test_touched`, or `.deliverable`, or when it
+`resume`s a tainted lane's session. `Lane.taint_from` names the lanes it
+inherited from, in mission order, empty when the lane is tainted only by its
+own `taint: true`. Every attempt of a tainted lane dispatches with taint
 set on its `Spec`, cascade attempts included — the ladder does not launder a
 tainted lane back to trusted.
 

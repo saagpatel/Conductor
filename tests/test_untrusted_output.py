@@ -341,3 +341,74 @@ def test_readme_documents_untrusted_output():
     assert '"untrusted_output": true' in section
     assert "taint_from" in section
     assert "research" in section and "build" in section
+
+
+# --- D3: declaration order does not decide taint --------------------------
+
+
+def _order_pair(consumer_fleet: str, consumer_model: str | None) -> list[list[dict]]:
+    """The same two lanes, written both ways round: an untrusted-output
+    source and a consumer that pastes its answer. `needs` may point forward,
+    so both orders are legal missions and both must reach the same verdict."""
+    source = {
+        "name": "src",
+        "fleet": "claude",
+        "untrusted_output": True,
+        "prompt": "S",
+    }
+    consumer = {
+        "name": "con",
+        "fleet": consumer_fleet,
+        "needs": ["src"],
+        "prompt": "C sees {{lanes.src.answer}}",
+    }
+    if consumer_model is not None:
+        consumer["model"] = consumer_model
+    return [[source, consumer], [consumer, source]]
+
+
+@pytest.mark.parametrize("lanes", _order_pair("claude", None))
+def test_taint_reaches_a_consumer_declared_before_its_source(lanes, tmp_path):
+    mission = mission_from_dict({"cwd": "/tmp", "lanes": lanes}, base_dir=tmp_path)
+    by_name = {lane.name: lane for lane in mission.lanes}
+    assert by_name["src"].tainted is False
+    assert by_name["con"].tainted is True
+    assert by_name["con"].taint_from == ["src"]
+
+
+@pytest.mark.parametrize("lanes", _order_pair("cursor", "grok-4.6"))
+def test_a_consumer_declared_before_its_source_is_still_refused_off_claude(lanes, tmp_path):
+    """D3: consumer-first used to load clean with `tainted=False`, because
+    the flag was derived inside the lane-building loop from the lanes seen so
+    far. The refusal must not depend on which lane was written first."""
+    with pytest.raises(
+        MissionInvalid, match="taint is enforceable on the claude and antigravity fleets only"
+    ):
+        mission_from_dict({"cwd": "/tmp", "lanes": lanes}, base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_taint_reaches_a_whole_chain_written_backwards(reverse, tmp_path):
+    """Two hops, so a single extra pass would not be enough: `mid` only
+    becomes a taint source once `src` has marked it."""
+    lanes = [
+        {"name": "src", "fleet": "claude", "untrusted_output": True, "prompt": "S"},
+        {
+            "name": "mid",
+            "fleet": "claude",
+            "needs": ["src"],
+            "prompt": "M sees {{lanes.src.answer}}",
+        },
+        {
+            "name": "sink",
+            "fleet": "claude",
+            "needs": ["mid"],
+            "prompt": "K sees {{lanes.mid.answer}}",
+        },
+    ]
+    if reverse:
+        lanes = list(reversed(lanes))
+    mission = mission_from_dict({"cwd": "/tmp", "lanes": lanes}, base_dir=tmp_path)
+    by_name = {lane.name: lane for lane in mission.lanes}
+    assert by_name["mid"].tainted is True and by_name["mid"].taint_from == ["src"]
+    assert by_name["sink"].tainted is True and by_name["sink"].taint_from == ["mid"]

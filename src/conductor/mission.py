@@ -386,12 +386,13 @@ class Lane:
     # is untrusted -- a read lane that fetched the web, for instance. Mission
     # input, never cascaded. Unlike `taint`, it does not weaken this lane's own
     # tool set or dispatch state; it only makes this lane a taint *source* for
-    # whatever later lane references it (see mission_from_dict's propagation
-    # walk) or resumes its session.
+    # whatever lane references it (see _propagate_taint) or resumes its
+    # session -- wherever that lane is declared, before it or after it.
     untrusted_output: bool = False
     # D2: whether this lane is tainted, self-declared or inherited by
     # referencing a tainted lane's answer/diff/verdict/test_touched or by
-    # resuming a tainted lane's session. Load-derived; see mission_from_dict.
+    # resuming a tainted lane's session. Load-derived; D3: computed over the
+    # whole lane graph, after every lane is built -- see _propagate_taint.
     tainted: bool = False
     # D2: the lanes this lane inherited taint from, in mission order; empty
     # when the lane is tainted only by its own `taint: true`.
@@ -1202,6 +1203,61 @@ def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
     return refs
 
 
+def _propagate_taint(lanes: list[Lane]) -> None:
+    """D3: mark every lane that inherits taint, over the whole lane graph.
+
+    A lane inherits taint from any lane it references in a template -- every
+    field `_template_refs` parses (`answer`, `diff`, `deliverable`,
+    `verdict`, `test_touched`), on every attempt including the cascade one --
+    and from the lane whose session it `resume`s, whenever that source lane
+    is itself tainted or declares `untrusted_output`.
+
+    A `needs` edge may point forward, so the source may be declared after the
+    consumer; this walk therefore runs to a fixed point over the complete
+    lane list rather than trusting declaration order (which is what a single
+    forward pass inside the build loop did, leaving the same two lanes
+    tainted or not depending on which one was written first). Taint only ever
+    spreads, so every pass either marks a lane and runs again or the graph
+    has settled.
+
+    A human lane is tainted at load with the sentinel `taint_from` value
+    `["human"]`, which names no lane: it is left exactly as `_human_lane`
+    built it, and stays a taint source for everything that reads it.
+    """
+    by_name = {lane.name: lane for lane in lanes}
+    order = {lane.name: index for index, lane in enumerate(lanes)}
+    sources: dict[str, list[str]] = {}
+    for lane in lanes:
+        if lane.human:
+            continue
+        refs: set[str] = set()
+        for attempt in lane.attempts:
+            for ref_lane, _ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
+                if is_mission or ref_lane == lane.name or ref_lane not in by_name:
+                    continue
+                refs.add(ref_lane)
+        if lane.resume is not None and lane.resume in by_name and lane.resume != lane.name:
+            refs.add(lane.resume)
+        sources[lane.name] = sorted(refs, key=lambda name: order[name])
+
+    changed = True
+    while changed:
+        changed = False
+        for lane in lanes:
+            if lane.human:
+                continue
+            taint_from = [
+                name
+                for name in sources[lane.name]
+                if by_name[name].tainted or by_name[name].untrusted_output
+            ]
+            tainted = lane.tainted or bool(taint_from)
+            if taint_from != lane.taint_from or tainted != lane.tainted:
+                lane.taint_from = taint_from
+                lane.tainted = tainted
+                changed = True
+
+
 def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
     """Every (judge, judged, vendor) pair where a judge could score a lane on
     its own vendor: a verdict lane or a `stage: review` lane against its
@@ -1376,16 +1432,6 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         for raw_lane in raw_lanes
     )
     lanes: list[Lane] = []
-    # D2: (tainted, taint_from) per lane name, filled in as each lane is
-    # built. A lane can only reference an earlier lane (a later reference is
-    # refused in _validate_graph), so one forward pass over `raw_lanes` in
-    # mission order reaches a fixed point without a second pass.
-    tainted_by_name: dict[str, tuple[bool, list[str]]] = {}
-    # E3: whether each already-processed lane declared `untrusted_output` --
-    # a second taint-source signal alongside `tainted_by_name`, consulted by
-    # the same forward pass since a later lane can only reference an earlier
-    # one.
-    untrusted_by_name: dict[str, bool] = {}
     for i, raw_lane in enumerate(raw_lanes):
         if not isinstance(raw_lane, dict):
             raise MissionInvalid(f"lane {i} must be an object")
@@ -1393,12 +1439,11 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         lane_where = f"lane '{raw_lane['name']}'" if raw_lane.get("name") else f"lane {i}"
         if raw_lane.get("fleet") == "human":
             lane = _human_lane(raw_lane, base_dir, cwd, lane_where, defaults, lanes)
-            lanes.append(lane)
             # E7: a human lane is tainted at load, always -- see _human_lane --
             # so every downstream lane that reads its answer inherits taint
-            # from it exactly the way it would from any other tainted lane.
-            tainted_by_name[lane.name] = (True, list(lane.taint_from))
-            untrusted_by_name[lane.name] = False
+            # from it exactly the way it would from any other tainted lane
+            # (in _propagate_taint, once every lane is built).
+            lanes.append(lane)
             continue
         # E6: this lane's own declared fleet, before any fallback or cascade
         # attempt -- Lane.script, and the refusals below that make no sense
@@ -1500,34 +1545,16 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                         f"{attempt_where}: a plan lane's deliverable path must end in "
                         ".json or .toml"
                     )
-        # D2: inherited taint, from every attempt's template references
-        # (cascade attempt included) and from resuming a tainted lane's
-        # session. Only lanes already processed (i.e. earlier in mission
-        # order) are in `tainted_by_name`; a reference to a later lane is a
-        # load error caught separately, in _validate_graph.
-        taint_from: list[str] = []
-        for attempt in attempts:
-            for ref_lane, _ref_field, is_mission in _template_refs(attempt.prompt, lane_name):
-                if is_mission or ref_lane not in tainted_by_name:
-                    continue
-                # E3: a reference to an untrusted-output lane taints the
-                # referencing lane exactly like a reference to a tainted one.
-                if (
-                    tainted_by_name[ref_lane][0] or untrusted_by_name[ref_lane]
-                ) and ref_lane not in taint_from:
-                    taint_from.append(ref_lane)
-        if lane_resume is not None and lane_resume in tainted_by_name:
-            if (
-                tainted_by_name[lane_resume][0] or untrusted_by_name[lane_resume]
-            ) and lane_resume not in taint_from:
-                taint_from.append(lane_resume)
-        lane_tainted = lane_taint or bool(taint_from)
-        if lane_plan and lane_tainted:
-            raise MissionInvalid(f"{lane_where}: a plan lane may not be tainted")
+        # D3: inherited taint is not computed here. A `needs` edge may point
+        # forward, so a lane's template references and its `resume` target
+        # can name a lane declared after it; deriving the flag inside this
+        # loop made it depend on the order the lanes happened to be written
+        # in. `_propagate_taint`, below, runs the same rules to a fixed point
+        # over the complete lane list, and only then do the refusals that
+        # read `tainted` (here, and the per-attempt capability check in
+        # Mission.validate) apply.
         if lane_plan and lane_untrusted_output:
             raise MissionInvalid(f"{lane_where}: a plan lane may not be untrusted-output")
-        tainted_by_name[lane_name] = (lane_tainted, taint_from)
-        untrusted_by_name[lane_name] = lane_untrusted_output
         lanes.append(
             Lane(
                 name=lane_name,
@@ -1539,13 +1566,19 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 stage=lane_stage,
                 cascaded=lane_cascaded,
                 taint=lane_taint,
-                tainted=lane_tainted,
-                taint_from=taint_from,
+                tainted=lane_taint,
+                taint_from=[],
                 script=lane_is_script,
                 untrusted_output=lane_untrusted_output,
                 plan=lane_plan,
             )
         )
+
+    # D3: taint over the whole graph, then the refusals that read it.
+    _propagate_taint(lanes)
+    for lane in lanes:
+        if lane.plan and lane.tainted:
+            raise MissionInvalid(f"lane '{lane.name}': a plan lane may not be tainted")
 
     collate = None
     raw_collate = raw.get("collate")
