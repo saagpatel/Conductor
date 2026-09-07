@@ -1,0 +1,67 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "fcd1a6deb89f11dddf4e0d02060dd5edef99c88d7de0971cd165f296a469cca0",
+    "lanes/cand-composer.json": "f5690a307029a78448c8dcb9e8c65b3bc480cb06efdc5cb64c496a3f24bb8e44",
+    "lanes/cand-grok.json": "caafd3a0892ef12f28f7270d69d42742f08d1f3540203f0f620402e287b6def9",
+    "mission.json": "818cdb34e09c00251ec87e29c254ff9794a1f3de1828881a48c43481a3b1d095",
+    "report.md": "0c17d4a4f095dd8830915342a7c6ce8f2266a12731ccc1512eb24b1604572b73",
+    "result.json": "d41e06e2e8221a33488c511f6f4ec892d34a2678a0300d1e0722f4b74517e07b",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/answer.txt": "d75f6003e8a39d7a3912f193b3af12596aa5f71fbadbafc0ccbe61d6e5263b31",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/diff.patch": "e429498ce7a7561b4c5fa3a2cd51243d05849f75d5b4d9d32037aaa2c3fe635e",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/prompt.txt": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/result.json": "bba73f0650e6f9049eda66abf19a246a4e8b2170714bb93b27efb2784975a3cd",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/stdout.jsonl": "f02ed1d722aa372c97eea387b7c43b7f5fd42e241ffa3e791d378ae48041e4fc",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/answer.txt": "781ea842cecbc3c8b7b0cd1e2bb82e02980302aa5c21a4558b94ab3edbb67294",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/diff.patch": "3d642b725936dde53fba47a7ae5cce750efc4a73680b1033eab8395a208ce775",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/prompt.txt": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/result.json": "f3b60d21e8f95579d83a96cc068dcfbfa7a1ae8618184db1fad8aa3ae730f07f",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/stdout.jsonl": "42a520217e28b815a8c302cfaaed65b2434fb373adebfae388dbe1295e67eab2",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/answer.txt": "5ba8f3d20f5b81b26de20bd172d3885cfd3a80e7a8d5dd3bff1d71d148b98968",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/prompt.txt": "db22978b7ae5de6831e6d6fc35acf699667ba3c9d26b3ff45cb060e0dfbcce23",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/result.json": "c4758bc908364eaa904e286c29990d402aa7bc15df30d2737dc6ae63369d8cff",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/stdout.jsonl": "21391e9f2d51d7b887fc8eff968f72ddd2321877e588cd7459b2eb2c652ab9ee",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of/answer.txt": "1955b2ce47ce554973ee9f1cc3b9f2feedaec15bf29ebfd7ed3925f81dee30ea",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of/prompt.txt": "966bd426b96ac1c36e857f2ab1a15af851948875e23adda2ceb3837ae3c18693",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of/result.json": "8d8dc90cd3acf812087481e1845cb85290c64b9634ff3f4269822f6cca38aebf",
+    "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of/stdout.jsonl": "951027041f138d671241b876483942a880f7495f43591d162abfc203d9b51fd2",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of-2/answer.txt": "5b57502a326fe7e7fd60f8f0a6efcd1d72e9790cf04bf087a39071cce41938cc",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of-2/prompt.txt": "966bd426b96ac1c36e857f2ab1a15af851948875e23adda2ceb3837ae3c18693",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of-2/result.json": "caa39c5e0ca407003aef14bf5b011a089f013c7c813f8c443e0b6321aca672f9",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of-2/stdout.jsonl": "d5a5b82e3d22517c5df9c70ccf8e60811744ac8e3a294708c46d089595ffb1cf",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of/answer.txt": "0f2a56cd8d9471810a770095ff2015c1c1ad2d559ac4a332ef7c35a4b30d38f1",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of/prompt.txt": "db22978b7ae5de6831e6d6fc35acf699667ba3c9d26b3ff45cb060e0dfbcce23",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of/result.json": "1bf64eb5f4596baa1ef58baadbc0bb77fa5a70ff406d0616a6b9309bc8dbf78b",
+    "runs/20260907T075027Z-claude-you-are-collating-the-results-of/stdout.jsonl": "85f0ef22ff4e4fdb2a19f590730e7229adf764c1f5717c089e81504536134936"
+  },
+  "fleet_versions": {
+    "antigravity": "1.1.27",
+    "claude": "2.1.263 (Claude Code)",
+    "cursor": "2026.09.02-c22c1a3"
+  },
+  "fleets": [
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T074956Z-f8-judge-sitting",
+  "name": "e4-new",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T08:01:57.258192Z"
+}

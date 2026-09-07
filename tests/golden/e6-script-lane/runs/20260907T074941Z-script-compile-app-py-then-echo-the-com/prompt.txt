@@ -1,0 +1,1 @@
+compile app.py, then echo the compile lane's own output

@@ -1,0 +1,141 @@
+{
+  "cache_hit_rate": null,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "cost_basis": null,
+          "effort": "standard",
+          "failure": null,
+          "fleet": "script",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "write",
+          "model": "sh",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "retry": null,
+          "retry_of": null,
+          "session_id": null,
+          "tokens": 0,
+          "tool_calls": 0
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074942Z-script-run",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "a",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "cost_basis": null,
+          "effort": "standard",
+          "failure": null,
+          "fleet": "script",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "write",
+          "model": "sh",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "retry": null,
+          "retry_of": null,
+          "session_id": null,
+          "tokens": 0,
+          "tool_calls": 0
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074942Z-script-run-2",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "b",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "cost_basis": null,
+          "effort": "standard",
+          "failure": null,
+          "fleet": "script",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "write",
+          "model": "sh",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "retry": null,
+          "retry_of": null,
+          "session_id": null,
+          "tokens": 0,
+          "tool_calls": 0
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074942Z-script-run-3",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "c",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    }
+  ],
+  "notes": [],
+  "ok": true,
+  "paused": null,
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "a",
+      "ok": true,
+      "rank": 1
+    },
+    {
+      "lane": "b",
+      "ok": true,
+      "rank": 2
+    },
+    {
+      "lane": "c",
+      "ok": true,
+      "rank": 3
+    }
+  ],
+  "require": "all"
+}

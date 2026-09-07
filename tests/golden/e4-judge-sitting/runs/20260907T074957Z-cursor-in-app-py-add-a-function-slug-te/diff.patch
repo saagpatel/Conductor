@@ -1,0 +1,21 @@
+diff --git a/app.py b/app.py
+index ed94d44..57eda55 100644
+--- a/app.py
++++ b/app.py
+@@ -1,2 +1,16 @@
+ def greet(name: str) -> str:
+     return f"hello, {name}"
++
++
++def slug(text: str) -> str:
++    out: list[str] = []
++    pending_hyphen = False
++    for ch in text.lower():
++        if ch.isascii() and ch.isalnum():
++            if pending_hyphen:
++                out.append("-")
++                pending_hyphen = False
++            out.append(ch)
++        elif out:
++            pending_hyphen = True
++    return "".join(out)

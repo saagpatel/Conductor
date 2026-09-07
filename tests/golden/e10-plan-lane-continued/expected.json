@@ -1,0 +1,69 @@
+{
+  "cache_hit_rate": 0.495,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 19388,
+          "cache_write_tokens": 19814,
+          "cost_basis": "reported",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "claude",
+          "input_tokens": 4,
+          "kind": null,
+          "mode": "read",
+          "model": "claude-sonnet-5",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "0ec88f2990e9061735958f21eea71b87a064f10968afbed139ea1de2189e4f56",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "0dd959e7-7fea-486b-a36b-ce35d0b08162",
+          "tokens": 39481,
+          "tool_calls": 1
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074956Z-claude-write-the-file-child-json-in-the",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "plan",
+      "needs": [],
+      "ok": true,
+      "plan": {
+        "dry_run_ok": true,
+        "refused": null
+      },
+      "skipped": null,
+      "stage": null
+    }
+  ],
+  "notes": [],
+  "ok": false,
+  "paused": {
+    "child_max_cost_usd": 1.0,
+    "child_name": "f8-plan-child",
+    "kind": "child",
+    "lane": "plan",
+    "question": "Lane 'plan' planned mission 'f8-plan-child' ($1.00); launch it?",
+    "spent_usd": null,
+    "threshold": null
+  },
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "plan",
+      "ok": true,
+      "rank": 1
+    }
+  ],
+  "require": "all"
+}

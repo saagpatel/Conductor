@@ -1,0 +1,23 @@
+diff --git a/child.json b/child.json
+new file mode 100644
+index 0000000..8795f42
+--- /dev/null
++++ b/child.json
+@@ -0,0 +1,17 @@
++{
++  "name": "f8-plan-child",
++  "cwd": ".",
++  "max_cost_usd": 1.0,
++  "lanes": [
++    {
++      "name": "childbuild",
++      "fleet": "script",
++      "command": "printf 'planned\\n' > planned.txt",
++      "commit": "chore: planned marker"
++    }
++  ],
++  "ceiling": {
++    "per_hour_usd": 10.0,
++    "per_day_usd": null
++  }
++}

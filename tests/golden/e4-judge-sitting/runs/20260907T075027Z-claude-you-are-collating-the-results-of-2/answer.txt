@@ -1,0 +1,8 @@
+{
+  "strongest": "cand-grok",
+  "scores": {
+    "cand-grok": 9,
+    "cand-composer": 4
+  },
+  "reason": "Composer's implementation has a bug: it only strips a trailing hyphen, not a leading one. For input starting with a non-alnum character (e.g. \\\"-abc\\\" or \\\" abc\\\"), it emits a leading hyphen immediately since the initial `hyphen` flag is False, violating the 'no leading hyphen' requirement. Grok's version guards leading hyphens correctly via `elif out:` (only queues a hyphen once at least one character has been emitted) and also strips a trailing pending hyphen naturally by never flushing it. Both otherwise correctly lowercase and collapse runs of non-ASCII-alnum characters and leave `greet` untouched, but grok satisfies the spec exactly while composer does not."
+}

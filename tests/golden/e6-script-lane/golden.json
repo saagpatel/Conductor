@@ -1,0 +1,45 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "62f6d7568dec3d653d3f9a823f2ff0610729cdf06e2b47743eebd1574b96a643",
+    "lanes/compile.json": "4a758a160b7c405b3b121810d144851dd1051850800272059011560607a0dbe7",
+    "lanes/echo.json": "7e264ae9ee2ee52ac71f0bf26e388cebf63b8c0937b3fbaa6518a5eb99af8bbb",
+    "mission.json": "45eea24ab515fd66f6ff87868847d6ba105dba3653a7ae1233601fa026786ae8",
+    "report.md": "4ca23cd0146b67d75976082797fe6dc277f773d6d63a1df7a3ac3967cb4eb328",
+    "result.json": "0f24fb93e5d0430fc75d309bb2e166d9c337cac69895d9ceb362c6cfe9b541d1",
+    "runs/20260907T074941Z-script-compile-app-py-then-echo-the-com/diff.patch": "fe3ac17fb23ffe0fbf1bc6ece7859821805f447a9ffc04efb49dfb22b921fb8f",
+    "runs/20260907T074941Z-script-compile-app-py-then-echo-the-com/prompt.txt": "c70797c3c8508225a7cbe9afea91646d2f34119404baea74482f0a90b03cb4f5",
+    "runs/20260907T074941Z-script-compile-app-py-then-echo-the-com/result.json": "7c6512c6858b78bf3e754b431863fab22600ddb27ec91f91ad63ca1751358f2a",
+    "runs/20260907T074941Z-script-compile-app-py-then-echo-the-com/stdout.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074941Z-script-compile-lane-said-none/answer.txt": "960920151ad34b8f9f898cebad8edba84142fc099453212327a2cec64eae3cda",
+    "runs/20260907T074941Z-script-compile-lane-said-none/prompt.txt": "960920151ad34b8f9f898cebad8edba84142fc099453212327a2cec64eae3cda",
+    "runs/20260907T074941Z-script-compile-lane-said-none/result.json": "be9970e7cb503e9a82d20a0619677803cce337756a9961b94d5d9668ec10635e",
+    "runs/20260907T074941Z-script-compile-lane-said-none/stdout.jsonl": "960920151ad34b8f9f898cebad8edba84142fc099453212327a2cec64eae3cda"
+  },
+  "fleet_versions": {
+    "script": "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)"
+  },
+  "fleets": [
+    "script"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T074941Z-f8-script-lane",
+  "name": "e6-script-lane",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:54:53.685596Z"
+}

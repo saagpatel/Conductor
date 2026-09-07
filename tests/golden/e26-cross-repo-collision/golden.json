@@ -1,0 +1,51 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "3a0d9dddf924e551db82aa53ab11dd6157463ce65ac1799b99bc4c00ea2ddb9b",
+    "lanes/a.json": "bf80f25a88dbc8dd0b8105239d9066d744593ffce1c8b33e5d3965d0e3312018",
+    "lanes/b.json": "51a74e0d1f847695bdcc1c2a9c2f64af77facb3d216b70b240fed4798c70b14c",
+    "lanes/c.json": "62f75646931d8d418d4a4e8b681b33e436b5e669cb781b2e8d1cdc7279fee64b",
+    "mission.json": "5cfb8f641a2d51e54cf61ff93788487ddec2cbe6c3b634b28474200bcc38dc63",
+    "report.md": "bd73c353d3c19f3f3e9bc2a8e3b36380065a26e620931f729759c7466b203098",
+    "result.json": "da93acdc0ec20127c5b11193c9950d88d13e4ba44147a28d3dd32919c22e7277",
+    "runs/20260907T074942Z-script-run-2/diff.patch": "0094753f7bb2d739ebc30333c4d3e4f092e3c8fc79ebb3d329cc7dce531abd34",
+    "runs/20260907T074942Z-script-run-2/prompt.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run-2/result.json": "bcd170ffa6454cec207cbf4aa054bddb310d25a5b0b373a8a1f93fe2b49ccf5a",
+    "runs/20260907T074942Z-script-run-2/stdout.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run-3/diff.patch": "36cd7d39879300f53ec05215bc8d71a411c4c52535145278b588764335e0b538",
+    "runs/20260907T074942Z-script-run-3/prompt.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run-3/result.json": "72f071962c532efa9d9125af1849faae2d90f0c8b612e59b539ea7e1136c5613",
+    "runs/20260907T074942Z-script-run-3/stdout.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run/diff.patch": "e427555e2686748ae56978f8e8ed89c2c325c285646405176b91db64bee8e3f2",
+    "runs/20260907T074942Z-script-run/prompt.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run/result.json": "cdba73809da21f7b953b57dab28ced8480398a5339b5ebf367f7d2ac7fcadb0b",
+    "runs/20260907T074942Z-script-run/stdout.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "fleet_versions": {
+    "script": "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)"
+  },
+  "fleets": [
+    "script"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T074942Z-f8-cross-repo",
+  "name": "e26-new",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>",
+    "<cwd2>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T08:00:57.868898Z"
+}

@@ -1,0 +1,83 @@
+{
+  "name": "f8-plan-lane",
+  "cwd": "<cwd>",
+  "lanes": [
+    {
+      "name": "plan",
+      "attempts": [
+        {
+          "fleet": "claude",
+          "model": "sonnet",
+          "effort": "standard",
+          "mode": "read",
+          "cwd": null,
+          "prompt": "Write the file child.json in the working directory with exactly this JSON content and nothing else, then reply with the single word: written\n\n{\n  \"name\": \"f8-plan-child\",\n  \"cwd\": \".\",\n  \"max_cost_usd\": 1.0,\n  \"lanes\": [\n    {\n      \"name\": \"childbuild\",\n      \"fleet\": \"script\",\n      \"command\": \"printf 'planned\\\\n' > planned.txt\",\n      \"commit\": \"chore: planned marker\"\n    }\n  ],\n  \"ceiling\": {\n    \"per_hour_usd\": 10.0,\n    \"per_day_usd\": null\n  }\n}\n\nDo not run any other command. Do not edit any other file.",
+          "timeout": null,
+          "stall_timeout": 600,
+          "loop_limit": 6,
+          "max_tool_calls": null,
+          "tool_idle_timeout": null,
+          "test": null,
+          "commit": null,
+          "schema": null,
+          "verdict": null,
+          "isolate": null,
+          "cap_usd": 1.0,
+          "cap_grace_usd": null,
+          "no_op_ok": false,
+          "test_policy": "clean",
+          "test_surface": null,
+          "ports": 0,
+          "setup": null,
+          "teardown": null,
+          "include": null,
+          "agent": null,
+          "deliverable": {
+            "path": "child.json"
+          },
+          "restricted": false,
+          "on": null,
+          "command": null
+        }
+      ],
+      "needs": [],
+      "base": null,
+      "resume": null,
+      "branch": null,
+      "stage": null,
+      "cascaded": false,
+      "taint": false,
+      "untrusted_output": false,
+      "tainted": false,
+      "taint_from": [],
+      "human": false,
+      "script": false,
+      "plan": true
+    }
+  ],
+  "concurrency": 2,
+  "require": "all",
+  "max_cost_usd": 2.0,
+  "collate": null,
+  "source": "<user>/.claude/jobs/b514440a/tmp/f8/scratch/plan-lane.json",
+  "prompt": null,
+  "prefix": null,
+  "template_max_chars": 40000,
+  "snapshot_version": 1,
+  "self_judging": null,
+  "policy": null,
+  "early_cancel": false,
+  "pause": null,
+  "cascade": null,
+  "retry": null,
+  "test": null,
+  "resolve": null,
+  "notify": null,
+  "ceiling": {
+    "per_hour_usd": 10.0,
+    "per_day_usd": null
+  },
+  "depth": 0,
+  "parent": null,
+  "budget_from_parent": false
+}

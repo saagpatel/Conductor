@@ -2715,7 +2715,15 @@ repository, all four lanes green, the fix on the build's resumed thread),
 fix pause was answered `stop`, so the fixture carries `pause.json` with
 the answer and a fix lane that never ran), and `f11-unattended-read-notify`
 (three read lanes under `--unattended` with a `notify` hook and a
-per-mission ceiling, the `end` event pinned in the projection).
+per-mission ceiling, the `end` event pinned in the projection). Five more
+came from scratch repositories, one per Phase E shape the suite had never
+replayed: `e6-script-lane` (a script build lane and a script read lane,
+$0), `e7-human-lane-answered` (a human lane parked and answered with its
+sign-off deliverable), `e10-plan-lane-continued` (a plan lane parked on its
+child and continued, the child run in the plan lane's own repository),
+`e4-judge-sitting` (two Cursor candidates, a Gemini collate and a Sonnet
+judge in both orders, unanimous), and `e26-cross-repo-collision` (three
+script lanes across two repositories, a hotspot in one and none across).
 
 ```
 conductor golden record 20260905T171417Z-c5-error-kinds --out tests/golden/c5-build-cascade-capped

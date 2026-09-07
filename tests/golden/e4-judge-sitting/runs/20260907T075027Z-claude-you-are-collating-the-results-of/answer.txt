@@ -1,0 +1,8 @@
+{
+  "strongest": "cand-grok",
+  "reason": "Both diffs are minimal and leave greet untouched, but composer's slug() has a correctness bug: it only pops a trailing hyphen after the loop and never guards against a leading one, so inputs beginning with a non-alnum character (e.g. \\\"-abc\\\", \\\"  Hello World!!\\\", \\\"!!!abc!!!\\\") produce a leading hyphen \u2014 violating the explicit \\\"no leading or trailing hyphen\\\" spec. I verified this by running both implementations directly. Grok's version uses a pending-hyphen flag gated on `out` being non-empty, which correctly suppresses hyphens at both ends and passed all tested cases (leading, trailing, runs of separators, all-separator input).",
+  "scores": {
+    "cand-composer": 3,
+    "cand-grok": 9
+  }
+}

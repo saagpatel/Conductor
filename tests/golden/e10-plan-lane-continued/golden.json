@@ -1,0 +1,43 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "ec662220610db80697f899208e88fb1f998fc7745c68030f8934bacc262ebaad",
+    "lanes/plan.json": "30dfecaff53e0058de276c92acfe93cdb9741f03b898875e53029c761c29ead5",
+    "mission.json": "3e1502402d1843890ea9b3cd50930fc312cf65df337ee4b9146a84d8b957dd5b",
+    "pause.json": "00b530f6d015525bdb6e1d8e7f9a262211d554e1e6890187f80ac3fab6a02799",
+    "report.md": "eb14f01e49b18a73784c30366b28bac34cca30962af03f4eae1f3dc9a51451f7",
+    "result.json": "a5ebbf4277c547d0224759228db4505a99cc4d56e35a8cb0a9df5634aba28be2",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/answer.txt": "ccc0e8da6b80e08e80d75a89afe11e8f2d5cd0f29a10f782104ca5f2648e8903",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/deliverable": "52d3a498a4cba825e1efbae540fdad83d01ea5e85e1fb0727f43bd3274575680",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/diff.patch": "3dad49ea40ce9fd30572c8850a50039f37f6f53384c83a7b0d8fb276b013147f",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/prompt.txt": "0ec88f2990e9061735958f21eea71b87a064f10968afbed139ea1de2189e4f56",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/result.json": "0e0e868688d8b30514698a05a9e824bf71e48c5826452fc51917ead41e4bee27",
+    "runs/20260907T074956Z-claude-write-the-file-child-json-in-the/stdout.jsonl": "39931dfa3887600c10779ab7bcad502222dbfc325140b191d5fcc18d41ecdee1"
+  },
+  "fleet_versions": {
+    "claude": "2.1.263 (Claude Code)"
+  },
+  "fleets": [
+    "claude"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T074956Z-f8-plan-lane",
+  "name": "e10-plan-lane-continued",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:55:18.989288Z"
+}
