@@ -6,7 +6,6 @@ import json
 import shlex
 import socket
 import subprocess
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -430,6 +429,12 @@ def test_interrupted_mission_keeps_ok_lane_and_reruns_interrupted_lane(
         if key == "FIRST":
             return _command("first")
         if calls[key] == 1:
+            # The stop lands the moment the second lane is about to spawn:
+            # `first` has already settled (concurrency 1), so the interrupt
+            # can only reach `second`. A wall-clock timer here lost the race
+            # under machine load twice on 2026-09-07 (three suites at once),
+            # interrupting `first` too and failing a green build's gate.
+            request_stop()
             return ["sh", "-c", "sleep 60"]
         return _command("second")
 
@@ -445,7 +450,6 @@ def test_interrupted_mission_keeps_ok_lane_and_reruns_interrupted_lane(
         },
         base_dir=tmp_path,
     )
-    threading.Timer(0.8, request_stop).start()
     first = run_mission(mission, home=home)
     clear_stop()
 
