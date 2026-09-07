@@ -16,6 +16,7 @@ from pathlib import Path
 from . import attest, golden, prices, prompts, shape
 from . import export as export_mod
 from . import forecast as forecast_mod
+from . import land as land_mod
 from . import salvage as salvage_mod
 from .errors import error_kind
 from .fleets import (
@@ -364,36 +365,11 @@ def cmd_attest(args: argparse.Namespace) -> int:
         _invalid("MISSION_ID must be a mission directory name")
         return 3
     home = conductor_home()
-    mission_dir = home / "missions" / mission_id
-    chain_path = mission_dir / "receipts" / "chain.json"
-    if not mission_dir.is_dir():
-        _invalid(f"mission '{mission_id}' does not exist")
-        return 3
-    if not chain_path.is_file():
-        _invalid(f"mission '{mission_id}' has no receipt chain")
-        return 3
-    key = attest.read_receipt_key(home)
-    if key is None:
-        _invalid("receipt key is missing")
-        return 3
     try:
-        chain = json.loads(chain_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        _invalid(f"chain.json is invalid: {exc}")
+        out = attest.attest_mission(home, mission_id)
+    except attest.AttestInvalid as exc:
+        _invalid(str(exc))
         return 3
-    if not isinstance(chain, dict) or not isinstance(chain.get("links"), list):
-        _invalid("chain.json is malformed")
-        return 3
-
-    rows = attest.verify_chain_links(chain, home=home, key=key)
-    results = [{k: v for k, v in row.items() if k != "_statement"} for row in rows]
-
-    out = {
-        "mission_id": chain.get("mission_id", mission_id),
-        "key_id": attest.key_id(key),
-        "links": results,
-        "verified": all(row["verified"] for row in results),
-    }
     print(json.dumps(out, indent=2))
     return 0 if out["verified"] else 1
 
@@ -466,6 +442,83 @@ def cmd_salvage(args: argparse.Namespace) -> int:
         return 0
 
     return 0 if passed else 1
+
+
+def _default_land_checkout(home: Path, mission_id: str, lane: str) -> str:
+    """The lane's repository: its own recorded `cwd`, else the mission
+    snapshot's `cwd`. Never raises -- an unreadable or missing snapshot
+    just falls through to an empty string, and `land()` itself refuses with
+    a proper reason once it checks the mission and lane exist."""
+    mission_file = home / "missions" / mission_id / "mission.json"
+    try:
+        mission_raw = json.loads(mission_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        mission_raw = {}
+    mission_cwd = mission_raw.get("cwd") if isinstance(mission_raw, dict) else None
+
+    lane_file = home / "missions" / mission_id / "lanes" / f"{lane}.json"
+    try:
+        lane_raw = json.loads(lane_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        lane_raw = {}
+    lane_cwd = lane_raw.get("cwd") if isinstance(lane_raw, dict) else None
+
+    checkout = lane_cwd or mission_cwd
+    return checkout if isinstance(checkout, str) else ""
+
+
+def cmd_land(args: argparse.Namespace) -> int:
+    """F7: the lead's hands after the diff is read and the reviewers have
+    covered it -- merge a lane's branch, gate the merged head in a fresh
+    worktree, run `golden check`, and attest the mission."""
+    mission_id = args.mission_id
+    if Path(mission_id).name != mission_id or mission_id in {".", ".."}:
+        _invalid("MISSION_ID must be a mission directory name")
+        return 3
+
+    home = conductor_home()
+    checkout = args.checkout or _default_land_checkout(home, mission_id, args.lane)
+    try:
+        result = land_mod.land(
+            mission_id,
+            args.lane,
+            home=home,
+            checkout=checkout,
+            gate_command=args.test,
+            dry_run=args.dry_run,
+        )
+    except land_mod.LandInvalid as exc:
+        _invalid(str(exc))
+        return 3
+
+    if args.json:
+        if result.receipt_path:
+            print(Path(result.receipt_path).read_text().rstrip("\n"))
+        else:
+            print(json.dumps(result.to_dict(), indent=2))
+    else:
+        print(f"mission: {result.mission}  lane: {result.lane}  branch: {result.branch}")
+        print(f"checkout: {result.checkout}")
+        if result.already_merged:
+            print("already merged")
+        elif result.dry_run:
+            print(f"gate: {result.gate_command}")
+            print("would merge:")
+            for line in result.would_merge:
+                print(f"  {line}")
+        else:
+            for step in result.steps:
+                mark = "ok " if step["ok"] else "RED"
+                print(f"[{mark}] {step['name']}")
+                if not step["ok"]:
+                    print(step["detail"])
+            if result.reset:
+                print(f"checkout reset to pre-merge HEAD {result.pre_merge_sha}")
+        print(f"receipt: {result.receipt_path}")
+
+    if result.dry_run or result.already_merged:
+        return 0
+    return 0 if result.ok else 1
 
 
 LIVENESS_STALE_S: int = 30
@@ -1125,6 +1178,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_salvage.add_argument("--json", action="store_true")
     p_salvage.set_defaults(func=cmd_salvage)
+
+    p_land = sub.add_parser(
+        "land",
+        help="F7: merge a lane's branch, gate the merged head, run golden check, and "
+        "attest the mission -- the lead's own act, never run inside a mission",
+    )
+    p_land.add_argument("mission_id", metavar="MISSION_ID")
+    p_land.add_argument("--lane", required=True, help="the lane whose branch lands")
+    p_land.add_argument(
+        "--checkout", help="repo to merge into (default: the lane's own repository)"
+    )
+    p_land.add_argument(
+        "--test", help="gate command (default: the mission snapshot's own test)"
+    )
+    p_land.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run every refusal check and print what would merge; merges nothing",
+    )
+    p_land.add_argument("--json", action="store_true")
+    p_land.set_defaults(func=cmd_land)
 
     p_golden = sub.add_parser(
         "golden", help="record and replay golden-mission fixtures offline (C7)"

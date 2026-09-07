@@ -232,6 +232,43 @@ def verify_run_attestation(
     return problems, taint
 
 
+class AttestInvalid(ValueError):
+    """A mission whose receipt chain cannot be verified as asked."""
+
+
+def attest_mission(home: Path, mission_id: str) -> dict:
+    """Whatever `conductor attest` reports, as data: every link's signature,
+    its place in the hash chain, and, for a link with a run, that the run's
+    own attestation still matches its result.json and diff -- the same
+    verification `cmd_attest` prints, factored out so `land.py` can run it
+    as one of its own steps without shelling out to itself."""
+    home = Path(home)
+    mission_dir = home / "missions" / mission_id
+    if not mission_dir.is_dir():
+        raise AttestInvalid(f"mission '{mission_id}' does not exist")
+    chain_path = mission_dir / "receipts" / "chain.json"
+    if not chain_path.is_file():
+        raise AttestInvalid(f"mission '{mission_id}' has no receipt chain")
+    key = read_receipt_key(home)
+    if key is None:
+        raise AttestInvalid("receipt key is missing")
+    try:
+        chain = json.loads(chain_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AttestInvalid(f"chain.json is invalid: {exc}") from exc
+    if not isinstance(chain, dict) or not isinstance(chain.get("links"), list):
+        raise AttestInvalid("chain.json is malformed")
+
+    rows = verify_chain_links(chain, home=home, key=key)
+    results = [{k: v for k, v in row.items() if k != "_statement"} for row in rows]
+    return {
+        "mission_id": chain.get("mission_id", mission_id),
+        "key_id": key_id(key),
+        "links": results,
+        "verified": all(row["verified"] for row in results),
+    }
+
+
 def verify_chain_links(chain: dict, *, home: Path, key: bytes) -> list[dict]:
     """The per-link verification loop `cmd_attest` runs: each link's
     signature, its place in the hash chain, and, for a link with a run, that
