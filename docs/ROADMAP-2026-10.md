@@ -44,6 +44,7 @@ the cap rules in `AGENTS.md`.
 | E14 cost forecast | 0.44.0 | Shape A on 0.43.0, fourth of Group 7; build green under cap; Grok's one finding wording, fixed by hand | $5.72 |
 | E19 cross-repo collisions | 0.45.0 | Shape A on 0.44.0, fifth of Group 7; build green under cap and fixed the resolver cwd; Grok one real, one coverage, one wrong at confidence 10, fix lane sorted them | $10.45 |
 | E10 planner lanes (first spec) | 0.46.0 | Shape A on 0.45.0, last of Group 7; build capped on the code, tests built separately, code reviewed on a follow-on, two real findings fixed on the merged tip | $27.53 |
+| E10 planner lanes (second spec) | 0.47.0 | Shape A on 0.46.0 on the parallel gate; build salvaged after an unrelated key race tripped the gate; both reviewers found the same two receipt bugs, fixed on the follow-on | $13.60 |
 
 ## What "general" means here
 
