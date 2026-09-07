@@ -15,7 +15,7 @@ from .verdicts import (
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import GitState, Verdict, compare, run_tests
 
-__version__ = "0.70.0"
+__version__ = "0.71.0"
 
 __all__ = [
     "EFFORTS",
