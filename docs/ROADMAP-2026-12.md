@@ -33,6 +33,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | W6 price basis and outstanding caps on receipts; W9 export scope declared and the D13 inventory; drill pass three; scrub guard accepts its own redaction | 0.69.0 | Shape A via the launcher with --opus-review, landed by conductor land; lead fix; four scratch-repo dispatches | $17.41 |
 | Ledger in-flight figures live in pause.json and running.json; settings digest check for Claude write lanes; land dry-run flag | 0.70.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; one scratch-repo dispatch | $0.07 |
 | W11 undispositioned sharpened, README error kinds pinned to KINDS; 0.69.0 and 0.70.0 receipts read live on the mission | 0.71.0 | Shape A via the launcher with --opus-review, landed by conductor land | $5.30 |
+| F17 launcher raises a warned lane's cap to the forecast p80 and records the caps block; plan-digest refusal drilled live | 0.72.0 | lead with one Opus subagent in a worktree, gated on the merged tree; one scratch plan-lane mission | $0.04 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -57,9 +58,10 @@ or carried as a stated limit. Both follow-ons shipped in 0.70.0: the ledger's in
 written to `pause.json` and refreshed in `running.json`, and a Claude write lane that rewrites its
 own `.claude/settings*.json` fails as kind `settings` (drilled live). 0.71.0 (W11) sharpened `undispositioned` and pinned the
 README kinds block, and read every 0.69.0 and 0.70.0 receipt live on the mission itself
-(`docs/research/2026-09-07-consumer-live-receipts-0-70.md`). Open: the plan-digest refusal drill,
-which needs a paused plan lane, and a launcher build cap that takes the larger of rule 2 and the
-forecast p80.
+(`docs/research/2026-09-07-consumer-live-receipts-0-70.md`). Both closed in 0.72.0: the launcher raises a
+warned lane's cap to the forecast p80 and records every cap's basis on the mission file (F17), and
+the plan-digest refusal fired live on a scratch plan lane. Every fail-closed check in the inventory
+that a finished mission or a scratch repository can reach now has a live receipt.
 
 ## Waves
 
