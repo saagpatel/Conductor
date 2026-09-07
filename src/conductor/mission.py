@@ -53,7 +53,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from . import attest
+from . import attest, spend
 from . import ceiling as ceiling_mod
 from . import collisions as collisions_mod
 from . import forecast as forecast_mod
@@ -4278,33 +4278,18 @@ def _run_receipt_spend(
     base: Path, previous: dict[str, LaneResult], prior_result: dict | None
 ) -> tuple[float, int]:
     """Price prior dispatches once from their authoritative run receipts."""
-    attempts: dict[str, dict] = {}
-    for lane in previous.values():
-        for attempt in [*lane.previous_attempts, *lane.attempts]:
-            run_id = attempt.get("run_id")
-            if isinstance(run_id, str):
-                attempts.setdefault(run_id, attempt)
-    collate = (prior_result or {}).get("collate")
-    if isinstance(collate, dict):
-        for run_id, record in _collate_run_ids(collate):
-            attempts.setdefault(run_id, record)
-    previous_collates = (prior_result or {}).get("previous_collates")
-    if isinstance(previous_collates, list):
-        for old_collate in previous_collates:
-            if isinstance(old_collate, dict):
-                for run_id, record in _collate_run_ids(old_collate):
-                    attempts.setdefault(run_id, record)
-    resolve = (prior_result or {}).get("resolve")
-    if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
-        attempts.setdefault(resolve["run_id"], resolve)
-    # D13: a rerun's superseded resolvers are paid dispatches too, and
-    # without this the earlier resolver's spend was invisible to every
-    # resume. Absent on a receipt written before D13.
-    previous_resolves = (prior_result or {}).get("previous_resolves")
-    if isinstance(previous_resolves, list):
-        for old_resolve in previous_resolves:
-            if isinstance(old_resolve, dict) and isinstance(old_resolve.get("run_id"), str):
-                attempts.setdefault(old_resolve["run_id"], old_resolve)
+    lane_dicts = [
+        {
+            "name": lane.name,
+            "stage": lane.stage,
+            "attempts": lane.attempts,
+            "previous_attempts": lane.previous_attempts,
+        }
+        for lane in previous.values()
+    ]
+    attempts: dict[str, dict] = {
+        effect.run_id: effect.record for effect in spend.effects(prior_result, lanes=lane_dicts)
+    }
 
     spent = 0.0
     unpriced = 0
@@ -4329,25 +4314,6 @@ def _run_receipt_spend(
         elif summary.get("unpriced") is True:
             unpriced += 1
     return spent, unpriced
-
-
-def _collate_run_ids(collate: dict) -> list[tuple[str, dict]]:
-    """Every priced run a collate receipt carries: its own run (a prose
-    collate), both order runs (a ranking collate's judge 1), and, in a
-    judge sitting (E4), every extra judge's own two order runs."""
-    ids: list[tuple[str, dict]] = []
-    if isinstance(collate.get("run_id"), str):
-        ids.append((collate["run_id"], collate))
-    for order in collate.get("orders") or []:
-        if isinstance(order, dict) and isinstance(order.get("run_id"), str):
-            ids.append((order["run_id"], order))
-    for judge in collate.get("judges") or []:
-        if not isinstance(judge, dict):
-            continue
-        for order in judge.get("orders") or []:
-            if isinstance(order, dict) and isinstance(order.get("run_id"), str):
-                ids.append((order["run_id"], order))
-    return ids
 
 
 def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:

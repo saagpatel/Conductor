@@ -7,6 +7,7 @@ import json
 import math
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -188,6 +189,132 @@ def _read_run(path: Path) -> Run | None:
         return None
 
 
+@dataclass(frozen=True)
+class Effect:
+    """One paid dispatch a mission snapshot or a lane receipt named.
+
+    `kind` is `"attempt"` (a lane's own dispatch), `"collate"` (a collate's
+    own run), `"order"` (one of a collate's judge orders), or `"resolve"`
+    (the cross-vendor resolver). `lane` and `stage` are set only for an
+    `"attempt"`; every other kind carries neither, since a collate, order,
+    or resolve is not itself a lane. `superseded` is True for an entry a
+    rerun replaced (`previous_attempts`, `previous_collates`, or
+    `previous_resolves`), so a caller that only wants the live picture can
+    filter it out. `record` is whatever summary object the receipt carried
+    for that run, so a caller can price it (`cost_usd`, `unpriced`) even
+    once the run's own directory under `runs/` is gone; it is `{}` for a
+    bare `final` string, which carries no summary of its own.
+    """
+
+    run_id: str
+    kind: str
+    lane: str | None
+    stage: str | None
+    superseded: bool
+    record: dict
+
+
+def effects(snapshot: dict | None = None, lanes: Iterable[dict] = ()) -> list[Effect]:
+    """Every paid dispatch a mission snapshot and/or a set of lane receipts
+    named, as one `Effect` per distinct `run_id` (first occurrence wins, in
+    encounter order).
+
+    This is the versioned adapter every caller that discovers a mission's
+    paid run ids -- `resume`'s spend accounting, the ledger `report`, and
+    `export` -- reads instead of walking the receipt shape by hand,
+    because each generation of receipt added a new place a paid dispatch
+    could hide and a hand-written walk had to be told about it separately:
+
+    - lane `attempts` and a lane's `final` run: every generation.
+    - `previous_attempts` (an attempt a rerun superseded): every generation.
+    - `previous_collates` and a collate's `orders` (a ranking collate's two
+      judge runs) and a judge sitting's extra `judges[].orders`: added E4.
+    - `resolve` (the cross-vendor resolver) and `previous_resolves` (a rerun's
+      superseded resolvers): added D13.
+
+    `snapshot` is a mission's `result.json` shape: its `lanes` (each lane's
+    `final` as a bare string or as a dict with `run_id`, then
+    `previous_attempts`, then `attempts`), then `previous_collates` and
+    `collate`, then `resolve` and `previous_resolves`. `lanes` is an
+    iterable of lane-receipt dicts (`lanes/<name>.json`, carrying `name`,
+    `stage`, `attempts`, `previous_attempts`), each walked the same way as
+    a snapshot lane. Every key above may be absent on an older receipt;
+    a missing key is simply skipped, never an error.
+    """
+    found: dict[str, Effect] = {}
+
+    def add(run_id: object, kind: str, lane: str | None, stage: str | None,
+            superseded: bool, record: object) -> None:
+        if isinstance(run_id, str) and run_id not in found:
+            found[run_id] = Effect(
+                run_id, kind, lane, stage, superseded, record if isinstance(record, dict) else {}
+            )
+
+    def walk_lane(lane_data: object) -> None:
+        if not isinstance(lane_data, dict):
+            return
+        lane_name = lane_data.get("name")
+        lane_name = lane_name if isinstance(lane_name, str) else None
+        stage = lane_data.get("stage")
+        stage = stage if isinstance(stage, str) else None
+        final = lane_data.get("final")
+        if isinstance(final, str):
+            add(final, "attempt", lane_name, stage, False, {})
+        elif isinstance(final, dict):
+            add(final.get("run_id"), "attempt", lane_name, stage, False, final)
+        for key, superseded in (("previous_attempts", True), ("attempts", False)):
+            attempts = lane_data.get(key)
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if isinstance(attempt, dict):
+                    add(attempt.get("run_id"), "attempt", lane_name, stage, superseded, attempt)
+
+    def walk_collate(collate: object, superseded: bool) -> None:
+        if not isinstance(collate, dict):
+            return
+        add(collate.get("run_id"), "collate", None, None, superseded, collate)
+        orders = collate.get("orders")
+        if isinstance(orders, list):
+            for order in orders:
+                if isinstance(order, dict):
+                    add(order.get("run_id"), "order", None, None, superseded, order)
+        judges = collate.get("judges")
+        if isinstance(judges, list):
+            for judge in judges:
+                if not isinstance(judge, dict):
+                    continue
+                judge_orders = judge.get("orders")
+                if isinstance(judge_orders, list):
+                    for order in judge_orders:
+                        if isinstance(order, dict):
+                            add(order.get("run_id"), "order", None, None, superseded, order)
+
+    if isinstance(snapshot, dict):
+        snapshot_lanes = snapshot.get("lanes")
+        if isinstance(snapshot_lanes, list):
+            for lane_data in snapshot_lanes:
+                walk_lane(lane_data)
+        previous_collates = snapshot.get("previous_collates")
+        if isinstance(previous_collates, list):
+            for collate in previous_collates:
+                walk_collate(collate, True)
+        walk_collate(snapshot.get("collate"), False)
+        resolve = snapshot.get("resolve")
+        if isinstance(resolve, dict):
+            add(resolve.get("run_id"), "resolve", None, None, False, resolve)
+        previous_resolves = snapshot.get("previous_resolves")
+        if isinstance(previous_resolves, list):
+            for old_resolve in previous_resolves:
+                if isinstance(old_resolve, dict):
+                    add(old_resolve.get("run_id"), "resolve", None, None, True, old_resolve)
+
+    for lane_data in lanes:
+        walk_lane(lane_data)
+
+    return list(found.values())
+
+
 def mission_run_ids(data: dict[str, object]) -> set[str]:
     """Every run id a mission's `result.json` snapshot (`data`) named as
     paid for: lane attempts and their final run, every collate's own run and
@@ -196,43 +323,7 @@ def mission_run_ids(data: dict[str, object]) -> set[str]:
     can union it with what lane receipts and the receipt chain separately
     name, catching a judge-order or resolver run that no lane attempt does.
     """
-    run_ids: set[str] = set()
-    lanes = data.get("lanes")
-    if isinstance(lanes, list):
-        for lane in lanes:
-            if not isinstance(lane, dict):
-                continue
-            final = lane.get("final")
-            if isinstance(final, str):
-                run_ids.add(final)
-            elif isinstance(final, dict) and isinstance(final.get("run_id"), str):
-                run_ids.add(final["run_id"])
-            for key in ("previous_attempts", "attempts"):
-                attempts = lane.get(key)
-                if not isinstance(attempts, list):
-                    continue
-                for attempt in attempts:
-                    if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
-                        run_ids.add(attempt["run_id"])
-    previous_collates = data.get("previous_collates")
-    if isinstance(previous_collates, list):
-        for collate in previous_collates:
-            if isinstance(collate, dict):
-                run_ids |= _collate_run_ids(collate)
-    collate = data.get("collate")
-    if isinstance(collate, dict):
-        run_ids |= _collate_run_ids(collate)
-    # D13: the resolver's own run, and every superseded resolver a rerun
-    # retained. Both are absent on a snapshot written before D13.
-    resolve = data.get("resolve")
-    if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
-        run_ids.add(resolve["run_id"])
-    previous_resolves = data.get("previous_resolves")
-    if isinstance(previous_resolves, list):
-        for old_resolve in previous_resolves:
-            if isinstance(old_resolve, dict) and isinstance(old_resolve.get("run_id"), str):
-                run_ids.add(old_resolve["run_id"])
-    return run_ids
+    return {effect.run_id for effect in effects(data)}
 
 
 # Kept as an alias: every internal caller predates the public name above.
@@ -243,25 +334,7 @@ def _collate_run_ids(collate: dict[str, object]) -> set[str]:
     """A collate's priced runs: its own run (a prose collate), both order
     runs (a ranking collate's judge 1), and, in a judge sitting (E4), every
     extra judge's own two order runs."""
-    run_ids: set[str] = set()
-    if isinstance(collate.get("run_id"), str):
-        run_ids.add(collate["run_id"])
-    orders = collate.get("orders")
-    if isinstance(orders, list):
-        for order in orders:
-            if isinstance(order, dict) and isinstance(order.get("run_id"), str):
-                run_ids.add(order["run_id"])
-    judges = collate.get("judges")
-    if isinstance(judges, list):
-        for judge in judges:
-            if not isinstance(judge, dict):
-                continue
-            judge_orders = judge.get("orders")
-            if isinstance(judge_orders, list):
-                for order in judge_orders:
-                    if isinstance(order, dict) and isinstance(order.get("run_id"), str):
-                        run_ids.add(order["run_id"])
-    return run_ids
+    return {effect.run_id for effect in effects({"collate": collate})}
 
 
 def _mission_map(home: Path) -> dict[str, str]:

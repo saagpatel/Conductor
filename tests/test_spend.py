@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
+from conductor import export, mission
+from conductor import report as report_mod
 from conductor.cli import main
+from conductor.spend import Effect, effects, mission_run_ids
 
 
 def _run(
@@ -319,3 +323,149 @@ def test_spend_excludes_dry_runs_instead_of_calling_them_unpriced(home: Path, mo
     assert total["unpriced_runs"] == 1 and total["dry_runs"] == 1
     assert main(["spend"]) == 0
     assert "1 dry run(s) excluded" in capsys.readouterr().out.splitlines()[-1]
+
+
+# --- F20: one effect inventory, read by resume, report, spend, and export ---
+
+
+def _every_generation_snapshot() -> dict:
+    """A snapshot carrying one entry of every generation of paid-dispatch
+    key `spend.effects` has to know about: a bare-string lane `final`, a
+    lane with `previous_attempts` and `attempts`, a collate with `orders`
+    and a judge sitting's `judges[].orders` (E4), a `previous_collates`
+    entry (E4), a `resolve` (D13), and two `previous_resolves` (D13)."""
+    return {
+        "lanes": [
+            {"name": "build", "stage": "build", "final": "run-final"},
+            {
+                "name": "fix",
+                "stage": "fix",
+                "previous_attempts": [{"run_id": "run-prev-attempt"}],
+                "attempts": [{"run_id": "run-attempt"}],
+            },
+        ],
+        "previous_collates": [{"run_id": "run-prev-collate"}],
+        "collate": {
+            "run_id": "run-collate",
+            "orders": [{"run_id": "run-order-1"}, {"run_id": "run-order-2"}],
+            "judges": [
+                {"orders": [{"run_id": "run-judge-order-1"}, {"run_id": "run-judge-order-2"}]}
+            ],
+        },
+        "resolve": {"run_id": "run-resolve"},
+        "previous_resolves": [
+            {"run_id": "run-prev-resolve-1"},
+            {"run_id": "run-prev-resolve-2"},
+        ],
+    }
+
+
+_EVERY_GENERATION_ORDER: list[tuple[str, str, str | None, str | None, bool]] = [
+    ("run-final", "attempt", "build", "build", False),
+    ("run-prev-attempt", "attempt", "fix", "fix", True),
+    ("run-attempt", "attempt", "fix", "fix", False),
+    ("run-prev-collate", "collate", None, None, True),
+    ("run-collate", "collate", None, None, False),
+    ("run-order-1", "order", None, None, False),
+    ("run-order-2", "order", None, None, False),
+    ("run-judge-order-1", "order", None, None, False),
+    ("run-judge-order-2", "order", None, None, False),
+    ("run-resolve", "resolve", None, None, False),
+    ("run-prev-resolve-1", "resolve", None, None, True),
+    ("run-prev-resolve-2", "resolve", None, None, True),
+]
+
+
+def test_effects_walks_every_generation_of_key_in_encounter_order():
+    found = effects(_every_generation_snapshot())
+    assert [
+        (e.run_id, e.kind, e.lane, e.stage, e.superseded) for e in found
+    ] == _EVERY_GENERATION_ORDER
+    assert all(isinstance(e, Effect) for e in found)
+    expected_ids = {row[0] for row in _EVERY_GENERATION_ORDER}
+    assert mission_run_ids(_every_generation_snapshot()) == expected_ids
+
+
+def test_report_scan_missions_join_names_every_effect_from_one_snapshot(home: Path):
+    """D13 omission path: before F20, `_scan_missions` walked `attempts` and
+    `previous_attempts` itself and only reached `collate`/`resolve` runs
+    through a second hand-written walk -- a fifth kind of key (a future
+    generation) would again need a matching edit here. Reading the join
+    from `spend.effects` instead means this test would fail on old code the
+    same way D13's own omission once did, if the inventory it now shares
+    ever falls behind again."""
+    mission_id = "20260101T000000Z-full-mission"
+    mission_dir = home / "missions" / mission_id
+    mission_dir.mkdir(parents=True)
+    (mission_dir / "result.json").write_text(json.dumps(_every_generation_snapshot()))
+
+    join, _meta = report_mod._scan_missions(home)
+
+    for run_id, _kind, lane, stage, _superseded in _EVERY_GENERATION_ORDER:
+        assert join[run_id] == (mission_id, lane, stage)
+
+
+def test_mission_run_receipt_spend_prices_a_run_named_only_under_previous_resolves(
+    home: Path,
+):
+    """D13 omission path: a resolver a rerun superseded is a paid dispatch
+    that appears nowhere but `previous_resolves`. Before F20 this was its
+    own hand-written branch in `_run_receipt_spend`; if the shared
+    `spend.effects` inventory ever drops `previous_resolves` again, this
+    run's cost silently falls out of resume's spend accounting the same way
+    it once did pre-D13, and this test catches it."""
+    run_id = "20260101T000000Z-claude-superseded-resolver"
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "fleet": "claude",
+                "model": "opus",
+                "ok": True,
+                "dry_run": False,
+                "usage": {"cost_usd": 3.5, "cost_basis": "reported", "total_tokens": 10},
+            }
+        )
+    )
+    prior_result = {"previous_resolves": [{"run_id": run_id}]}
+
+    spent, unpriced = mission._run_receipt_spend(home, {}, prior_result)
+
+    assert spent == pytest.approx(3.5)
+    assert unpriced == 0
+
+
+def test_export_lane_run_ids_returns_a_run_named_only_under_previous_attempts(home: Path):
+    mission_dir = home / "missions" / "20260101T000000Z-mission"
+    lanes_dir = mission_dir / "lanes"
+    lanes_dir.mkdir(parents=True)
+    (lanes_dir / "build.json").write_text(
+        json.dumps(
+            {
+                "name": "build",
+                "stage": "build",
+                "previous_attempts": [{"run_id": "run-superseded-attempt"}],
+                "attempts": [],
+            }
+        )
+    )
+
+    assert export._lane_run_ids(mission_dir) == {"run-superseded-attempt"}
+
+
+def test_no_hand_written_walk_of_collate_or_resolve_keys_remains():
+    """The review that asked for F20 (D13, simplification 1) named the risk
+    directly: a fifth hand-written walk of `previous_collates`,
+    `previous_resolves`, or a collate's `orders` could always creep back in
+    beside the shared `spend.effects` inventory. This fails on the
+    pre-F20 code, where all three literal strings appear in each of these
+    three functions."""
+    for source in (
+        inspect.getsource(report_mod._scan_missions),
+        inspect.getsource(mission._run_receipt_spend),
+        inspect.getsource(export._lane_run_ids),
+    ):
+        for banned in ("previous_collates", "previous_resolves", "orders"):
+            assert banned not in source
