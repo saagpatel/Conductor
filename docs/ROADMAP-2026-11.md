@@ -114,14 +114,13 @@ is still gated and still fails. The projection of the `c5-review-fix` golden fix
 `report.py`. Not the wait loop. Depends on E1. Size 0.5. Build cap $5 (`3 items + $1 breadth +
 $1 summary`).
 
-**F4. `conductor salvage` runs the kept tree's own full gate beside the clean gate.** Recorded
-as an E23 follow-up in the E17 receipt: the clean gate restores the test surface from the base,
-so a kept worktree's new tests are never linted or run by the salvage command, and both E17
-reviewers then failed on an E501 line the salvage gate could not see. F4: the salvage receipt
-carries `own_gate` (the lane's `--test` command run on the kept tree from a scratch copy, the
-way the clean gate already runs) beside `clean_gate`, the command prints both, and the exit
-code is red when either is. Modules: `salvage.py`, `cli.py`. Depends on E23. Size 0.5. Build
-cap $5 (`3 items + $1 breadth + $1 summary`).
+**F4. `conductor salvage` runs the kept tree's own full gate beside the clean gate. Already
+shipped.** Recorded as an E23 follow-up in the E17 receipt and then landed by hand between
+groups (commits "salvage runs the kept tree's own gate beside the clean gate" and "salvage
+honors test_policy allow"), which the draft missed. The Shape A build launched for it on
+2026-09-07 read the tree, found every item present with its tests, and wrote no diff, $0.56.
+Dropped; the receipt is the lesson: read `git log -- <module>` before writing a spec against a
+receipt's follow-up note.
 
 ## F-b: the lead's time between missions
 
@@ -135,8 +134,14 @@ post-hoc verdict, same $0.50 ceiling, receipted as `budget.grace_used`, never on
 the Grok lane. Modules: `fleets.py`, `budget.py`, `shape.py`. Depends on E24. Size 0.25. Build cap
 $5 (`3 items + $1 breadth + $1 summary`).
 
-**F6. Launcher completeness.** Three things every Phase E mission file needed by hand after
-`conductor shape a` wrote it: the E9 ceiling block (`ceiling: {"per_hour_usd": null,
+**F6. Launcher completeness.** Four things every Phase E mission file needed by hand after
+`conductor shape a` wrote it, and one the first Phase F launch got wrong: the gate command
+must use absolute paths and `PYTHONPATH=src` because a worktree has no `.venv` and the venv's
+editable install imports the main checkout's source (F1 and F3 were launched with a relative
+command on 2026-09-07 and their gates tested the wrong tree); F6 adds a gate preflight that
+runs the command once in a throwaway worktree of the repository at dry-run time and refuses a
+launch whose gate cannot run there (exit 127, an import from outside the worktree). The three
+by-hand edits: the E9 ceiling block (`ceiling: {"per_hour_usd": null,
 "per_day_usd": null}`, because the default ceilings apply to attended launches and a Shape A day
 runs past $25 before noon); a raised fix cap ($7 for a four-finding review, set by hand on E4, E6,
 E7, E9, E13, E14, E19); and the rule-11 test count (E10b's `--items` was raised from 10 to 12 by
@@ -238,9 +243,8 @@ launchd fleet is a separate system and stays one). Depends on E9, E12, F10.
   salvages on record); the three probes for F12, F13, F14 on a scratch repository, receipts
   into `docs/research/`; the two verbatim Anthropic prompt blocks into the launcher's build
   prompt under E17's versioning; the Composer price-row note; the operator decisions above.
-- **Group 1, three in parallel, snapshot-disjoint:** F1 verdicts (lane result), F3 read-lane
-  gate (run receipt gate block, backfill), F4 salvage own gate (salvage receipt). F2 waits: it
-  touches the mission result and resume.
+- **Group 1, two in parallel, snapshot-disjoint:** F1 verdicts (lane result), F3 read-lane
+  gate (run receipt gate block, backfill). F2 waits: it touches the mission result and resume.
 - **Group 2, series with the resume touch, then three in parallel:** F2 wall clock; then F5
   cursor grace, F6 launcher, F13 `denied_actions` (fleet output only).
 - **Group 3:** F12 restricted read lanes and permission denials on the receipt (F14 dropped
@@ -249,7 +253,7 @@ launchd fleet is a separate system and stays one). Depends on E9, E12, F10.
 - **Group 5, receipts:** F8 fixtures, F9 shapes, F10 consumers, F11 unattended. F10 can start
   the same day as Group 1; nothing in it depends on a Phase F build.
 
-Nine build items, build caps summing to $53, about $88 with review and fix lanes; the
+Eight build items, build caps summing to $48, about $80 with review and fix lanes; the
 receipt items about $40 to $60 depending on what the consumers spend. At the E10b pace (75
 minutes launch to release) the builds are a day and a half; the receipts are another day.
 
