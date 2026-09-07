@@ -56,6 +56,8 @@ from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
 from .verdicts import checklist_contract, checklist_schema, parse_verdict
 from .verify import (
+    GATE_POLL_S,
+    GIT_TIMEOUT,
     NO_OP_COMMIT_REASONS,
     CommitOutcome,
     GitState,
@@ -704,7 +706,7 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
         return None
     path = declared["path"]
     if dry_run:
-        return {
+        state = {
             "path": path,
             "exists": None,
             "bytes": None,
@@ -712,6 +714,16 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
             "ok": None,
             "reason": None,
         }
+        if declared.get("validator"):
+            # F22: declared, not checked -- same convention as the rest of
+            # this dry-run record.
+            state["validator"] = {
+                "command": _validator_command(declared["validator"], path),
+                "before": None,
+                "after": None,
+                "verdict": None,
+            }
+        return state
     full = Path(spec.cwd) / path
     # W5: before anything reads the file, and before the capture below
     # copies it. `exists: False` keeps the capture's hands off a path that
@@ -798,6 +810,207 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
         "ok": True,
         "reason": None,
     }
+
+
+def _validator_command(command: str, path: str) -> str:
+    """F22: the literal `{path}` in a declared `deliverable.validator`,
+    replaced with the bytes' actual location -- the deliverable's
+    repo-relative path for the after run, a temporary file's absolute path
+    for the before run. A command without `{path}` is unchanged."""
+    return command.replace("{path}", path)
+
+
+def _validator_passed(run: dict | None) -> bool:
+    return run is not None and run.get("exit_code") == 0 and not run.get("timed_out")
+
+
+def _run_validator_command(
+    cwd: str,
+    command: str,
+    timeout: int,
+    env: dict[str, str] | None,
+    *,
+    stop: Callable[[], bool] | None = None,
+) -> dict:
+    """F22: one before/after validator run -- the same process-group and
+    poll-loop shape as `verify.run_tests`, including the same `stop` check
+    a long-running gate gets, but this receipt's own 20-line tail
+    (`TAIL_LINES`) rather than the gate's 15."""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=cwd,
+                shell=True,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=env,
+            )
+        except OSError as exc:
+            return {
+                "exit_code": None,
+                "timed_out": False,
+                "tail": f"validator could not start: {exc}",
+            }
+        _register_live_group(proc.pid)
+        try:
+            deadline = time.monotonic() + timeout
+            timed_out = interrupted = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    proc.wait(timeout=min(GATE_POLL_S, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop is not None and stop():
+                    interrupted = True
+                    break
+        finally:
+            _kill_live_group(proc.pid)
+            proc.wait()
+        if timed_out:
+            return {
+                "exit_code": None,
+                "timed_out": True,
+                "tail": f"timed out after {timeout}s; process group killed",
+            }
+        if interrupted:
+            return {
+                "exit_code": None,
+                "timed_out": False,
+                "tail": "interrupted: stop requested; process group killed",
+            }
+        out.seek(0)
+        combined = out.read().strip().splitlines()
+    return {
+        "exit_code": proc.returncode,
+        "timed_out": False,
+        "tail": "\n".join(combined[-TAIL_LINES:]) if combined else "(no output)",
+    }
+
+
+def _git_show_bytes(cwd: str, ref: str, path: str) -> bytes | None:
+    """F22: the base commit's raw bytes for `path`, not text-decoded.
+
+    `git_run` (used everywhere else in this module) runs with `text=True`,
+    which applies universal-newline translation on read -- fine for the
+    status and diff plumbing that never round-trips through a byte
+    comparison, wrong here: a CRLF base file would otherwise reach the
+    validator's before run silently normalized to LF, judging bytes the
+    repository never held. `None` on any failure to start, run, or find
+    the blob (the caller reads that the same way a nonzero `git show`
+    would: no before run attempted).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _validator_ran_and_failed(run: dict | None) -> bool:
+    """F22: true only when a run actually produced a verdict and that
+    verdict was failure -- a run that timed out or never started proved
+    nothing, the same distinction `_reproduce_gate`'s own ladder draws
+    between `infra_error`/`timed_out` (no evidence either way) and a gate
+    that genuinely ran and failed (`runner.py`'s `_reproduce_receipt`
+    docstring)."""
+    return run is not None and not run.get("timed_out") and run.get("exit_code") not in (0, None)
+
+
+def _check_deliverable_validator(
+    spec: Spec,
+    deliverable_state: dict | None,
+    deliverable_sha: str | None,
+    before: GitState,
+    run_dir: Path,
+    env: dict[str, str] | None,
+) -> tuple[dict | None, str | None]:
+    """F22: a declared `deliverable.validator` runs on the before and after
+    bytes -- the same command and environment the gate gets -- once
+    `_check_deliverable` has judged the file and before the gate runs.
+    `_reproduce_receipt` reads the verdict this returns to decide whether a
+    `stage: fix` lane's deliverable reproduced anything.
+
+    Returns the receipt block for `Result.deliverable["validator"]` (or
+    `None` when no validator was declared, or the deliverable does not exist
+    to check), and, when the after run's own bytes moved under it, the same
+    `DELIVERABLE_CHANGED` error `_capture_deliverable` guards after the real
+    gate.
+    """
+    declared = spec.deliverable
+    if declared is None or not declared.get("validator"):
+        return None, None
+    if deliverable_state is None or not deliverable_state.get("exists"):
+        return None, None
+    path = deliverable_state["path"]
+    command = declared["validator"]
+    after_command = _validator_command(command, path)
+
+    before_run: dict | None = None
+    if before.is_repo and before.head:
+        # W5/E1's own rule for this path: declared relative to `spec.cwd`,
+        # which need not be the repo toplevel, while `<rev>:<path>` git
+        # syntax resolves a bare path from the toplevel (`_repo_relative`
+        # exists for exactly this, see `_read_deliverable_only`).
+        repo_path = _repo_relative(spec.cwd, path)
+        raw = _git_show_bytes(spec.cwd, before.head, repo_path)
+        if raw is not None:
+            before_file = run_dir / f"validator-before{Path(path).suffix}"
+            before_file.write_bytes(raw)
+            before_command = _validator_command(command, str(before_file))
+            before_run = _run_validator_command(
+                spec.cwd, before_command, GATE_TIMEOUT, env, stop=stop_requested
+            )
+
+    after_run = _run_validator_command(
+        spec.cwd, after_command, GATE_TIMEOUT, env, stop=stop_requested
+    )
+
+    error: str | None = None
+    now = _deliverable_sha256(spec.cwd, path)
+    if now is None or now != deliverable_sha:
+        error = f"{DELIVERABLE_CHANGED}: {path}"
+
+    if not _validator_passed(after_run):
+        verdict = "rejected"
+    elif _validator_ran_and_failed(before_run):
+        verdict = "reproduced"
+    else:
+        # `before_run` is `None`, passed, or -- a before run that timed out
+        # or could not start -- never produced a verdict at all; none of
+        # those are evidence the base was broken, so this reads the same as
+        # "before passed or was None": nothing was demonstrated.
+        verdict = "accepted"
+
+    if verdict == "rejected":
+        after_tail = after_run.get("tail") or ""
+        first_line = after_tail.splitlines()[0] if after_tail else ""
+        deliverable_state["ok"] = False
+        deliverable_state["reason"] = f"deliverable rejected by validator: {path}: {first_line}"
+
+    return (
+        {
+            "command": after_command,
+            "before": before_run,
+            "after": after_run,
+            "verdict": verdict,
+        },
+        error,
+    )
 
 
 def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
@@ -1443,6 +1656,7 @@ def _reproduce_receipt(
     run_id: str,
     env: dict[str, str] | None = None,
     inherited_check: str | None = None,
+    deliverable_validator: dict | None = None,
 ) -> tuple[dict, str | None]:
     """Reproduce before fix: a `stage: fix` write dispatch must show its own
     check failing on the base before it may land. Runs the caller's gate
@@ -1469,6 +1683,13 @@ def _reproduce_receipt(
     reproduce step is satisfied without demanding a fresh test-surface change
     of its own -- the verdict reads `inherited` and the ordinary gate (run
     after this returns) is where that inherited test must now pass.
+
+    `deliverable_validator` (F22) is `Result.deliverable["validator"]`, when
+    the fix's deliverable declared one: a `reproduced` verdict there, with no
+    test-surface change to transplant, is itself the reproduction (verdict
+    `validator`, no error); an `accepted` verdict with no other change is the
+    same refusal a source fix with no test-surface change gets, worded for a
+    validator that already passed on the base. Unchanged for `adversarial`.
     """
     if spec.stage not in ("fix", "adversarial"):
         return _reproduce_skip("skipped", "stage is not fix"), None
@@ -1485,10 +1706,46 @@ def _reproduce_receipt(
     # it is the "changed nothing" case, not the "changed source without a
     # check" one. Live: the F18 fix lane answered NO_CHANGES with an empty
     # dispositions list and was failed here, kind `unknown` (2026-09-07).
+    deliverable_only = False
     if spec.deliverable and before.head:
         changed = changed_paths_since(spec.cwd, before.head)
-        if changed == [str(spec.deliverable["path"])]:
-            return _reproduce_skip("skipped", "the fleet wrote only its declared deliverable"), None
+        deliverable_only = changed == [str(spec.deliverable["path"])]
+    # F22: checked ahead of the F19 skip below, which the same
+    # `deliverable_only` condition would otherwise read as "nothing to
+    # reproduce" whether or not a declared validator already spoke. A fix
+    # lane that also touched the test surface falls through to the ordinary
+    # transplant path unchanged; the validator verdict travels on the
+    # deliverable block regardless.
+    if spec.stage == "fix" and deliverable_validator is not None:
+        verdict = deliverable_validator.get("verdict")
+        surface_untouched = surface_state is None or not surface_state["touched"]
+        # Gated on `deliverable_only`, same as the `accepted` refusal right
+        # below: a validator that reproduced something on its own document
+        # is evidence about that document, not about an unrelated source
+        # edit riding along in the same diff. Without this, a fix lane could
+        # pair a validator-reproduced document fix with an untested source
+        # change and land both -- the source change checked by nothing.
+        if verdict == "reproduced" and surface_untouched and deliverable_only:
+            before_tail = (deliverable_validator.get("before") or {}).get("tail") or ""
+            return (
+                {
+                    "ran": False,
+                    "exit_code": None,
+                    "timed_out": False,
+                    "tail": before_tail.splitlines()[0] if before_tail else "",
+                    "worktree": "",
+                    "patch_bytes": 0,
+                    "verdict": "validator",
+                },
+                None,
+            )
+        if verdict == "accepted" and deliverable_only:
+            return (
+                _reproduce_skip("no-check", "validator passed on the base too"),
+                "fix without a reproducing check: validator passed on the base too",
+            )
+    if deliverable_only:
+        return _reproduce_skip("skipped", "the fleet wrote only its declared deliverable"), None
     if spec.stage == "fix" and inherited_check:
         return (
             {
@@ -2390,6 +2647,42 @@ def dispatch(
                 + ", ".join(surface_state["changed"])
             )
 
+        # E1: after the fleet exits, before the gate (and before the reproduce
+        # receipt below, which reads a declared validator's verdict). A dry
+        # run never reaches here (dispatch() returns earlier), so this is
+        # always a real check.
+        deliverable_state = _check_deliverable(spec, dry_run=False)
+        deliverable_path: str | None = None
+        # W4: the check above is what decides `deliverable_state`, and it stays
+        # here, before the gate. The bytes are only hashed now; the copy into
+        # run_dir happens after the gate and after the tree is judged (see
+        # `_capture_deliverable`), so the captured copy is the artifact the
+        # run actually leaves behind rather than one a gate could still rewrite.
+        deliverable_sha: str | None = None
+        if deliverable_state is not None and deliverable_state.get("exists"):
+            deliverable_sha = _deliverable_sha256(spec.cwd, deliverable_state["path"])
+
+        # F22: a declared validator runs on the before and after bytes now,
+        # same reasoning as the sha256 above -- before the gate, so
+        # `_reproduce_receipt` can read its verdict. Skipped on the same
+        # "did not complete cleanly" state the ordinary gate below already
+        # refuses to run against (`test_command and not timed_out and error
+        # is None`) and `_reproduce_receipt` itself refuses to build a
+        # verdict on: an already-timed-out, already-interrupted, or
+        # already-failed dispatch gets no more gate-length subprocesses
+        # spent on it, and a stop request already recorded as `error` is
+        # honored immediately instead of racing two more waits for it.
+        validator_state: dict | None = None
+        validator_error: str | None = None
+        if not (timed_out or error is not None or exit_code != 0 or output.error):
+            validator_state, validator_error = _check_deliverable_validator(
+                spec, deliverable_state, deliverable_sha, before, run_dir, env
+            )
+        if validator_state is not None and deliverable_state is not None:
+            deliverable_state["validator"] = validator_state
+        if validator_error is not None and error is None:
+            error = validator_error
+
         reproduce_state, reproduce_error = _reproduce_receipt(
             spec,
             before=before,
@@ -2404,19 +2697,23 @@ def dispatch(
             run_id=run_id,
             env=env,
             inherited_check=inherited_check,
+            deliverable_validator=validator_state,
         )
         # E16: an adversarial lane's `not-reproduced` verdict does not fail
         # the lane (`reproduce_error` is None for it) but must still keep the
         # commit off the branch, same as `no-check` -- only `reproduced`,
-        # `inherited` (a fix building on a reproduced adversarial base), and
-        # every other stage's `skipped` (which never had a commit to block
-        # anyway) may land. This is a superset of the old `reproduce_error is
-        # not None` check: for a `fix` dispatch the two verdicts that ever set
-        # `reproduce_error` (`no-check`, `not-reproduced`) are exactly the two
-        # excluded here, so a fix lane's behavior is unchanged.
+        # `inherited` (a fix building on a reproduced adversarial base),
+        # `validator` (F22: a fix's declared validator reproduced something),
+        # and every other stage's `skipped` (which never had a commit to
+        # block anyway) may land. This is a superset of the old
+        # `reproduce_error is not None` check: for a `fix` dispatch the two
+        # verdicts that ever set `reproduce_error` (`no-check`,
+        # `not-reproduced`) are exactly the two excluded here, so a fix
+        # lane's behavior is unchanged.
         reproduce_blocks_commit = reproduce_state.get("verdict") not in (
             "reproduced",
             "inherited",
+            "validator",
             "skipped",
         ) or (
             # An adversarial lane that changed source outside the test surface
@@ -2435,19 +2732,6 @@ def dispatch(
             error = reproduce_error
             if reproduce_state.get("interrupted"):
                 interrupted = True
-
-        # E1: after the fleet exits, before the gate. A dry run never reaches
-        # here (dispatch() returns earlier), so this is always a real check.
-        deliverable_state = _check_deliverable(spec, dry_run=False)
-        deliverable_path: str | None = None
-        # W4: the check above is what decides `deliverable_state`, and it stays
-        # here, before the gate. The bytes are only hashed now; the copy into
-        # run_dir happens after the gate and after the tree is judged (see
-        # `_capture_deliverable`), so the captured copy is the artifact the
-        # run actually leaves behind rather than one a gate could still rewrite.
-        deliverable_sha: str | None = None
-        if deliverable_state is not None and deliverable_state.get("exists"):
-            deliverable_sha = _deliverable_sha256(spec.cwd, deliverable_state["path"])
 
         # Commit before the Git verdict is taken, so it describes the state
         # the caller is actually left with.

@@ -625,7 +625,9 @@ class Spec:
     # exits (runner.dispatch), never through `git status` (see the module
     # docstring there for why). F15 mission 2 item 3: `commit: false` keeps
     # the deliverable out of the harness's own commit (verify.commit_work's
-    # `exclude`) -- a receipt, not source.
+    # `exclude`) -- a receipt, not source. F22: `validator`, optional, a
+    # shell command run on the deliverable's before and after bytes -- see
+    # `_validate_deliverable` and `runner._check_deliverable_validator`.
     deliverable: dict | None = None
     # E6: the shell command a `fleet: "script"` dispatch runs; ignored by
     # every other fleet. Refused as missing (script) or as set (any other
@@ -946,7 +948,7 @@ class Spec:
         deliverable = self.deliverable
         if not isinstance(deliverable, dict):
             raise DispatchRefused("deliverable must be an object")
-        unknown = sorted(set(deliverable) - {"path", "schema", "commit"})
+        unknown = sorted(set(deliverable) - {"path", "schema", "commit", "validator"})
         if unknown:
             raise DispatchRefused(f"deliverable has unknown field(s): {', '.join(unknown)}")
         if "commit" in deliverable and type(deliverable["commit"]) is not bool:
@@ -977,6 +979,9 @@ class Spec:
             # reads `required` and `properties` off this file after the run.
             if not isinstance(parsed, dict):
                 raise DispatchRefused("deliverable schema file must be a JSON object")
+        validator = deliverable.get("validator")
+        if validator is not None and (not isinstance(validator, str) or not validator):
+            raise DispatchRefused("deliverable validator must be a non-empty string")
 
     def resolved_timeout(self) -> int:
         return self.timeout if self.timeout is not None else DEFAULT_TIMEOUT[self.mode]
