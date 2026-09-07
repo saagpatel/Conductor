@@ -297,7 +297,11 @@ def test_report_reviewer_precision_table_over_two_missions(home: Path):
 # --- F2: wall clock on the ledger -------------------------------------------
 
 
-def test_report_vendor_stage_cache_column_is_cache_read_over_input_tokens(home: Path):
+def test_report_vendor_stage_cache_column_is_the_prompt_cache_hit_rate(home: Path):
+    """Reads over everything given to the model (uncached input, reads,
+    writes): the same hit rate report.md prints per mission. The first
+    shape divided reads by uncached input alone and printed 300% here and
+    millions of percent on a real day."""
     _write_receipt(
         home,
         "20260101T000000Z-claude-cached",
@@ -309,8 +313,8 @@ def test_report_vendor_stage_cache_column_is_cache_read_over_input_tokens(home: 
     )
     rpt = report(home)
     row = next(r for r in rpt.vendor_stage if r.vendor == "anthropic" and r.stage == "build")
-    assert row.cache_pct() == 300.0
-    assert row.to_dict()["cache_pct"] == 300.0
+    assert row.cache_pct() == 75.0
+    assert row.to_dict()["cache_pct"] == 75.0
 
 
 def test_report_vendor_stage_cache_column_is_blank_with_no_input_tokens(home: Path):
@@ -636,3 +640,22 @@ def test_result_from_dict_defaults_new_fields_and_to_dict_writes_them():
     assert written["stage"] is None
     assert written["lane"] is None
     assert written["mission"] is None
+
+
+def test_report_wall_clock_table_is_bounded_by_since_like_every_other_table(home: Path):
+    from datetime import UTC, datetime
+
+    _write_mission(home, "m-old", name="mission-old", ok=True, lanes=[])
+    _write_mission(home, "m-new", name="mission-new", ok=True, lanes=[])
+    _write_receipt(
+        home,
+        "20260201T000000Z-claude-recent",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-new",
+    )
+    rpt = report(home, since=datetime(2026, 1, 15, tzinfo=UTC))
+    assert {row.mission for row in rpt.wall_clock} == {"m-new"}
+    unbounded = report(home)
+    assert {row.mission for row in unbounded.wall_clock} == {"m-new", "m-old"}

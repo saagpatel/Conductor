@@ -299,9 +299,13 @@ class VendorStageRow:
     unpriced_runs: int = 0
     cap_misses: int = 0
     gate_failures: int = 0
-    # F2: the "cache" column -- cache_read_tokens over input_tokens, summed
-    # across every run in this vendor/stage group, as a percentage.
+    # F2: the "cache" column -- the prompt cache hit rate over every run in
+    # this vendor/stage group: cache reads over everything the model was
+    # given (uncached input plus cache reads plus cache writes), the same
+    # figure `report.md` prints per mission. The first shape divided reads
+    # by uncached input alone and printed millions of percent.
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     input_tokens: int = 0
     _durations: list[float] = field(default_factory=list)
     _tool_calls: list[int] = field(default_factory=list)
@@ -320,12 +324,14 @@ class VendorStageRow:
         self._durations.append(run.duration_s)
         self._tool_calls.append(run.tool_calls)
         self.cache_read_tokens += run.cache_read_tokens
+        self.cache_write_tokens += run.cache_write_tokens
         self.input_tokens += run.input_tokens
 
     def cache_pct(self) -> float | None:
-        if not self.input_tokens:
+        given = self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+        if not given:
             return None
-        return round(self.cache_read_tokens / self.input_tokens * 100, 1)
+        return round(self.cache_read_tokens / given * 100, 1)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -369,10 +375,14 @@ class ReviewerFindingRow:
     # `FINDINGS: N` -- narration `report._is_no_findings` used to read as a
     # finding. Included in `runs`, excluded from `rate`'s denominator.
     unparsed: int = 0
+    # Reviews whose parsed verdict reported at least one finding; `rate` is
+    # this over the parsed reviews (a fraction, never above 1), while
+    # `findings` is the total count those reviews reported.
+    with_findings: int = 0
 
     def rate(self) -> float | None:
         parsed = self.runs - self.unparsed
-        return round(self.findings / parsed, 3) if parsed else None
+        return round(self.with_findings / parsed, 3) if parsed else None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -526,7 +536,11 @@ def _is_no_findings(answer_path: str) -> dict | None:
 
 
 def _build_report(
-    rows: list[Run], skipped: int, mission_meta: dict[str, dict[str, object]]
+    rows: list[Run],
+    skipped: int,
+    mission_meta: dict[str, dict[str, object]],
+    *,
+    windowed: bool = False,
 ) -> Report:
     vendor_stage: dict[tuple[str, str | None], VendorStageRow] = {}
     error_kinds: dict[str, ErrorKindRow] = {}
@@ -553,6 +567,8 @@ def _build_report(
                     row.unparsed += 1
                 else:
                     row.findings += verdict["findings"]
+                    if verdict["findings"]:
+                        row.with_findings += 1
 
         if run.mission is not None:
             mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
@@ -642,9 +658,12 @@ def _build_report(
     # `result.json` under `home/missions`, not just the ones with a run in
     # the window `rows` was filtered to), so a mission recorded before this
     # field existed still gets its row, blanks and all.
+    # ... restricted to the missions with a run inside the requested window,
+    # so `--since` bounds this table the way it bounds every other one.
     wall_rows = [
         WallClockRow(mission=name, **_wall_figures(mission_meta[name].get("wall")))
         for name in sorted(mission_meta)
+        if not windowed or name in missions
     ]
 
     return Report(
@@ -679,7 +698,9 @@ def report(home: Path, *, since: datetime | None = None, until: datetime | None 
             # A dry run spent nothing; see spend.summarize's own comment.
             continue
         rows.append(run)
-    return _build_report(rows, skipped, mission_meta)
+    return _build_report(
+        rows, skipped, mission_meta, windowed=since is not None or until is not None
+    )
 
 
 def _print_section(title: str, headings: tuple[str, ...], rows: list[tuple[str, ...]]) -> None:
