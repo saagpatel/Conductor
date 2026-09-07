@@ -539,12 +539,24 @@ def record(
         work = Path(tmp) / out_dir.name
         work.mkdir()
 
+        scrubbed_source = False
         for name in MISSION_FILES:
             src = mission_dir / name
             if not src.is_file():
                 continue
             if name == "mission.json":
-                backfilled = json.dumps(_backfill_snapshot(dict(mission_raw)), indent=2)
+                snapshot = _backfill_snapshot(dict(mission_raw))
+                # F9: `source` is the path of the mission file the operator
+                # launched from -- the placeholder walk above only reaches as
+                # far as `<home>`/`<cwd>`/`<user>` match, leaving the rest of
+                # the path (a jobs id, a scratchpad dir) in the fixture. It
+                # carries nothing replay needs back (`from_snapshot` only
+                # requires a string), so it is scrubbed whole instead.
+                source_value = snapshot.get("source")
+                scrubbed_source = isinstance(source_value, str) and source_value != ""
+                if scrubbed_source:
+                    snapshot = {**snapshot, "source": "<source>"}
+                backfilled = json.dumps(snapshot, indent=2)
                 (work / name).write_text(scrub_json_text(backfilled, replacements))
             elif name.endswith(".json"):
                 _copy_json(src, work / name, replacements)
@@ -654,7 +666,13 @@ def record(
             # moved; null-map fixtures (recorded before this field existed)
             # read as unknown, never as a failure.
             "prompt_versions": prompts_mod.prompt_versions(),
-            "placeholders": ["<home>", "<cwd>", "<user>", *(p for _, p in extra_pairs)],
+            "placeholders": [
+                "<home>",
+                "<cwd>",
+                "<user>",
+                *(["<source>"] if scrubbed_source else []),
+                *(p for _, p in extra_pairs),
+            ],
             "files": files,
         }
         (work / "golden.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))

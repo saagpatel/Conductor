@@ -362,6 +362,44 @@ def test_record_then_check_is_clean(repo, home, monkeypatch, tmp_path):
     assert golden.check(fixture) == []
 
 
+def test_record_scrubs_the_mission_files_own_source_path(repo, home, monkeypatch, tmp_path):
+    # F9: `source` is the path of the mission file the operator launched
+    # from; the placeholder walk only reaches as far as `<home>`/`<cwd>`
+    # match, so a launch path with a jobs id or scratchpad dir past that
+    # point used to leak into every fixture unscrubbed.
+    fake_fleets(
+        monkeypatch,
+        {
+            "claude": ["sh", "-c", f"echo x > x.txt && echo '{envelope('done', 0.01)}'"],
+            "cursor": say("ok"),
+        },
+    )
+    launch_path = tmp_path / "jobs" / "b514440a" / "tmp" / "cg3" / "mission.json"
+    m = mission_from_dict(_two_lane_mission_raw(repo), base_dir=tmp_path, source=str(launch_path))
+    result = run_mission(m, home=home)
+    assert result.ok is True
+
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    snapshot = json.loads((fixture / "mission.json").read_text())
+    assert snapshot["source"] == "<source>"
+    manifest = json.loads((fixture / "golden.json").read_text())
+    assert "<source>" in manifest["placeholders"]
+    assert golden.scrub_guard(fixture) == []
+    # A snapshot carrying the `<source>` placeholder loads through
+    # Mission.from_snapshot and replays clean -- replay never resolves or
+    # checks it as a real path.
+    assert golden.check(fixture) == []
+
+
+def test_record_leaves_a_missing_source_unscrubbed(repo, home, monkeypatch, tmp_path):
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    snapshot = json.loads((fixture / "mission.json").read_text())
+    assert snapshot["source"] == ""
+    manifest = json.loads((fixture / "golden.json").read_text())
+    assert "<source>" not in manifest["placeholders"]
+
+
 def test_recorded_fixture_never_contains_a_dot_log_file(repo, home, monkeypatch, tmp_path):
     # The operator's global git excludes drop every `*.log` path, silently,
     # from any `git add`. A fixture file with that extension looks committed

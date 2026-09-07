@@ -2560,7 +2560,13 @@ Every copied text file and every string inside every copied JSON document is
 scrubbed, longest replacement first so a home nested inside the user's own
 home is replaced before the shorter path that contains it: the conductor
 home becomes `<home>`, the mission's `cwd` becomes `<cwd>`, and the user's
-home directory (`Path.home()`) becomes `<user>`. Then secrets: any
+home directory (`Path.home()`) becomes `<user>`. The mission snapshot's own
+`source` -- the path of the mission file the operator launched from -- is
+scrubbed whole to the literal `<source>` rather than through the placeholder
+walk above, since that walk only reaches as far as `<home>`/`<cwd>`/`<user>`
+match and would otherwise leave a fragment of the launch path (a jobs id, a
+scratchpad directory) in the fixture; a missing or empty `source` (a mission
+built in code, as the test suite does) is left as it is. Then secrets: any
 `NAME=value` where `NAME` contains `TOKEN`, `SECRET`, `KEY`, or `PASSWORD`
 becomes `NAME=<redacted>`; `Bearer <token>` becomes `Bearer <redacted>`;
 JSON object values whose key contains those words become `<redacted>`; and
