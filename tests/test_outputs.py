@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from conductor.outputs import parse
+from conductor.outputs import INCOMPLETE, parse
 
 CLAUDE = (
     '{"duration_api_ms":1730,"stop_reason":"end_turn","result":"PONG",'
@@ -390,3 +390,72 @@ def test_reported_costs_must_be_finite_non_negative_numbers(cost):
     assert out.notes == [
         "ignored total_cost_usd: reported cost must be a finite non-negative number"
     ]
+
+
+# --- D9: a usage figure that is not a number ---------------------------------
+
+
+def test_a_bare_nan_usage_figure_is_dropped_not_raised():
+    """`json.loads` accepts bare `NaN` and `Infinity`; `int()` on either
+    raises. The figure a fleet did report is still worth recording, so the
+    unusable one is dropped to the same 0 a missing field has always given."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"usage":{"input_tokens":NaN,"output_tokens":7,'
+        '"cache_read_input_tokens":Infinity,"cache_creation_input_tokens":true}}'
+    )
+    out = parse("claude", envelope)
+    assert out.parsed is True and out.error is None
+    assert out.usage.input_tokens == 0
+    assert out.usage.output_tokens == 7
+    assert out.usage.cache_read_tokens == 0
+    assert out.usage.cache_write_tokens == 0  # a bool is not a token count
+
+
+def test_a_non_integral_usage_figure_is_dropped_rather_than_truncated():
+    out = parse("claude", '{"type":"result","usage":{"output_tokens":7.5}}')
+    assert out.usage.output_tokens == 0
+
+
+def test_a_nan_in_a_cut_short_claude_stream_still_prices_the_rest():
+    """The per-message fold has the same trap as the envelope, on the one
+    path whose whole purpose is pricing a run nobody else will price."""
+    stream = "\n".join(
+        [
+            '{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":NaN,'
+            '"output_tokens":3}}}',
+            '{"type":"assistant","message":{"id":"m2","usage":{"output_tokens":4}}}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.error == "claude stream ended without a result event"
+    assert out.usage.input_tokens == 0 and out.usage.output_tokens == 7
+
+
+def test_a_nan_in_an_agy_step_still_prices_the_other_steps():
+    stream = "\n".join(
+        [
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {"step_index": 1, "usage": {"input_tokens": 100}},
+                }
+            ),
+            '{"event":"step_update","step_update":{"step_index":2,'
+            '"usage":{"input_tokens":NaN,"output_tokens":5}}}',
+        ]
+    )
+    out = parse("antigravity", stream)
+    assert out.usage.input_tokens == 100 and out.usage.output_tokens == 5
+
+
+def test_a_cut_short_agy_stream_is_marked_incomplete():
+    """D15: no result event means the turn never finished. The status is
+    conductor's own, not a fleet's word, so `error` stays None."""
+    stream = (
+        '{"event":"step_update","step_update":{"step_index":1,'
+        '"usage":{"input_tokens":10}}}'
+    )
+    out = parse("antigravity", stream)
+    assert out.status == INCOMPLETE and out.error is None and out.parsed is True
+    assert out.notes and "without a result event" in out.notes[0]

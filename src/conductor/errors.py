@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .outputs import INCOMPLETE
 from .verify import NO_OP_COMMIT_REASONS
 
 if TYPE_CHECKING:
@@ -29,9 +30,17 @@ if TYPE_CHECKING:
 # really finished (interrupted, capped, timed out, gated, rate-limited) must
 # classify as whatever ended it, not as "deliverable" merely because the
 # file also happens to be missing.
+# D9: the prefix `runner.dispatch` writes on a receipt for a run that was
+# paid for and then failed while its output was being read -- a malformed
+# envelope, an unparseable deliverable, a settlement that raised. Matched by
+# prefix rather than by a field of its own so an older receipt rehydrates
+# into the same classification.
+PARSE_FAILURE_PREFIX = "parse failed: "
+
 KINDS: tuple[str, ...] = (
     "interrupted",
     "cancelled",
+    "parse",
     "cap",
     "breaker",
     "timeout",
@@ -219,6 +228,12 @@ def error_kind(result: Result) -> str | None:
         return "interrupted"
     if result.cancelled:
         return "cancelled"
+    # D9: checked ahead of the cap because a run whose output could not be
+    # read comes back with no priced usage, which `_capped` reads as an
+    # unenforced cap. What actually ended this run is the parse, and the
+    # receipt exists only because conductor wrote it after the fact.
+    if (result.error or "").startswith(PARSE_FAILURE_PREFIX):
+        return "parse"
     if _capped(result):
         return "cap"
     if (result.breaker or {}).get("tripped"):
@@ -271,6 +286,12 @@ def error_kind(result: Result) -> str | None:
         if _is_refusal(result.fleet, fleet_text, result.fleet_status):
             return "refusal"
         return "fleet_error"
+    # D15: a stream that stopped before its fleet's terminal event is the
+    # same class of failure as the cut-short streams the transport table
+    # above already matches on their `error` text; this one carries a status
+    # instead, because no fleet reported it.
+    if result.fleet_status == INCOMPLETE:
+        return "transport"
     if result.exit_code not in (0, None):
         return "exit"
     if _gate_test_surface_failed(result):

@@ -24,8 +24,10 @@ from conductor.verdicts import (
     checklist_contract,
     checklist_schema,
     parse_checklist,
+    parse_dispositions_deliverable,
     parse_verdict,
     render_verdict,
+    valid_disposition_entry,
 )
 
 CRITERIA = parse_checklist(
@@ -502,3 +504,29 @@ def test_out_of_order_criteria_are_normalized_not_refused():
     assert verdict.invalid is None and verdict.passed
     assert [item["id"] for item in verdict.criteria] == ["alpha", "beta"]
     assert "normalized" in verdict.summary
+
+
+# --- D9: a fleet's own answer must not be able to raise ---------------------
+
+
+def test_a_verdict_field_that_is_not_a_string_is_invalid_not_a_crash():
+    """`x in {"pass", "fail"}` raises TypeError on an unhashable value, and
+    the value here is whatever a fleet wrote. An invalid verdict is already a
+    recorded outcome; a crash after the spend loses the whole receipt."""
+    answer = json.dumps({"verdict": ["pass"], "criteria": [], "summary": "s"})
+    verdict = parse_verdict(answer, [Criterion(id="a", question="a?")])
+    assert verdict.passed is False
+    assert verdict.invalid == "verdict must be 'pass' or 'fail'"
+    assert verdict.criteria[0]["id"] == "a" and verdict.criteria[0]["ok"] is False
+
+
+def test_a_disposition_that_is_not_a_string_is_refused_not_a_crash():
+    """The same shape one level down: `disposition` is compared against a
+    frozenset, so a list there raised where the entry should merely have
+    been counted malformed."""
+    entry = {"lane": "fix", "index": 1, "disposition": ["fixed"], "reason": "r"}
+    assert valid_disposition_entry(entry) is False
+    dispositions, malformed = parse_dispositions_deliverable(
+        json.dumps({"dispositions": [entry]})
+    )
+    assert dispositions == [] and malformed == 1

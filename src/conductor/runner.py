@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
@@ -34,7 +35,7 @@ from . import attest, prices, worktrees
 from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
-from .errors import error_kind
+from .errors import PARSE_FAILURE_PREFIX, error_kind
 from .fleets import (
     FLEETS,
     TAINT_AGY_DENIED_TOOLS,
@@ -49,7 +50,7 @@ from .fleets import (
     taint_disallowed_tools,
     taint_hook_files,
 )
-from .outputs import FleetOutput, agy_init_event, claude_init_event, json_line
+from .outputs import INCOMPLETE, FleetOutput, agy_init_event, claude_init_event, json_line
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -233,6 +234,12 @@ class Result:
         # A fleet that says it failed is believed, whatever its exit code.
         if self.fleet_error:
             return f"fleet reported: {self.fleet_error}"
+        # D15: and a fleet that never said anything terminal did not finish.
+        # A stream cut short mid-step can still leave an exit code of 0, bytes
+        # moved, and a green gate behind it -- every other check below then
+        # passes and the lane settles as ok on a turn that never ended.
+        if self.fleet_status == INCOMPLETE:
+            return "fleet stream ended without a terminal event"
         # F15: a vanished working tree is never ok, whatever the mode and
         # whatever the gate did or did not do with a directory that no
         # longer exists -- checked ahead of the gate below so a read lane
@@ -494,12 +501,20 @@ def _schema_mismatch(data: object, schema: dict) -> str | None:
     contract: every name in `required` is present, and every present
     property whose schema declares a `type` has a value of that type. Not a
     general JSON Schema validator."""
+    if not isinstance(schema, dict):
+        # D9: `Spec._validate_deliverable` refuses this before the spawn, but
+        # a schema file is read again here, after the run, and a file that
+        # changed underneath (or a Result rehydrated from an older receipt)
+        # must read as a failed check, not as an AttributeError on `.get`.
+        return "schema file is not a JSON object"
     if not isinstance(data, dict):
         return "top level is not a JSON object"
-    for name in schema.get("required") or []:
+    required = schema.get("required")
+    for name in required if isinstance(required, list) else []:
         if name not in data:
             return f"missing required property {name!r}"
-    for name, subschema in (schema.get("properties") or {}).items():
+    properties = schema.get("properties")
+    for name, subschema in (properties if isinstance(properties, dict) else {}).items():
         if name not in data or not isinstance(subschema, dict):
             continue
         expected = subschema.get("type")
@@ -668,7 +683,20 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
             "ok": False,
             "reason": f"deliverable does not parse: {path}",
         }
-    schema = json.loads(Path(schema_path).read_text())
+    try:
+        schema = json.loads(Path(schema_path).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # D9: validated before the spawn; unreadable now means the file moved
+        # or was rewritten during the run, which is a failed check on this
+        # lane, not an exception on the thread that records what it cost.
+        return {
+            "path": path,
+            "exists": True,
+            "bytes": size,
+            "parsed": True,
+            "ok": False,
+            "reason": f"deliverable schema unreadable: {exc}",
+        }
     problem = _schema_mismatch(data, schema)
     if problem is not None:
         return {
@@ -1904,6 +1932,11 @@ def dispatch(
                 )
             return _bail(f"setup failed: exit {setup_outcome.exit_code}")
 
+    # D9: flipped the moment the fleet's own process is over and the paid
+    # bytes are on disk. Everything after that point -- parsing the envelope,
+    # checking the deliverable, settling the budget -- is conductor reading a
+    # fleet's output, and a crash there must still leave a receipt.
+    post_wait = False
     try:
         before = GitState.capture(spec.cwd)
         try:
@@ -2048,6 +2081,7 @@ def dispatch(
                     error = f"{breaker_reason}; process group killed"
 
         duration = time.monotonic() - started
+        post_wait = True
         breaker_state = breaker.to_dict() if breaker is not None else None
 
         # The fleet's own envelope first: a fleet that says it failed (on any
@@ -2517,6 +2551,44 @@ def dispatch(
                 )
             elif teardown_outcome.exit_code != 0:
                 git_verdict.notes.append(f"teardown failed: exit {teardown_outcome.exit_code}")
+    except Exception as exc:  # noqa: BLE001 - D9 boundary, re-raised below
+        ports_mod.release(base, claimed_ports)
+        if include_exclude_file is not None:
+            include_exclude_file.unlink(missing_ok=True)
+        if iso is not None:
+            worktrees.release(iso)
+        if not post_wait:
+            # Nothing was paid for yet, or the failure is conductor's own
+            # setup: unchanged, it propagates.
+            raise
+        # D9: the fleet ran and the money is spent. What raised is conductor
+        # reading its output -- a bare NaN in a usage figure, a verdict field
+        # that is a list, a deliverable schema that is not an object. Without
+        # a receipt here the run directory holds only stdout.log, which
+        # neither `spend` nor `report` can see, so the spend goes missing and
+        # the mission records "lane crashed" with no ledger entry. Write what
+        # is known instead, and let the ordinary failure path judge it.
+        return _parse_failure_result(
+            exc,
+            run_id=run_id,
+            spec=spec,
+            model_id=model_id,
+            timeout=timeout,
+            run_dir=run_dir,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            duration=duration,
+            watcher=watcher,
+            budget=budget,
+            iso=iso,
+            lane_env=_lane_env(),
+            lane=lane,
+            mission=mission,
+            fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
+        )
     except BaseException:
         ports_mod.release(base, claimed_ports)
         if include_exclude_file is not None:
@@ -2855,6 +2927,102 @@ def _refused_result(
         prompt_versions=dict(prompt_versions or {}),
         taint_enforcement=taint_enforcement,
     )
+
+
+def _parse_failure_result(
+    exc: BaseException,
+    *,
+    run_id: str,
+    spec: Spec,
+    model_id: str,
+    timeout: int,
+    run_dir: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    exit_code: int | None,
+    timed_out: bool,
+    duration: float,
+    watcher: Watcher | None,
+    budget: Budget | None,
+    iso: worktrees.Isolation | None,
+    lane_env: dict | None,
+    lane: str | None,
+    mission: str | None,
+    fleet_version: str | None,
+    prompt_versions: dict[str, str] | None,
+) -> Result:
+    """D9: a receipt for a run that was paid for and then failed while its
+    own output was being read.
+
+    The price is whatever is still recoverable: the watcher's last reading,
+    priced from the table when the fleet reported no figure. When there is
+    none, the receipt says so in as many words rather than reading as free --
+    a missing price is a gap in the ledger, never $0.00 (prices.estimate).
+    The full traceback goes to `parse-error.txt` beside the transcript; the
+    one-line reason goes on the receipt, where `errors.error_kind` reads it
+    as `parse`.
+    """
+    error = f"{PARSE_FAILURE_PREFIX}{type(exc).__name__}: {exc}"
+    try:
+        (run_dir / "parse-error.txt").write_text(
+            "".join(traceback.format_exception(exc)),
+        )
+    except OSError:
+        pass
+    usage = watcher.poll() if watcher is not None else None
+    if usage is not None and usage.cost_usd is None:
+        estimated = prices.estimate(
+            model_id,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
+        if estimated is not None:
+            usage.cost_usd = estimated
+            usage.cost_basis = "estimated"
+    notes = [error, "receipt written after the run; the tree was not judged"]
+    if usage is None or usage.cost_usd is None:
+        notes.append("no priced usage was recovered before the failure; this run is unpriced")
+    if budget is not None:
+        budget.settle(
+            usage.cost_usd if usage is not None else None,
+            killed=False,
+            interrupted=False,
+            fleet_status=None,
+        )
+    result = Result(
+        run_id=run_id,
+        fleet=spec.fleet,
+        model=model_id,
+        effort=spec.effort,
+        mode=spec.mode,
+        cwd=spec.cwd,
+        timeout=timeout,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        duration_s=duration,
+        run_dir=str(run_dir),
+        stdout_path=str(stdout_path),
+        stderr_path=str(stderr_path),
+        tail=_tail(stdout_path),
+        spawned=True,
+        git_verdict=GitVerdict(
+            checked=False, notes=[*notes, *_version_note(fleet_version)]
+        ).to_dict(),
+        isolation=iso.to_dict() if iso is not None else None,
+        lane_env=lane_env,
+        usage=usage.to_dict() if usage is not None else None,
+        budget=budget.to_dict() if budget is not None else None,
+        error=error,
+        stage=spec.stage,
+        lane=lane,
+        mission=mission,
+        fleet_version=fleet_version,
+        prompt_versions=dict(prompt_versions or {}),
+    )
+    (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+    return result
 
 
 def _replace(spec: Spec, **changes) -> Spec:

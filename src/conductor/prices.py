@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -29,6 +30,32 @@ from .paths import conductor_home
 
 AS_OF = "2026-09-03"
 log = logging.getLogger("conductor.prices")
+
+
+def finite_positive(value: object) -> bool:
+    """D14: a number a budget can actually fire on.
+
+    A cap is compared against a spend, and both NaN (every comparison with
+    it is False) and inf (no finite spend exceeds it) pass a plain `> 0`
+    while leaving the cap permanently unenforceable. `True` is not a dollar
+    figure either, however well it behaves as `1`.
+    """
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def finite_nonnegative(value: object) -> bool:
+    """`finite_positive`, but zero is a real answer: a free model's rate."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value >= 0
+    )
 
 
 @dataclass(frozen=True)
@@ -146,6 +173,29 @@ def load_prices(override: Path | None = None, errors: list[str] | None = None) -
             # A missing or null cache rate takes the vendor-standard default.
             cache_read = value.get("cache_read")
             cache_write = value.get("cache_write")
+            # D14: `json.loads` accepts bare NaN and Infinity, and `float()`
+            # takes "nan" and "-1" alike. A rate that is not a finite
+            # non-negative number silently defeats every dollar figure it
+            # touches: NaN makes `budget.over_cap` and `Ledger.add` compare
+            # False forever, and a negative rate pays the operator back.
+            bad = [
+                name
+                for name, rate in (
+                    ("input", value["input"]),
+                    ("output", value["output"]),
+                    ("cache_read", cache_read),
+                    ("cache_write", cache_write),
+                )
+                if rate is not None
+                and (isinstance(rate, bool) or not finite_nonnegative(float(rate)))
+            ]
+            if bad:
+                _problem(
+                    errors,
+                    f"{path}: '{key}' rate(s) {', '.join(bad)} must be finite and "
+                    "non-negative; entry ignored",
+                )
+                continue
             price = _std(inp, out, str(value.get("note", "override")))
             if cache_read is not None:
                 price = replace(price, cache_read=float(cache_read))

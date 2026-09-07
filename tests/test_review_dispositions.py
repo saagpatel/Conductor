@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from conductor import runner as runner_mod
+from conductor import verdicts as verdicts_mod
 from conductor.fleets import Spec
 from conductor.mission import (
     LaneResult,
@@ -537,3 +538,71 @@ def test_read_lane_text_survives_an_undecodable_byte_and_a_missing_file(tmp_path
     assert review_verdict(text)["verdict"] == "no_findings"
     assert _read_lane_text(str(tmp_path / "missing.txt")) is None
     assert _read_lane_text(None) is None
+
+
+# --- D9: settle() runs on the scheduler thread, on a fleet's own file -------
+
+
+def _build_argv_with_bad_deliverable(spec: Spec) -> list[str]:
+    answer = claude_envelope("done\n")
+    payload = json.dumps({"dispositions": [{"lane": "review", "index": 1}]})
+    write_deliverable = f"printf %s {shlex.quote(payload)} > dispositions.json"
+    return ["sh", "-c", f"{write_deliverable}; printf %s {shlex.quote(answer)}"]
+
+
+def test_a_dispositions_deliverable_that_raises_fails_its_lane_not_the_mission(
+    repo, home, monkeypatch, tmp_path
+):
+    """`settle()` parses a fix lane's `dispositions.json` on the scheduler
+    thread with no boundary of its own: an exception there aborted the whole
+    mission after every lane had already been paid for and judged. The lane
+    is failed with the reason instead, and result.json is still written."""
+    monkeypatch.setattr(runner_mod, "build_argv", _build_argv_with_bad_deliverable)
+
+    def boom(text: str):
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(verdicts_mod, "parse_dispositions_deliverable", boom)
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {
+                "name": "fix",
+                "fleet": "claude",
+                "stage": "fix",
+                "mode": "write",
+                "prompt": "FIX",
+                "deliverable": {"path": "dispositions.json"},
+            }
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    lane = result.lanes[0]
+
+    assert result.ok is False
+    assert lane["ok"] is False
+    assert lane["skipped"] == "output parsing failed: TypeError: unhashable type: 'list'"
+    written = json.loads((Path(result.mission_dir) / "result.json").read_text())
+    assert written["lanes"][0]["skipped"] == lane["skipped"]
+
+
+def test_a_malformed_deliverable_entry_is_counted_not_raised(repo, home, monkeypatch, tmp_path):
+    """The same input without the monkeypatch: the type guards mean it is
+    merely malformed, which is what a fleet's file is allowed to be."""
+    monkeypatch.setattr(runner_mod, "build_argv", _build_argv_with_bad_deliverable)
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {
+                "name": "fix",
+                "fleet": "claude",
+                "stage": "fix",
+                "mode": "write",
+                "prompt": "FIX",
+                "deliverable": {"path": "dispositions.json"},
+            }
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    lane = result.lanes[0]
+    assert lane["dispositions"] == [] and lane["dispositions_malformed"] == 1

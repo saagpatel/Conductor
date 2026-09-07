@@ -59,6 +59,7 @@ from . import notify as notify_mod
 from . import verdicts as verdicts_mod
 from .errors import KINDS, error_kind
 from .fleets import TAINT_SHELL_MODES, VENDORS, DispatchRefused, Spec, model_vendor
+from .prices import finite_positive
 from .runner import (
     Result,
     _slug,
@@ -632,8 +633,12 @@ class Mission:
             raise MissionInvalid(f"require must be one of {', '.join(REQUIRE)} or a quorum object")
         if self.concurrency < 1:
             raise MissionInvalid("concurrency must be at least 1")
-        if self.max_cost_usd is not None and self.max_cost_usd <= 0:
-            raise MissionInvalid("max_cost_usd must be positive")
+        # D14: `<= 0` admits NaN (every comparison with it is False) and inf
+        # (no finite spend ever exceeds it), either of which leaves the
+        # mission running with a budget that can never fire -- the same trap
+        # `Spec._validate_cap` refuses per lane.
+        if self.max_cost_usd is not None and not finite_positive(self.max_cost_usd):
+            raise MissionInvalid("max_cost_usd must be a positive finite number")
         if self.template_max_chars < 1:
             raise MissionInvalid("template_max_chars must be positive")
         if self.early_cancel and self.require != "any":
@@ -1699,6 +1704,11 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         except (TypeError, ValueError) as exc:
             raise MissionInvalid(f"resolve: {exc}") from exc
 
+    # D14: `float(True)` is 1.0, so a boolean cap would reach `validate()`
+    # already looking like a dollar figure. Refused here, where the mission
+    # file's own value is still visible.
+    if isinstance(raw.get("max_cost_usd"), bool):
+        raise MissionInvalid("max_cost_usd must be a positive finite number")
     try:
         concurrency = int(raw.get("concurrency", 2))
         max_cost = float(raw["max_cost_usd"]) if raw.get("max_cost_usd") is not None else None
@@ -5143,12 +5153,9 @@ def _execute_mission(
                     out.branch = lane.branch
                     out.attempts[-1]["branch"] = lane.branch
 
-    def settle(lane_result: LaneResult) -> None:
-        # F1: a reviewer narrates before its verdict and a fix lane's
-        # disposition of each finding is otherwise prose with no receipt --
-        # parse both from the lane's own persisted answer, once, here, so
-        # every path that reaches settle() (a live run, a skip, a kept or
-        # salvaged lane) gets the same treatment on whatever text it wrote.
+    def _settle_parse(lane_result: LaneResult) -> None:
+        """The parsing half of `settle`, split out so one boundary covers it
+        all (see the caller)."""
         answer_text = _read_lane_text(lane_result.answer_path)
         if lane_result.stage == "review" and answer_text is not None:
             lane_result.review = verdicts_mod.review_verdict(answer_text)
@@ -5174,6 +5181,23 @@ def _execute_mission(
                 lane_result.dispositions_malformed = verdicts_mod.dispositions_malformed(
                     answer_text
                 )
+
+    def settle(lane_result: LaneResult) -> None:
+        # F1: a reviewer narrates before its verdict and a fix lane's
+        # disposition of each finding is otherwise prose with no receipt --
+        # parse both from the lane's own persisted answer, once, here, so
+        # every path that reaches settle() (a live run, a skip, a kept or
+        # salvaged lane) gets the same treatment on whatever text it wrote.
+        # D9: this runs on the scheduler thread, on text and files a fleet
+        # wrote. Everything above judged the lane already; a malformed
+        # `dispositions.json` here must fail this one lane with a reason, not
+        # abort the mission and lose every other lane's receipt with it.
+        try:
+            _settle_parse(lane_result)
+        except Exception as exc:  # noqa: BLE001 - boundary for an unattended run
+            reason = f"output parsing failed: {type(exc).__name__}: {exc}"
+            lane_result.ok = False
+            lane_result.skipped = lane_result.skipped or reason
         done[lane_result.name] = lane_result
         # A per-lane receipt as each lane ends, so a crash mid-mission does
         # not lose every finished stage with the final result.json.

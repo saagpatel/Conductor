@@ -202,7 +202,11 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
     missing_root = [key for key in ("verdict", "criteria", "summary") if key not in raw]
     if missing_root:
         return _invalid_verdict(f"missing top-level field {missing_root[0]!r}", criteria, raw)
-    if raw["verdict"] not in {"pass", "fail"}:
+    # D9: `x in {...}` raises TypeError on an unhashable value, and a fleet
+    # that answered `"verdict": []` is exactly the shape that reaches here.
+    # An invalid verdict is already a recorded outcome; a crash after the
+    # spend is not.
+    if not isinstance(raw["verdict"], str) or raw["verdict"] not in {"pass", "fail"}:
         return _invalid_verdict("verdict must be 'pass' or 'fail'", criteria, raw)
     if not isinstance(raw["summary"], str):
         return _invalid_verdict("summary must be a string", criteria, raw)
@@ -418,7 +422,10 @@ def valid_disposition_entry(entry: object) -> bool:
         and isinstance(entry.get("lane"), str)
         and bool(entry["lane"])
         and type(entry.get("index")) is int
-        and entry.get("disposition") in _DISPOSITION_KINDS
+        # D9: isinstance first -- an unhashable value (a list, a dict) makes
+        # the membership test itself raise, and this runs on a fleet's file.
+        and isinstance(entry.get("disposition"), str)
+        and entry["disposition"] in _DISPOSITION_KINDS
         and isinstance(entry.get("reason"), str)
     )
 
