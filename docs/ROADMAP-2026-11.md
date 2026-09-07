@@ -243,13 +243,13 @@ launchd fleet is a separate system and stays one). Depends on E9, E12, F10.
   touches the mission result and resume.
 - **Group 2, series with the resume touch, then three in parallel:** F2 wall clock; then F5
   cursor grace, F6 launcher, F13 `denied_actions` (fleet output only).
-- **Group 3, two in parallel, both on `fleets.py` and `runner.py` but snapshot-disjoint:** F12
-  restricted read lanes; F14 Cursor sandbox if its probe held.
+- **Group 3:** F12 restricted read lanes and permission denials on the receipt (F14 dropped
+  after its probe).
 - **Group 4, if approved:** F7 `land`.
 - **Group 5, receipts:** F8 fixtures, F9 shapes, F10 consumers, F11 unattended. F10 can start
   the same day as Group 1; nothing in it depends on a Phase F build.
 
-Ten build items, build caps summing to $59, about $95 with review and fix lanes; the
+Nine build items, build caps summing to $53, about $88 with review and fix lanes; the
 receipt items about $40 to $60 depending on what the consumers spend. At the E10b pace (75
 minutes launch to release) the builds are a day and a half; the receipts are another day.
 
@@ -270,37 +270,41 @@ on a permission nobody answers (the September fleet comparison: eight refused py
 then a question to nobody). F12: read lanes pass both flags; a tainted read lane's
 `taint_enforcement` cites `--restricted` beside the deny list; `--include-hook-events` is passed
 on tainted lanes and a deny that fired is recorded on the receipt as direct evidence rather than
-inferred from the init event. `--restricted` refuses `bypassPermissions`, so write lanes are
-untouched. Also the `xhigh` rung: Claude's effort ladder is `low, medium, high, xhigh, max` and
+inferred from the init event. `--restricted` refuses `bypassPermissions` (probed: exit 1, nothing spent) and runs only
+under `acceptEdits`, so a restricted lane cannot run a gate and the flag is per lane
+(`restricted: true`), for reviewers that read only (Gemini's role in Shape A, never Grok's);
+`WebSearch` survives it, so it confines files and exec, not egress, and the deny list stays.
+`--permission-prompts none` goes on every Claude lane: the probe shows denials land in
+`result.permission_denials` as `{tool_name, tool_use_id, tool_input}` while the run still
+exits 0 with `subtype: success`, so a non-empty list on a write lane fails it (kind
+`denied`) and on a read lane is a note. `xhigh` is accepted by 2.1.263 on every model. Also the `xhigh` rung: Claude's effort ladder is `low, medium, high, xhigh, max` and
 `_CLAUDE_EFFORT` maps conductor's four levels without ever emitting `xhigh`; the probe measures
 whether it is worth a fifth level or a remap of `max`. Probe first: a read lane under both flags
 asked to run the gate, write a file, and fetch a URL, with the init event's tool list captured.
 Modules: `fleets.py`, `runner.py` (receipt fields), `outputs.py` (hook events). Depends on D2,
 E21. Size 0.5. Build cap $6 (`4 items + $1 breadth + $1 summary`).
 
-**F13. Antigravity `denied_actions` on the receipt.** agy 1.1.27's own changelog: headless
-runs that skipped a tool action they were not permitted to take "now end with a notice naming
-the refused actions and report them as `denied_actions` in the JSON output". `outputs.py` parses
-the init and result events and never that field, so AGENTS.md's "a tool that needed approval is
-soft-denied and the run still exits 0" is now half true: the exit code is still 0 and the record
-exists. F13: parse `denied_actions` into the fleet output; a read lane that was denied nothing
-says so; a write lane with a non-empty list fails with kind `denied` naming the actions (the
-fleet did not do what it was asked and its summary will say it did, the Haiku pattern from the
-fleet comparison); a tainted lane's enforcement check gains a second source beside the log
-count. Probe first: a write lane under `--mode plan` asked to write, and the field's shape on the
-stream. Modules: `outputs.py`, `runner.py`. Depends on E21. Size 0.25. Build cap $4 (`2 items +
-$1 breadth + $1 summary`).
+**F13. Antigravity hook verification through the free `/hooks` command. Rewritten after the
+probe.** The 1.1.27 changelog's `denied_actions` field does not exist: fourteen runs found it
+in no result, step, or log event, and a plan-mode refusal is legible only as an absent tool call
+(`docs/research/2026-09-07-live-probe-restricted-denied-sandbox.md`). What the probe found
+instead: agy's read-only slash commands answer in print mode with `num_turns: 0` and zero
+usage, and `-p "/hooks"` names every loaded hooks file with its source and enabled flag. F13:
+before a tainted Antigravity dispatch, conductor runs `agy -p "/hooks"` in the lane's worktree
+and requires its own hooks file to appear enabled, failing the run as `taint hooks not
+enforced` before any paid turn (today the check reads the `--log-file` count after the run,
+which is the same fact a turn later and a dollar poorer). Also from the probe: under `--mode
+plan --sandbox` with `--json-schema`, agy took a second turn that wrote a file into the working
+directory and ran a shell command, so a schema on an Antigravity read lane is refused at load
+(the bytes check would fail the lane anyway; the refusal saves the spend). Modules:
+`fleets.py`, `runner.py`. Depends on E21. Size 0.25. Build cap $4 (`2 items + $1 breadth + $1
+summary`).
 
-**F14. Cursor taint through `--sandbox enabled`, conditional on its probe.** E21 left taint
-refused on Cursor because `.cursor/cli.json` has no rule kind for its native web fetch and
-search tools. `cursor-agent --help` carries `--sandbox <enabled|disabled>` ("explicitly enable
-or disable sandbox mode, overrides config"), a mechanism the 2026-09-06 probe never tested.
-Probe first, same shape as E21's: a lane under `--sandbox enabled` asked to fetch a URL, write
-outside the worktree, and run a shell command, judged on bytes and on the stream's denial
-markers. If the sandbox holds egress and confinement on bytes, F14 lifts the Cursor refusal
-with the sandbox flag as the mechanism and the `cli.json` rules beside it; if it does not, the
-refusal stays and the probe is the record. Modules if built: `fleets.py`, `runner.py`. Depends
-on E21. Size 0.5. Build cap $6 (`4 items + $1 breadth + $1 summary`).
+**F14. Cursor taint through `--sandbox enabled`: dropped after the probe.** The flag blocked
+nothing on bytes: web fetch returned the page and the shell wrote outside the worktree under
+`--sandbox enabled` exactly as under `disabled`. The `cli.json` deny list held on both shell
+calls beside it and did not cover the fetch, which confirms E21's gap live. Taint on Cursor
+stays refused; the probe is the record.
 
 Noted, not items: `--fallback-model` can move a lane to another model on overload, which would
 break the review-vendor policy silently, so conductor should keep not passing it; `--fork-session`
