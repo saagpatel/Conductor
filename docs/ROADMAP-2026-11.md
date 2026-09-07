@@ -38,8 +38,11 @@ in one sitting of about two and a half hours. Of the receipt items, F10's first 
 ran: the core-guard audit (`docs/research/2026-09-07-consumer-core-guard-audit.md`) and the
 Shape A fix that followed it (`docs/research/2026-09-07-consumer-core-guard-fix.md`, $8.56,
 three commits on a branch of the harness repository, gated green, the operator's to merge);
-F8 fixtures, F9 shapes, F11 unattended, and the other consumers are not yet run. The last two
-releases were landed by `conductor land`.
+F11 ran (`docs/research/2026-09-07-f11-unattended-reaudit.md`: the re-audit unattended, $1.73,
+end event accepted by notification-hub; bridge-db unreachable from the lead's session; a third
+fix mission, $2.08, closed the re-audit's agreed shapes on a second harness branch). F8 fixtures,
+F9 shapes, and the other consumers are not yet run. The last two releases were landed by
+`conductor land`.
 
 ## What the receipts say
 
