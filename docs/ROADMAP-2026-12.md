@@ -35,6 +35,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | W11 undispositioned sharpened, README error kinds pinned to KINDS; 0.69.0 and 0.70.0 receipts read live on the mission | 0.71.0 | Shape A via the launcher with --opus-review, landed by conductor land | $5.30 |
 | F17 launcher raises a warned lane's cap to the forecast p80 and records the caps block; plan-digest refusal drilled live | 0.72.0 | lead with one Opus subagent in a worktree, gated on the merged tree; one scratch plan-lane mission | $0.04 |
 | F18 KINDS is the check order of error_kind; F19 a fix lane that wrote only its deliverable skips the reproduce gate, reproduce refusals get their own kind | 0.73.0 | Shape A via the launcher with --opus-review, build lane landed by conductor land after the fix lane failed on F19; lead fix | $4.14 |
+| undispositioned guard applied on the no-fix-lane branch too | 0.74.0 | lead fix | $0 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
