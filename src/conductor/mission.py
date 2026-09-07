@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -3295,38 +3296,111 @@ def _lock_status(raw: dict) -> tuple[bool, str]:
     return True, f"pid {pid} is alive"
 
 
-def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
-    """Claim one mission directory, replacing only a demonstrably stale lock."""
+def _lock_body(owner: str, **extra: object) -> dict:
+    """One lock's contents, always complete before the file is visible."""
+    return {
+        "pid": os.getpid(),
+        "started": datetime.now(UTC).isoformat(),
+        "host": socket.gethostname(),
+        # D10: the token that says whose lock this is. Release and reclaim
+        # both check it, so neither can remove a lock it does not own.
+        "owner": owner,
+        **extra,
+    }
+
+
+def _publish_lock(lock: Path, body: dict) -> bool:
+    """D10: publish a lock's bytes atomically. `open("x")` made a zero-byte
+    file visible and only then wrote the JSON into it; a contender reading
+    that window saw an unparseable file, `_lock_status({})` called `pid None`
+    not alive, and a live mission's lock was unlinked mid-publication. The
+    JSON is written to a temp file in the same directory instead and linked
+    into place -- `os.link` fails rather than replacing an existing lock, so
+    publication never steals one. True when this process now holds it."""
+    tmp = lock.parent / f".{lock.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp.write_text(json.dumps(body, indent=2))
+    try:
+        os.link(tmp, lock)
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def _release_lock(lock: Path, owner: str | None) -> bool:
+    """D10: unlink a lock only while it still carries `owner`. A lock whose
+    body has moved on belongs to someone else -- releasing it would hand a
+    running mission's directory to a third process -- and a lock that cannot
+    be read is not proven to be anyone's, so neither is removed. False says
+    the file was left alone, which is never an error here: the caller's own
+    claim is over either way."""
+    current = _json_object(lock)
+    if current is None or current.get("owner") != owner:
+        return False
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def _lock_holder(lock: Path, where: str) -> dict:
+    """The body of a lock a claim just lost the race to, or a refusal.
+
+    D10: an unreadable, empty, or half-written lock is *not* proven stale.
+    Reclaiming on that evidence is exactly how a lock still being published
+    was unlinked out from under a live mission, so it is reported instead."""
+    try:
+        raw = lock.read_text()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise MissionInvalid(f"{where}: lock at {lock} cannot be read ({exc})") from None
+    if not raw.strip():
+        raise MissionInvalid(
+            f"{where}: lock at {lock} is empty -- it is being written, or it was "
+            "left half-written; not reclaiming it"
+        )
+    try:
+        current = json.loads(raw)
+    except json.JSONDecodeError:
+        raise MissionInvalid(
+            f"{where}: lock at {lock} is not readable JSON -- it is being written, or "
+            "it was left corrupt; not reclaiming it"
+        ) from None
+    if not isinstance(current, dict):
+        raise MissionInvalid(f"{where}: lock at {lock} is not a JSON object; not reclaiming it")
+    return current
+
+
+def _acquire_running_lock(mission_dir: Path) -> tuple[Path, str, list[str]]:
+    """Claim one mission directory, replacing only a demonstrably stale lock.
+
+    Returns the lock path, this claim's owner token (`_release_lock` needs
+    it), and any notes."""
     lock = mission_dir / "running.json"
     notes: list[str] = []
     while True:
-        try:
-            with lock.open("x") as target:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "started": datetime.now(UTC).isoformat(),
-                        "host": socket.gethostname(),
-                    },
-                    target,
-                    indent=2,
-                )
-            return lock, notes
-        except FileExistsError:
-            current = _json_object(lock) or {}
-            live, reason = _lock_status(current)
-            if live:
-                raise MissionInvalid(
-                    f"mission '{mission_dir.name}' is still running ({reason})"
-                ) from None
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                continue
-            notes.append(f"removed stale running.json lock before resume ({reason})")
+        owner = uuid.uuid4().hex
+        if _publish_lock(lock, _lock_body(owner)):
+            return lock, owner, notes
+        current = _lock_holder(lock, f"mission '{mission_dir.name}'")
+        if not current:
+            continue  # gone between the failed link and the read; race again
+        live, reason = _lock_status(current)
+        if live:
+            raise MissionInvalid(
+                f"mission '{mission_dir.name}' is still running ({reason})"
+            ) from None
+        if not _release_lock(lock, current.get("owner")):
+            continue  # someone else moved it first; re-read rather than assume
+        notes.append(f"removed stale running.json lock before resume ({reason})")
 
 
-def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path, list[str]]:
+def _acquire_source_lock(
+    base: Path, source: str, mission_id: str
+) -> tuple[Path, str, list[str]]:
     """E9: beside the running lock (keyed by mission run), a lock keyed by
     the mission *file*, so two overlapping launches of the same file cannot
     both run -- `_acquire_running_lock` cannot catch this, since each launch
@@ -3340,32 +3414,21 @@ def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path
     lock = locks_dir / f"{digest}.json"
     notes: list[str] = []
     while True:
-        try:
-            with lock.open("x") as target:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "started": datetime.now(UTC).isoformat(),
-                        "host": socket.gethostname(),
-                        "mission_id": mission_id,
-                    },
-                    target,
-                    indent=2,
-                )
-            return lock, notes
-        except FileExistsError:
-            current = _json_object(lock) or {}
-            live, reason = _lock_status(current)
-            if live:
-                raise MissionInvalid(
-                    f"mission file is already running as '{current.get('mission_id')}' "
-                    f"({reason}); lock at {lock}"
-                ) from None
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                continue
-            notes.append(f"removed stale file lock at {lock} before resume ({reason})")
+        owner = uuid.uuid4().hex
+        if _publish_lock(lock, _lock_body(owner, mission_id=mission_id)):
+            return lock, owner, notes
+        current = _lock_holder(lock, "mission file")
+        if not current:
+            continue
+        live, reason = _lock_status(current)
+        if live:
+            raise MissionInvalid(
+                f"mission file is already running as '{current.get('mission_id')}' "
+                f"({reason}); lock at {lock}"
+            ) from None
+        if not _release_lock(lock, current.get("owner")):
+            continue
+        notes.append(f"removed stale file lock at {lock} before resume ({reason})")
 
 
 def _effective_ceiling(mission: Mission) -> tuple[float | None, float | None]:
@@ -3964,11 +4027,16 @@ def _resume_plan_child(
 
     if not child_dir.is_dir():
         return missing()
-    running_raw = _json_object(child_dir / "running.json")
-    if running_raw is not None:
-        live, reason = _lock_status(running_raw)
-        if live:
-            raise MissionInvalid(f"child '{child_id}' is still running ({reason})")
+    child_lock = child_dir / "running.json"
+    if child_lock.exists():
+        # D10: the same rule as a claim -- a lock whose body cannot be read
+        # is not proven stale, and a child that may still be running is not
+        # a child whose receipt may be adopted.
+        running_raw = _lock_holder(child_lock, f"child '{child_id}'")
+        if running_raw:
+            live, reason = _lock_status(running_raw)
+            if live:
+                raise MissionInvalid(f"child '{child_id}' is still running ({reason})")
     result_path = child_dir / "result.json"
     if not result_path.is_file():
         return missing()
@@ -4463,7 +4531,7 @@ def run_mission(
         elif answer is not None or answer_file is not None:
             raise MissionInvalid(f"mission '{mission_id}' is not paused")
 
-    running, lock_notes = _acquire_running_lock(mission_dir)
+    running, running_owner, lock_notes = _acquire_running_lock(mission_dir)
     try:
         # E9: beside the running lock (keyed by this run's own directory), a
         # lock keyed by the mission file, so a second overlapping launch of
@@ -4471,8 +4539,11 @@ def run_mission(
         # never trip `_acquire_running_lock` -- is refused too. A mission
         # built in code (an empty source, as the tests do) takes no lock.
         source_lock: Path | None = None
+        source_owner: str | None = None
         if mission.source:
-            source_lock, source_notes = _acquire_source_lock(base, mission.source, mission_id)
+            source_lock, source_owner, source_notes = _acquire_source_lock(
+                base, mission.source, mission_id
+            )
             lock_notes.extend(source_notes)
         if resume_dir is None:
             (mission_dir / "mission.json").write_text(
@@ -4508,15 +4579,11 @@ def run_mission(
             conflict_finder=conflict_finder,
         )
     finally:
-        try:
-            running.unlink()
-        except FileNotFoundError:
-            pass
+        # D10: owner-bound, both of them -- a release only ever removes the
+        # lock this run published.
+        _release_lock(running, running_owner)
         if source_lock is not None:
-            try:
-                source_lock.unlink()
-            except FileNotFoundError:
-                pass
+            _release_lock(source_lock, source_owner)
 
 
 def _execute_mission(

@@ -547,6 +547,16 @@ host is refused rather than guessed stale; after verifying that host is no
 longer running the mission, the operator may remove the lock. A demonstrably
 stale local lock is removed and recorded in the result.
 
+A lock is published whole: its JSON is written to a temp file beside it and
+hard-linked into place, so no contender ever reads a half-written one, and
+the link fails rather than replacing a lock that already exists. Only a
+readable lock can be proven stale -- an empty, truncated, or unparseable one
+refuses the claim, naming the file, instead of being reclaimed. Each lock
+also carries an `owner` token minted by the run that took it, and both the
+release at the end of a run and the removal of a stale lock check it, so
+neither can remove a lock this run does not hold. The mission-file lock
+(below) works the same way.
+
 The boundary is deliberately honest. A lane that half-committed before a crash
 has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted
 on their receipts and artifact paths; beyond commit and named-branch existence,

@@ -818,3 +818,104 @@ def test_readme_documents_the_mission_resume_contract():
     assert "running.json" in section
     assert "half-committed" in section
     assert "not re-verified" in section
+
+
+# --- D10: publishing a lock is not the same as leaving a stale one -----------
+
+
+def _parked_mission(repo, home, tmp_path):
+    mission = mission_from_dict(
+        {"cwd": str(repo), "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}]},
+        base_dir=tmp_path,
+    )
+    return run_mission(mission, home=home, dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [("", "is empty"), ('{"pid": 12', "not readable JSON"), ("[]", "not a JSON object")],
+)
+def test_a_lock_mid_publication_is_not_reclaimed(tmp_path, body, reason):
+    """D10: `open("x")` published a zero-byte file and wrote the JSON into it
+    afterwards. A contender that read that window got `None` from
+    `_json_object`, `_lock_status({})` answered "pid None is not alive", and
+    a live mission's lock was unlinked out from under it. Unreadable is not
+    proven stale, so the claim refuses and says why."""
+    (tmp_path / "running.json").write_text(body)
+
+    with pytest.raises(MissionInvalid) as error:
+        mission_mod._acquire_running_lock(tmp_path)
+
+    assert "not reclaiming it" in str(error.value)
+    assert reason in str(error.value)
+    assert (tmp_path / "running.json").read_text() == body
+
+
+def test_a_resume_refuses_a_half_written_lock(repo, home, tmp_path):
+    """The same window, through the resume an operator actually runs."""
+    first = _parked_mission(repo, home, tmp_path)
+    mission_dir = Path(first.mission_dir)
+    (mission_dir / "running.json").write_text("")
+
+    with pytest.raises(MissionInvalid, match="not reclaiming it"):
+        run_mission(_snapshot(first), home=home, resume_dir=mission_dir, dry_run=True)
+
+    assert (mission_dir / "running.json").read_text() == ""
+
+
+def test_a_dead_pids_lock_is_still_reclaimed(repo, home, tmp_path):
+    """The staleness rule itself is unchanged: a readable lock whose pid is
+    gone is proven stale and is replaced, with a note."""
+    first = _parked_mission(repo, home, tmp_path)
+    mission_dir = Path(first.mission_dir)
+    (mission_dir / "running.json").write_text(
+        json.dumps(
+            {
+                "pid": 999_999_999,
+                "started": datetime.now(UTC).isoformat(),
+                "host": socket.gethostname(),
+                "owner": "someone-elses-token",
+            }
+        )
+    )
+
+    resumed = run_mission(_snapshot(first), home=home, resume_dir=mission_dir, dry_run=True)
+
+    assert "removed stale running.json lock before resume" in "\n".join(resumed.notes)
+    assert not (mission_dir / "running.json").exists()
+
+
+def test_a_published_lock_is_whole_and_owner_bound(tmp_path):
+    """D10: the lock is linked into place already complete, a second claim
+    never replaces it, and only its own owner token releases it -- unlink and
+    release were not owner-bound at all."""
+    lock = tmp_path / "running.json"
+
+    assert mission_mod._publish_lock(lock, mission_mod._lock_body("mine")) is True
+    body = json.loads(lock.read_text())
+    assert body["owner"] == "mine" and body["pid"] > 0
+    assert not list(tmp_path.glob(".running.json.*.tmp"))
+
+    # A second publication does not steal a lock that exists.
+    assert mission_mod._publish_lock(lock, mission_mod._lock_body("theirs")) is False
+    assert json.loads(lock.read_text())["owner"] == "mine"
+
+    assert mission_mod._release_lock(lock, "theirs") is False
+    assert lock.is_file()
+    assert mission_mod._release_lock(lock, "mine") is True
+    assert not lock.exists()
+
+
+def test_a_source_lock_mid_publication_is_not_reclaimed(home, tmp_path):
+    """The file lock (E9) publishes and releases the same way."""
+    source = tmp_path / "mission.json"
+    source.write_text("{}")
+    lock, owner, notes = mission_mod._acquire_source_lock(home, str(source), "m1")
+    assert notes == [] and json.loads(lock.read_text())["mission_id"] == "m1"
+
+    lock.write_text("")
+    with pytest.raises(MissionInvalid, match="not reclaiming it"):
+        mission_mod._acquire_source_lock(home, str(source), "m2")
+
+    lock.write_text(json.dumps(mission_mod._lock_body(owner, mission_id="m1")))
+    assert mission_mod._release_lock(lock, owner) is True
