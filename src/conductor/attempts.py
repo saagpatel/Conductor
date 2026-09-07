@@ -41,7 +41,7 @@ in two tests that exercise `_trusted_lane`'s tip-commit check under a refused
 or missing git spawn. Resolved the same way slice 2 (approvals.py) resolved
 `datetime`: `_git_answer` reaches `git_run` through `mission_mod.git_run`,
 looked up lazily, so the patch on `conductor.mission.git_run` still applies
-and neither test needed to change.
+and neither test's patch target needed to change.
 """
 
 from __future__ import annotations

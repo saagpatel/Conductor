@@ -405,9 +405,11 @@ def test_a_resume_still_reruns_a_lane_whose_tip_git_says_is_missing(
     assert first.ok is True
 
     real_git_run = mission_mod.git_run
+    asked: list[tuple[str, ...]] = []
 
     def git_says_no(cwd, *args, **kwargs):
         if args[:1] == ("cat-file",):
+            asked.append(args)
             return subprocess.CompletedProcess(["git", *args], 128, "", "missing")
         return real_git_run(cwd, *args, **kwargs)
 
@@ -416,4 +418,5 @@ def test_a_resume_still_reruns_a_lane_whose_tip_git_says_is_missing(
     second = run_mission(
         Mission.from_snapshot(snapshot), home=home, resume_dir=Path(first.mission_dir)
     )
+    assert asked, "the trust check consulted the patched git_run for the tip commit"
     assert "a" in second.resumed_from["rerun"]
