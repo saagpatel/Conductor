@@ -57,7 +57,7 @@ from . import forecast as forecast_mod
 from . import notify as notify_mod
 from . import verdicts as verdicts_mod
 from .errors import KINDS, error_kind
-from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
+from .fleets import TAINT_SHELL_MODES, VENDORS, DispatchRefused, Spec, model_vendor
 from .runner import (
     Result,
     _slug,
@@ -120,6 +120,7 @@ _INHERITED = (
     "agent",
     "deliverable",
     "restricted",
+    "taint_shell",
     "command",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
@@ -291,6 +292,11 @@ class Attempt:
     # F12: forces `--restricted` on a claude read lane even without a
     # declared `deliverable`; cascades like `agent`. See fleets.Spec.restricted.
     restricted: bool = False
+    # D5: what a tainted lane may do with a shell -- "deny" (the default and
+    # the only boundary) or the opt-in "allow", which restores the old
+    # command-prefix list. Stated per lane beside `taint`; refused at
+    # dispatch on a lane that is not tainted. See fleets.Spec.taint_shell.
+    taint_shell: str = "deny"
     # C5: which of the previous attempt's error `KINDS` this fallback answers;
     # None (every fallback but a hand-set one) means every kind, as before.
     on: list[str] | None = None
@@ -347,6 +353,7 @@ class Attempt:
             teardown=self.teardown,
             include=self.include,
             taint=False if script else taint,
+            taint_shell="deny" if script else self.taint_shell,
             agent=self.agent,
             deliverable=self.deliverable,
             restricted=self.restricted,
@@ -2051,6 +2058,12 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
     for key in ("isolate", "no_op_ok"):
         if fields.get(key) is not None and not isinstance(fields[key], bool):
             raise MissionInvalid(f"{where}: {key} must be true or false")
+    # D5: named here so a typo is a load-time refusal on the lane rather than
+    # a DispatchRefused after the mission has already started paying.
+    if fields.get("taint_shell") is not None and fields["taint_shell"] not in TAINT_SHELL_MODES:
+        raise MissionInvalid(
+            f"{where}: taint_shell must be one of {', '.join(TAINT_SHELL_MODES)}"
+        )
     for key in _BREAKER_KEYS:
         value = fields.get(key)
         if value is not None and (
@@ -2107,6 +2120,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             agent=fields.get("agent"),
             deliverable=fields.get("deliverable"),
             restricted=bool(fields.get("restricted", False)),
+            taint_shell=str(fields.get("taint_shell", "deny")),
             on=validated_on,
             command=fields.get("command"),
         )
@@ -2167,6 +2181,7 @@ _SCRIPT_ATTEMPT_DENIED = (
     "verdict",
     "agent",
     "restricted",
+    "taint_shell",
 )
 
 

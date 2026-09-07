@@ -15,6 +15,7 @@ the obvious implementation fails in an unattended run:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -38,12 +39,14 @@ from .fleets import (
     FLEETS,
     TAINT_AGY_DENIED_TOOLS,
     TAINT_AGY_HOOKS_REL,
-    TAINT_DISALLOWED_TOOLS,
     DispatchRefused,
     Spec,
     build_agy_hooks_argv,
     build_argv,
     cli_version,
+    taint_agy_denied_tools,
+    taint_agy_matchers,
+    taint_disallowed_tools,
     taint_hook_files,
 )
 from .outputs import FleetOutput, agy_init_event, claude_init_event, json_line
@@ -775,13 +778,26 @@ def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str
 # TAINT_AGY_DENIED_TOOLS in fleets.py).
 _TAINT_AGY_UNCOVERED_SUBSTRINGS = ("subagent", "mcp", "web", "url", "message", "schedule", "inbox")
 # Every PreToolUse matcher `fleets.taint_hook_files` writes, in the order it
-# writes them; the preflight requires each one back by name.
-_TAINT_AGY_MATCHERS = (*TAINT_AGY_DENIED_TOOLS, "run_command")
+# writes them; the preflight requires each one back by name. D5: the same
+# names in both shell modes -- `run_command` is always matched, and only the
+# hook's decision for it changes -- so this stays a module constant.
+_TAINT_AGY_MATCHERS = taint_agy_matchers()
 _TAINT_AGY_LOG_RE = re.compile(r"loaded (\d+) named hooks? from \d+ hooks\.json file\(s\)")
 _TAINT_AGY_DENIED_CALL_MARKER = "denied by pre-tool hook"
 
 
-def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> list[str]:
+def _sha256_file(path: Path) -> str | None:
+    """W1: the digest of a hook file as it sits on disk, or None if it is
+    gone or unreadable -- both of which are themselves a failed check."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _write_taint_agy_hooks(
+    cwd: str, iso: worktrees.Isolation, *, taint_shell: str = "deny"
+) -> tuple[list[str], dict[str, str]]:
     """E21: write the deny hook files into the worktree, before `before` is
     captured, and return their worktree-relative paths so the caller can keep
     them untracked through the worktree-scoped `core.excludesFile` that
@@ -790,8 +806,14 @@ def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> list[str]:
     repository shares (verified on git 2.55 from a linked worktree), so
     writing there would mutate the operator's checkout and leak this lane's
     pattern into every other lane's.
+
+    W1: also returns the sha256 of each file as written, keyed by its path
+    relative to `cwd`. The hook script is re-read from a writable worktree on
+    every tool call, so "what conductor wrote" and "what agy ran" are two
+    different claims; `_taint_agy_enforcement` re-hashes after the run and
+    fails it if they differ.
     """
-    hook_files = taint_hook_files(cwd)
+    hook_files = taint_hook_files(cwd, taint_shell=taint_shell)
     repo_root = Path(iso.worktree).resolve()
     cwd_root = Path(cwd).resolve()
     try:
@@ -799,12 +821,16 @@ def _write_taint_agy_hooks(cwd: str, iso: worktrees.Isolation) -> list[str]:
     except ValueError:
         prefix = Path(".")
     written: list[str] = []
+    digests: dict[str, str] = {}
     for rel_path, text in hook_files.items():
         dest = cwd_root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
         written.append((prefix / rel_path).as_posix())
-    return written
+        digest = _sha256_file(dest)
+        if digest is not None:
+            digests[rel_path] = digest
+    return written, digests
 
 
 def _uncovered_agy_tools(tools: list[str]) -> list[str]:
@@ -913,9 +939,22 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
 
 
 def _taint_agy_enforcement(
-    *, hooks_written: int, stdout_text: str, log_text: str
+    *,
+    hooks_written: int,
+    stdout_text: str,
+    log_text: str,
+    cwd: str | None = None,
+    hook_digests: dict[str, str] | None = None,
 ) -> tuple[dict, str | None]:
     """E21: fail closed on the evidence, not on the fleet's own status.
+
+    W1: `hook_digests` (what `_write_taint_agy_hooks` wrote, keyed by path
+    relative to `cwd`) is re-hashed here. The hook files live in a writable
+    worktree and are re-read on every tool call, so a lane that rewrote its
+    own deny script mid-run would otherwise pass every other check; a
+    changed, missing, or unreadable file fails the run. Both are keywords
+    with defaults so an older caller (and every test that calls this
+    directly) keeps working.
 
     Returns the receipt's `taint_enforcement` dict and, when the hooks did
     not visibly hold, the text `dispatch()` uses as the run's `error`."""
@@ -926,13 +965,24 @@ def _taint_agy_enforcement(
     denied_calls = _count_denied_calls(stdout_text)
     log_match = _TAINT_AGY_LOG_RE.search(log_text)
     hooks_loaded = int(log_match.group(1)) if log_match else None
+    modified: list[str] = []
+    if hook_digests and cwd is not None:
+        for rel_path, digest in sorted(hook_digests.items()):
+            if _sha256_file(Path(cwd) / rel_path) != digest:
+                modified.append(rel_path)
     receipt = {
         "hooks_written": hooks_written,
         "hooks_loaded": hooks_loaded,
         "tools_seen": tools_seen,
         "uncovered": uncovered,
         "denied_calls": denied_calls,
+        "hook_digests": dict(hook_digests or {}),
+        "hooks_modified": modified,
     }
+    if modified:
+        # W1: checked before the log line, because a rewritten hook script
+        # makes every other piece of evidence here worth nothing.
+        return receipt, f"taint hooks modified during the run: {', '.join(modified)}"
     if log_match is None:
         return receipt, "no 'loaded N named hooks' line in agy.log"
     # agy counts named hooks per hooks.json file, not per matcher: the deny
@@ -1653,6 +1703,7 @@ def dispatch(
     # shared checkout the caller named.
     iso: worktrees.Isolation | None = None
     taint_hook_paths: list[str] = []
+    taint_hook_digests: dict[str, str] = {}
     if isolate and not dry_run:
         iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
         if iso.active:
@@ -1660,7 +1711,9 @@ def dispatch(
             # worktree; the fleet was pointed at that directory for a reason.
             spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
             if tainted_agy:
-                taint_hook_paths = _write_taint_agy_hooks(spec.cwd, iso)
+                taint_hook_paths, taint_hook_digests = _write_taint_agy_hooks(
+                    spec.cwd, iso, taint_shell=spec.taint_shell
+                )
         elif spec.mode == "write" or base_ref is not None or tainted_agy:
             # The caller asked for a private tree and cannot have one. For a
             # write, running in the shared checkout instead is the collision
@@ -2079,16 +2132,18 @@ def dispatch(
             # the confinement --restricted itself enforces -- recorded
             # together so the receipt shows both, not just the deny list.
             taint_enforcement = {
-                "disallowed_tools": list(TAINT_DISALLOWED_TOOLS),
+                "disallowed_tools": list(taint_disallowed_tools(spec.taint_shell)),
                 "restricted": True,
             }
         if tainted_agy:
-            # Every denied tool name, plus one entry for run_command.
-            hooks_written = len(TAINT_AGY_DENIED_TOOLS) + 1
+            # One entry per matcher `fleets.taint_hook_files` writes.
+            hooks_written = len(taint_agy_matchers(spec.taint_shell))
             taint_enforcement, taint_problem = _taint_agy_enforcement(
                 hooks_written=hooks_written,
                 stdout_text=_read(stdout_path),
                 log_text=_read(run_dir / "agy.log"),
+                cwd=spec.cwd,
+                hook_digests=taint_hook_digests,
             )
             # F13: the free preflight ran before this paid turn spawned and
             # already passed (a failing preflight bails before spawn, above)
@@ -2526,10 +2581,13 @@ def dispatch(
             {
                 "declared": True,
                 "tools_denied": (
-                    list(TAINT_AGY_DENIED_TOOLS)
+                    list(taint_agy_denied_tools(spec.taint_shell))
                     if spec.fleet == "antigravity"
-                    else list(TAINT_DISALLOWED_TOOLS)
+                    else list(taint_disallowed_tools(spec.taint_shell))
                 ),
+                # D5: which shell policy actually ran -- "denied" (the
+                # boundary) or "prefix" (the opt-in discouragement).
+                "taint_shell": "prefix" if spec.taint_shell == "allow" else "denied",
             }
             if spec.taint
             else None

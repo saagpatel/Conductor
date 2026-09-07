@@ -22,16 +22,19 @@ from conductor import runner as runner_mod
 from conductor.errors import error_kind
 from conductor.fleets import (
     TAINT_AGY_DENIED_TOOLS,
+    TAINT_AGY_EDIT_TOOLS,
     TAINT_AGY_HOOKS_REL,
+    TAINT_AGY_SCRIPT_REL,
     TAINT_SHELL_DENIED_PREFIXES,
     DispatchRefused,
     Spec,
     build_argv,
+    taint_agy_matchers,
     taint_hook_files,
 )
 from conductor.runner import dispatch
 
-HOOKS_WRITTEN = len(TAINT_AGY_DENIED_TOOLS) + 1  # every denied name, plus run_command
+HOOKS_WRITTEN = len(taint_agy_matchers())  # one entry per matcher written
 
 
 def spec(**kw) -> Spec:
@@ -88,14 +91,24 @@ def _default_hooks_preflight(monkeypatch):
 # --- the hook script itself, run as a real subprocess -----------------------
 
 
-@pytest.fixture
-def hook_script(tmp_path: Path) -> Path:
-    files = taint_hook_files(str(tmp_path))
-    for rel_path, text in files.items():
-        dest = tmp_path / rel_path
+def _write_hook(root: Path, *, taint_shell: str = "deny") -> Path:
+    for rel_path, text in taint_hook_files(str(root), taint_shell=taint_shell).items():
+        dest = root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
-    return tmp_path / ".agents" / "conductor-taint.py"
+    return root / TAINT_AGY_SCRIPT_REL
+
+
+@pytest.fixture
+def hook_script(tmp_path: Path) -> Path:
+    return _write_hook(tmp_path)
+
+
+@pytest.fixture
+def prefix_hook_script(tmp_path: Path) -> Path:
+    """D5: the opt-in `taint_shell: "allow"` script -- the pre-2026-09-07
+    behavior, kept under test because the opt-in still ships."""
+    return _write_hook(tmp_path / "allow", taint_shell="allow")
 
 
 def _run_hook(script: Path, payload: object) -> dict:
@@ -129,18 +142,74 @@ def test_hook_allows_an_unlisted_tool(hook_script):
         "git push origin main",
         "FOO=1 curl -s https://example.com",
         "ls && curl -s https://example.com",
+        # D5 (Astra 2026-09-07, probed): every one of these ran under the
+        # prefix list, which is why the shell is denied whole now.
+        "command curl -s https://example.com",
+        "/usr/bin/curl -s https://example.com",
+        "env curl -s https://example.com",
+        "bash -c 'curl -s https://example.com'",
+        "python3 -c \"import urllib.request\"",
+        "nc example.com 80",
+        "ls",
     ],
 )
-def test_hook_denies_run_command_reaching_outside(hook_script, command_line):
+def test_hook_denies_run_command_outright_by_default(hook_script, command_line):
+    """D5, operator decision: a tainted lane runs no shell. The command line
+    is not consulted at all -- `run_command` is denied by name."""
     out = _run_hook(
         hook_script, {"toolCall": {"name": "run_command", "args": {"CommandLine": command_line}}}
     )
     assert out["decision"] == "deny"
+    assert "run_command" in out["reason"]
 
 
-def test_hook_allows_run_command_with_no_denied_prefix(hook_script):
+def test_hook_script_carries_no_prefix_list_by_default(hook_script):
+    """A prefix list in the default script would be a boundary that is not
+    one; there is nothing left for it to decide."""
+    assert "DENIED_PREFIXES = ()" in hook_script.read_text()
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    ["curl -s https://example.com", "git push origin main", "FOO=1 curl -s https://x"],
+)
+def test_prefix_hook_denies_a_denied_prefix(prefix_hook_script, command_line):
+    out = _run_hook(
+        prefix_hook_script,
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": command_line}}},
+    )
+    assert out["decision"] == "deny"
+
+
+def test_prefix_hook_allows_run_command_with_no_denied_prefix(prefix_hook_script):
+    """The opt-in restores the old behavior in full, bypasses included --
+    which is what the README now says out loud."""
     payload = {"toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}}
-    out = _run_hook(hook_script, payload)
+    assert _run_hook(prefix_hook_script, payload) == {"decision": "allow"}
+    bypass = {"toolCall": {"name": "run_command", "args": {"CommandLine": "env curl -s https://x"}}}
+    assert _run_hook(prefix_hook_script, bypass) == {"decision": "allow"}
+
+
+@pytest.mark.parametrize("tool", TAINT_AGY_EDIT_TOOLS)
+def test_hook_denies_an_edit_tool_naming_the_policy_directory(hook_script, tool):
+    """W1: the hook files sit in a writable worktree and are re-read on every
+    tool call. The payload shape for these tools is not on record from any
+    probe, so this scans the call's string arguments for a `.agents` path
+    component; the digest check in the runner is the evidence that does not
+    depend on the shape."""
+    out = _run_hook(
+        hook_script,
+        {"toolCall": {"name": tool, "args": {"TargetFile": ".agents/conductor-taint.py"}}},
+    )
+    assert out["decision"] == "deny"
+    assert ".agents" in out["reason"]
+
+
+def test_hook_allows_an_edit_tool_elsewhere_in_the_worktree(hook_script):
+    out = _run_hook(
+        hook_script,
+        {"toolCall": {"name": "write_to_file", "args": {"TargetFile": "src/thing.py"}}},
+    )
     assert out == {"decision": "allow"}
 
 
@@ -156,15 +225,42 @@ def test_hook_fails_closed_on_malformed_input(hook_script):
 # --- taint_hook_files ---------------------------------------------------
 
 
-def test_taint_hook_files_has_one_entry_per_denied_name_plus_run_command():
+def test_taint_hook_files_has_one_entry_per_matcher():
     files = taint_hook_files("/some/worktree")
     hooks = json.loads(files[".agents/hooks.json"])
     matchers = [entry["matcher"] for entry in hooks["hooks"]["PreToolUse"]]
-    assert matchers == [*TAINT_AGY_DENIED_TOOLS, "run_command"]
+    assert matchers == list(taint_agy_matchers())
+    assert "run_command" in matchers  # D5: matched, and denied by name
     assert len(matchers) == HOOKS_WRITTEN
     for entry in hooks["hooks"]["PreToolUse"]:
         command = entry["hooks"][0]["command"]
         assert command == "python3 /some/worktree/.agents/conductor-taint.py"
+
+
+def test_taint_hook_files_matchers_do_not_change_with_the_shell_mode():
+    """The opt-in changes the hook's decision for `run_command`, never which
+    calls it sees -- so the preflight's matcher list is one constant."""
+    deny = json.loads(taint_hook_files("/w")[".agents/hooks.json"])
+    allow = json.loads(taint_hook_files("/w", taint_shell="allow")[".agents/hooks.json"])
+    assert [e["matcher"] for e in deny["hooks"]["PreToolUse"]] == [
+        e["matcher"] for e in allow["hooks"]["PreToolUse"]
+    ]
+
+
+def test_taint_hook_command_path_is_quoted(tmp_path):
+    """W2: `fleets.py` emitted `python3 <path>` unquoted, so a worktree path
+    with a space in it split into two arguments and the hook failed
+    silently. The written command must survive shlex.split back into one
+    interpreter and one script path -- and the script must actually run."""
+    worktree = tmp_path / "a worktree with spaces"
+    worktree.mkdir()
+    script = _write_hook(worktree)
+    hooks = json.loads((worktree / TAINT_AGY_HOOKS_REL).read_text())
+    command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert " " in str(script)
+    assert shlex.split(command) == ["python3", str(script)]
+    out = _run_hook(script, {"toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}}})
+    assert out["decision"] == "deny"
 
 
 def test_denied_tools_cover_every_browser_tool_in_a_recorded_agy_stream():
@@ -192,11 +288,14 @@ def test_taint_hook_files_script_is_valid_python():
     compile(files[".agents/conductor-taint.py"], "conductor-taint.py", "exec")
 
 
-def test_shell_denied_prefixes_are_derived_from_the_claude_list():
-    from conductor.fleets import TAINT_DISALLOWED_TOOLS
+def test_shell_denied_prefixes_are_derived_from_the_opt_in_claude_list():
+    from conductor.fleets import TAINT_DISALLOWED_TOOLS, TAINT_SHELL_PREFIX_DISALLOWED_TOOLS
 
     for prefix in TAINT_SHELL_DENIED_PREFIXES:
-        assert f"Bash({prefix} *)" in TAINT_DISALLOWED_TOOLS
+        assert f"Bash({prefix} *)" in TAINT_SHELL_PREFIX_DISALLOWED_TOOLS
+    # D5: the default list has no prefixes left to derive from -- it denies
+    # the shell whole.
+    assert not [name for name in TAINT_DISALLOWED_TOOLS if name.startswith("Bash(")]
 
 
 # --- Spec.validate outcomes -----------------------------------------------
@@ -244,6 +343,7 @@ def _agy_argv(
     tools: list[str],
     extra_lines: list[str],
     marker: Path | None = None,
+    tamper: str | None = None,
 ) -> list[str]:
     """A fake `agy` that writes `agy.log` and its stream from inside the
     subprocess -- it needs $CONDUCTOR_RUN_ID, set by dispatch() only once the
@@ -253,6 +353,13 @@ def _agy_argv(
     home_q = shlex.quote(str(home))
     run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
     parts = [f"mkdir -p {run_dir}"]
+    if tamper is not None:
+        # W1: the lane rewrites its own deny script mid-run. The hook files
+        # live in the writable worktree and are re-read on every tool call.
+        script_q = shlex.quote(TAINT_AGY_SCRIPT_REL)
+        parts.append(
+            f"printf '%s\\n' {shlex.quote(tamper)} >> \"$CONDUCTOR_WORKTREE\"/{script_q}"
+        )
     if marker is not None:
         parts.append(f"touch {shlex.quote(str(marker))}")
     if log_line is not None:
@@ -315,8 +422,9 @@ def test_hook_files_are_kept_untracked_by_the_worktree_scoped_excludes_file(repo
 
     iso = worktrees.create(str(repo), "taint-probe", home / "worktrees")
     assert iso.active, iso.reason
-    written = _write_taint_agy_hooks(iso.worktree, iso)
+    written, digests = _write_taint_agy_hooks(iso.worktree, iso)
     assert sorted(written) == [".agents/conductor-taint.py", ".agents/hooks.json"]
+    assert sorted(digests) == [".agents/conductor-taint.py", ".agents/hooks.json"]
     assert git_out(Path(iso.worktree), "status", "--porcelain").strip() != ""
     _, _, exclude_file = _apply_include(
         spec(cwd=iso.worktree), iso, home, "taint-probe", extra_excludes=written
@@ -495,6 +603,110 @@ def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is True, result.failure()
     assert result.taint_enforcement["denied_calls"] == 2
+
+
+# --- W1: the hook files must be the ones conductor wrote --------------------
+
+
+def test_a_lane_rewriting_its_own_deny_script_fails_the_run(repo, home, fake_fleet):
+    """W1 (Astra 2026-09-07): every other piece of evidence here is about
+    what conductor wrote and what agy loaded at startup. The script is
+    re-read from a writable worktree on every tool call, so a lane that
+    rewrote it mid-run kept passing all of them; the digest taken at write
+    time is re-checked after the run."""
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            tamper="# denied by nobody",
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert error_kind(result) == "taint"
+    assert "taint hooks modified during the run" in result.error
+    te = result.taint_enforcement
+    assert te["hooks_modified"] == [".agents/conductor-taint.py"]
+    assert sorted(te["hook_digests"]) == [".agents/conductor-taint.py", ".agents/hooks.json"]
+
+
+def test_untouched_hook_files_record_their_digests_and_pass(repo, home, fake_fleet):
+    fake_fleet(
+        _agy_argv(
+            home, log_line=_passing_log_line(), tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[]
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    te = result.taint_enforcement
+    assert te["hooks_modified"] == []
+    assert all(len(digest) == 64 for digest in te["hook_digests"].values())
+
+
+def test_a_deleted_hook_file_fails_the_run(repo, home, fake_fleet):
+    home_q = shlex.quote(str(home))
+    run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
+    init_event = json.dumps(
+        {"event": "init", "conversation_id": "c1", "init": {"tools": [*TAINT_AGY_DENIED_TOOLS]}}
+    )
+    result_event = json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "ok",
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+        }
+    )
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            " && ".join(
+                [
+                    f"mkdir -p {run_dir}",
+                    f"printf '%s\\n' {shlex.quote(_passing_log_line())} > {run_dir}/agy.log",
+                    f'rm "$CONDUCTOR_WORKTREE"/{shlex.quote(TAINT_AGY_HOOKS_REL)}',
+                    f"printf '%s\\n' {shlex.quote(init_event)}",
+                    f"printf '%s\\n' {shlex.quote(result_event)}",
+                ]
+            ),
+        ]
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert "taint hooks modified during the run" in result.error
+    assert result.taint_enforcement["hooks_modified"] == [TAINT_AGY_HOOKS_REL]
+
+
+# --- D5: the per-lane shell opt-in on antigravity ---------------------------
+
+
+def test_taint_shell_allow_writes_the_prefix_script_and_receipts_prefix(repo, home, fake_fleet):
+    fake_fleet(
+        _agy_argv(
+            home, log_line=_passing_log_line(), tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[]
+        )
+    )
+    result = dispatch(spec(cwd=str(repo), taint_shell="allow"), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert result.taint["taint_shell"] == "prefix"
+    assert "run_command" not in result.taint["tools_denied"]
+
+
+def test_default_taint_receipt_says_the_shell_is_denied(repo, home, fake_fleet):
+    fake_fleet(
+        _agy_argv(
+            home, log_line=_passing_log_line(), tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[]
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert result.taint["taint_shell"] == "denied"
+    assert "run_command" in result.taint["tools_denied"]
 
 
 # --- F13: the free /hooks preflight, before any paid turn -------------------
