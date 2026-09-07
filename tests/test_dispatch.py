@@ -511,3 +511,46 @@ def test_a_truncated_agy_stream_fails_even_with_a_green_gate(repo, home, fake_fl
     assert result.failure() == "fleet stream ended without a terminal event"
     assert result.to_dict()["kind"] == "transport"
     assert result.usage["input_tokens"] == 900  # the steps' own usage is still priced
+
+
+# --- W4: teardown runs after the tree was judged -----------------------------
+
+
+def test_a_teardown_that_changes_the_tree_is_reported_as_cleanup_required(
+    repo, home, fake_fleet
+):
+    """W4: the git verdict is taken before teardown runs, so a teardown that
+    touches a tracked file leaves behind a tree the receipt's counts no
+    longer describe. The counts are restated from the tree the run actually
+    leaves, the note says so, and `cleanup_required` marks the checkout --
+    but teardown's outcome is still a note, so `ok` does not move."""
+    fake_fleet(["sh", "-c", "echo work > new.txt && git add -A && git commit -qm 'agent work'"])
+    result = dispatch(
+        spec_for(repo, mode="write", teardown="echo tampered >> seed.txt"),
+        home=home,
+        isolate=True,
+    )
+    assert result.ok is True, result.failure()
+    assert result.cleanup_required is True
+    assert result.isolation["clean"] is False
+    assert result.git_verdict["dirty_delta"] == 1
+    assert any(
+        "teardown changed the tree after it was judged: seed.txt" in note
+        for note in result.git_verdict["notes"]
+    )
+
+
+def test_a_teardown_that_changes_nothing_leaves_the_verdict_as_judged(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo work > new.txt && git add -A && git commit -qm 'agent work'"])
+    result = dispatch(
+        spec_for(repo, mode="write", teardown="true"),
+        home=home,
+        isolate=True,
+    )
+    assert result.ok is True, result.failure()
+    assert result.cleanup_required is False
+    assert result.isolation["clean"] is True
+    assert result.git_verdict["dirty_delta"] == 0
+    assert not any(
+        "teardown changed the tree" in note for note in result.git_verdict["notes"]
+    )

@@ -193,6 +193,13 @@ class Result:
     # declared E1 deliverable; None for every other lane, and for a read lane
     # that moved anything else (still gated, same as today).
     gate: dict | None = None
+    # W4: True when this lane's teardown changed the tree after the run was
+    # judged (tracked files touched, HEAD or the branch moved), so the caller
+    # knows the checkout needs cleaning before anything builds on it. The
+    # git verdict's counts are restated from that post-teardown tree; the
+    # verdict itself is not, because teardown's outcome is a note. False on
+    # every other run and on any receipt written before this field existed.
+    cleanup_required: bool = False
     # F12: `result.permission_denials` from a claude run under
     # `--permission-prompts none` -- `{tool_name, tool_use_id, tool_input}`
     # per denial, empty for every other fleet and for a claude run that
@@ -607,6 +614,75 @@ def copy_no_follow(src: Path, dst: Path) -> None:
             shutil.copyfileobj(source, out)
     finally:
         os.close(fd)
+
+
+DELIVERABLE_CHANGED = "deliverable changed after the gate ran"
+
+
+def _deliverable_sha256(cwd: str | Path, path: str) -> str | None:
+    """W4: the deliverable's bytes, hashed without following a symlink (the
+    same refusal `copy_no_follow` makes). None when the file cannot be read
+    at all, which for this purpose counts as "not the bytes we checked"."""
+    try:
+        fd = os.open(str(Path(cwd) / path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with open(fd, "rb", closefd=False) as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def _capture_deliverable(
+    cwd: str,
+    state: dict | None,
+    expected_sha: str | None,
+    run_dir: Path,
+) -> tuple[str | None, str | None]:
+    """W4: persist the deliverable's bytes into `run_dir/deliverable`, but
+    only if they are still the bytes that were checked before the gate ran.
+
+    The check that decides `deliverable_state` happens the moment the fleet
+    exits; the gate that follows is an arbitrary shell command the spec
+    names, and a gate (or a teardown) that rewrites the file would otherwise
+    leave a receipt whose captured copy nobody judged. Returns the copy's
+    path and, when the bytes moved, the error that fails the run closed."""
+    if state is None or not state.get("exists"):
+        return None, None
+    path = state["path"]
+    now = _deliverable_sha256(cwd, path)
+    if now is None or now != expected_sha:
+        return None, f"{DELIVERABLE_CHANGED}: {path}"
+    dest = run_dir / "deliverable"
+    try:
+        copy_no_follow(Path(cwd) / path, dest)
+    except OSError:
+        return None, None
+    state["sha256"] = now
+    return str(dest), None
+
+
+def _teardown_drift(judged: GitState, now: GitState) -> str | None:
+    """W4: what a teardown changed after the tree was already judged -- HEAD,
+    the branch, or the dirty paths whose bytes differ -- or None when the
+    tree it leaves behind is the tree the receipt describes."""
+    if not judged.is_repo or not now.is_repo:
+        return "the working tree vanished" if judged.is_repo else None
+    parts: list[str] = []
+    if judged.head != now.head:
+        parts.append("HEAD moved")
+    if judged.branch != now.branch:
+        parts.append(f"branch {judged.branch or '(none)'} -> {now.branch or '(none)'}")
+    paths = sorted(changed_entry_paths(judged, now))
+    if paths:
+        parts.append(", ".join(paths[:10]))
+    return "; ".join(parts) or None
 
 
 def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
@@ -2305,17 +2381,14 @@ def dispatch(
         # here (dispatch() returns earlier), so this is always a real check.
         deliverable_state = _check_deliverable(spec, dry_run=False)
         deliverable_path: str | None = None
+        # W4: the check above is what decides `deliverable_state`, and it stays
+        # here, before the gate. The bytes are only hashed now; the copy into
+        # run_dir happens after the gate and after the tree is judged (see
+        # `_capture_deliverable`), so the captured copy is the artifact the
+        # run actually leaves behind rather than one a gate could still rewrite.
+        deliverable_sha: str | None = None
         if deliverable_state is not None and deliverable_state.get("exists"):
-            # Persisted now, while spec.cwd (the worktree, when isolated) still
-            # exists: a clean isolated worktree is released before this dispatch
-            # returns, and a downstream lane's {{lanes.<name>.deliverable}} must
-            # still be able to read it afterwards.
-            dest = run_dir / "deliverable"
-            try:
-                copy_no_follow(Path(spec.cwd) / deliverable_state["path"], dest)
-                deliverable_path = str(dest)
-            except OSError:
-                pass
+            deliverable_sha = _deliverable_sha256(spec.cwd, deliverable_state["path"])
 
         # Commit before the Git verdict is taken, so it describes the state
         # the caller is actually left with.
@@ -2509,6 +2582,17 @@ def dispatch(
             commit.reason.startswith("gate failed") or spec.stage == "adversarial"
         ):
             git_verdict.notes.append(commit.reason)
+        # W4: now that the gates have run and the capture above has judged the
+        # tree, persist the deliverable -- while spec.cwd (the worktree, when
+        # isolated) still exists: a clean isolated worktree is released before
+        # this dispatch returns, and a downstream lane's
+        # {{lanes.<name>.deliverable}} must still be able to read it afterwards.
+        deliverable_path, deliverable_change = _capture_deliverable(
+            spec.cwd, deliverable_state, deliverable_sha, run_dir
+        )
+        if deliverable_change is not None and error is None:
+            error = deliverable_change
+
         diff_path: str | None = None
         if git_verdict.checked and not git_verdict.no_op and before.head:
             # The patch is the evidence a judge should see; the answer is a claim.
@@ -2562,6 +2646,7 @@ def dispatch(
         # work is already judged, so its own outcome is a note, never a reason
         # to flip the verdict.
         teardown_outcome: TestOutcome | None = None
+        cleanup_required = False
         if spec.teardown:
             teardown_outcome = run_tests(
                 spec.cwd, spec.teardown, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
@@ -2574,6 +2659,34 @@ def dispatch(
                 )
             elif teardown_outcome.exit_code != 0:
                 git_verdict.notes.append(f"teardown failed: exit {teardown_outcome.exit_code}")
+            # W4: the tree was judged before teardown ran, so a teardown that
+            # touches tracked files or moves HEAD leaves behind a tree the
+            # counts above no longer describe. Restate the descriptive counts
+            # from the tree the run actually leaves, and say so. The verdict
+            # itself is not re-decided: `no_op`, `vanished`, and `ok` still
+            # come from the judged tree, because teardown's outcome is a note,
+            # never a reason to flip the verdict. What can still fail the run
+            # is the deliverable: a teardown that rewrote it means the bytes
+            # captured above are not the bytes left behind.
+            post_teardown = GitState.capture(spec.cwd)
+            drift = _teardown_drift(after, post_teardown)
+            if drift is not None:
+                cleanup_required = True
+                git_verdict.notes.append(f"teardown changed the tree after it was judged: {drift}")
+                restated = compare(spec.cwd, before, post_teardown)
+                git_verdict.commits_added = restated.commits_added
+                git_verdict.files_changed = restated.files_changed
+                git_verdict.dirty_delta = restated.dirty_delta
+                git_verdict.branch_after = restated.branch_after
+                git_verdict.branch_moved = restated.branch_moved
+                if deliverable_path is not None and deliverable_state is not None:
+                    path = deliverable_state["path"]
+                    if _deliverable_sha256(spec.cwd, path) != deliverable_sha:
+                        Path(deliverable_path).unlink(missing_ok=True)
+                        deliverable_path = None
+                        deliverable_state.pop("sha256", None)
+                        if error is None:
+                            error = f"{DELIVERABLE_CHANGED}: {path}"
     except Exception as exc:  # noqa: BLE001 - D9 boundary, re-raised below
         ports_mod.release(base, claimed_ports)
         if include_exclude_file is not None:
@@ -2705,6 +2818,7 @@ def dispatch(
         fleet_version=fleet_version,
         prompt_versions=prompt_versions,
         gate=read_gate_skip,
+        cleanup_required=cleanup_required,
         permission_denials=list(output.permission_denials),
         permission_mode=permission_mode,
         restricted=restricted_flag,

@@ -341,7 +341,7 @@ the gate -- never through `git status`, because an operator's own global
 excludes can hide an untracked file from Git entirely, which is exactly how
 one fixture's own deliverable went missing from its receipt (C7). The
 verdict lands on `Result.deliverable`: `{"path", "exists", "bytes",
-"parsed", "ok", "reason"}`. A missing file, an empty file, or (when
+"parsed", "ok", "reason"}`, plus `sha256` once the bytes are captured. A missing file, an empty file, or (when
 `schema` was set) a file that is not valid JSON or does not satisfy the
 schema each sink `ok` and give `Result.failure()` one of `deliverable
 missing: <path>`, `deliverable empty: <path>`, `deliverable does not parse:
@@ -354,6 +354,17 @@ integer, boolean, array, or object) has a value of that type -- not a
 general JSON Schema validator. On a dry run the deliverable is recorded as
 declared (`ok: null`) and not checked. `errors.KINDS` gains `deliverable`
 for the four failures above.
+
+The check decides the verdict before the gate, but the copy under the run
+directory is taken afterwards, once the lane's own gate, the clean gate, and
+the final Git capture have judged the tree. A gate is an arbitrary shell
+command the spec names, and so is a teardown, so either could rewrite the
+product after it was checked; the bytes are hashed at the check and hashed
+again at the capture, and if they differ the copy is refused, the receipt
+carries no `deliverable_path`, and the run fails with `deliverable changed
+after the gate ran: <path>`. What a downstream lane reads through
+`{{lanes.<name>.deliverable}}` is therefore the artifact the run leaves
+behind, not an earlier draft of it.
 
 The path is validated at load, but the lane runs after that, so the check
 is repeated on bytes before anything reads the file: no component from the
@@ -2415,8 +2426,17 @@ failed: exit <code>` (or `setup timed out`, or the interrupted error).
 `teardown` runs the same way, after the gate and the commit decision,
 whether or not the run was ok; its outcome never changes `ok` -- the work is
 already judged by then, so a failing teardown (`teardown failed: exit
-<code>`, or `teardown timed out`) is only a note in the git verdict. Both
-land in the receipt's `lane_env`: `{"ports": [...], "setup": <outcome or
+<code>`, or `teardown timed out`) is only a note in the git verdict. What
+teardown does to the tree is reported, though: conductor captures the tree
+again after teardown and, when HEAD, the branch, or any dirty path moved,
+notes `teardown changed the tree after it was judged: <paths>`, restates the
+verdict's `files_changed`, `dirty_delta`, and branch fields from the tree the
+run actually leaves behind, and sets `cleanup_required: true` on the receipt
+so a caller knows the checkout needs cleaning before anything builds on it.
+The verdict itself is not re-decided, for the same reason: the work was
+already judged. A teardown that rewrote the lane's declared deliverable is
+the one exception that does fail the run, under the deliverable rule above.
+Both setup and teardown land in the receipt's `lane_env`: `{"ports": [...], "setup": <outcome or
 null>, "teardown": <outcome or null>, "included": [...]}`, present only when
 a dispatch actually used one of these four keys; `summary()` also carries
 `ports`.

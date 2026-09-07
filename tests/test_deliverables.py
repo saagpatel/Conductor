@@ -8,6 +8,7 @@ downstream lane can read it through `{{lanes.<name>.deliverable}}`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -257,6 +258,9 @@ def test_read_lane_writes_its_deliverable_and_passes(repo, home, fake_fleet):
         "parsed": None,
         "ok": True,
         "reason": None,
+        # W4: the sha256 of the bytes actually captured into run_dir, added
+        # by the capture that now runs after the gate.
+        "sha256": hashlib.sha256(b"out\n").hexdigest(),
     }
     assert result.git_verdict["deliverable_only"] is True
     assert error_kind(result) is None
@@ -475,6 +479,58 @@ def test_a_regular_file_deliverable_is_still_captured(repo, home, fake_fleet):
     assert result.ok is True, result.failure()
     assert result.deliverable["ok"] is True
     assert Path(result.deliverable_path).read_text() == "out\n"
+
+
+# --- W4: the judged artifact is the artifact left behind ---------------------
+
+
+def test_a_gate_that_rewrites_the_deliverable_fails_the_run(repo, home, fake_fleet):
+    """W4: the gate is an arbitrary shell command. One that rewrites the
+    declared deliverable after the pre-gate check means the bytes on the
+    receipt would not be the bytes the run was judged on -- the capture is
+    refused and the run fails closed instead."""
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}),
+        home=home,
+        test_command="echo tampered > report.txt",
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.deliverable_path is None
+    assert not (Path(result.run_dir) / "deliverable").exists()
+
+
+def test_a_gate_that_leaves_the_deliverable_alone_captures_its_bytes(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}),
+        home=home,
+        test_command="true",
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable["sha256"] == hashlib.sha256(b"out\n").hexdigest()
+    assert Path(result.deliverable_path).read_text() == "out\n"
+
+
+def test_a_teardown_that_rewrites_the_deliverable_fails_the_run(repo, home, fake_fleet):
+    """The same rule after the run is judged: a teardown that rewrites the
+    deliverable invalidates the copy already taken, and the run fails."""
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+    result = dispatch(
+        spec_for(
+            repo,
+            mode="write",
+            deliverable={"path": "report.txt"},
+            teardown="echo tampered > report.txt",
+        ),
+        home=home,
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.deliverable_path is None
+    assert result.cleanup_required is True
+    assert not (Path(result.run_dir) / "deliverable").exists()
 
 
 # --- {{lanes.<name>.deliverable}} template (item 2) --------------------------
