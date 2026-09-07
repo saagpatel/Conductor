@@ -389,6 +389,8 @@ def _backfill_snapshot(mission_raw: dict) -> dict:
         # E3: no recording before this field existed ever ran an
         # untrusted-output lane.
         lane.setdefault("untrusted_output", False)
+        # E10: no recording before this field existed ever ran a plan lane.
+        lane.setdefault("plan", False)
         for attempt in lane.get("attempts") or []:
             if isinstance(attempt, dict):
                 for key, default in _ATTEMPT_FIELD_DEFAULTS.items():
@@ -887,6 +889,16 @@ def projection(result: MissionResult) -> dict:
         ]
         entry = {key: lane.get(key) for key in _LANE_PROJECTION_KEYS}
         entry["attempts"] = attempts
+        # E10: a plan lane's `refused` and `dry_run_ok` describe what
+        # happened, the same scope as every other lane-level projection
+        # field; `child_path`, `child_name`, `child_max_cost_usd`, and the
+        # child's own report path and dollar cost are excluded, same as
+        # every other path/dollar amount this projection drops.
+        # Only when the lane is a plan lane: a recording made before E10 has
+        # no `plan` key at all, and its projection must stay byte-identical.
+        plan = lane.get("plan")
+        if plan is not None:
+            entry["plan"] = {"refused": plan.get("refused"), "dry_run_ok": plan.get("dry_run_ok")}
         lanes.append(entry)
     return {
         "ok": data.get("ok"),

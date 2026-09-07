@@ -46,7 +46,7 @@ import time
 import tomllib
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -71,6 +71,10 @@ REQUIRE = ("all", "any")
 STAGES = ("build", "review", "fix", "adversarial")
 _STAGE_MODE = {"build": "write", "review": "read", "fix": "write", "adversarial": "write"}
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# E10: a plan lane's child may itself declare a plan lane only while it still
+# sits at depth 0 (its child, at depth 1, may not plan a grandchild) -- at
+# most one level of nesting beyond the mission that first plans.
+PLAN_MAX_DEPTH = 1
 
 # Fields an attempt may set, in the order they cascade mission -> lane -> attempt.
 _INHERITED = (
@@ -131,6 +135,7 @@ _LANE_KEYS = _ATTEMPT_KEYS | {
     "cascade",
     "taint",
     "untrusted_output",
+    "plan",
 }
 _MISSION_KEYS = _ATTEMPT_KEYS | {
     "name",
@@ -389,6 +394,12 @@ class Lane:
     # the load-time refusals (resume, cascade, taint) that make no sense on
     # it, not to skip dispatch.
     script: bool = False
+    # E10: this lane's deliverable is a mission file conductor may load, dry
+    # run, and (with an operator's unconditional pause answer) launch as a
+    # child mission. Mission input, never cascaded; see mission_from_dict's
+    # per-lane load-time refusals and Mission._validate_graph for the
+    # base/resume refusals, which need the full lane graph.
+    plan: bool = False
 
 
 @dataclass
@@ -559,6 +570,15 @@ class Mission:
     # the rolling spend under `home/runs` -- never against this mission's own
     # ledger, which `max_cost_usd` already bounds.
     ceiling: dict | None = None
+    # E10: load-derived, never set by a mission file (not in _MISSION_KEYS) --
+    # stamped by the scheduler when it loads a plan lane's deliverable as a
+    # child mission, one level deeper than its parent (PLAN_MAX_DEPTH bounds
+    # this). A mission loaded directly from a file is always depth 0.
+    depth: int = 0
+    # E10: {"mission_id", "lane"} naming the parent mission and the plan lane
+    # that planned this one, or None for a mission nobody planned. Load-
+    # derived like `depth`, never set by a mission file.
+    parent: dict | None = None
 
     def validate(self) -> None:
         if self.snapshot_version != 1:
@@ -850,6 +870,14 @@ class Mission:
                     f"lane '{lane.name}': base '{lane.base}' is a human lane, "
                     "which holds no commit to build on"
                 )
+            # E10: a plan lane is read mode and never commits -- naming one as
+            # another lane's base or resume is refused here, the same place a
+            # human lane's is, above.
+            if lane.base is not None and by_name[lane.base].plan:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': base '{lane.base}' is a plan lane, "
+                    "which holds no commit to build on"
+                )
             if lane.resume is not None:
                 if lane.resume not in names:
                     raise MissionInvalid(
@@ -869,6 +897,11 @@ class Mission:
                 if by_name[lane.resume].script:
                     raise MissionInvalid(
                         f"lane '{lane.name}': resume '{lane.resume}' is a script lane, "
+                        "which holds no session to resume"
+                    )
+                if by_name[lane.resume].plan:
+                    raise MissionInvalid(
+                        f"lane '{lane.name}': resume '{lane.resume}' is a plan lane, "
                         "which holds no session to resume"
                     )
             for attempt in lane.attempts:
@@ -954,6 +987,8 @@ class Mission:
             "test",
             "notify",
             "ceiling",
+            "depth",
+            "parent",
         }
         _require_snapshot_keys(raw, expected, "mission snapshot")
         if raw["snapshot_version"] != 1:
@@ -964,6 +999,17 @@ class Mission:
             raise MissionInvalid("mission snapshot source must be a string")
         if not isinstance(raw["lanes"], list):
             raise MissionInvalid("mission snapshot lanes must be a list")
+        # E10: load-derived, never accepted from a mission file (mission_raw
+        # below carries neither key, since _MISSION_KEYS does not) -- stamped
+        # back on after mission_from_dict returns, below.
+        if isinstance(raw["depth"], bool) or not isinstance(raw["depth"], int):
+            raise MissionInvalid("mission snapshot depth must be an integer")
+        if raw["parent"] is not None and (
+            not isinstance(raw["parent"], dict) or set(raw["parent"]) != {"mission_id", "lane"}
+        ):
+            raise MissionInvalid(
+                "mission snapshot parent must be null or an object with mission_id and lane"
+            )
 
         lanes: list[dict] = []
         lane_keys = {
@@ -981,6 +1027,7 @@ class Mission:
             "human",
             "script",
             "untrusted_output",
+            "plan",
         }
         attempt_keys = set(Attempt.__dataclass_fields__)
         for index, raw_lane in enumerate(raw["lanes"]):
@@ -1011,6 +1058,8 @@ class Mission:
                 raise MissionInvalid(
                     f"mission snapshot lane {index} untrusted_output must be true or false"
                 )
+            if not isinstance(raw_lane["plan"], bool):
+                raise MissionInvalid(f"mission snapshot lane {index} plan must be true or false")
             attempts = raw_lane["attempts"]
             if not isinstance(attempts, list) or not attempts:
                 raise MissionInvalid(
@@ -1052,6 +1101,7 @@ class Mission:
                 "stage": raw_lane["stage"],
                 "taint": raw_lane["taint"],
                 "untrusted_output": raw_lane["untrusted_output"],
+                "plan": raw_lane["plan"],
                 **primary_attempt,
                 "fallback": fallback_attempts,
                 "cascade": cascaded,
@@ -1098,6 +1148,11 @@ class Mission:
             mission_raw, base_dir=Path("/"), source=raw["source"]
         )
         mission.snapshot_version = 1
+        # E10: load-derived, stamped back on after the ordinary loader built
+        # everything a mission file may actually set -- see the `expected`
+        # check above.
+        mission.depth = raw["depth"]
+        mission.parent = raw["parent"]
         if json.dumps(mission.to_dict(), sort_keys=True) != json.dumps(raw, sort_keys=True):
             raise MissionInvalid("mission snapshot does not round-trip through validation")
         return mission
@@ -1342,6 +1397,16 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         lane_untrusted_output = raw_lane.get("untrusted_output", False)
         if not isinstance(lane_untrusted_output, bool):
             raise MissionInvalid(f"lane {i}: untrusted_output must be true or false")
+        # E10: a plan lane's deliverable is a mission file conductor may
+        # later load and launch -- it may not be a script lane (Lane.script,
+        # checked here like taint/cascade above) or tainted/untrusted-output
+        # (checked below, once lane_tainted is known); base/resume-target
+        # refusals need the full lane graph and live in _validate_graph.
+        lane_plan = raw_lane.get("plan", False)
+        if not isinstance(lane_plan, bool):
+            raise MissionInvalid(f"lane {i}: plan must be true or false")
+        if lane_is_script and lane_plan:
+            raise MissionInvalid(f"{lane_where}: a script lane may not set plan")
         lane_cascade = raw_lane.get("cascade", True)
         if not isinstance(lane_cascade, bool):
             raise MissionInvalid(f"lane {i}: cascade must be true or false")
@@ -1375,6 +1440,21 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 raise MissionInvalid(
                     f"{attempt_where}: command may only be set on a script attempt"
                 )
+            # E10: every attempt (primary, fallback, and any cascade attempt)
+            # must be read mode and declare a mission-shaped deliverable --
+            # its product is a mission that will spend, never a reply.
+            if lane_plan:
+                if attempt.mode != "read":
+                    raise MissionInvalid(f"{attempt_where}: a plan lane must be read mode")
+                deliverable = attempt.deliverable
+                if not deliverable or not deliverable.get("path"):
+                    raise MissionInvalid(f"{attempt_where}: a plan lane must declare a deliverable")
+                deliverable_path = str(deliverable["path"])
+                if not deliverable_path.endswith((".json", ".toml")):
+                    raise MissionInvalid(
+                        f"{attempt_where}: a plan lane's deliverable path must end in "
+                        ".json or .toml"
+                    )
         # D2: inherited taint, from every attempt's template references
         # (cascade attempt included) and from resuming a tainted lane's
         # session. Only lanes already processed (i.e. earlier in mission
@@ -1397,6 +1477,10 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
             ) and lane_resume not in taint_from:
                 taint_from.append(lane_resume)
         lane_tainted = lane_taint or bool(taint_from)
+        if lane_plan and lane_tainted:
+            raise MissionInvalid(f"{lane_where}: a plan lane may not be tainted")
+        if lane_plan and lane_untrusted_output:
+            raise MissionInvalid(f"{lane_where}: a plan lane may not be untrusted-output")
         tainted_by_name[lane_name] = (lane_tainted, taint_from)
         untrusted_by_name[lane_name] = lane_untrusted_output
         lanes.append(
@@ -1414,6 +1498,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 taint_from=taint_from,
                 script=lane_is_script,
                 untrusted_output=lane_untrusted_output,
+                plan=lane_plan,
             )
         )
 
@@ -2022,6 +2107,11 @@ def _human_lane(
         raise MissionInvalid(f"{where}: a human lane may not set stage")
     if raw_lane.get("branch") is not None:
         raise MissionInvalid(f"{where}: a human lane may not set branch")
+    if raw_lane.get("plan"):
+        # E10: a plan lane's product is a mission that will spend -- a human
+        # lane is never dispatched at all, so it has nothing to check or
+        # launch.
+        raise MissionInvalid(f"{where}: a human lane may not set plan")
     untrusted_output = raw_lane.get("untrusted_output", False)
     if not isinstance(untrusted_output, bool):
         raise MissionInvalid(f"{where}: untrusted_output must be true or false")
@@ -2276,6 +2366,13 @@ class LaneResult:
     # true here says nothing about how this lane itself ran -- only that its
     # output is a taint source for whatever lane references it.
     untrusted_output: bool = False
+    # E10: {"child_path", "child_name", "child_max_cost_usd", "depth",
+    # "dry_run_ok", "refused", "child"} once this lane's own dispatch has
+    # settled ok and the checks against the deliverable's mission file have
+    # run; "child" (the launch outcome) is absent until the operator answers
+    # the pause with continue. None on every other lane, and on a plan lane
+    # whose own dispatch never got that far.
+    plan: dict | None = None
 
     def buildable(self) -> tuple[str, str | None]:
         """The commit a later lane may start from, or why there is none."""
@@ -2377,6 +2474,8 @@ class LaneResult:
             raise ValueError("lane receipt taint_from must be a list of strings")
         if "untrusted_output" in raw and not isinstance(raw["untrusted_output"], bool):
             raise ValueError("lane receipt untrusted_output must be true or false")
+        if raw.get("plan") is not None and not isinstance(raw["plan"], dict):
+            raise ValueError("lane receipt plan must be an object or null")
         return cls(**raw)
 
 
@@ -2455,6 +2554,11 @@ class MissionResult:
     # resolve to, sorted -- a one-lane, one-repository mission gets exactly
     # that one entry, same as it always implicitly ran in.
     repositories: list[str] = field(default_factory=list)
+    # E10: every child mission id a plan lane has launched, across every
+    # resume, in the order each was launched. Empty, never null, when the
+    # mission has no plan lane or none has launched yet. A child's own cost
+    # is never rolled into this mission's ledger -- see `notes`.
+    children: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2935,15 +3039,20 @@ def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path
             notes.append(f"removed stale file lock at {lock} before resume ({reason})")
 
 
+def _effective_ceiling(mission: Mission) -> tuple[float | None, float | None]:
+    """The (per_hour_usd, per_day_usd) bounds this mission actually runs
+    under: its own explicit `ceiling`, or ceiling.py's module defaults when
+    it sets none."""
+    if mission.ceiling is not None:
+        return mission.ceiling["per_hour_usd"], mission.ceiling["per_day_usd"]
+    return ceiling_mod.USD_PER_HOUR, ceiling_mod.USD_PER_DAY
+
+
 def _check_ceiling(mission: Mission, base: Path) -> dict:
     """E9: read once, at start, against the rolling spend under `base/runs`
     -- never against this mission's own ledger, which `max_cost_usd` already
     bounds. Raises before a single dispatch, on a launch and a resume alike."""
-    per_hour = ceiling_mod.USD_PER_HOUR
-    per_day = ceiling_mod.USD_PER_DAY
-    if mission.ceiling is not None:
-        per_hour = mission.ceiling["per_hour_usd"]
-        per_day = mission.ceiling["per_day_usd"]
+    per_hour, per_day = _effective_ceiling(mission)
     spend = ceiling_mod.rolling_spend(base)
     if per_hour is not None and spend.hour_usd >= per_hour:
         raise MissionInvalid(
@@ -2965,6 +3074,91 @@ def _check_ceiling(mission: Mission, base: Path) -> dict:
     }
 
 
+def _first_child_error(result: MissionResult) -> str:
+    """E10: the first reason a dry-run child mission was not ok, for the
+    plan lane's own failure text -- the same shape a lead would read off the
+    child's own report."""
+    for lane in result.lanes:
+        if lane.get("ok"):
+            continue
+        attempts = lane.get("attempts") or []
+        if attempts:
+            failure = attempts[-1].get("failure") or attempts[-1].get("error")
+            if failure:
+                return f"lane '{lane.get('name')}': {failure}"
+        if lane.get("skipped"):
+            return f"lane '{lane.get('name')}': {lane['skipped']}"
+    return "child dry run was not ok"
+
+
+def _plan_check_child(
+    mission: Mission, deliverable_path: str | None, *, ledger: Ledger, base: Path
+) -> tuple[dict, str | None]:
+    """E10: everything the scheduler must confirm about a plan lane's
+    deliverable before the mission may ask the operator to launch it: the
+    file loads as a mission, its depth stays within `PLAN_MAX_DEPTH`, its
+    budget is bounded and within the parent's remaining ledger, its ceiling
+    is no looser than the parent's, and it dry-runs clean. Returns the
+    `plan` block (`LaneResult.plan`, minus the eventual `child` key) and the
+    first refusal message, or `None` once every check has passed."""
+    child_depth = mission.depth + 1
+    plan: dict = {
+        "child_path": deliverable_path,
+        "child_name": None,
+        "child_max_cost_usd": None,
+        "depth": child_depth,
+        "dry_run_ok": False,
+        "refused": None,
+    }
+    if not deliverable_path:
+        message = "plan lane produced no deliverable to load"
+        plan["refused"] = message
+        return plan, message
+    try:
+        child = load_mission(deliverable_path)
+    except MissionInvalid as exc:
+        message = str(exc)
+        plan["refused"] = message
+        return plan, message
+    plan["child_name"] = child.name
+    plan["child_max_cost_usd"] = child.max_cost_usd
+    if child_depth > PLAN_MAX_DEPTH or (
+        child_depth == PLAN_MAX_DEPTH and any(child_lane.plan for child_lane in child.lanes)
+    ):
+        message = "child would exceed the plan depth limit"
+        plan["refused"] = message
+        return plan, message
+    remaining = ledger.remaining()
+    if child.max_cost_usd is None:
+        message = "child has no max_cost_usd; a planned mission's budget must be bounded"
+        plan["refused"] = message
+        return plan, message
+    if remaining is not None and child.max_cost_usd > remaining:
+        message = (
+            f"child budget ${child.max_cost_usd:.2f} is over the parent's "
+            f"remaining ${remaining:.2f}"
+        )
+        plan["refused"] = message
+        return plan, message
+    parent_hour, parent_day = _effective_ceiling(mission)
+    child_hour, child_day = _effective_ceiling(child)
+    for label, parent_bound, child_bound in (
+        ("per_hour_usd", parent_hour, child_hour),
+        ("per_day_usd", parent_day, child_day),
+    ):
+        if parent_bound is not None and (child_bound is None or child_bound > parent_bound):
+            message = f"child ceiling {label} is looser than the parent's"
+            plan["refused"] = message
+            return plan, message
+    dry_result = run_mission(child, home=base, dry_run=True)
+    if not dry_result.ok:
+        message = f"child dry run failed: {_first_child_error(dry_result)}"
+        plan["refused"] = message
+        return plan, message
+    plan["dry_run_ok"] = True
+    return plan, None
+
+
 def _check_unattended(mission: Mission) -> None:
     """E9: an unattended launch runs only where nobody reading it is not a
     problem -- see the four refusals below, verbatim from the roadmap item.
@@ -2974,6 +3168,11 @@ def _check_unattended(mission: Mission) -> None:
             raise MissionInvalid(
                 f"--unattended: lane '{lane.name}' is a human lane -- nobody is there "
                 "to answer it"
+            )
+        if lane.plan:
+            raise MissionInvalid(
+                f"--unattended: lane '{lane.name}' is a plan lane -- launching its child "
+                "needs an operator's pause answer"
             )
     pause_before = set(mission.pause["before"]) if mission.pause else set()
     if mission.resolve is not None:
@@ -3422,6 +3621,69 @@ def _answer_human_pause(
     return None
 
 
+def _launch_plan_child(
+    lane: Lane,
+    parked: LaneResult,
+    *,
+    base: Path,
+    mission_id: str,
+    stop_answer: dict | None,
+) -> tuple[LaneResult, str | None]:
+    """E10: resolve a parked plan lane's unconditional pause. `stop` fails
+    the lane naming the refusal, without ever loading the deliverable again.
+    `continue` loads it fresh, stamps the child's `depth` and `parent`, and
+    launches it synchronously in this process -- its own directory, ledger,
+    running lock, and receipt chain, never rolled into this mission's own.
+    Returns the finalized `LaneResult` and the launched child's mission id
+    (None when nothing launched, i.e. the operator said stop)."""
+    plan = dict(parked.plan or {})
+    resolved = replace(parked)
+    resolved.attempts = [dict(attempt) for attempt in parked.attempts]
+    resolved.kinds = list(parked.kinds)
+
+    def _fail(message: str) -> LaneResult:
+        resolved.ok = False
+        if resolved.attempts:
+            resolved.attempts[-1] = {
+                **resolved.attempts[-1],
+                "ok": False,
+                "error": message,
+                "failure": message,
+                "kind": "plan",
+            }
+        resolved.kinds = [*resolved.kinds[:-1], "plan"] if resolved.kinds else ["plan"]
+        resolved.plan = plan
+        return resolved
+
+    if (
+        stop_answer is not None
+        and stop_answer.get("kind") == "child"
+        and stop_answer.get("lane") == lane.name
+    ):
+        return _fail("plan: child launch refused by the operator"), None
+
+    child = load_mission(plan["child_path"])
+    child.depth = plan["depth"]
+    child.parent = {"mission_id": mission_id, "lane": lane.name}
+    child_result = run_mission(child, home=base)
+    plan["child"] = {
+        "mission_id": child_result.mission_id,
+        "ok": child_result.ok,
+        "cost_usd": child_result.cost_usd,
+        "paused": child_result.paused is not None,
+        "report_path": child_result.report_path,
+    }
+    if child_result.paused is not None:
+        result = _fail(f"plan: child paused: {child_result.mission_id}")
+    elif not child_result.ok:
+        result = _fail(f"plan: child mission '{child_result.mission_id}' was not ok")
+    else:
+        resolved.ok = True
+        resolved.plan = plan
+        result = resolved
+    return result, child_result.mission_id
+
+
 def run_mission(
     mission: Mission,
     *,
@@ -3751,6 +4013,20 @@ def _execute_mission(
                     json.dumps(result.to_dict(), indent=2)
                 )
             ledger.add(result)
+            if lane.plan and not dry_run and result.ok:
+                # E10: the deliverable this attempt just produced is a
+                # mission conductor may launch on the operator's word --
+                # check it now, against the ledger as it stands once this
+                # attempt's own cost is counted, and mutate `.error` (the
+                # same mechanism the agent/taint/adversarial checks above
+                # use) so a failing check reads as an ordinary failed
+                # attempt, `kind` included.
+                plan, plan_message = _plan_check_child(
+                    mission, result.deliverable_path, ledger=ledger, base=base
+                )
+                out.plan = plan
+                if plan_message is not None:
+                    result.error = f"plan: {plan_message}"
             kind = error_kind(result)
             summary = result.summary()
             summary["test_surface"] = result.test_surface
@@ -4000,6 +4276,33 @@ def _execute_mission(
                 )
             )
 
+    # E10: a plan lane's launch decision. Only a resume can reach here with a
+    # plan lane already parked (a fresh launch's plan lane, if any, has not
+    # dispatched yet), and only a resume of the exact pause it raised ever
+    # answers it, so this always runs whether that answer was continue or
+    # stop -- `_launch_plan_child` itself tells the two apart.
+    plan_children: list[str] = []
+    if is_resume and not dry_run:
+        for lane in mission.lanes:
+            if not lane.plan:
+                continue
+            parked = done.get(lane.name)
+            if parked is None or not parked.ok or parked.plan is None:
+                continue
+            if parked.plan.get("refused") is not None or parked.plan.get("child") is not None:
+                continue  # never parked ok, or already launched on an earlier resume
+            resolved, child_id = _launch_plan_child(
+                lane, parked, base=base, mission_id=mission_id, stop_answer=stop_answer
+            )
+            settle(resolved)
+            if child_id is not None:
+                plan_children.append(child_id)
+                child_block = (resolved.plan or {}).get("child") or {}
+                child_cost = float(child_block.get("cost_usd") or 0.0)
+                mission_notes.append(
+                    f"child '{child_id}' spent ${child_cost:.4f} (not rolled into this budget)"
+                )
+
     # C2: the pause primitive. `pause_park` becomes this run's paused-result
     # payload the moment either the stop-answer short circuit below, or the
     # scheduler's own pause-point check, decides nothing more may start.
@@ -4168,7 +4471,7 @@ def _execute_mission(
                 break
             finished, _ = wait(running, return_when=FIRST_COMPLETED)
             for future in finished:
-                running.pop(future)
+                dispatched_lane = running.pop(future)
                 result = future.result()
                 settle(result)
                 if (
@@ -4178,6 +4481,35 @@ def _execute_mission(
                     and result.ok
                 ):
                     _fire_early_cancel(result.name)
+                if (
+                    pause_info is None
+                    and dispatched_lane.plan
+                    and result.ok
+                    and result.plan is not None
+                    and result.plan.get("refused") is None
+                ):
+                    # E10: the pause is unconditional -- there is no key that
+                    # disables it, and it fires the moment the checks above
+                    # pass, in the same place a `pause.before` lane's own
+                    # park is decided.
+                    pause_info = {
+                        "kind": "child",
+                        "lane": result.name,
+                        "spent_usd": None,
+                        "threshold": None,
+                        "reason": (
+                            f"lane {result.name} planned a mission and is waiting for "
+                            "the operator"
+                        ),
+                        "question": (
+                            f"Lane '{result.name}' planned mission "
+                            f"'{result.plan['child_name']}' "
+                            f"(${result.plan['child_max_cost_usd']:.2f}); launch it?"
+                        ),
+                        "child_path": result.plan["child_path"],
+                        "child_name": result.plan["child_name"],
+                        "child_max_cost_usd": result.plan["child_max_cost_usd"],
+                    }
 
     if pause_info is not None and not stop_requested():
         # A stop that arrives while a lane already dispatched before the
@@ -4197,6 +4529,9 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             new_pause_doc["ask_path"] = pause_info["ask_path"]
+        for key in ("child_path", "child_name", "child_max_cost_usd"):
+            if key in pause_info:
+                new_pause_doc[key] = pause_info[key]
         (mission_dir / "pause.json").write_text(json.dumps(new_pause_doc, indent=2))
         if mission.notify and "pause" in mission.notify["events"]:
             notifications.append(
@@ -4223,6 +4558,9 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             pause_park["ask_path"] = pause_info["ask_path"]
+        for key in ("child_path", "child_name", "child_max_cost_usd"):
+            if key in pause_info:
+                pause_park[key] = pause_info[key]
     lane_results = [done[lane.name] for lane in mission.lanes]
     # B5 mechanical ranking: bytes and gate results, no model judgment, over
     # the sink lanes that were actually dispatched (not skipped or cancelled).
@@ -4529,6 +4867,10 @@ def _execute_mission(
         repositories=sorted(
             {lane.attempts[0].effective_cwd(mission.cwd) for lane in mission.lanes}
         ),
+        children=[
+            *((resume.prior_result or {}).get("children") or []),
+            *plan_children,
+        ],
     )
     report_path.write_text(_report(mission, result, lane_results))
     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
