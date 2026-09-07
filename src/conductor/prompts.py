@@ -2,8 +2,8 @@
 
 Conductor writes its own prompt text in five places: the collate and resolve
 defaults and the rank contract in `mission.py`, the verdict checklist
-contract in `verdicts.py`, and the Shape A texts (four review/fix prompts
-and the shared prefix) in `shape.py`. None of that text carried a version:
+contract in `verdicts.py`, and the Shape A texts (the build wrapper, four
+review/fix prompts, and the shared prefix) in `shape.py`. None of that text carried a version:
 an edit to any of it changed what every future mission sends with no trace
 on a receipt. `prompt_versions()` fingerprints each one -- the first 12 hex
 characters of the sha256 of its text, rendered with a fixed sample input for
@@ -44,5 +44,6 @@ def prompt_versions() -> dict[str, str]:
         "shape_grok_review": _id(shape_mod.GROK_REVIEW_PROMPT),
         "shape_grok_read_only": _id(shape_mod.GROK_READ_ONLY_PROMPT),
         "shape_fix": _id(shape_mod.FIX_PROMPT),
+        "shape_build": _id(shape_mod.BUILD_PROMPT),
         "shape_prefix": _id(shape_mod._prefix(_SAMPLE_REPO, None)),
     }

@@ -377,6 +377,34 @@ def gate_preflight(repo: Path, test_command: str, *, timeout: int = GATE_TIMEOUT
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+BUILD_PROMPT = (
+    "Implement the spec below on this branch.\n\n"
+    "<gate>\n{gate}\n</gate>\n\n"
+    "That is the gate the lead will run on your work, exactly as written. Run it the same "
+    "way, flags included, before you finish: the flags are what make it take under a minute "
+    "on this machine, and a serial run of the same suite takes several times longer and "
+    "proves nothing extra. When the gate is pytest, pass --basetemp pointing to a directory "
+    "under $TMPDIR so nothing is written inside this working tree. Keep every existing call "
+    "signature working; add new parameters as keywords with defaults. Do not commit; the "
+    "harness commits. Do not special-case a test to make it pass: a test that passes for "
+    "the wrong reason is worse than a failing one, and the reviewers read every test edit. "
+    "Investigate before answering: read the code a change touches before changing it.\n\n"
+    "<spec>\n{{mission.prompt}}\n</spec>"
+)
+
+
+def build_prompt(test: str) -> str:
+    """The Shape A build lane's prompt: `BUILD_PROMPT` with the gate command filled in.
+
+    Idea 7 of the 2026-09 review: the build lane used to receive the bare spec, so a builder
+    that ran the suite ran it serially (four minutes) instead of with the xdist flags the
+    lead's gate uses (under a minute), and spent its cap on that. Naming the gate verbatim
+    costs one line and removes the guess. `{{mission.prompt}}` stays a template reference,
+    rendered by the mission like every other lane prompt.
+    """
+    return BUILD_PROMPT.replace("{gate}", test)
+
+
 def _prefix(repo: Path, about: str | None) -> str:
     what = about or f"the repository '{repo.name}'"
     return (
@@ -465,7 +493,7 @@ def shape_a(
         "cap_usd": caps.build_cap,
         "test_policy": test_policy,
         "commit": build_commit,
-        "prompt": "{{mission.prompt}}",
+        "prompt": build_prompt(test),
     }
     if ports:
         build["ports"] = ports

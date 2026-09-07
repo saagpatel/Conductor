@@ -103,6 +103,25 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     }
 
 
+def test_build_prompt_names_the_gate_verbatim_and_wraps_the_spec(repo, tmp_path):
+    # Review idea 7: builders ran the suite serially because the spec never
+    # named the gate's flags. The build lane now carries the gate command
+    # exactly as the lead runs it, the basetemp rule, and the signature rule,
+    # around the spec as a template reference the mission still renders.
+    spec = _spec(tmp_path)
+    gate = 'pytest -q -n auto --dist loadgroup --basetemp="$TMPDIR/x"'
+    raw = shape.shape_a(spec=spec, repo=repo, test=gate, caps=shape.cap_arithmetic(1, 1))
+    build = raw["lanes"][0]
+    assert f"<gate>\n{gate}\n</gate>" in build["prompt"]
+    assert "--basetemp" in build["prompt"]
+    assert "existing call signature" in build["prompt"]
+    assert build["prompt"].endswith("<spec>\n{{mission.prompt}}\n</spec>")
+    assert "{gate}" not in build["prompt"]
+    from conductor.prompts import prompt_versions
+
+    assert "shape_build" in prompt_versions()
+
+
 def test_grok_prompt_lets_it_run_the_gate_only_when_asked(repo, tmp_path):
     spec = _spec(tmp_path)
     caps = shape.cap_arithmetic(1, 1, grok_runs_suite=True)
