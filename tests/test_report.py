@@ -1245,11 +1245,26 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "dispositions_duplicate",
         "dispositions_unmatched",
         "missions",
+        "landed",
         "rules",
         "skipped",
         "wall_clock",
     ]
     assert list(payload["rules"].keys()) == ["review", "cap_losses"]
+    assert list(payload["landed"].keys()) == [
+        "missions",
+        "cost_usd",
+        "with_items",
+        "items",
+        "usd_per_item",
+    ]
+    assert payload["landed"] == {
+        "missions": 0,
+        "cost_usd": "0.00",
+        "with_items": 0,
+        "items": 0,
+        "usd_per_item": None,
+    }
     row = payload["vendor_stage"][0]
     assert list(row.keys()) == [
         "vendor",
@@ -1669,3 +1684,182 @@ def test_report_json_emits_the_new_wall_clock_figures(home: Path, capsys, monkey
     assert row["critical_path_s"] == 900.0
     assert row["lead_s"] == 1800.0
     assert row["stretch"] == 4.0
+
+
+# --- review item 2: cost per landed item ------------------------------------
+
+
+def _write_land_receipt(home: Path, mission_id: str, stamp: str, **fields: object) -> None:
+    land_dir = home / "missions" / mission_id / "land"
+    land_dir.mkdir(parents=True, exist_ok=True)
+    (land_dir / f"build-{stamp}.json").write_text(json.dumps({"lane": "build", **fields}))
+
+
+def _write_evidence(home: Path, run_id: str, items: object) -> str:
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    copy = run_dir / "deliverable"
+    copy.write_text(json.dumps({"items": items}))
+    return str(copy)
+
+
+def _build_lane(run_id: str, *, copy: str | None, deliverable_ok: bool = True) -> dict:
+    attempt: dict[str, object] = {"run_id": run_id}
+    if copy is not None:
+        attempt["deliverable"] = {"path": "evidence.json", "ok": deliverable_ok, "parsed": True}
+        attempt["deliverable_path"] = copy
+    return {"name": "build", "stage": "build", "attempts": [attempt]}
+
+
+def _landed_mission(
+    home: Path, mission_id: str, *, cost: float, items: object, land: list[dict]
+) -> None:
+    run_id = f"{mission_id}-build"
+    _write_receipt(
+        home,
+        run_id,
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        lane="build",
+        mission=mission_id,
+        cost=cost,
+    )
+    copy = _write_evidence(home, run_id, items) if items is not None else None
+    lanes = [_build_lane(run_id, copy=copy)]
+    _write_mission(home, mission_id, name=mission_id, ok=True, lanes=lanes)
+    for index, fields in enumerate(land):
+        _write_land_receipt(home, mission_id, f"2026010{index}T000000000000Z", **fields)
+
+
+MERGED = {"ok": True, "dry_run": False, "already_merged": False}
+
+
+def test_report_landed_counts_only_merges_that_happened(home: Path):
+    # The F18 mission on record carries three land receipts for one merge:
+    # a refusal (`refused`, no other keys), a dry run, and the merge.
+    _landed_mission(
+        home,
+        "20260101T000000Z-m-three-receipts",
+        cost=4.0,
+        items=[1, 2, 3, 4],
+        land=[
+            {"refused": "lane 'fix' has no branch on its receipt"},
+            {"ok": True, "dry_run": True, "already_merged": False},
+            MERGED,
+            {"ok": False, "dry_run": False, "already_merged": True},
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.missions if r.mission == "20260101T000000Z-m-three-receipts")
+    assert row.landed == 4
+    assert row.landed_ok == 1
+    assert row.items == 4
+    assert row.to_dict()["usd_per_item"] == "1.00"
+
+
+def test_report_landed_aggregate_divides_only_missions_with_an_evidence_map(home: Path):
+    _landed_mission(home, "20260101T000000Z-m-a", cost=6.0, items=[1, 2, 3], land=[MERGED])
+    # Merged, but its build lane predates the evidence map: counted in the
+    # landed cost, left out of the per-item division.
+    _landed_mission(home, "20260101T000000Z-m-b", cost=10.0, items=None, land=[MERGED])
+    # An evidence map on a mission that never merged is not a landed item.
+    _landed_mission(home, "20260101T000000Z-m-c", cost=8.0, items=[1, 2], land=[])
+    # A map with no items is unknown, not a free landing.
+    _landed_mission(home, "20260101T000000Z-m-d", cost=2.0, items=[], land=[MERGED])
+    rpt = report(home)
+    by_name = {r.mission: r for r in rpt.missions}
+    assert by_name["20260101T000000Z-m-a"].to_dict()["usd_per_item"] == "2.00"
+    assert by_name["20260101T000000Z-m-b"].items is None
+    assert by_name["20260101T000000Z-m-b"].usd_per_item() is None
+    assert by_name["20260101T000000Z-m-c"].landed_ok == 0
+    assert by_name["20260101T000000Z-m-c"].usd_per_item() is None
+    assert by_name["20260101T000000Z-m-d"].items == 0
+    assert by_name["20260101T000000Z-m-d"].usd_per_item() is None
+    assert rpt.landed.to_dict() == {
+        "missions": 3,
+        "cost_usd": "18.00",
+        "with_items": 1,
+        "items": 3,
+        "usd_per_item": "2.00",
+    }
+
+
+def test_report_evidence_items_need_a_parsed_ok_copy(home: Path):
+    run_id = "20260101T000000Z-m-e-build"
+    _write_receipt(
+        home,
+        run_id,
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        lane="build",
+        mission="20260101T000000Z-m-e",
+        cost=3.0,
+    )
+    copy = _write_evidence(home, run_id, [1, 2, 3])
+    _write_mission(
+        home,
+        "20260101T000000Z-m-e",
+        name="m-e",
+        ok=True,
+        lanes=[_build_lane(run_id, copy=copy, deliverable_ok=False)],
+    )
+    _write_land_receipt(home, "20260101T000000Z-m-e", "20260101T000000000000Z", **MERGED)
+    rpt = report(home)
+    row = next(r for r in rpt.missions if r.mission == "20260101T000000Z-m-e")
+    assert row.items is None
+    assert rpt.landed.to_dict()["with_items"] == 0
+    # An unreadable copy is unknown too, never a crash.
+    Path(copy).write_text("{not json")
+    _write_mission_lanes = home / "missions" / "20260101T000000Z-m-e" / "result.json"
+    payload = json.loads(_write_mission_lanes.read_text())
+    payload["lanes"][0]["attempts"][0]["deliverable"]["ok"] = True
+    _write_mission_lanes.write_text(json.dumps(payload))
+    again = next(r for r in report(home).missions if r.mission == "20260101T000000Z-m-e")
+    assert again.items is None
+
+
+def test_report_prints_landed_columns_and_summary_line(home: Path, monkeypatch, capsys):
+    _landed_mission(home, "20260101T000000Z-m-p", cost=5.0, items=[1, 2], land=[MERGED])
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    out = capsys.readouterr().out
+    header = next(line for line in out.splitlines() if line.strip().startswith("mission "))
+    assert header.split() == [
+        "mission",
+        "cost_usd",
+        "ok",
+        "lanes",
+        "capped",
+        "salvaged",
+        "landed",
+        "merged",
+        "items",
+        "usd_per_item",
+    ]
+    row = next(line for line in out.splitlines() if "20260101T000000Z-m-p" in line)
+    assert row.split()[-3:] == ["1", "2", "2.50"]
+    assert (
+        "Landed: 1 mission(s), $5.00; 1 with an evidence map naming 2 item(s): "
+        "$2.50 per landed item" in out
+    )
+
+
+def test_report_prints_no_merge_when_nothing_landed(home: Path, monkeypatch, capsys):
+    _write_receipt(
+        home, "20260101T000000Z-claude-a", fleet="claude", model="claude-sonnet-5", stage="build"
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    assert "Landed: no mission in this window merged" in capsys.readouterr().out
+
+
+def test_readme_documents_cost_per_landed_item():
+    readme = Path(__file__).parents[1] / "README.md"
+    raw_section = readme.read_text().split("#### Ledger report", 1)[1].split("\n### ", 1)[0]
+    section = " ".join(raw_section.split())
+    assert "`merged`" in section and "`items`" in section and "`usd_per_item`" in section
+    assert "evidence map" in section
+    assert "per landed item" in section
+    assert "AGENTS.md rule 2" in section

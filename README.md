@@ -2766,7 +2766,20 @@ The report has seven sections, in this order:
   `conductor salvage` was run against it (`salvaged`, 0 when
   `$CONDUCTOR_HOME/missions/<id>/salvage/` does not exist), and how many
   times `conductor land` was run against it (`landed`, same rule against
-  `$CONDUCTOR_HOME/missions/<id>/land/`).
+  `$CONDUCTOR_HOME/missions/<id>/land/`). Three more columns turn AGENTS.md
+  rule 2's "about a dollar per spec item" into a measured figure: `merged`
+  is the land receipts whose merge happened (`ok` true, not a dry run, not
+  the already-merged answer; a refusal receipt counts in `landed` only),
+  `items` is how many spec items the build lane's evidence map names, read
+  from the copy the runner captured after the gates and only when the
+  runner recorded that copy as parsed and ok (blank on a mission that
+  predates the map, never 0 for unknown), and `usd_per_item` is the
+  mission's whole cost over `items` when a merge happened. One line under
+  the table sums it: how many missions merged and what they cost, and,
+  over the subset with an evidence map, the cost per landed item. A
+  merged mission without a map is in the first pair of figures and out of
+  the division, so it neither inflates nor deflates the rate. `--json`
+  carries the same three columns per mission and the sum as `landed`.
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
   and fix stages, the runs killed at their cap). D21: a cap loss is

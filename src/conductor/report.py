@@ -30,6 +30,7 @@ from .spend import Run as _SpendRun
 from .spend import _collate_run_ids, _number, _parse_bound
 from .spend import _read_run as _spend_read_run
 
+BUILD_STAGE = "build"
 REVIEW_STAGE = "review"
 FIX_STAGE = "fix"
 DISPOSITIONS = ("fixed", "refused", "already", "wording")
@@ -186,7 +187,12 @@ def _scan_missions(
         # `land` never dispatches a fleet either, so this is the only place
         # a land shows up in the report at all.
         land_dir = result_file.parent / "land"
-        landed = len(list(land_dir.glob("*.json"))) if land_dir.is_dir() else 0
+        land_files = sorted(land_dir.glob("*.json")) if land_dir.is_dir() else []
+        landed = len(land_files)
+        # Review item 2: `landed` counts every receipt `conductor land`
+        # wrote, refusals and dry runs included (the F18 mission carries
+        # three for one merge). `landed_ok` is the merges that happened.
+        landed_ok = sum(1 for path in land_files if _land_merged(path))
         review_lanes: dict[str, dict[str, object]] = {}
         fix_dispositions: list[object] | None = None
         meta[mission] = {
@@ -194,6 +200,12 @@ def _scan_missions(
             "lanes": len(lane_list),
             "salvaged": salvaged,
             "landed": landed,
+            "landed_ok": landed_ok,
+            # Review item 2: the spec items the build lane's evidence map
+            # names (`evidence.json`, Phase H item 6), read from the copy
+            # the runner captured after the gates (W4); None on a mission
+            # with no build lane, no map, or a map that did not parse.
+            "items": None,
             "review_lanes": review_lanes,
             "fix_dispositions": fix_dispositions,
             # F15 item 3: summed over every `stage: fix` lane on this
@@ -208,6 +220,8 @@ def _scan_missions(
                 continue
             lane_name = _str_field(lane_raw, "name")
             stage = _str_field(lane_raw, "stage")
+            if stage == BUILD_STAGE and meta[mission]["items"] is None:
+                meta[mission]["items"] = _evidence_items(lane_raw)
             for key in ("previous_attempts", "attempts"):
                 attempts = lane_raw.get(key)
                 if not isinstance(attempts, list):
@@ -273,6 +287,44 @@ def _scan_missions(
             if isinstance(one_resolve, dict) and isinstance(one_resolve.get("run_id"), str):
                 join.setdefault(one_resolve["run_id"], (mission, None, None))
     return join, meta
+
+
+def _land_merged(path: Path) -> bool:
+    """A `conductor land` receipt for a merge that happened: `ok` true, not
+    a dry run, not the already-merged answer. A refusal receipt carries
+    `refused` and none of these keys."""
+    try:
+        raw: object = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    return (
+        raw.get("ok") is True and raw.get("dry_run") is False and not raw.get("already_merged")
+    )
+
+
+def _evidence_items(lane_raw: dict) -> int | None:
+    """How many spec items the build lane's evidence map names, from the
+    final attempt's captured deliverable (`deliverable_path`, the copy the
+    runner judged) when the runner recorded it as parsed and ok. None when
+    the receipt predates the map or the copy is unreadable; never 0 for
+    "unknown", since 0 would divide a landed cost by nothing."""
+    attempts = lane_raw.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts else None
+    if not isinstance(last, dict):
+        return None
+    state = last.get("deliverable")
+    copy = last.get("deliverable_path")
+    if not isinstance(state, dict) or state.get("ok") is not True or not isinstance(copy, str):
+        return None
+    try:
+        raw: object = json.loads(Path(copy).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
+        return None
+    return len(raw["items"])
 
 
 def _gate_ran(tests: object, surface: object) -> bool:
@@ -576,8 +628,22 @@ class MissionRow:
     salvaged: int = 0
     # F7: land receipts under this mission's `land/` directory, 0 when absent.
     landed: int = 0
+    # Review item 2: of those, the merges that happened (`_land_merged`).
+    landed_ok: int = 0
+    # Review item 2: spec items the build lane's evidence map names; None
+    # when the mission carries no parsed map.
+    items: int | None = None
+
+    def usd_per_item(self) -> Decimal | None:
+        """The mission's whole cost over the items it landed: AGENTS.md
+        rule 2's "about a dollar per spec item" as a measured figure. None
+        unless a merge happened and the map is known."""
+        if not self.landed_ok or not self.items:
+            return None
+        return self.cost_usd / self.items
 
     def to_dict(self) -> dict[str, object]:
+        per_item = self.usd_per_item()
         return {
             "mission": self.mission,
             "cost_usd": _money(self.cost_usd),
@@ -586,6 +652,37 @@ class MissionRow:
             "capped": self.capped,
             "salvaged": self.salvaged,
             "landed": self.landed,
+            "landed_ok": self.landed_ok,
+            "items": self.items,
+            "usd_per_item": _money(per_item) if per_item is not None else None,
+        }
+
+
+@dataclass
+class LandedRow:
+    """Review item 2: cost per landed item across the report's missions.
+    `missions` and `cost_usd` cover every mission with a merge that
+    happened; `usd_per_item` divides the cost of the subset whose build
+    lane left a parsed evidence map (`with_items`) by the items those maps
+    name, so a mission without a map neither inflates nor deflates it."""
+
+    missions: int = 0
+    cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
+    with_items: int = 0
+    items: int = 0
+    items_cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    def usd_per_item(self) -> Decimal | None:
+        return self.items_cost_usd / self.items if self.items else None
+
+    def to_dict(self) -> dict[str, object]:
+        per_item = self.usd_per_item()
+        return {
+            "missions": self.missions,
+            "cost_usd": _money(self.cost_usd),
+            "with_items": self.with_items,
+            "items": self.items,
+            "usd_per_item": _money(per_item) if per_item is not None else None,
         }
 
 
@@ -692,6 +789,9 @@ class Report:
     # against a finding.
     dispositions_duplicate: int = 0
     dispositions_unmatched: int = 0
+    # Review item 2: the aggregate behind the Missions table's per-mission
+    # `usd_per_item`.
+    landed: LandedRow = field(default_factory=LandedRow)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -704,6 +804,7 @@ class Report:
             "dispositions_duplicate": self.dispositions_duplicate,
             "dispositions_unmatched": self.dispositions_unmatched,
             "missions": [row.to_dict() for row in self.missions],
+            "landed": self.landed.to_dict(),
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
             "wall_clock": [row.to_dict() for row in self.wall_clock],
@@ -848,6 +949,12 @@ def _build_report(
             meta.get("salvaged", 0) if isinstance(meta.get("salvaged"), int) else 0
         )
         mission_row.landed = meta.get("landed", 0) if isinstance(meta.get("landed"), int) else 0
+        mission_row.landed_ok = (
+            meta.get("landed_ok", 0) if isinstance(meta.get("landed_ok"), int) else 0
+        )
+        items = meta.get("items")
+        known = isinstance(items, int) and not isinstance(items, bool)
+        mission_row.items = items if known else None
 
         review_lanes = meta.get("review_lanes")
         review_lanes = review_lanes if isinstance(review_lanes, dict) else {}
@@ -959,6 +1066,16 @@ def _build_report(
     error_kind_rows = sorted(error_kinds.values(), key=lambda r: (-r.count, r.kind))
     reviewer_rows = sorted(reviewer.values(), key=lambda r: r.vendor)
     mission_rows = sorted(missions.values(), key=lambda r: (-r.cost_usd, r.mission))
+    landed = LandedRow()
+    for row in mission_rows:
+        if not row.landed_ok:
+            continue
+        landed.missions += 1
+        landed.cost_usd += row.cost_usd
+        if row.items:
+            landed.with_items += 1
+            landed.items += row.items
+            landed.items_cost_usd += row.cost_usd
 
     review_vendors = sorted({r.vendor for r in vendor_stage_rows if r.stage == REVIEW_STAGE})
     review_rules: list[dict[str, object]] = []
@@ -1027,6 +1144,7 @@ def _build_report(
         dispositions_duplicate=disposition_counts["duplicate"],
         dispositions_unmatched=disposition_counts["unmatched"],
         missions=mission_rows,
+        landed=landed,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
         wall_clock=wall_rows,
@@ -1189,7 +1307,18 @@ def _print_report(rpt: Report) -> None:
     print()
     _print_section(
         "Missions",
-        ("mission", "cost_usd", "ok", "lanes", "capped", "salvaged", "landed"),
+        (
+            "mission",
+            "cost_usd",
+            "ok",
+            "lanes",
+            "capped",
+            "salvaged",
+            "landed",
+            "merged",
+            "items",
+            "usd_per_item",
+        ),
         [
             (
                 d["mission"],
@@ -1199,10 +1328,24 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["capped"]),
                 _cell(d["salvaged"]),
                 _cell(d["landed"]),
+                _cell(d["landed_ok"]),
+                _cell(d["items"]),
+                _cell(d["usd_per_item"]),
             )
             for d in (row.to_dict() for row in rpt.missions)
         ],
     )
+    landed = rpt.landed.to_dict()
+    if landed["missions"]:
+        per_item = landed["usd_per_item"]
+        print(
+            f"  Landed: {landed['missions']} mission(s), ${landed['cost_usd']}; "
+            f"{landed['with_items']} with an evidence map naming {landed['items']} item(s): "
+            + (f"${per_item} per landed item" if per_item is not None else "no per-item figure")
+        )
+    else:
+        print("  Landed: no mission in this window merged")
+    print()
     _print_section(
         "Wall clock",
         (

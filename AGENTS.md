@@ -78,6 +78,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    caps to the forecast p80, rounded up, whenever the E14 forecast warns that this figure
    sits under it (F17), and raises the mission budget with them, so the hand edit before
    every launch is gone; `--no-forecast-cap` keeps the old behaviour.
+   `conductor report` measures the figure this rule estimates: `usd_per_item` per merged
+   mission and one cost per landed item across them (review item 2, 0.76.0).
 3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
    The clean gate reruns the original tests against the new source; when the new source refuses a
    shape the old fixtures build, both builders were right and both were rejected. The lead then reads
