@@ -1041,6 +1041,50 @@ and `emit()` itself is refused when the kept worktree is still dirty or its
 HEAD still equals `base_sha` -- either way nothing has actually been
 committed yet, so the follow-on would review the wrong thing.
 
+### Landing
+
+Every release has ended with the same sequence by hand: merge the fix
+lane's branch into the checkout's branch, gate the merged head in a fresh
+worktree, run `golden check`, attest the mission, and only then bump the
+version. `conductor land` is that sequence made repeatable, for the lead to
+run after reading the diff and once the reviewers have covered it:
+
+```
+conductor land MISSION_ID --lane fix
+```
+
+It reads the lane's receipt for its `branch`, and refuses (exit 3, nothing
+changed) when the mission or lane does not exist, the lane has no branch or
+the branch does not exist in the lane's repository, the checkout (default:
+the lane's own repository) is not a git repository, is not on a branch, has
+uncommitted changes, or is mid-merge, the checkout's current branch is the
+branch itself, or the branch's tip is not a descendant of the checkout's
+HEAD. A branch whose tip is already reachable from the checkout's HEAD is
+not a refusal: it exits 0 and reports `already_merged` without touching the
+tree. It also refuses when it finds itself running inside a lane's own
+environment (`CONDUCTOR_LANE`, set on every dispatched process) -- `land` is
+the lead's own act, never a fleet's, and no mission or lane spec can make it
+run one.
+
+Landing itself: `git merge --no-ff` onto the checkout, a fresh worktree of
+the merged head under `$TMPDIR`, the gate (`--test`, else the mission
+snapshot's own `test`, else refused) under the same timeout and environment
+a lane's own gate gets, `golden check` through golden's Python API, and
+`attest.attest_mission` for the mission -- in that order, any red step
+aborting the rest. A failing step after the merge commit exists resets the
+checkout to its pre-merge HEAD (only when that commit is still HEAD and the
+tree is otherwise clean) and reports the failing step with its last twenty
+lines of output; the branch itself is never deleted, on any path. `--dry-run`
+runs every refusal check and prints what would merge (`git log --oneline
+HEAD..<branch>`) and the gate command, without merging anything.
+
+Every call, refused or not, is receipted to
+`$CONDUCTOR_HOME/missions/<mission-id>/land/<lane>-<UTC timestamp>.json`
+(except when the mission itself does not exist, exactly like salvage); `land`
+never dispatches a fleet, so it never extends the mission's signed receipt
+chain, and it never bumps a version, never pushes, and never runs inside a
+mission.
+
 ### Lane stages, reviewer policy, and reproduce before fix
 
 A lane may declare `"stage"`: `build`, `review`, `fix`, or `adversarial`. A
@@ -2199,9 +2243,11 @@ The report has six sections, in this order:
   `precision` is `fixed / (fixed + refused)`, blank under three total
   dispositions -- not enough to read as a rate.
 - **Missions**: cost, whether the mission was ok, how many lanes it
-  declared, whether any lane hit its cap, and how many times
+  declared, whether any lane hit its cap, how many times
   `conductor salvage` was run against it (`salvaged`, 0 when
-  `$CONDUCTOR_HOME/missions/<id>/salvage/` does not exist).
+  `$CONDUCTOR_HOME/missions/<id>/salvage/` does not exist), and how many
+  times `conductor land` was run against it (`landed`, same rule against
+  `$CONDUCTOR_HOME/missions/<id>/land/`).
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
   and fix stages, how many runs were killed at their cap after their own
@@ -2211,7 +2257,8 @@ The report has six sections, in this order:
 
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`
-could otherwise count it (see the Salvage subsection above).
+could otherwise count it (see the Salvage subsection above). `landed` is the
+same trace for `conductor land` (see "Landing" above).
 
 A mission lane's own receipt (`lanes/<name>.json`) carries the same parse:
 a `stage: review` lane gets `review` (`verdicts.review_verdict` over its
@@ -2582,6 +2629,9 @@ conductor golden check tests/golden/c5-build-cascade-capped --update
   kept lane's worktree by hand (AGENTS.md rule 6), and, once the lead has
   committed it, `--emit PATH --items N --modules M` writes the follow-on
   review-and-fix mission
+- `conductor land MISSION_ID --lane NAME`: merge a lane's branch, gate the
+  merged head, run `golden check`, and attest the mission (`--checkout PATH`,
+  `--test CMD`, `--dry-run`); see "Landing"
 - `conductor golden record MISSION_ID --out DIR`: record a finished mission
   under `$CONDUCTOR_HOME` as an offline, scrubbed fixture (`--max-bytes`
   overrides the 3,000,000-byte default)

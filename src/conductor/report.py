@@ -139,12 +139,18 @@ def _scan_missions(
         ok = raw.get("ok")
         salvage_dir = result_file.parent / "salvage"
         salvaged = len(list(salvage_dir.glob("*.json"))) if salvage_dir.is_dir() else 0
+        # F7: `conductor land` receipts, same shape as `salvaged` above --
+        # `land` never dispatches a fleet either, so this is the only place
+        # a land shows up in the report at all.
+        land_dir = result_file.parent / "land"
+        landed = len(list(land_dir.glob("*.json"))) if land_dir.is_dir() else 0
         review_lanes: dict[str, dict[str, object]] = {}
         fix_dispositions: list[object] | None = None
         meta[mission] = {
             "ok": ok if isinstance(ok, bool) else None,
             "lanes": len(lane_list),
             "salvaged": salvaged,
+            "landed": landed,
             "review_lanes": review_lanes,
             "fix_dispositions": fix_dispositions,
         }
@@ -383,6 +389,8 @@ class MissionRow:
     # it is absent -- `conductor salvage` never dispatches, so this is the
     # only place a salvage shows up in the report at all.
     salvaged: int = 0
+    # F7: land receipts under this mission's `land/` directory, 0 when absent.
+    landed: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -392,6 +400,7 @@ class MissionRow:
             "lanes": self.lanes,
             "capped": self.capped,
             "salvaged": self.salvaged,
+            "landed": self.landed,
         }
 
 
@@ -486,6 +495,7 @@ def _build_report(
         mission_row.salvaged = (
             meta.get("salvaged", 0) if isinstance(meta.get("salvaged"), int) else 0
         )
+        mission_row.landed = meta.get("landed", 0) if isinstance(meta.get("landed"), int) else 0
 
         # F1 item 4: only a mission with both a review lane whose verdict
         # parsed and a fix lane that recorded dispositions (even an empty
@@ -678,7 +688,7 @@ def _print_report(rpt: Report) -> None:
     )
     _print_section(
         "Missions",
-        ("mission", "cost_usd", "ok", "lanes", "capped", "salvaged"),
+        ("mission", "cost_usd", "ok", "lanes", "capped", "salvaged", "landed"),
         [
             (
                 d["mission"],
@@ -687,6 +697,7 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["lanes"]),
                 _cell(d["capped"]),
                 _cell(d["salvaged"]),
+                _cell(d["landed"]),
             )
             for d in (row.to_dict() for row in rpt.missions)
         ],

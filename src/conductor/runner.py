@@ -1714,6 +1714,11 @@ def dispatch(
     env = dict(os.environ)
     env["CONDUCTOR_RUN_ID"] = run_id
     env["CONDUCTOR_WORKTREE"] = worktree_env
+    # F7: every dispatched process, fleet and gate alike, carries this so
+    # `land.py` can refuse to run inside a lane's own environment -- land is
+    # the lead's hands, never a fleet's, and this is what proves the caller
+    # is not one.
+    env["CONDUCTOR_LANE"] = "1"
     for index, port in enumerate(claimed_ports, start=1):
         env[f"CONDUCTOR_PORT_{index}"] = str(port)
     if claimed_ports:
