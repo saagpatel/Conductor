@@ -489,6 +489,16 @@ class Spec:
     # (an issue, a PR, a web page). Opt-in, never inferred; enforced with a
     # Claude tool deny list because no other fleet exposes one headless.
     taint: bool = False
+    # F12: forces `--restricted --permission-mode acceptEdits` on a claude
+    # read lane even without a declared `deliverable` -- a reviewer that
+    # reads only (Gemini's role in Shape A, on the Claude side). A read lane
+    # that declares `deliverable` gets the same shape automatically (see
+    # `_build_claude`); this key is for the lane that has no file to write
+    # but still benefits from the stronger, cheaper confinement. Enforceable
+    # on the claude fleet, read mode only: `--restricted` refuses
+    # `--permission-mode bypassPermissions` outright (probed: exit 1, nothing
+    # spent), and `acceptEdits` alone cannot run a gate.
+    restricted: bool = False
     # D3: an inline persona -- {"name", "description", "prompt",
     # "tools": [...] (optional)}. Opt-in, never inferred; enforceable on
     # Claude Code only (see _AGENT_KEYS above).
@@ -573,6 +583,21 @@ class Spec:
             )
             raise DispatchRefused(
                 f"taint is enforceable on the claude and antigravity fleets only: {detail}"
+            )
+        # F12: --restricted is a Claude Code flag; every other fleet is
+        # refused by name, not silently ignored. A write lane is refused too:
+        # --restricted refuses --permission-mode bypassPermissions outright
+        # (probed: exit 1, nothing spent), and the only mode it does run
+        # under, acceptEdits, cannot run a gate.
+        if self.restricted and self.fleet != "claude":
+            raise DispatchRefused(
+                f"restricted is enforceable on the claude fleet only: {self.fleet} exposes no "
+                "--restricted flag"
+            )
+        if self.restricted and self.mode == "write":
+            raise DispatchRefused(
+                "restricted is refused on a write lane: --restricted refuses "
+                "--permission-mode bypassPermissions, and acceptEdits alone cannot run a gate"
             )
         # D3: only Claude Code exposes an inline persona headless; agy's
         # --agent selects from disk and fails open on an unknown name, and
@@ -828,6 +853,13 @@ def build_argv(spec: Spec) -> list[str]:
 
 
 def _build_claude(spec: Spec, model: str) -> list[str]:
+    # F12: a read lane with a declared deliverable gets the same shape as an
+    # explicit `restricted: true` -- a plan lane's own file is exactly this
+    # case, and the live gap it closes is real: a plan lane on plain `plan`
+    # mode can write nothing but its own plan.md, so the first live planner
+    # lane (2026-09-07) wrote the mission into its plan file instead of the
+    # declared deliverable path.
+    restricted = spec.mode == "read" and (spec.restricted or spec.deliverable is not None)
     argv = [
         "claude",
         "-p",
@@ -863,13 +895,33 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         "--system-prompt-snapshot",
         "on",
         "--exclude-dynamic-system-prompt-sections",
+        # F12: every claude dispatch, read and write -- anything that would
+        # otherwise stall on a permission prompt nobody can answer is denied
+        # automatically instead, and the denial lands in the result envelope's
+        # `permission_denials` rather than being invisible while the run
+        # still exits 0 (docs/research/2026-09-07-live-probe-restricted-
+        # denied-sandbox.md).
+        "--permission-prompts",
+        "none",
     ]
-    # Write mode bypasses permissions outright. `acceptEdits` auto-approves
-    # Edit/Write but still refuses Bash beyond `pwd`/`ls`, so a build lane
-    # could edit and never run its gate: Haiku edited blind and reported
-    # success, Sonnet stopped after eight refused pytest calls (live
-    # 2026-09-04). The worktree is the sandbox, as it is for every fleet.
-    argv += ["--permission-mode", "bypassPermissions" if spec.mode == "write" else "plan"]
+    if spec.mode == "write":
+        # Write mode bypasses permissions outright. `acceptEdits` auto-approves
+        # Edit/Write but still refuses Bash beyond `pwd`/`ls`, so a build lane
+        # could edit and never run its gate: Haiku edited blind and reported
+        # success, Sonnet stopped after eight refused pytest calls (live
+        # 2026-09-04). The worktree is the sandbox, as it is for every fleet.
+        permission_mode = "bypassPermissions"
+    elif restricted:
+        # F12: the only combination that actually runs restricted --
+        # `--restricted` refuses `bypassPermissions` outright (probed: exit
+        # 1, nothing spent), and `acceptEdits` is what lets the file tools
+        # write inside the worktree while Bash and WebFetch are gone.
+        permission_mode = "acceptEdits"
+    else:
+        permission_mode = "plan"
+    argv += ["--permission-mode", permission_mode]
+    if restricted:
+        argv.append("--restricted")
     if spec.schema:
         # Claude Code wants the schema text, not a path: a path is rejected
         # with "--json-schema is not valid JSON". Verified live 2026-09-03.

@@ -75,6 +75,12 @@ class FleetOutput:
     error: str | None = None  # the fleet's own failure message, when it has one
     session_id: str | None = None
     notes: list[str] = field(default_factory=list)
+    # F12: Claude Code's `result.permission_denials` under `--permission-prompts
+    # none` -- `{tool_name, tool_use_id, tool_input}` per denial, empty when the
+    # envelope carries none (every other fleet, or a claude run with nothing
+    # denied). The run still exits 0 with `subtype: success`, so this list is
+    # the only signal.
+    permission_denials: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +90,7 @@ class FleetOutput:
             "error": self.error,
             "session_id": self.session_id,
             "notes": self.notes,
+            "permission_denials": self.permission_denials,
             "usage": self.usage.to_dict() if self.usage else None,
         }
 
@@ -454,6 +461,10 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
         answer = ""
     elif not recognized:
         answer = text
+    raw_denials = payload.get("permission_denials")
+    permission_denials = (
+        [d for d in raw_denials if isinstance(d, dict)] if isinstance(raw_denials, list) else []
+    )
     return FleetOutput(
         answer=answer,
         usage=usage,
@@ -468,6 +479,7 @@ def _parse_envelope(fleet: str, payload: dict, text: str) -> FleetOutput:
             else None
         ),
         notes=notes,
+        permission_denials=permission_denials,
     )
 
 

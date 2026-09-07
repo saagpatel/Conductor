@@ -107,6 +107,33 @@ def test_claude_stream_json_takes_the_last_result_with_all_final_fields():
     assert out.usage.output_tokens == 3 and out.usage.cost_usd == 0.04
 
 
+def test_claude_permission_denials_are_parsed_from_the_result_envelope():
+    # F12: `--permission-prompts none` records each denial in
+    # `result.permission_denials` while the run still exits 0 with
+    # `subtype: success` -- the list is the only signal.
+    stream = "\n".join(
+        [
+            '{"type":"system","subtype":"init"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"ok",'
+            '"session_id":"s1","permission_denials":[{"tool_name":"Write",'
+            '"tool_use_id":"toolu_1","tool_input":{"file_path":"../outside/f.txt"}}]}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.permission_denials == [
+        {
+            "tool_name": "Write",
+            "tool_use_id": "toolu_1",
+            "tool_input": {"file_path": "../outside/f.txt"},
+        }
+    ]
+
+
+def test_claude_permission_denials_absent_is_an_empty_list():
+    out = parse("claude", CLAUDE_STREAM_JSON)
+    assert out.permission_denials == []
+
+
 def test_a_claude_stream_without_result_fails_closed_and_keeps_partial_usage():
     stream = "\n".join(
         [

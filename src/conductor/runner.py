@@ -188,6 +188,19 @@ class Result:
     # declared E1 deliverable; None for every other lane, and for a read lane
     # that moved anything else (still gated, same as today).
     gate: dict | None = None
+    # F12: `result.permission_denials` from a claude run under
+    # `--permission-prompts none` -- `{tool_name, tool_use_id, tool_input}`
+    # per denial, empty for every other fleet and for a claude run that
+    # denied nothing. A write lane with a non-empty list fails (see
+    # `failure()`); a read lane's list is a note on the git verdict only.
+    permission_denials: list[dict] = field(default_factory=list)
+    # F12: the `--permission-mode` this claude dispatch actually ran under
+    # ("plan", "acceptEdits", or "bypassPermissions"), None for every other
+    # fleet. `restricted` is True when `--restricted` was on the argv --
+    # either because the lane declared `restricted: true` or because it is a
+    # read lane with a declared `deliverable` (see `fleets._build_claude`).
+    permission_mode: str | None = None
+    restricted: bool = False
 
     @property
     def gate_passed(self) -> bool:
@@ -1588,6 +1601,15 @@ def dispatch(
         spec_with_paths = _replace(spec, last_message=str(run_dir / "last_message.txt"))
 
     argv = build_argv(spec_with_paths)
+    # F12: read straight off the real argv rather than re-deriving
+    # `fleets._build_claude`'s own branching here, so the receipt can never
+    # disagree with what actually ran.
+    permission_mode: str | None = None
+    restricted_flag = False
+    if spec.fleet == "claude":
+        if "--permission-mode" in argv:
+            permission_mode = argv[argv.index("--permission-mode") + 1]
+        restricted_flag = "--restricted" in argv
     if tainted_agy:
         # E21: needs this run's own directory, which no Spec field carries;
         # appended here rather than threaded into build_argv's signature (see
@@ -1629,6 +1651,8 @@ def dispatch(
             mission=mission,
             deliverable=_check_deliverable(spec, dry_run=True),
             prompt_versions=prompt_versions,
+            permission_mode=permission_mode,
+            restricted=restricted_flag,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -1897,12 +1921,33 @@ def dispatch(
                 if error is None:
                     error = resume_note
 
+        # F12: a fleet-reported success (exit 0, `subtype: success`) that
+        # silently denied a write lane's own tool call is not success -- the
+        # fleet did not do what it was asked, and its own summary will say it
+        # did. A read lane keeps its denials as a note on the git verdict
+        # (below), never a failure: a read lane's tool set is meant to be
+        # thin, and a denial there is expected, not a defect.
+        denied_tools = sorted(
+            {
+                d["tool_name"]
+                for d in output.permission_denials
+                if isinstance(d, dict)
+                and isinstance(d.get("tool_name"), str)
+                and d["tool_name"]
+            }
+        )
+        if denied_tools and spec.mode == "write" and error is None:
+            error = f"permission denied: {', '.join(denied_tools)}"
+
+        claude_init: dict | None = None
+        if spec.fleet == "claude" and (spec.agent is not None or restricted_flag):
+            claude_init = claude_init_event(_read(stdout_path))
+
         agent_result: dict | None = None
         if spec.agent is not None:
-            init_event = claude_init_event(_read(stdout_path))
-            agent_result, agent_problem = _agent_verdict(spec.agent, init_event)
+            agent_result, agent_problem = _agent_verdict(spec.agent, claude_init)
             if agent_problem is not None:
-                if init_event is None:
+                if claude_init is None:
                     # A stream cut short before its own init event is not, on
                     # its own, evidence the persona failed to apply -- it is
                     # usually just evidence of whatever else ended the run
@@ -1921,7 +1966,32 @@ def dispatch(
                 elif error is None:
                     error = agent_problem
 
+        if restricted_flag:
+            # F12: `--restricted`'s own promise, verified on bytes the same
+            # way E21 verifies agy's deny hooks: neither Bash nor WebFetch may
+            # survive into the init event's own tool list. No init event (a
+            # stream cut short for an unrelated reason) is not, on its own,
+            # evidence the flag failed -- same reasoning as the agent check
+            # above -- so this only ever fails closed on positive evidence.
+            restricted_tools = claude_init.get("tools") if claude_init is not None else None
+            restricted_tools = restricted_tools if isinstance(restricted_tools, list) else []
+            present = [name for name in ("Bash", "WebFetch") if name in restricted_tools]
+            if present and error is None:
+                error = (
+                    f"restricted mode not enforced: {', '.join(present)} present in the "
+                    "init tool list"
+                )
+
         taint_enforcement: dict | None = None
+        if spec.fleet == "claude" and spec.taint and restricted_flag:
+            # F12: a tainted, restricted claude read lane is guarded by both
+            # mechanisms at once -- the disallowedTools deny list (D2) and
+            # the confinement --restricted itself enforces -- recorded
+            # together so the receipt shows both, not just the deny list.
+            taint_enforcement = {
+                "disallowed_tools": list(TAINT_DISALLOWED_TOOLS),
+                "restricted": True,
+            }
         if tainted_agy:
             # Every denied tool name, plus one entry for run_command.
             hooks_written = len(TAINT_AGY_DENIED_TOOLS) + 1
@@ -2183,6 +2253,14 @@ def dispatch(
                 f"{spec.deliverable['path']}"
             )
         git_verdict.notes.extend(output.notes)
+        if denied_tools:
+            # F12: a write lane already failed on this above; a read lane's
+            # denials are expected (a thin tool set is the point) and land
+            # here as evidence, not a verdict.
+            git_verdict.notes.append(
+                f"permission denied ({len(output.permission_denials)}): "
+                f"{', '.join(denied_tools)}"
+            )
         if resume_note:
             git_verdict.notes.append(resume_note)
         if surface_state and surface_state["touched"]:
@@ -2363,6 +2441,9 @@ def dispatch(
         fleet_version=fleet_version,
         prompt_versions=prompt_versions,
         gate=read_gate_skip,
+        permission_denials=list(output.permission_denials),
+        permission_mode=permission_mode,
+        restricted=restricted_flag,
     )
     if result.spawned:
         statement = _lane_receipt_statement(

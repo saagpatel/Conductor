@@ -257,6 +257,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "taint",
         "adversarial",
         "plan",
+        "denied",
         "rate_limit",
         "transport",
         "refusal",

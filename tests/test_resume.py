@@ -34,6 +34,8 @@ def test_resume_argv_is_exact_for_every_fleet():
         "--system-prompt-snapshot",
         "on",
         "--exclude-dynamic-system-prompt-sections",
+        "--permission-prompts",
+        "none",
         "--permission-mode",
         "plan",
         "--resume",
