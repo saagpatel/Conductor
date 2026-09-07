@@ -1152,15 +1152,33 @@ conductor salvage MISSION_ID --lane build
 It reads the lane's receipt and the mission snapshot, and refuses (exit 3)
 when the mission or lane does not exist, the lane was not kept, its
 recorded worktree is missing on disk or is not a git worktree of the
-mission's repository, or the lane's effective test command is empty. It
-then runs two gates from the kept worktree, each in a fresh scratch copy
-under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the tree's own gate
-(everything transplanted, new tests included) and the clean gate (test
-surface restored from the base; recorded as skipped, not judged, when the
-lane ran under `test_policy: allow`, rule 3) -- never committing,
+lane's own repository, or the lane's effective test command is empty. The
+contract salvage gates under is the producing attempt's, not the lane's
+first: the kept worktree comes from the attempt that actually ran, so its
+repository (`cwd`, which a lane or one of its attempts may override), its
+`test` command, and its `timeout` come from that same attempt -- a fallback
+is never judged under the primary's gate. What a scratch gate cannot rebuild
+it refuses rather than substitutes: an attempt declaring `setup`, `include`,
+`ports`, or a `teardown` is answered with `salvage cannot reconstruct
+<setup|includes|ports|env> for lane <name>; gate the kept worktree by hand`,
+because a verdict without the lane environment is a verdict under a
+different contract. It then runs two gates from the kept worktree, each in a
+fresh scratch copy under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the
+tree's own gate (everything transplanted, new tests included) and the clean
+gate (test surface restored from the base; recorded as skipped, not judged,
+when the lane ran under `test_policy: allow`, rule 3) -- never committing,
 writing into, or touching the index of the kept worktree itself -- and
 prints the worktree, its base and HEAD shas, whether it is dirty, the
-recorded diff, and each gate's exit code and tail. Exit 0 means both
+diff, and each gate's exit code and tail.
+
+The diff and `diff_sha256` on the result are the bytes salvage gated: they
+are read from the kept worktree at salvage time, not copied from the run's
+receipt, since a worktree repaired by hand after the run would otherwise
+pass carrying the pre-repair digest. The run's own digest is kept beside
+them as `lineage_diff_sha256`, evidence of where the tree came from rather
+than of what was gated; the two differ exactly when the tree was touched
+since the run. A tree that changes while the gates are running is refused
+outright. Exit 0 means both
 gates passed, 1 means one failed. Every call, refused or not, writes a
 receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
 timestamp>.json` (except when the mission itself does not exist: a typo
@@ -1654,7 +1672,10 @@ conductor computes `collisions` over whichever sinks left a diff:
 - `overlap`: which files each sink's patch touches
   (`conductor.collisions.touched_files`, read from a unified diff's
   `diff --git a/<p> b/<p>` headers; a rename counts both paths), and which
-  files two or more sinks touch -- a **hotspot**.
+  files two or more sinks touch -- a **hotspot**. Git's quoted header form
+  (`diff --git "a/caf\303\251.txt" ...`, which it writes by default for a
+  path with a tab or a non-ASCII byte) is decoded back to the path it names,
+  on either side independently, so those files count like any other.
 - `conflicts`: for every pair of sinks that both left a clean commit,
   whether `git merge-tree --write-tree --name-only` on their two tips would
   actually conflict, and on which paths. A pair whose merge would fail for

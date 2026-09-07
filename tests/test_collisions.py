@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,55 @@ def test_touched_files_added_deleted_renamed_and_binary():
     assert touched_files(binary) == ["image.png"]
     assert touched_files(added + deleted + renamed) == ["new.txt", "old.txt"]
     assert touched_files("") == []
+
+
+def test_touched_files_decodes_git_quoted_paths():
+    """D22: git quotes a path with a tab or a non-ASCII byte by default, and
+    the quoted header is the only form those files ever appear in."""
+    tabbed = 'diff --git "a/with\\ttab.txt" "b/with\\ttab.txt"\n@@ -0,0 +1 @@\n+a\n'
+    unicode_name = (
+        'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n'
+        "@@ -0,0 +1 @@\n+a\n"
+    )
+    quoted_rename = (
+        'diff --git "a/caf\\303\\251.txt" "b/th\\303\\251.txt"\n'
+        "similarity index 100%\n"
+    )
+    half_quoted = 'diff --git a/plain.txt "b/caf\\303\\251.txt"\n'
+    assert touched_files(tabbed) == ["with\ttab.txt"]
+    assert touched_files(unicode_name) == ["caf\u00e9.txt"]
+    assert touched_files(quoted_rename) == ["caf\u00e9.txt", "th\u00e9.txt"]
+    assert touched_files(half_quoted) == ["caf\u00e9.txt", "plain.txt"]
+    # A quoted name still counts as a hotspot when two lanes touch it.
+    assert overlap({"a": unicode_name, "b": unicode_name})["hotspots"] == ["caf\u00e9.txt"]
+
+
+def test_touched_files_reads_a_real_git_diff_with_awkward_names(tmp_path):
+    """The same, on bytes git actually wrote, not a hand-built header."""
+    repo = tmp_path / "quoted-repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.invalid"],
+        ["config", "user.name", "test"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    (repo / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True)
+    (repo / "caf\u00e9.txt").write_text("a\n")
+    (repo / "with\ttab.txt").write_text("b\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    patch = subprocess.run(
+        ["git", "diff", "--cached", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # Git quoted them itself: the plain `a/` header never appears for these.
+    assert '"a/caf' in patch
+    assert touched_files(patch) == ["caf\u00e9.txt", "with\ttab.txt"]
 
 
 # --- overlap --------------------------------------------------------------------

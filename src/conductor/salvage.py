@@ -16,6 +16,7 @@ mission's signed receipt chain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -51,6 +52,11 @@ class SalvageResult:
     # from the base, so it never lints or runs a kept worktree's new tests;
     # E17's salvage lost a review round to one long line for exactly that.
     own_gate: dict = field(default_factory=dict)
+    # D17: the digest the run's own receipt carried for this lane's diff --
+    # lineage, not evidence. `diff_sha256` above hashes the bytes this
+    # salvage actually gated; when they differ, the kept worktree was
+    # repaired after the run and the run's digest names a different tree.
+    lineage_diff_sha256: str | None = None
     # Set after the receipt is written; not itself part of the receipt (the
     # timestamp in its name is not known before the write happens).
     receipt_path: str = ""
@@ -99,6 +105,66 @@ def _lane_snapshot(mission_raw: dict, lane: str) -> dict | None:
     return None
 
 
+def _text_sha256(text: str) -> str:
+    """The digest of a diff held in memory, comparable with the digest
+    `attest.file_sha256` takes of the same patch written to disk (both hash
+    the UTF-8 bytes `Path.write_text` would have stored)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _matching_attempt(lane_snapshot: dict | None, attempt: dict, position: int) -> dict | None:
+    """The declared attempt that produced `attempt`, the lane receipt's last
+    dispatch (D16).
+
+    The receipt's attempts are dispatches, the snapshot's are declarations:
+    a retry repeats one declaration, so the two lists are not the same length
+    and `attempts[0]` is not the attempt whose worktree salvage gates. Match
+    on the dispatch contract (fleet, model, effort, mode), preferring the
+    declaration at the same position when it also matches, and fall back to
+    position alone when nothing matches (an older receipt, a hand-edited
+    snapshot) rather than silently gating under the primary's contract.
+    """
+    raw = lane_snapshot.get("attempts") if lane_snapshot else None
+    if not isinstance(raw, list):
+        return None
+    declared = [entry for entry in raw if isinstance(entry, dict)]
+    if not declared:
+        return None
+    keys = ("fleet", "model", "effort", "mode")
+    matches = [
+        index
+        for index, entry in enumerate(declared)
+        if all(entry.get(key) == attempt.get(key) for key in keys)
+    ]
+    if position in matches:
+        return declared[position]
+    if matches:
+        return declared[matches[-1]]
+    if 0 <= position < len(declared):
+        return declared[position]
+    return declared[-1]
+
+
+def _unreconstructable(attempt_snapshot: dict) -> list[str]:
+    """What the producing attempt declared that a salvage gate cannot rebuild.
+
+    `_transplant_gate` runs the command with no lane environment: no ports
+    claimed and exported, no `setup` run first, no `include` copied in. A
+    gate missing any of those is not the contract the lane ran under, so
+    salvage refuses instead of reporting a verdict from a different one.
+    """
+    missing: list[str] = []
+    if attempt_snapshot.get("setup"):
+        missing.append("setup")
+    if attempt_snapshot.get("include"):
+        missing.append("includes")
+    if attempt_snapshot.get("ports"):
+        missing.append("ports")
+    if attempt_snapshot.get("teardown"):
+        missing.append("env")
+    return missing
+
+
 def _gather(
     home: Path, mission_id: str, lane: str, *, stop: Callable[[], bool] | None
 ) -> SalvageResult:
@@ -123,7 +189,12 @@ def _gather(
         raise SalvageInvalid(f"lane '{lane}' kept worktree is missing on disk: {worktree}")
 
     mission_raw = _load_json(mission_dir / "mission.json", what=f"mission '{mission_id}' snapshot")
-    repo = mission_raw.get("cwd")
+    # D16: a lane (or one of its attempts) may declare its own cwd, and the
+    # attempt that ran is the one whose worktree is being gated -- so the
+    # repository this worktree must belong to is the lane's effective cwd,
+    # as `land.py` already reads it, with the mission's own cwd only as the
+    # default for a lane that never overrode it.
+    repo = lane_result.cwd or mission_raw.get("cwd")
     if not isinstance(repo, str) or not repo:
         raise SalvageInvalid(f"mission '{mission_id}' snapshot has no cwd")
     if not _same_repo(worktree, repo):
@@ -132,14 +203,18 @@ def _gather(
         )
 
     lane_snapshot = _lane_snapshot(mission_raw, lane)
-    attempt_snapshot = (
-        lane_snapshot.get("attempts", [None])[0]
-        if lane_snapshot and lane_snapshot.get("attempts")
-        else None
+    attempt_snapshot = _matching_attempt(
+        lane_snapshot, last_attempt, len(lane_result.attempts) - 1
     )
     test_command = attempt_snapshot.get("test") if attempt_snapshot else None
     if not test_command:
         raise SalvageInvalid(f"lane '{lane}' has no test command to salvage")
+    missing = _unreconstructable(attempt_snapshot) if attempt_snapshot else []
+    if missing:
+        raise SalvageInvalid(
+            f"salvage cannot reconstruct {', '.join(missing)} for lane {lane}; "
+            "gate the kept worktree by hand"
+        )
     timeout = (attempt_snapshot.get("timeout") if attempt_snapshot else None) or DEFAULT_TIMEOUT[
         "write"
     ]
@@ -151,15 +226,16 @@ def _gather(
     test_surface = last_attempt.get("test_surface") or {}
     patterns = test_surface.get("patterns") or []
 
-    diff_text = ""
-    diff_sha256: str | None = None
-    if lane_result.diff_path:
-        diff_path = Path(lane_result.diff_path)
-        try:
-            diff_text = diff_path.read_text()
-        except OSError:
-            diff_text = ""
-        diff_sha256 = attest.file_sha256(diff_path)
+    # D17: the diff the receipt records is what the fleet left at run time;
+    # what the gates below judge is what the kept worktree holds now. A
+    # worktree repaired by hand after the run would otherwise pass here with
+    # the pre-repair digest attached. Snapshot the current bytes once, hash
+    # those, and keep the run's own digest as lineage only.
+    diff_text = diff_since(str(worktree), base_sha)
+    diff_sha256 = _text_sha256(diff_text)
+    lineage_diff_sha256 = (
+        attest.file_sha256(Path(lane_result.diff_path)) if lane_result.diff_path else None
+    )
 
     status = git_run(worktree, "status", "--porcelain")
     dirty = status.returncode != 0 or bool(status.stdout.strip())
@@ -196,6 +272,16 @@ def _gather(
             worktree=scratch,
         )
 
+    # Both gates read the kept worktree, so the digest above is only evidence
+    # about what they judged for as long as those bytes held still. Re-read
+    # them once: an edit landing mid-salvage is refused, never receipted as
+    # if the snapshot had been gated.
+    if _text_sha256(diff_since(str(worktree), base_sha)) != diff_sha256:
+        raise SalvageInvalid(
+            f"lane '{lane}' kept worktree changed while it was being gated; "
+            "re-run the salvage"
+        )
+
     return SalvageResult(
         mission=mission_id,
         lane=lane,
@@ -208,6 +294,7 @@ def _gather(
         test_command=test_command,
         gate=outcome,
         own_gate=own_outcome,
+        lineage_diff_sha256=lineage_diff_sha256,
     )
 
 
