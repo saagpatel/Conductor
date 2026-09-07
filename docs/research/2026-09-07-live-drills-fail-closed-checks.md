@@ -90,9 +90,22 @@ mission is running from. The salvage refusals past not-kept (a foreign worktree,
 unreconstructable environment, a worktree that changed under the gate) need a kept worktree and
 stay unit-tested.
 
-One receipt detail: on an already-merged lane, `land --dry-run --json` reports `dry_run: false`,
-because the already-merged shortcut returns before the flag is recorded. The verdict is right and
-nothing merges either way; the field is wrong. Noted for the next small fix wave.
+One receipt detail: on an already-merged lane, `land --dry-run --json` reported `dry_run: false`,
+because the already-merged shortcut returned before the flag was recorded. The verdict was right
+and nothing merged either way; fixed in 0.70.0.
+
+### Plan-digest refusal (D2), post-hoc on a scratch plan lane
+
+The one item 10 entry the third pass left. A scratch mission with one Haiku plan lane (read,
+`deliverable: child.json`, $2 budget) on a copy of the taint-drill repository wrote a one-lane
+child mission, dry-ran it, and parked with `child_sha256` on the pause and the lane receipt, $0.04.
+The kept copy under the parent's `deliverables/` was then edited by hand (`max_cost_usd` 0.5 to
+0.4, still a valid mission) before the pause was answered `continue`. The resume re-read and
+re-hashed the file and refused: the plan lane failed with `child plan changed since it was
+approved: 3bbca84f -> f7bbd8dd; re-run to approve the revised plan`, kind `plan`, no child launched,
+the parent `ok: false`. The only `drill-child` directory on disk is the park-time dry run
+(`dry_run: true`, one attempt record that never spawned, no cost). Every land, salvage, and plan-digest refusal in the inventory that a
+finished mission can reach now has a live receipt.
 
 ## What this settles
 
