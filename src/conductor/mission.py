@@ -4116,6 +4116,7 @@ def run_mission(
     unattended: bool = False,
     mission_id: str | None = None,
     notifier: Callable[[dict, dict], dict] | None = None,
+    conflict_finder: Callable[[str, dict[str, str]], dict] | None = None,
 ) -> MissionResult:
     mission.validate()
     base = Path(home or conductor_home())
@@ -4240,6 +4241,7 @@ def run_mission(
             ceiling_result=ceiling_result,
             forecast_result=forecast_result,
             notifier=notifier,
+            conflict_finder=conflict_finder,
         )
     finally:
         try:
@@ -4269,6 +4271,7 @@ def _execute_mission(
     ceiling_result: dict | None = None,
     forecast_result: forecast_mod.Forecast | None = None,
     notifier: Callable[[dict, dict], dict] | None = None,
+    conflict_finder: Callable[[str, dict[str, str]], dict] | None = None,
 ) -> MissionResult:
     answers_dir = mission_dir / "answers"
     answers_dir.mkdir(exist_ok=True)
@@ -5164,7 +5167,12 @@ def _execute_mission(
                 names = conflict_cwd_groups.get(repo, [])
                 repo_conflict_files: dict[str, list[list[str]]] = {}
                 if len(names) >= 2:
-                    group_out = collisions_mod.merge_conflicts(
+                    # F8: `conflict_finder` stands in for `git merge-tree`
+                    # the way `dispatcher` stands in for a spawn -- a replay
+                    # repository holds none of the recorded tips, so
+                    # golden.replay answers from the recorded collisions.
+                    find_conflicts = conflict_finder or collisions_mod.merge_conflicts
+                    group_out = find_conflicts(
                         repo, {name: tips_by_name[name] for name in names}
                     )
                     conflict_pairs.extend(group_out["pairs"])
@@ -5247,6 +5255,7 @@ def _execute_mission(
                 # (see col.spec below) -- its collisions section is scoped to
                 # that one repository's group, never another's.
                 collisions=_collisions_for_cwd(collisions_out, mission.cwd),
+                dispatcher=dispatcher,
             )
 
     # D1: the resolver lane, dispatched after the collate (or right after the
@@ -5273,6 +5282,7 @@ def _execute_mission(
                 base,
                 collisions=collisions_out,
                 strongest=resolve_strongest,
+                dispatcher=dispatcher,
             )
 
     early_cancel_out = (
@@ -5785,6 +5795,41 @@ def _omitted_note(omitted: list[str]) -> str:
     return f"\n(omitted by ranking: {', '.join(omitted)})\n"
 
 
+def _dispatch_aux(
+    dispatcher: Callable[..., Result] | None,
+    spec: Spec,
+    *,
+    label: str,
+    home: Path,
+    prompt_versions: dict | None = None,
+    **live_kwargs,
+) -> Result:
+    """A collate, judge, or resolve dispatch. C7/F8: through `dispatcher`
+    (golden.replay's recorded receipts, keyed by `label` the way a lane's
+    are keyed by its name -- `collate`, `collate:<judge>:<order>`, `resolve`)
+    when the mission runs offline, live otherwise. Before this the three
+    sites called `dispatch` directly, so the first judge-sitting fixture
+    replayed its four judges against real vendors on every `golden check`."""
+    if dispatcher is not None:
+        return dispatcher(
+            spec,
+            lane=label,
+            attempt="primary",
+            retry=None,
+            dry_run=False,
+            test_command=live_kwargs.get("test_command"),
+            commit_message=live_kwargs.get("commit_message"),
+            isolate=True,
+            home=home,
+            no_op_ok=False,
+            base_ref=None,
+            cancel=None,
+        )
+    return dispatch(
+        spec, isolate=True, home=home, prompt_versions=prompt_versions or {}, **live_kwargs
+    )
+
+
 def _run_collate(
     mission: Mission,
     lanes: list[LaneResult],
@@ -5794,6 +5839,7 @@ def _run_collate(
     *,
     ranking: list[dict],
     collisions: dict | None = None,
+    dispatcher: Callable[..., Result] | None = None,
 ) -> dict:
     col = mission.collate
     assert col is not None
@@ -5813,6 +5859,7 @@ def _run_collate(
             omitted=omitted,
             tainted=tainted,
             collisions=collisions,
+            dispatcher=dispatcher,
         )
     why = ledger.blocker()
     if why:
@@ -5842,11 +5889,12 @@ def _run_collate(
         if col.instructions == DEFAULT_COLLATE_INSTRUCTIONS
         else {}
     )
-    result = dispatch(
+    result = _dispatch_aux(
+        dispatcher,
         col.spec(
             mission.cwd, prompt, cap_usd=_tighter(col.cap_usd, ledger.remaining()), taint=tainted
         ),
-        isolate=True,
+        label="collate",
         home=base,
         prompt_versions=used_versions,
     )
@@ -6040,6 +6088,7 @@ def _run_rank_collate(
     omitted: list[str] | None = None,
     tainted: bool = False,
     collisions: dict | None = None,
+    dispatcher: Callable[..., Result] | None = None,
 ) -> dict:
     """A sitting of M judges (E4; judge 1 is the collate's own fleet/model,
     judges 2..M are `col.judges`), each dispatched once per lane order
@@ -6089,7 +6138,8 @@ def _run_rank_collate(
         # collide with judge 1's or each other's.
         suffix = "" if judge_index == 0 else f"-{judge_index - 1}"
         (mission_dir / f"collate-prompt-{label}{suffix}.txt").write_text(prompt)
-        result = dispatch(
+        result = _dispatch_aux(
+            dispatcher,
             judge.spec(
                 mission.cwd,
                 prompt,
@@ -6097,7 +6147,7 @@ def _run_rank_collate(
                 schema=_rank_schema_for(judge.fleet, str(schema_path)),
                 taint=tainted,
             ),
-            isolate=True,
+            label=f"collate:{judge_index}:{label}",
             home=base,
             prompt_versions={"rank_contract": rank_contract_version},
         )
@@ -6284,6 +6334,7 @@ def _run_resolve(
     *,
     collisions: dict | None,
     strongest: str | None,
+    dispatcher: Callable[..., Result] | None = None,
 ) -> dict:
     """D1's resolver lane: one write-mode, isolated dispatch from the sinks'
     own repository, gated by the mission's own `test`, only when the sinks
@@ -6316,9 +6367,10 @@ def _run_resolve(
         if res.instructions == DEFAULT_RESOLVE_INSTRUCTIONS
         else {}
     )
-    result = dispatch(
+    result = _dispatch_aux(
+        dispatcher,
         res.spec(resolve_cwd, prompt, cap_usd=_tighter(res.cap_usd, ledger.remaining())),
-        isolate=True,
+        label="resolve",
         home=base,
         prompt_versions=used_versions,
         test_command=mission.test,

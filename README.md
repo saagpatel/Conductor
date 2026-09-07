@@ -2531,7 +2531,9 @@ a routing or template change is testable without spending on live vendors."
 `conductor golden record MISSION_ID --out DIR` copies a finished mission
 directory and every run it dispatched into `DIR`: `mission.json`,
 `result.json`, `report.md`, `lanes/*.json`, `pause.json` when present, and
-for every run id any lane's attempts name, `runs/<run_id>/result.json`,
+for every run id any lane's attempts name -- plus, since F8, the collate's
+own run, every judge order of a rank sitting, and the resolver's run, the
+ones `result.json` names outside any lane -- `runs/<run_id>/result.json`,
 `stdout.jsonl`, `prompt.txt`, `answer.txt`, and `diff.patch`, each only when
 it exists. A run's transcript is stored as `stdout.jsonl`, never
 `stdout.log`: an operator's global git excludes routinely drop every
@@ -2563,7 +2565,9 @@ home directory (`Path.home()`) becomes `<user>`. Then secrets: any
 becomes `NAME=<redacted>`; `Bearer <token>` becomes `Bearer <redacted>`;
 JSON object values whose key contains those words become `<redacted>`; and
 `sk-`, `xai-`, `ghp_`, or `AIza`-prefixed tokens of 16 or more characters
-become `<redacted>`. A cross-repo mission's other repositories (E26 `cwd`)
+become `<redacted>`. JSON object keys are scrubbed like values (a
+cross-repo mission's `overlap.files` is keyed by `<repository>:<path>`).
+A cross-repo mission's other repositories (E26 `cwd`)
 each get their own `<cwd2>`, `<cwd3>`, ... placeholder, in the order they
 first appear in the mission's lanes -- see "Collisions across
 repositories", above. `golden.scrub_guard(path, extra=[(real, label), ...])`
@@ -2571,8 +2575,10 @@ re-scans a fixture directory for the user's home path, the conductor home,
 any of `extra`'s own (path, label) pairs -- a mission's repositories, say,
 which `scrub_guard` has no way to recover from an already-scrubbed fixture
 on its own -- or any of those secret patterns, as `file:line: <pattern
-name>`; empty when clean, which `conductor golden record` and `conductor
-golden check` both leave a fixture in. It also decodes any run of 64 or
+name>`; empty when clean. `record` runs it over the scrubbed copy before
+anything is written to `DIR` and refuses (`fixture would leak: ...`) on any
+hit, so a clean fixture is what `record` produces, not a step after it.
+It also decodes any run of 64 or
 more base64 characters on a line and
 scans the decoded text the same way, reporting `file:line: <pattern name>
 (base64)` -- the shape a DSSE envelope like `attestation.json` carries a
@@ -2586,8 +2592,10 @@ readable without changing what the parser sees: per JSON line, any string
 value longer than 512 characters becomes `<elided N chars
 sha256=<12 hex chars>>`, except the keys `result`, `response`, and `error`
 inside an event whose `type` (or, for antigravity, `event`) is `result`, the
-key `text` inside an event whose `type` is `assistant`, and the key `plan`
-anywhere, all of which are kept whole. A line that is not JSON is kept as it
+whole `structured_output` object inside such a result event (a
+`--json-schema` answer, which `outputs.parse` re-serializes as the run's
+answer), the key `text` inside an event whose `type` is `assistant`, and
+the key `plan` anywhere, all of which are kept whole. A line that is not JSON is kept as it
 is. `record` refuses (`GoldenError`, naming the run and the field) unless
 `outputs.parse` agrees on `answer`, `usage`, `status`, `error`, and
 `session_id` before and after eliding.
@@ -2606,7 +2614,18 @@ fixture uses mapped back to `cwds`'s own real directory, or a fresh empty
 repository under `home` when `cwds` does not name it) through the ordinary
 snapshot loader, and for the
 k-th call on a lane returns the k-th recorded run in that lane's
-`lanes/<name>.json` (`previous_attempts` then `attempts`) -- copying its
+`lanes/<name>.json` (`previous_attempts` then `attempts`). The collate,
+each judge order, and the resolver dispatch through the same callable under
+their own labels (`collate`, `collate:<judge index>:<forward|reverse>` with
+judge 0 the collate's own fleet, `resolve`), answered from the run ids the
+fixture's `result.json` names; before F8 those three sites called the live
+`runner.dispatch` directly, and the first judge-sitting fixture paid four
+real judge dispatches on every `golden check`. `run_mission` likewise
+takes `conflict_finder=` in place of `collisions.merge_conflicts` (a
+replay repository holds none of the recorded tips) and `notifier=` in
+place of `notify.emit`; replay passes the recorded `collisions.conflicts`
+and a notifier that records the event without running the hook. The
+replay copies each recorded run's
 files into `home/runs/<run_id>/` (`stdout.jsonl` restored to `stdout.log`),
 re-parsing that transcript, and recording
 a difference for any of the same five fields that disagree with what was
@@ -2614,7 +2633,9 @@ recorded, or for a rendered prompt (template nonces normalized) that no
 longer matches `prompt.txt`. A call past the recorded count is itself a
 difference (`lane <name>: replay dispatched attempt <k> but the recording
 has <n>`), answered with a refused result so the mission still completes
-rather than raising. `runner.Result.from_dict` rehydrates a stored
+rather than raising; so is a recorded run id with no receipt in the
+fixture (`recorded run <id> has no result.json in the fixture`, the shape
+a pre-F8 fixture with a collate would show). `runner.Result.from_dict` rehydrates a stored
 `result.json` back into a `Result`; an unknown field is refused by name, and
 a field missing from an older receipt takes its dataclass default.
 
@@ -2653,9 +2674,11 @@ list of event names that reached the mission's `notify` hook (only when any
 did, so a fixture recorded without `notify` keeps a byte-identical
 projection; the hook's own outcome is never pinned, since a replay's
 notifier always answers ok and a live hook's exit code belongs to the
-operator's machine, not the routing), and per lane and attempt the
-fields that describe what happened, never a path, a duration, a run id, a
-timestamp, or a dollar amount. `expected.json` pins that projection at
+operator's machine, not the routing), `collate` (`ok`, `rank`,
+`strongest`, `error`, and the sitting's `agreement` and `votes`) and
+`resolve` (`ran`, `ok`, `error`) when the mission had one, and per lane
+and attempt the fields that describe what happened, never a path, a
+duration, a run id, a timestamp, or a dollar amount. `expected.json` pins that projection at
 record time. `golden.check(fixture_dir, *, update=False, cwds=None)` takes
 the same `cwds` as `replay`. `conductor golden check [DIR ...]` replays each fixture (every
 directory under `tests/golden/` of the current working directory that holds

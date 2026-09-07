@@ -166,7 +166,12 @@ def _scrub_json_value(
             return "<redacted>"
         return scrub_text(value, replacements)
     if isinstance(value, dict):
-        return {k: _scrub_json_value(v, replacements, key=k) for k, v in value.items()}
+        # F8: keys too -- a cross-repo mission's `overlap.files` is keyed by
+        # `<repository>:<path>` (E19), and a key is as much a path as a value.
+        return {
+            scrub_text(k, replacements): _scrub_json_value(v, replacements, key=k)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_scrub_json_value(v, replacements, key=key) for v in value]
     return value
@@ -305,6 +310,12 @@ def _elide_line(line: str) -> str:
     def walk(value: object, key: str | None = None):
         if isinstance(value, str):
             return value if protected(key) else _elide_string(value)
+        if is_result_event and key == "structured_output":
+            # F8: a `--json-schema` answer is the whole object, kept as one --
+            # `outputs.parse` re-serializes it as the run's answer, so any
+            # string inside it (a judge's `reason`, say) elided here would
+            # change the answer and fail `record`'s own elision check.
+            return value
         if isinstance(value, dict):
             return {k: walk(v, key=k) for k, v in value.items()}
         if isinstance(value, list):
@@ -341,12 +352,61 @@ def _verify_elision(fleet: str, original: str, elided: str, run_id: str) -> None
 # --- recording -------------------------------------------------------------
 
 
-def _run_ids_and_fleets(lane_files: list[Path]) -> tuple[list[str], dict[str, str], set[str]]:
+_ORDER_LABELS = ("forward", "reverse")
+
+
+def _aux_recordings(result_raw: dict | None) -> list[tuple[str, str, str]]:
+    """F8: the (label, run_id, fleet) rows a mission result names outside
+    its lanes -- the collate (`collate`), each judge order of a rank sitting
+    (`collate:<judge index>:<forward|reverse>`, judge 0 being the collate's
+    own fleet), and the resolver (`resolve`) -- in the order
+    `mission._dispatch_aux` labels them, so `record` copies those runs and
+    `replay` answers them from the fixture instead of a live vendor."""
+    rows: list[tuple[str, str, str]] = []
+    if not isinstance(result_raw, dict):
+        return rows
+    collate = result_raw.get("collate")
+    if isinstance(collate, dict):
+        if collate.get("rank"):
+            sittings = [(0, collate)] + [
+                (i + 1, judge)
+                for i, judge in enumerate(collate.get("judges") or [])
+                if isinstance(judge, dict)
+            ]
+            for judge_index, judge in sittings:
+                for k, order in enumerate(judge.get("orders") or []):
+                    run_id = order.get("run_id") if isinstance(order, dict) else None
+                    if isinstance(run_id, str) and k < len(_ORDER_LABELS):
+                        rows.append(
+                            (
+                                f"collate:{judge_index}:{_ORDER_LABELS[k]}",
+                                run_id,
+                                str(judge.get("fleet") or ""),
+                            )
+                        )
+        elif isinstance(collate.get("run_id"), str):
+            rows.append(("collate", collate["run_id"], str(collate.get("fleet") or "")))
+    resolve = result_raw.get("resolve")
+    if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
+        rows.append(("resolve", resolve["run_id"], str(resolve.get("fleet") or "")))
+    return rows
+
+
+def _run_ids_and_fleets(
+    lane_files: list[Path], result_raw: dict | None = None
+) -> tuple[list[str], dict[str, str], set[str]]:
     """Every run id named by any attempt row, in first-seen order, its
-    fleet, and the set of fleets seen (for the manifest)."""
+    fleet, and the set of fleets seen (for the manifest). F8: plus the
+    collate, judge, and resolve runs the mission result names."""
     run_ids: list[str] = []
     fleet_by_run: dict[str, str] = {}
     fleets: set[str] = set()
+    for _label, run_id, fleet in _aux_recordings(result_raw):
+        if run_id not in fleet_by_run:
+            run_ids.append(run_id)
+        if fleet:
+            fleet_by_run[run_id] = fleet
+            fleets.add(fleet)
     for lane_file in lane_files:
         data = json.loads(lane_file.read_text())
         for key in ("previous_attempts", "attempts"):
@@ -471,7 +531,9 @@ def record(
 
     lanes_dir = mission_dir / "lanes"
     lane_files = sorted(lanes_dir.glob("*.json")) if lanes_dir.is_dir() else []
-    run_ids, fleet_by_run, fleets = _run_ids_and_fleets(lane_files)
+    result_path = mission_dir / "result.json"
+    result_raw = json.loads(result_path.read_text()) if result_path.is_file() else None
+    run_ids, fleet_by_run, fleets = _run_ids_and_fleets(lane_files, result_raw)
 
     with tempfile.TemporaryDirectory(prefix="conductor-golden-") as tmp:
         work = Path(tmp) / out_dir.name
@@ -546,6 +608,15 @@ def record(
                     _copy_json(src, run_dst / name, replacements)
                 else:
                     _copy_text(src, run_dst / name, replacements)
+
+        # F8: the guard is part of `record`, not a separate step an operator
+        # remembers to run -- the first cross-repo fixture carried a real
+        # repository path in a JSON key that only the guard would have seen.
+        leaks = scrub_guard(work, extra=extra_pairs)
+        if leaks:
+            raise GoldenError(
+                f"{mission_dir.name}: fixture would leak: " + "; ".join(leaks[:8])
+            )
 
         replayed = _fresh_replay(work)
         if replayed.differences:
@@ -635,6 +706,10 @@ def _lane_recordings(fixture_dir: Path) -> dict[str, list[tuple[str, str]]]:
                 if isinstance(run_id, str):
                     rows.append((run_id, attempt.get("fleet") or ""))
         out[data["name"]] = rows
+    result_path = fixture_dir / "result.json"
+    result_raw = json.loads(result_path.read_text()) if result_path.is_file() else None
+    for label, run_id, fleet in _aux_recordings(result_raw):
+        out.setdefault(label, []).append((run_id, fleet))
     return out
 
 
@@ -746,11 +821,9 @@ def replay(
         k = call_index.get(lane, 0)
         call_index[lane] = k + 1
         recordings = lane_recordings.get(lane, [])
-        if k >= len(recordings):
-            differences.append(
-                f"lane {lane}: replay dispatched attempt {k + 1} but the recording has "
-                f"{len(recordings)}"
-            )
+
+        def unrecorded(reason: str) -> Result:
+            differences.append(f"lane {lane}: {reason}")
             return Result(
                 run_id=f"golden-unrecorded-{lane}-{k + 1}",
                 fleet=spec.fleet,
@@ -769,8 +842,18 @@ def replay(
                 spawned=False,
                 error="golden: no recorded run",
             )
+
+        if k >= len(recordings):
+            return unrecorded(
+                f"replay dispatched attempt {k + 1} but the recording has {len(recordings)}"
+            )
         run_id, fleet = recordings[k]
         src = fixture_dir / "runs" / run_id
+        if not (src / "result.json").is_file():
+            # F8: a fixture recorded before collate, judge, and resolve runs
+            # were copied names their run ids in result.json but holds no
+            # receipt for them -- a difference to report, never a crash.
+            return unrecorded(f"recorded run {run_id} has no result.json in the fixture")
         dst = Path(home) / "runs" / run_id
         dst.mkdir(parents=True, exist_ok=True)
         recorded_stdout = ""
@@ -847,18 +930,49 @@ def replay(
         }
         return Result.from_dict({**recorded_result, **overrides})
 
+    result_path = fixture_dir / "result.json"
+    recorded_result = json.loads(result_path.read_text()) if result_path.is_file() else {}
     mission_result = run_mission(
         mission,
         home=home,
         dispatcher=dispatcher,
         human_answers=human_answers or None,
         notifier=_replay_notifier,
+        conflict_finder=_recorded_conflict_finder(recorded_result),
     )
     return Replay(
         differences=differences,
         projection=projection(mission_result),
         result=mission_result,
     )
+
+
+def _recorded_conflict_finder(recorded_result: dict):
+    """F8: what a replay uses in place of `collisions.merge_conflicts`. A
+    replay repository holds none of the recorded tips, so `git merge-tree`
+    would find nothing and every collate prompt that names a conflict would
+    differ from its recording. The recorded mission's `collisions.conflicts`
+    is the answer: for the lanes asked about, the recorded pairs among them
+    and the files those pairs conflicted on."""
+    collisions = recorded_result.get("collisions") if isinstance(recorded_result, dict) else None
+    conflicts = (collisions or {}).get("conflicts") if isinstance(collisions, dict) else None
+    recorded_pairs = list((conflicts or {}).get("pairs") or [])
+
+    def find(repo: str, tips: dict[str, str]) -> dict:
+        del repo
+        names = set(tips)
+        pairs = [
+            pair
+            for pair in recorded_pairs
+            if isinstance(pair, dict) and set(pair.get("lanes") or []) <= names
+        ]
+        files: dict[str, list[list[str]]] = {}
+        for pair in pairs:
+            for path in pair.get("conflicts") or []:
+                files.setdefault(path, []).append(list(pair.get("lanes") or []))
+        return {"pairs": pairs, "files": files}
+
+    return find
 
 
 def _replay_notifier(config: dict, event: dict) -> dict:
@@ -965,6 +1079,26 @@ def projection(result: MissionResult) -> dict:
     # never pinned -- a replay's notifier always answers ok (above), and a
     # live hook's exit code is the operator's machine, not the routing.
     notified = [note.get("event") for note in data.get("notifications") or []]
+    # F8: what a sitting or a resolver decided, never what it cost or which
+    # run said it -- only when the mission had one, same reason as `plan`.
+    collate = data.get("collate")
+    collate_projection = None
+    if isinstance(collate, dict):
+        tally = collate.get("tally") if isinstance(collate.get("tally"), dict) else {}
+        collate_projection = {
+            "ok": collate.get("ok"),
+            "rank": collate.get("rank"),
+            "strongest": collate.get("strongest"),
+            "error": collate.get("error"),
+            "agreement": tally.get("agreement"),
+            "votes": tally.get("votes"),
+        }
+    resolve = data.get("resolve")
+    resolve_projection = (
+        {"ran": resolve.get("ran"), "ok": resolve.get("ok"), "error": resolve.get("error")}
+        if isinstance(resolve, dict)
+        else None
+    )
     projected = {
         "ok": data.get("ok"),
         "require": data.get("require"),
@@ -983,6 +1117,10 @@ def projection(result: MissionResult) -> dict:
     }
     if notified:
         projected["notifications"] = notified
+    if collate_projection is not None:
+        projected["collate"] = collate_projection
+    if resolve_projection is not None:
+        projected["resolve"] = resolve_projection
     return projected
 
 

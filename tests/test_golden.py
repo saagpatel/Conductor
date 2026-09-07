@@ -602,6 +602,202 @@ def test_run_mission_notifier_stands_in_for_emit(repo, home, monkeypatch, tmp_pa
     ]
 
 
+# --- F8: collate, judge, and resolve runs replay offline ---------------------
+
+
+def _antigravity_envelope(answer: dict) -> str:
+    return json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": json.dumps(answer),
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }
+    )
+
+
+def _codex_stream(text: str) -> str:
+    item = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}})
+    done = json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
+    return f"{item}\n{done}\n"
+
+
+def _forbid_live_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from conductor import mission as mission_mod
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a replay dispatched live")
+
+    monkeypatch.setattr(runner_mod, "dispatch", boom)
+    monkeypatch.setattr(mission_mod, "dispatch", boom)
+
+
+def _sitting_mission_raw(repo) -> dict:
+    return {
+        "cwd": str(repo),
+        "lanes": [
+            {"name": "a", "fleet": "claude", "prompt": "A"},
+            {"name": "b", "fleet": "codex", "prompt": "B"},
+        ],
+        "collate": {
+            "fleet": "antigravity",
+            "rank": True,
+            "judges": [{"fleet": "antigravity", "model": "gemini-3.7-flash"}],
+        },
+    }
+
+
+def test_judge_sitting_records_every_judge_run_and_replays_without_a_vendor(
+    repo, home, monkeypatch, tmp_path
+):
+    fake_fleets(
+        monkeypatch,
+        {
+            "claude": say("done", 0.01),
+            "codex": ["sh", "-c", f"printf '%s' '{_codex_stream('done')}'"],
+            "antigravity": [
+                "sh",
+                "-c",
+                f"printf '%s' '{_antigravity_envelope({'strongest': 'a', 'reason': 'r'})}'",
+            ],
+        },
+    )
+    result = run_mission(
+        mission_from_dict(_sitting_mission_raw(repo), base_dir=tmp_path), home=home
+    )
+    assert result.ok is True and result.collate["strongest"] == "a"
+    judge_runs = [order["run_id"] for order in result.collate["orders"]] + [
+        order["run_id"] for judge in result.collate["judges"] for order in judge["orders"]
+    ]
+    assert len(judge_runs) == 4
+
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    recorded = {p.name for p in (fixture / "runs").iterdir()}
+    assert set(judge_runs) <= recorded
+    manifest = json.loads((fixture / "golden.json").read_text())
+    assert manifest["fleets"] == ["antigravity", "claude", "codex"]
+    expected = json.loads((fixture / "expected.json").read_text())
+    assert expected["collate"] == {
+        "ok": True,
+        "rank": True,
+        "strongest": "a",
+        "error": None,
+        "agreement": "unanimous",
+        "votes": {"a": 4, "b": 0},
+    }
+
+    _forbid_live_dispatch(monkeypatch)
+    assert golden.check(fixture) == []
+    replayed = golden._fresh_replay(fixture)
+    assert replayed.result.collate["strongest"] == "a"
+    assert replayed.result.collate["tally"]["agreement"] == "unanimous"
+
+
+def test_plain_collate_with_a_merge_conflict_replays_the_recorded_conflict(
+    repo, home, monkeypatch, tmp_path
+):
+    fake_fleets(
+        monkeypatch,
+        {
+            "claude": ["sh", "-c", f"echo A > x.txt && echo '{envelope('a', 0.01)}'"],
+            "codex": ["sh", "-c", f"echo B > x.txt && printf '%s' '{_codex_stream('b')}'"],
+            "antigravity": [
+                "sh",
+                "-c",
+                f"printf '%s' '{_antigravity_envelope({'summary': 'both touch x.txt'})}'",
+            ],
+        },
+    )
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write", "prompt": "A", "commit": "feat: a"},
+            {"name": "b", "fleet": "codex", "mode": "write", "prompt": "B", "commit": "feat: b"},
+        ],
+        "collate": {"fleet": "antigravity", "instructions": "Summarize."},
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.ok is True
+    assert result.collisions["conflicts"]["pairs"] == [
+        {"lanes": ["a", "b"], "conflicts": ["x.txt"]}
+    ]
+    collate_prompt = Path(home, "runs", result.collate["run_id"], "prompt.txt").read_text()
+    assert "(conflict: a, b)" in collate_prompt
+
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    assert result.collate["run_id"] in {p.name for p in (fixture / "runs").iterdir()}
+    expected = json.loads((fixture / "expected.json").read_text())
+    assert expected["collate"] == {
+        "ok": True,
+        "rank": None,
+        "strongest": None,
+        "error": None,
+        "agreement": None,
+        "votes": None,
+    }
+    _forbid_live_dispatch(monkeypatch)
+    assert golden.check(fixture) == []
+
+
+def test_projection_omits_collate_and_resolve_when_the_mission_had_none(
+    repo, home, monkeypatch, tmp_path
+):
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    expected = json.loads((fixture / "expected.json").read_text())
+    assert "collate" not in expected and "resolve" not in expected
+
+
+def test_replay_reports_a_recorded_run_with_no_receipt_instead_of_crashing(
+    repo, home, monkeypatch, tmp_path
+):
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    fixture = golden.record(mission_dir, tmp_path / "fixture", home=home)
+    run_dirs = sorted(p for p in (fixture / "runs").iterdir())
+    (run_dirs[0] / "result.json").unlink()
+    differences = golden.check(fixture)
+    assert any("has no result.json in the fixture" in line for line in differences)
+
+
+def test_scrub_json_text_scrubs_object_keys(tmp_path):
+    replacements = golden._placeholder_map(home=tmp_path / "home", cwd=str(tmp_path / "repo"))
+    text = json.dumps({"files": {f"{tmp_path / 'repo'}:shared.txt": ["a", "b"]}})
+    scrubbed = json.loads(golden.scrub_json_text(text, replacements))
+    assert list(scrubbed["files"]) == ["<cwd>:shared.txt"]
+
+
+def test_record_refuses_a_fixture_the_guard_would_flag(repo, home, monkeypatch, tmp_path):
+    # A base64-encoded home path survives every placeholder replacement and
+    # only the guard's decoded scan sees it -- exactly what `record` must
+    # refuse on its own rather than leave for a separate step.
+    payload = (str(Path.home()) + "/leaked").ljust(48, "x")
+    while len(payload) % 3:
+        payload += "x"
+    leak = base64.b64encode(payload.encode()).decode()
+    assert len(leak) >= 64 and "=" not in leak
+    fake_fleets(monkeypatch, {"claude": say(leak, 0.01)})
+    raw = {"prompt": "x", "cwd": str(repo), "lanes": [{"name": "a", "fleet": "claude"}]}
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    with pytest.raises(golden.GoldenError, match="would leak"):
+        golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    assert not (tmp_path / "fixture").exists()
+
+
+def test_elision_keeps_a_structured_output_answer_whole():
+    reason = "r" * 700
+    line = json.dumps(
+        {
+            "type": "result",
+            "result": "short",
+            "structured_output": {"strongest": "a", "reason": reason},
+        }
+    )
+    elided = json.loads(golden._elide_line(line))
+    assert elided["structured_output"]["reason"] == reason
+
+
 # --- CLI -----------------------------------------------------------------
 
 
