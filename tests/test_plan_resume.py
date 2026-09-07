@@ -70,6 +70,25 @@ def _corrupt_to_launched(mission_dir: str, *, mission_id: str) -> None:
     result_path.write_text(json.dumps(result_raw, indent=2))
 
 
+def _corrupt_result_after_finalized_rollup(mission_dir: str, *, child_cost_usd: float) -> None:
+    """Simulate the parent process dying after `settle()` writes the plan
+    lane's rolled-up receipt (`state: "finished"`, `rolled_up: true`,
+    written before `result.json` is finalized -- see the E10 second spec
+    comment above the `plan_children` loop in `_execute_mission`) but before
+    `result.json` itself is rewritten with that rollup baked in: the lane
+    receipt already claims the rollup happened while the mission-level
+    record does not yet show it."""
+    result_path = Path(mission_dir) / "result.json"
+    result_raw = json.loads(result_path.read_text())
+    result_raw["children"] = []
+    result_raw["cost_usd"] = round(result_raw["cost_usd"] - child_cost_usd, 6)
+    result_raw["children_cost_usd"] = 0.0
+    budget = result_raw.get("budget")
+    if isinstance(budget, dict):
+        budget["cost_usd"] = result_raw["cost_usd"]
+    result_path.write_text(json.dumps(result_raw, indent=2))
+
+
 # --- item 1: the child's budget is the parent's -----------------------------
 
 
@@ -239,6 +258,49 @@ def test_resume_adopts_a_child_that_finished_ok_rolling_up_exactly_once(
     fourth = _resume(third, home)
     assert fourth.children_cost_usd == pytest.approx(0.2)
     assert fourth.cost_usd == pytest.approx(0.3)
+
+
+def test_resume_recovers_a_rollup_whose_finalize_never_landed(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """Cross-vendor review (Grok, finding 1): `settle()` writes the plan
+    lane's receipt (`state: "finished"`, `rolled_up: true`) before
+    `result.json` is rewritten with the rollup folded in. If the process
+    dies in that window, `result.json` on disk still shows the rollup as
+    never having happened even though the lane receipt says it did. A
+    further resume must not trust the stale receipt at face value -- it
+    must notice the mission-level record disagrees and redo the rollup,
+    also restoring the child's id to `children` (finding 2)."""
+    child_raw = _child_raw(repo, max_cost_usd=5.0, name="fix-the-test")
+    fake_fleet(_write_deliverable_argv(child_raw, cost=0.1))
+    mission = mission_from_dict(
+        {"cwd": str(repo), "max_cost_usd": 10.0, "lanes": [_plan_lane()]}, base_dir=tmp_path
+    )
+    first = run_mission(mission, home=home)
+
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    )
+    resumed = _continue(first, home)
+    assert resumed.ok is True
+    child_id = _plan_child(resumed)["mission_id"]
+    plan_lane = next(lane for lane in resumed.lanes if lane["name"] == "plan")
+    assert plan_lane["plan"]["child"]["rolled_up"] is True
+    assert resumed.children_cost_usd == pytest.approx(0.2)
+
+    _corrupt_result_after_finalized_rollup(resumed.mission_dir, child_cost_usd=0.2)
+
+    third = _resume(resumed, home)
+    assert third.ok is True
+    assert child_id in third.children
+    assert third.children_cost_usd == pytest.approx(0.2)
+    assert third.cost_usd == pytest.approx(0.3)
+
+    # A further resume must not roll the same child's spend in a second time.
+    fourth = _resume(third, home)
+    assert fourth.children_cost_usd == pytest.approx(0.2)
+    assert fourth.cost_usd == pytest.approx(0.3)
+    assert fourth.children.count(child_id) == 1
 
 
 def test_resume_adopts_a_child_that_finished_not_ok(

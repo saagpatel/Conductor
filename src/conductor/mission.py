@@ -3275,6 +3275,7 @@ def _trusted_lane(
     result: LaneResult,
     *,
     prior_ok: bool = False,
+    prior_result: dict | None = None,
 ) -> bool:
     """Whether a completed receipt is enough to skip every effect of a lane."""
     if result.name != lane.name:
@@ -3291,7 +3292,19 @@ def _trusted_lane(
             # shape (a launch a crash interrupted, a freshly parked child)
             # must be re-derived against the child's own disk state by
             # `_resume_plan_child`.
-            return child.get("state") == "finished" and child.get("rolled_up") is True
+            if child.get("state") != "finished" or child.get("rolled_up") is not True:
+                return False
+            # Cross-vendor review (Grok): `settle()` writes this lane's
+            # receipt with `rolled_up: true` before the mission's own
+            # `result.json` is rewritten with that rollup folded in. If a
+            # crash lands in that window, the receipt alone would claim a
+            # rollup the mission-level record never actually saw -- trust it
+            # only once `result.json` itself already names the child, never
+            # on the lane receipt's say-so alone.
+            child_id = child.get("mission_id")
+            return child_id is not None and child_id in (
+                (prior_result or {}).get("children") or []
+            )
     if lane.human:
         # E7: a human lane has no run receipt; its answer file (and declared
         # deliverable) on disk is the whole record. The receipt's own
@@ -3550,15 +3563,20 @@ def _plan_lane_failure(resolved: LaneResult, message: str, *, plan: dict) -> Lan
     return resolved
 
 
-def _resume_plan_child(old: LaneResult, base: Path) -> tuple[LaneResult, tuple[float, int] | None]:
+def _resume_plan_child(
+    old: LaneResult, base: Path, *, prior_result: dict | None = None
+) -> tuple[LaneResult, tuple[float, int] | None]:
     """E10 second spec: a plan lane whose prior receipt already names a
     launched child (item 2's pre-launch receipt, still `state: "launched"`
     if a crash cut the launch short, or item 4's finished one that never got
-    rolled up). Refuses the resume outright while the child is still live or
-    paused; otherwise adopts the plan lane's outcome without dispatching
-    anything, rolling the child's spend into the parent's ledger exactly
-    once. Never called once a receipt is already `state: "finished"` with
-    `rolled_up: true` -- `_trusted_lane` accepts that shape directly."""
+    rolled up, including one whose rollup never made it into `result.json`
+    before a crash -- see `_trusted_lane`). Refuses the resume outright while
+    the child is still live or paused; otherwise adopts the plan lane's
+    outcome without dispatching anything, rolling the child's spend into the
+    parent's ledger exactly once. Never called once a receipt is already
+    `state: "finished"` with `rolled_up: true` AND the mission-level
+    `result.json` already names the child -- `_trusted_lane` accepts only
+    that fully-committed shape directly."""
     plan = dict(old.plan or {})
     child_block = dict(plan.get("child") or {})
     child_id = str(child_block.get("mission_id"))
@@ -3589,7 +3607,9 @@ def _resume_plan_child(old: LaneResult, base: Path) -> tuple[LaneResult, tuple[f
     if still_parked or pause_unanswered:
         raise MissionInvalid(f"child '{child_id}' is paused; resume it first")
 
-    already_rolled_up = child_block.get("rolled_up") is True
+    already_rolled_up = child_block.get("rolled_up") is True and child_id in (
+        (prior_result or {}).get("children") or []
+    )
     ok = bool(child_result.get("ok"))
     cost_usd = float(child_result.get("cost_usd") or 0.0)
     unpriced = int((child_result.get("budget") or {}).get("unpriced_dispatches") or 0)
@@ -3637,7 +3657,9 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
                 rerun.add(lane.name)
             continue
         old = previous.get(lane.name)
-        if old is not None and _trusted_lane(mission, mission_dir, lane, old, prior_ok=prior_ok):
+        if old is not None and _trusted_lane(
+            mission, mission_dir, lane, old, prior_ok=prior_ok, prior_result=prior_result
+        ):
             old.kept = True
             kept[lane.name] = old
         elif (
@@ -3650,7 +3672,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             # launched child's own disk state decides the outcome instead of
             # an ordinary rerun -- rerunning would launch a second child
             # from the same deliverable, discarding the first.
-            resolved, rollup = _resume_plan_child(old, base)
+            resolved, rollup = _resume_plan_child(old, base, prior_result=prior_result)
             resolved.kept = True
             kept[lane.name] = resolved
             if rollup is not None:
@@ -5102,9 +5124,17 @@ def _execute_mission(
         repositories=sorted(
             {lane.attempts[0].effective_cwd(mission.cwd) for lane in mission.lanes}
         ),
+        # Cross-vendor review (Gemini): a plan lane a resume adopted via
+        # `_resume_plan_child` (never dispatched this run, so never appended
+        # to `plan_children`) still names its child on its own settled
+        # `LaneResult` -- read every plan lane's final state directly rather
+        # than merging only the prior result and this run's fresh launches,
+        # so an adopted child's id is never dropped from the mission record.
         children=[
-            *((resume.prior_result or {}).get("children") or []),
-            *plan_children,
+            child_id
+            for lane_result in lane_results
+            if (child_id := ((lane_result.plan or {}).get("child") or {}).get("mission_id"))
+            is not None
         ],
         children_cost_usd=round(children_cost_usd, 6),
         children_unpriced_dispatches=children_unpriced,
