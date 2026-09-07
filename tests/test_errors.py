@@ -10,7 +10,9 @@ the argv boundary the way `test_mission.py` and `test_cascade.py` do.
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import shlex
 import threading
 from pathlib import Path
@@ -252,11 +254,10 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "breaker",
         "timeout",
         "setup",
-        "refused",
-        "agent",
-        "deliverable",
         "taint",
         "settings",
+        "refused",
+        "agent",
         "adversarial",
         "plan",
         "denied",
@@ -265,14 +266,105 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "refusal",
         "fleet_error",
         "exit",
-        "gate",
         "gate_test_surface",
+        "gate",
+        "deliverable",
         "no_op",
         "read_moved_bytes",
         "no_answer",
         "commit",
         "unknown",
     )
+
+
+def test_error_kind_return_order_matches_kinds():
+    """F18: reads `error_kind`'s own source rather than a hand-copied list,
+    so the declared order in `KINDS` cannot drift from the checked order
+    again without this test failing on the old tuple's order."""
+    source = inspect.getsource(error_kind)
+    returned = re.findall(r'return "([a-z_]+)"', source)
+    seen: list[str] = []
+    for kind in returned:
+        if kind not in seen:
+            seen.append(kind)
+    assert tuple(seen) == KINDS
+
+
+# F18: one minimal failed `Result` per kind, first match for that kind and
+# no earlier one. Mirrors the fixtures in
+# `test_error_kind_covers_every_kind_and_precedence` above.
+_KIND_OVERRIDES: dict[str, dict] = {
+    "interrupted": dict(
+        interrupted=True, error="interrupted: stop requested; process group killed"
+    ),
+    "cancelled": dict(cancelled=True, error="cancelled: another lane already passed"),
+    "parse": dict(error="parse failed: unparseable envelope"),
+    "cap": dict(budget={"exceeded": True, "cap_usd": 1.0}),
+    "breaker": dict(
+        breaker={"tripped": "looping: x repeated 6 times"}, error="looping: x; killed"
+    ),
+    "timeout": dict(timed_out=True),
+    "setup": dict(spawned=False, error="setup timed out"),
+    "taint": dict(error="taint hooks not enforced: hook missing"),
+    "settings": dict(error="settings modified: .claude/settings.json changed"),
+    "refused": dict(spawned=False, error="isolation failed: worktree add failed"),
+    "agent": dict(error="agent 'reviewer' not applied: persona mismatch"),
+    "adversarial": dict(error="adversarial lane changed source: diff outside allowed files"),
+    "plan": dict(error="plan: child mission depth exceeded"),
+    "denied": dict(error="permission denied: Bash(rm -rf)"),
+    "rate_limit": dict(fleet_error="Rate limit exceeded, please retry"),
+    "transport": dict(fleet_error="ECONNRESET while streaming the response"),
+    "refusal": dict(
+        fleet="claude",
+        fleet_error="I must refuse this request",
+        fleet_status="error_during_execution",
+    ),
+    "fleet_error": dict(fleet_error="something went wrong upstream"),
+    "exit": dict(exit_code=3),
+    "gate_test_surface": dict(
+        test_surface={
+            "clean_gate": {
+                "ran": True,
+                "exit_code": 1,
+                "interrupted": False,
+                "timed_out": False,
+                "infra_error": False,
+            },
+            "touched": True,
+            "changed": ["tests/test_foo.py"],
+        },
+    ),
+    "gate": dict(tests={"ran": True, "exit_code": 1, "timed_out": False, "interrupted": False}),
+    "deliverable": dict(deliverable={"ok": False, "path": "OUT.md", "reason": "missing"}),
+    "no_op": dict(mode="write", git_verdict={"checked": True, "no_op": True}),
+    "read_moved_bytes": dict(mode="read", git_verdict={"checked": True, "no_op": False}),
+    "no_answer": dict(
+        mode="read", answer_path=None, git_verdict={"checked": True, "no_op": True}
+    ),
+    "commit": dict(
+        mode="write",
+        git_verdict={"checked": True, "no_op": False},
+        commit={"committed": False, "reason": "gate failed: exit 1"},
+    ),
+    "unknown": dict(
+        mode="write",
+        error="verdict invalid: schema mismatch",
+        git_verdict={},
+    ),
+}
+
+
+def test_error_kind_covers_every_declared_kind():
+    """Iterates over `KINDS` itself, not a separately maintained list, so a
+    kind added to the tuple without a fixture here fails this test instead
+    of passing silently. Every fixture is expected to fail (`result.ok` is
+    False) on both the old and the new check order, since no classification
+    changes here -- only where `KINDS` says each one is checked."""
+    assert set(_KIND_OVERRIDES) == set(KINDS)
+    for kind in KINDS:
+        result = _result(**_KIND_OVERRIDES[kind])
+        assert result.ok is False, f"{kind}: fixture must actually be a failure"
+        assert error_kind(result) == kind, kind
 
 
 def test_error_kind_from_a_live_rate_limited_claude_dispatch(repo, home, fake_fleet):
@@ -557,15 +649,16 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         "\n## ", 1
     )[0]
     assert (
-        "interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent,"
-        in section
+        "interrupted, cancelled, parse, cap, breaker, timeout, setup, taint, settings, refused,"
+        " agent," in section
     )
-    assert "deliverable, taint," in section
     assert (
-        "settings, adversarial, plan, denied, rate_limit, transport, refusal, fleet_error,"
-        in section
+        "adversarial, plan, denied, rate_limit, transport, refusal, fleet_error, exit," in section
     )
-    assert "gate_test_surface, no_op, read_moved_bytes, no_answer, commit, unknown" in section
+    assert (
+        "gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit,"
+        " unknown" in section
+    )
     assert "cap kill that also timed out is `cap`, not `timeout`" in section
     assert "rate limit is `rate_limit`, not `fleet_error`" in section
     assert "I can't help` or `I cannot help`" in section
@@ -590,18 +683,3 @@ def test_readme_error_kinds_code_block_matches_kinds_exactly():
     block = section.split("```\n", 1)[1].split("```", 1)[0]
     listed = tuple(block.replace(",", " ").split())
     assert listed == KINDS
-
-
-def test_readme_error_kinds_parenthetical_discloses_every_order_divergence():
-    # W11 peer review (Opus): the block above is pinned to `KINDS`' declared
-    # order, not `error_kind`'s check order, and the intro sentence above it
-    # says "checked in this order, first match wins" -- so every kind whose
-    # checked position differs from its declared one needs to be named here,
-    # not just `deliverable`, or the sentence reads as true when it is not.
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Structured error kinds", 1)[1]
-    parenthetical = " ".join(section.split("```", 2)[2].split())
-    assert "`taint` and `settings` are listed after `deliverable` too" in parenthetical
-    assert "`gate_test_surface` is listed after `gate` but is actually checked first" in (
-        parenthetical
-    )

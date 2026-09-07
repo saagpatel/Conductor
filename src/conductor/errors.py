@@ -23,13 +23,7 @@ if TYPE_CHECKING:
 
 # Checked in this order; first match wins. A cap kill that also timed out is
 # `cap`, not `timeout`; a fleet error that also mentions a rate limit is
-# `rate_limit`, not `fleet_error`. One exception to "checked in this order":
-# `deliverable` sits beside `agent` here -- both are conductor's own checks,
-# never a fleet's -- but is actually tested for later (see `error_kind`,
-# after `gate`), mirroring `Result.failure()`'s own order: a run that never
-# really finished (interrupted, capped, timed out, gated, rate-limited) must
-# classify as whatever ended it, not as "deliverable" merely because the
-# file also happens to be missing.
+# `rate_limit`, not `fleet_error`.
 # D9: the prefix `runner.dispatch` writes on a receipt for a run that was
 # paid for and then failed while its output was being read -- a malformed
 # envelope, an unparseable deliverable, a settlement that raised. Matched by
@@ -45,11 +39,10 @@ KINDS: tuple[str, ...] = (
     "breaker",
     "timeout",
     "setup",
-    "refused",
-    "agent",
-    "deliverable",
     "taint",
     "settings",
+    "refused",
+    "agent",
     "adversarial",
     "plan",
     "denied",
@@ -58,8 +51,9 @@ KINDS: tuple[str, ...] = (
     "refusal",
     "fleet_error",
     "exit",
-    "gate",
     "gate_test_surface",
+    "gate",
+    "deliverable",
     "no_op",
     "read_moved_bytes",
     "no_answer",
@@ -306,6 +300,10 @@ def error_kind(result: Result) -> str | None:
         return "gate_test_surface"
     if _gate_failed(result):
         return "gate"
+    # A run that never really finished (interrupted, capped, timed out,
+    # gated, rate-limited) must classify as whatever ended it, not as
+    # "deliverable" merely because the file also happens to be missing --
+    # mirrors `Result.failure()`'s own order.
     if _deliverable_failed(result):
         return "deliverable"
     if _no_op(result):

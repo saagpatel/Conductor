@@ -486,18 +486,10 @@ now also classifies as exactly one of a fixed set of kinds, checked in this
 order, first match wins:
 
 ```
-interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent, deliverable, taint,
-settings, adversarial, plan, denied, rate_limit, transport, refusal, fleet_error, exit, gate,
-gate_test_surface, no_op, read_moved_bytes, no_answer, commit, unknown
+interrupted, cancelled, parse, cap, breaker, timeout, setup, taint, settings, refused, agent,
+adversarial, plan, denied, rate_limit, transport, refusal, fleet_error, exit,
+gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit, unknown
 ```
-
-(`deliverable` is listed here beside `agent` -- both are conductor's own
-checks, not a fleet's -- but is actually tested for later, after `gate`, to
-match `Result.failure()`'s own order: see "Deliverables" above. `taint` and
-`settings` are listed after `deliverable` too, but both are actually checked
-earlier, right after `setup` and before `refused`; `gate_test_surface` is
-listed after `gate` but is actually checked first. This block follows
-`errors.KINDS`'s declared order, not the sequence `error_kind` checks.)
 
 `parse` is checked that early on purpose: a dispatch that raised while its
 output was being read comes back with no priced usage, which the cap check
