@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from conductor.cli import main
-from conductor.report import report
+from conductor.report import WallClockRow, report
 from conductor.runner import Result
 
 
@@ -294,6 +294,120 @@ def test_report_reviewer_precision_table_over_two_missions(home: Path):
     assert row.precision() == round(2 / 3, 3)
 
 
+def test_report_reviewer_precision_counts_an_unparsed_review_verdict_separately(home: Path):
+    # F15 item 2: an unparsed verdict is not a finding source (0 findings
+    # must not silently pass as "reviewed, found nothing") and its lane's
+    # dispositions must not be tallied as fixed/refused either.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m5-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m5",
+    )
+    _write_mission(
+        home,
+        "m5",
+        name="mission-five",
+        ok=True,
+        lanes=[
+            {
+                "name": "review-gemini",
+                "stage": "review",
+                "review": {"verdict": "unparsed", "findings": None},
+                "attempts": [{"fleet": "antigravity", "model": "gemini-3.7-flash"}],
+            },
+            _fix_lane(
+                [
+                    {
+                        "lane": "review-gemini",
+                        "index": 1,
+                        "disposition": "fixed",
+                        "reason": "r1",
+                    },
+                    {
+                        "lane": "review-gemini",
+                        "index": 2,
+                        "disposition": "refused",
+                        "reason": "r2",
+                    },
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.findings == 0
+    assert row.fixed == 0
+    assert row.refused == 0
+    assert row.unparsed == 1
+
+
+def test_report_disposition_naming_an_unknown_lane_is_counted_not_dropped(home: Path):
+    # F15 item 3: a well-formed disposition naming a lane that never ran as
+    # `stage: review` on this mission used to vanish with no counter.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m6-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m6",
+    )
+    _write_mission(
+        home,
+        "m6",
+        name="mission-six",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-typo", "index": 1, "disposition": "fixed", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    assert rpt.dispositions_unknown_lane == 1
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.fixed == 1
+
+
+def test_report_sums_dispositions_malformed_across_fix_lanes(home: Path):
+    # F15 item 3: `dispositions_malformed` lives on each fix lane's own
+    # receipt (verdicts.dispositions_malformed's count of skipped lines);
+    # the report was not printing or summing it anywhere.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m7-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m7",
+    )
+    _write_mission(
+        home,
+        "m7",
+        name="mission-seven",
+        ok=True,
+        lanes=[
+            {
+                "name": "fix",
+                "stage": "fix",
+                "dispositions": [],
+                "dispositions_malformed": 2,
+            },
+        ],
+    )
+    rpt = report(home)
+    assert rpt.dispositions_malformed == 2
+
+
 # --- F2: wall clock on the ledger -------------------------------------------
 
 
@@ -345,6 +459,7 @@ def test_report_wall_clock_table_lists_every_mission_blanks_for_missing_wall(hom
             "gate_s": 60.0,
             "lanes_s": 400.0,
             "idle_s": 5.0,
+            "concurrency": 2,
         },
     )
     # A mission recorded before F2 shipped: no "wall" key at all.
@@ -359,7 +474,8 @@ def test_report_wall_clock_table_lists_every_mission_blanks_for_missing_wall(hom
     assert fresh["gate_s"] == 60.0
     assert fresh["lanes_s"] == 400.0
     assert fresh["idle_s"] == 5.0
-    assert fresh["busy"] == round(400.0 / 3600.0, 3)
+    assert fresh["concurrency"] == 2
+    assert fresh["busy"] == round(400.0 / (3600.0 * 2), 3)
 
     old = rows["m-old"].to_dict()
     assert old == {
@@ -369,8 +485,19 @@ def test_report_wall_clock_table_lists_every_mission_blanks_for_missing_wall(hom
         "gate_s": None,
         "lanes_s": None,
         "idle_s": None,
+        "concurrency": None,
         "busy": None,
     }
+
+
+def test_wall_clock_row_busy_divides_by_wall_s_times_concurrency():
+    row = WallClockRow(mission="m", wall_s=12.0, lanes_s=30.0, concurrency=3)
+    assert row.busy() == round(30.0 / (12.0 * 3), 3)
+
+
+def test_wall_clock_row_busy_is_blank_without_concurrency():
+    row = WallClockRow(mission="m", wall_s=12.0, lanes_s=30.0)
+    assert row.busy() is None
 
 
 def test_readme_documents_wall_clock_in_the_report_section():
@@ -379,7 +506,8 @@ def test_readme_documents_wall_clock_in_the_report_section():
     section = " ".join(raw_section.split())
     assert "**Wall clock**" in section
     assert "launched_at" in section and "paused_s" in section and "idle_s" in section
-    assert "lanes_s / wall_s" in section
+    assert "concurrency" in section
+    assert "lanes_s / (wall_s * concurrency)" in section
     assert "cache_read_tokens" in section and "input_tokens" in section
 
 
@@ -585,6 +713,8 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "error_kinds",
         "reviewer_finding_rate",
         "reviewer_precision",
+        "dispositions_unknown_lane",
+        "dispositions_malformed",
         "missions",
         "rules",
         "skipped",

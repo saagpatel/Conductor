@@ -48,15 +48,24 @@ def _cell(value: object) -> str:
 _WALL_FIGURES = ("wall_s", "paused_s", "gate_s", "lanes_s", "idle_s")
 
 
-def _wall_figures(wall: dict | None) -> dict[str, float | None]:
+def _wall_figures(wall: dict | None) -> dict[str, float | int | None]:
     """F2: one mission's `wall` block, as `WallClockRow`'s own keyword
     arguments -- every figure blank (never 0) on a receipt that predates
     the block, or where a single figure was never computable."""
-    out: dict[str, float | None] = {}
+    out: dict[str, float | int | None] = {}
     for key in _WALL_FIGURES:
         value = wall.get(key) if isinstance(wall, dict) else None
         numeric = isinstance(value, int | float) and not isinstance(value, bool)
         out[key] = float(value) if numeric else None
+    # F15 item 6: an int, not a float, and blank (not 0) on a receipt that
+    # predates this field -- `WallClockRow.busy` reads that blank as "unknown
+    # concurrency", never as 1.
+    concurrency = wall.get("concurrency") if isinstance(wall, dict) else None
+    out["concurrency"] = (
+        concurrency
+        if isinstance(concurrency, int) and not isinstance(concurrency, bool)
+        else None
+    )
     return out
 
 
@@ -171,6 +180,9 @@ def _scan_missions(
             "landed": landed,
             "review_lanes": review_lanes,
             "fix_dispositions": fix_dispositions,
+            # F15 item 3: summed over every `stage: fix` lane on this
+            # mission, whether or not it recorded a `dispositions` list.
+            "fix_dispositions_malformed": 0,
             # F2: None on a receipt that predates the wall block -- the
             # report lists that mission with blanks, never skips it.
             "wall": raw.get("wall") if isinstance(raw.get("wall"), dict) else None,
@@ -194,13 +206,24 @@ def _scan_missions(
                 model = last.get("model") if isinstance(last, dict) else None
                 if isinstance(fleet, str) and lane_name:
                     findings = lane_raw["review"].get("findings")
+                    findings_parsed = isinstance(findings, int) and not isinstance(findings, bool)
                     review_lanes[lane_name] = {
                         "vendor": _vendor(fleet, model if isinstance(model, str) else ""),
-                        "findings": findings if isinstance(findings, int) else 0,
+                        "findings": findings if findings_parsed else 0,
+                        # F15 item 2: an unparsed verdict is not a finding
+                        # source (0 findings would otherwise silently count
+                        # as "zero findings, correctly") and its lane must
+                        # not have a fix lane's dispositions tallied against
+                        # it either -- see the precision loop below.
+                        "unparsed": not findings_parsed,
                     }
-            if stage == FIX_STAGE and isinstance(lane_raw.get("dispositions"), list):
-                fix_dispositions = lane_raw["dispositions"]
-                meta[mission]["fix_dispositions"] = fix_dispositions
+            if stage == FIX_STAGE:
+                malformed = lane_raw.get("dispositions_malformed")
+                if isinstance(malformed, int) and not isinstance(malformed, bool):
+                    meta[mission]["fix_dispositions_malformed"] += malformed
+                if isinstance(lane_raw.get("dispositions"), list):
+                    fix_dispositions = lane_raw["dispositions"]
+                    meta[mission]["fix_dispositions"] = fix_dispositions
         collates: list[object] = []
         collate = raw.get("collate")
         if isinstance(collate, dict):
@@ -408,6 +431,11 @@ class ReviewerPrecisionRow:
     refused: int = 0
     already: int = 0
     wording: int = 0
+    # F15 item 2: review lanes on this vendor whose verdict did not parse
+    # (findings is not an int) -- excluded from `findings` and from every
+    # disposition count above, since a fix lane's dispositions against an
+    # unparsed verdict are not real dispositions against real findings.
+    unparsed: int = 0
 
     def total(self) -> int:
         return self.fixed + self.refused + self.already + self.wording
@@ -426,6 +454,7 @@ class ReviewerPrecisionRow:
             "refused": self.refused,
             "already": self.already,
             "wording": self.wording,
+            "unparsed": self.unparsed,
             "precision": self.precision(),
         }
 
@@ -459,8 +488,14 @@ class MissionRow:
 @dataclass
 class WallClockRow:
     """F2: one mission's wall clock, straight off its own `result.json`
-    `wall` block -- `busy` (lanes_s / wall_s) is computed here, not stored,
-    since the two figures it divides are always read together."""
+    `wall` block -- `busy` (lanes_s / (wall_s * concurrency)) is computed
+    here, not stored, since the figures it divides are always read together.
+
+    F15 item 6: `lanes_s` is a sum across every lane, so a mission that ran
+    more than one lane at once legitimately pushes it past `wall_s` on its
+    own -- dividing by `wall_s` alone always read that as `busy` above 1.0.
+    `concurrency` is None on a receipt that predates this field, and `busy`
+    follows it blank rather than assume 1."""
 
     mission: str
     wall_s: float | None = None
@@ -468,11 +503,12 @@ class WallClockRow:
     gate_s: float | None = None
     lanes_s: float | None = None
     idle_s: float | None = None
+    concurrency: int | None = None
 
     def busy(self) -> float | None:
-        if not self.wall_s or self.lanes_s is None:
+        if not self.wall_s or self.lanes_s is None or not self.concurrency:
             return None
-        return round(self.lanes_s / self.wall_s, 3)
+        return round(self.lanes_s / (self.wall_s * self.concurrency), 3)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -482,6 +518,7 @@ class WallClockRow:
             "gate_s": self.gate_s,
             "lanes_s": self.lanes_s,
             "idle_s": self.idle_s,
+            "concurrency": self.concurrency,
             "busy": self.busy(),
         }
 
@@ -509,6 +546,11 @@ class Report:
     rules: Rules
     skipped: int = 0
     wall_clock: list[WallClockRow] = field(default_factory=list)
+    # F15 item 3: totals the per-vendor `reviewer_precision` rows cannot
+    # carry -- a disposition naming a lane that is not a review lane on its
+    # mission, and a fix lane's own malformed `DISPOSITION:` lines.
+    dispositions_unknown_lane: int = 0
+    dispositions_malformed: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -516,6 +558,8 @@ class Report:
             "error_kinds": [row.to_dict() for row in self.error_kinds],
             "reviewer_finding_rate": [row.to_dict() for row in self.reviewer_finding_rate],
             "reviewer_precision": [row.to_dict() for row in self.reviewer_precision],
+            "dispositions_unknown_lane": self.dispositions_unknown_lane,
+            "dispositions_malformed": self.dispositions_malformed,
             "missions": [row.to_dict() for row in self.missions],
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
@@ -578,6 +622,11 @@ def _build_report(
                 mission_row.capped = True
 
     precision: dict[str, ReviewerPrecisionRow] = {}
+    # F15 item 3: a disposition naming a lane that is not a review lane on
+    # its own mission (typo, or a lane that never ran as `stage: review`) is
+    # well-formed but has nowhere to land in `precision` -- counted here
+    # instead of vanishing silently.
+    dispositions_unknown_lane = 0
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
@@ -597,19 +646,37 @@ def _build_report(
             continue
         for info in review_lanes.values():
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
-            row.findings += info["findings"]
+            if info.get("unparsed"):
+                row.unparsed += 1
+            else:
+                row.findings += info["findings"]
         for item in fix_dispositions:
             if not isinstance(item, dict):
                 continue
             lane_name = item.get("lane")
             disposition = item.get("disposition")
-            info = review_lanes.get(lane_name) if isinstance(lane_name, str) else None
-            if info is None or disposition not in DISPOSITIONS:
+            if disposition not in DISPOSITIONS or not isinstance(lane_name, str):
+                continue
+            info = review_lanes.get(lane_name)
+            if info is None:
+                dispositions_unknown_lane += 1
+                continue
+            if info.get("unparsed"):
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             setattr(row, disposition, getattr(row, disposition) + 1)
 
     precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
+    # F15 item 3: every fix lane's own `dispositions_malformed` count, summed
+    # across the same missions the rest of this report's tables are scoped
+    # to -- independent of whether that mission has a review lane at all,
+    # unlike `dispositions_unknown_lane` above.
+    dispositions_malformed = sum(
+        meta.get("fix_dispositions_malformed", 0)
+        for name, meta in mission_meta.items()
+        if isinstance(meta.get("fix_dispositions_malformed"), int)
+        and (not windowed or name in missions)
+    )
 
     vendor_stage_rows = sorted(
         vendor_stage.values(), key=lambda r: (-r.cost_usd, r.vendor, r.stage or "")
@@ -671,6 +738,8 @@ def _build_report(
         error_kinds=error_kind_rows,
         reviewer_finding_rate=reviewer_rows,
         reviewer_precision=precision_rows,
+        dispositions_unknown_lane=dispositions_unknown_lane,
+        dispositions_malformed=dispositions_malformed,
         missions=mission_rows,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
@@ -779,7 +848,7 @@ def _print_report(rpt: Report) -> None:
     _print_section(
         "Reviewer precision (findings fixed vs. refused, over missions with a fix "
         "lane's dispositions)",
-        ("vendor", "findings", "fixed", "refused", "already", "wording", "precision"),
+        ("vendor", "findings", "fixed", "refused", "already", "wording", "unparsed", "precision"),
         [
             (
                 d["vendor"],
@@ -788,11 +857,17 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["refused"]),
                 _cell(d["already"]),
                 _cell(d["wording"]),
+                _cell(d["unparsed"]),
                 _cell(d["precision"]),
             )
             for d in (row.to_dict() for row in rpt.reviewer_precision)
         ],
     )
+    print(
+        f"  dispositions naming an unknown lane: {rpt.dispositions_unknown_lane}"
+        f"  |  malformed disposition lines: {rpt.dispositions_malformed}"
+    )
+    print()
     _print_section(
         "Missions",
         ("mission", "cost_usd", "ok", "lanes", "capped", "salvaged", "landed"),
@@ -811,7 +886,7 @@ def _print_report(rpt: Report) -> None:
     )
     _print_section(
         "Wall clock",
-        ("mission", "wall_s", "paused_s", "gate_s", "lanes_s", "idle_s", "busy"),
+        ("mission", "wall_s", "paused_s", "gate_s", "lanes_s", "idle_s", "concurrency", "busy"),
         [
             (
                 d["mission"],
@@ -820,6 +895,7 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["gate_s"]),
                 _cell(d["lanes_s"]),
                 _cell(d["idle_s"]),
+                _cell(d["concurrency"]),
                 _cell(d["busy"]),
             )
             for d in (row.to_dict() for row in rpt.wall_clock)

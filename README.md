@@ -2331,15 +2331,19 @@ The report has seven sections, in this order:
   mission's first launch, carried across every resume; `wall_s` is the
   span since; `paused_s` sums the time each pause point actually sat
   waiting for an answer (from `pause.json`'s own `asked_at`/`answered_at`
-  pairs); `gate_s` sums every lane's own gate and clean-gate time from its
-  run receipts; `lanes_s` sums every lane's dispatch time; `idle_s` is time
-  the scheduler had nothing running and nothing ready to start. The report
-  prints `wall_s`, `paused_s`, `gate_s`, `lanes_s`, `idle_s`, and `busy`
-  (`lanes_s / wall_s`, blank when `wall_s` is blank or zero). A mission
-  recorded before this field existed still gets its row, every figure
-  blank, never skipped or read as `0`. `report.md` carries the same figures
-  as one line under the mission header, and `conductor missions` carries
-  `wall_s`.
+  pairs); `gate_s` sums every lane's own gate, its clean-gate re-run, its
+  reproduce gate, and its setup/teardown commands' time from its run
+  receipts; `lanes_s` sums every lane's dispatch time; `idle_s` is time the
+  scheduler had nothing running and nothing ready to start, carried across a
+  resume from the mission's own prior `result.json` (not the scheduler's
+  clock, which only spans the current process) and added to by this run's
+  own idle time. The report prints `wall_s`, `paused_s`, `gate_s`,
+  `lanes_s`, `idle_s`, `concurrency`, and `busy` (`lanes_s / (wall_s *
+  concurrency)`, blank when `wall_s`, `lanes_s`, or `concurrency` is blank
+  or `wall_s` is zero). A mission recorded before this field existed still
+  gets its row, every figure blank, never skipped or read as `0`.
+  `report.md` carries the same figures as one line under the mission
+  header, and `conductor missions` carries `wall_s`.
 
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`

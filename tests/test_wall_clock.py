@@ -52,9 +52,38 @@ def test_two_lane_mission_wall_s_covers_lanes_s_and_idle_s_is_non_negative(
     assert wall["idle_s"] >= 0
     assert wall["paused_s"] == 0.0
     assert wall["gate_s"] == 0.0  # no `test` command declared on this mission
+    assert wall["concurrency"] == 1
 
     report = Path(result.report_path).read_text()
     assert f"- wall: {wall['wall_s']}s" in report
+
+
+def test_wall_s_times_concurrency_covers_lanes_s_when_lanes_overlap(
+    repo, home, monkeypatch, tmp_path
+):
+    # F15 item 6: `wall_s >= lanes_s` is the false invariant a concurrent
+    # mission can legitimately break (`lanes_s` is a sum across overlapping
+    # lanes) -- `wall_s * concurrency >= lanes_s` is the one that actually
+    # holds, whether or not the lanes overlapped enough to need the slack.
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: say("ok"))
+    mission = mission_from_dict(
+        {
+            "name": "wall-concurrent",
+            "cwd": str(repo),
+            "concurrency": 2,
+            "lanes": [
+                {"name": "a", "fleet": "claude", "prompt": "A"},
+                {"name": "b", "fleet": "claude", "prompt": "B"},
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    assert result.ok is True
+    wall = result.wall
+    assert wall is not None
+    assert wall["concurrency"] == 2
+    assert wall["wall_s"] * wall["concurrency"] >= wall["lanes_s"]
 
 
 def test_gate_s_sums_the_lanes_own_gate_duration(repo, home, monkeypatch, tmp_path):
@@ -118,6 +147,42 @@ def test_resume_of_a_pre_f2_mission_recovers_launched_at_from_the_mission_id(
         Mission.from_snapshot(raw_mission), home=home, resume_dir=Path(first.mission_dir)
     )
     assert resumed.wall["launched_at"].startswith("2026-01-01T00:00:00")
+
+
+def test_gate_s_sums_reproduce_and_setup_teardown_alongside_the_gate(home):
+    """F15 item 4: `reproduce` (E16) and `lane_env.setup`/`teardown` (C4) are
+    each their own `ran`/`duration_s` outcome, sibling to `tests` -- none of
+    the three used to be counted in `gate_s` at all."""
+    run_dir = home / "runs" / "20260101T000000Z-full"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "tests": {"ran": True, "exit_code": 0, "tail": "", "duration_s": 10.0},
+                "reproduce": {"ran": True, "verdict": "reproduced", "duration_s": 20.0},
+                "lane_env": {
+                    "setup": {"ran": True, "exit_code": 0, "tail": "", "duration_s": 5.0},
+                    "teardown": None,
+                },
+            }
+        )
+    )
+    lane = mission_mod.LaneResult(
+        name="a", ok=True, attempts=[{"run_id": "20260101T000000Z-full"}]
+    )
+    assert mission_mod._gate_seconds([lane], home) == 35.0
+
+
+def test_gate_s_is_null_when_reproduce_ran_but_predates_duration_s(home):
+    run_dir = home / "runs" / "20260101T000000Z-old-reproduce"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps({"reproduce": {"ran": True, "verdict": "reproduced"}})
+    )
+    lane = mission_mod.LaneResult(
+        name="a", ok=True, attempts=[{"run_id": "20260101T000000Z-old-reproduce"}]
+    )
+    assert mission_mod._gate_seconds([lane], home) is None
 
 
 def test_gate_s_is_null_when_a_receipt_ran_a_gate_but_predates_duration_s(home):

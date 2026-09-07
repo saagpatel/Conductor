@@ -383,6 +383,18 @@ def test_read_lane_with_an_e1_deliverable_and_a_gate_skips_the_gate(repo, home, 
     assert result.ok is True
 
 
+def test_read_lane_whose_tree_vanished_is_not_ok(repo, home, fake_fleet):
+    """F15: a read lane whose fake fleet deletes the whole working tree must
+    not read as a no-op skip -- the tree vanishing is a distinct, always
+    failing outcome, not the F3 "source unchanged" shape."""
+    fake_fleet(["sh", "-c", f"rm -rf {repo}; exit 0"])
+    result = dispatch(spec_for(repo, mode="read"), home=home, test_command="exit 0")
+    assert result.ok is False
+    assert result.failure() == "the working tree vanished during the dispatch; no work landed"
+    assert result.gate != {"skipped": "read lane, source unchanged", "command": "exit 0"}
+    assert any("vanished" in n for n in result.git_verdict["notes"])
+
+
 def test_write_lane_with_the_same_gate_still_runs_it(repo, home, fake_fleet):
     """The skip is read-lane only: a write lane that happens to move no bytes
     still pays for its gate, exactly as before."""

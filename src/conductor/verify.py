@@ -177,6 +177,11 @@ class Verdict:
 
     checked: bool
     no_op: bool = False
+    # F15: true only when `before.is_repo` and the tree is gone at `after` --
+    # distinct from an ordinary `no_op` (which `no_op` stays True for too, so
+    # every existing reader of that field is unchanged) so a caller can tell
+    # "nothing happened" from "the tree the fleet was given no longer exists".
+    vanished: bool = False
     commits_added: int = 0
     files_changed: int = 0
     dirty_delta: int = 0
@@ -201,6 +206,7 @@ def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
         return Verdict(
             checked=True,
             no_op=True,
+            vanished=True,
             branch_before=before.branch,
             notes=["the working tree vanished during the dispatch; no work landed"],
         )
