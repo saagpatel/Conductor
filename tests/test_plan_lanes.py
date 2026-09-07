@@ -634,3 +634,184 @@ def test_a_relative_child_cwd_resolves_against_the_plan_lanes_repository(
         (Path(child_block["report_path"]).parent / "mission.json").read_text()
     )
     assert Path(child_snapshot["cwd"]) == Path(repo).resolve()
+
+
+# --- D1: one answer launches exactly one planner's child --------------------
+
+
+def _by_first_word(monkeypatch, table: dict[str, list[str]]) -> None:
+    """Dispatch by the first word of the prompt, so two plan lanes in one
+    mission each write their own deliverable (`test_human.py::by_prompt`'s
+    shape, with a whole argv per prompt instead of one answer)."""
+
+    def pick(spec):
+        return table[spec.prompt.split()[0]]
+
+    monkeypatch.setattr(runner_mod, "build_argv", pick)
+
+
+def _two_planners(repo, tmp_path, *, home_budget: float | None = None) -> Mission:
+    raw: dict = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "lanes": [
+            {
+                "name": "plana",
+                "fleet": "claude",
+                "prompt": "PLANA write the child mission",
+                "plan": True,
+                "deliverable": {"path": "childa.json"},
+            },
+            {
+                "name": "planb",
+                "fleet": "claude",
+                "prompt": "PLANB write the child mission",
+                "plan": True,
+                "deliverable": {"path": "childb.json"},
+            },
+        ],
+    }
+    if home_budget is not None:
+        raw["max_cost_usd"] = home_budget
+    return mission_from_dict(raw, base_dir=tmp_path)
+
+
+def _two_planner_table(repo, *, slow: str | None = None) -> dict[str, list[str]]:
+    """Both planners write a child mission of their own; `slow` names the one
+    whose dispatch sleeps, so which of the two parks the mission first is the
+    test's to choose rather than the scheduler's."""
+    table: dict[str, list[str]] = {}
+    for lane, child_name in (("PLANA", "child-a"), ("PLANB", "child-b")):
+        argv = _write_deliverable_argv(
+            _child_raw(repo, max_cost_usd=1.0, name=child_name),
+            path=f"child{lane[-1].lower()}.json",
+            cost=0.1,
+        )
+        if slow == lane:
+            argv[-1] = f"sleep 0.5; {argv[-1]}"
+        table[lane] = argv
+    table["CHILDBUILD"] = ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    return table
+
+
+def _launched_children(home, parent_id: str) -> list[str]:
+    """Mission directories actually launched by `parent_id`'s plan lanes.
+    `_plan_check_child`'s own dry run claims a directory too, so a count of
+    `missions/` proves nothing; only a launch stamps `parent`."""
+    launched = []
+    for path in (home / "missions").iterdir():
+        snapshot = path / "mission.json"
+        if not snapshot.is_file():
+            continue
+        parent = json.loads(snapshot.read_text()).get("parent")
+        if isinstance(parent, dict) and parent.get("mission_id") == parent_id:
+            launched.append(path.name)
+    return sorted(launched)
+
+
+def _plan_of(result, name: str) -> dict:
+    return next(lane for lane in result.lanes if lane["name"] == name)["plan"]
+
+
+def _resume_with(first, home, answer: str | None):
+    return run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer=answer
+    )
+
+
+@pytest.mark.parametrize("slow", ["PLANB", "PLANA"])
+def test_continue_launches_only_the_answered_planners_child(
+    repo, home, monkeypatch, tmp_path, slow
+):
+    """D1: two plan lanes park in one pass (the scheduler submits both and
+    raises a pause only for the first completion). One `continue` launches
+    the child of the lane its pause names, and the other planner is still
+    parked -- it raises its own pause on the same resume."""
+    _by_first_word(monkeypatch, _two_planner_table(repo, slow=slow))
+    first = run_mission(_two_planners(repo, tmp_path), home=home)
+
+    answered = first.paused["lane"]
+    other = "planb" if answered == "plana" else "plana"
+    assert answered == ("plana" if slow == "PLANB" else "planb")
+    assert _plan_of(first, other).get("child") is None
+
+    resumed = _resume_with(first, home, "continue")
+
+    assert _plan_of(resumed, answered)["child"]["state"] == "finished"
+    assert _plan_of(resumed, answered)["child"]["ok"] is True
+    assert _plan_of(resumed, other).get("child") is None
+    assert resumed.children == [_plan_of(resumed, answered)["child"]["mission_id"]]
+    assert resumed.paused["kind"] == "child"
+    assert resumed.paused["lane"] == other
+    pause_doc = json.loads((Path(resumed.mission_dir) / "pause.json").read_text())
+    assert pause_doc["lane"] == other and pause_doc["answer"] is None
+
+    # And the second answer launches the second child, exactly once.
+    assert _launched_children(home, first.mission_id) == [
+        _plan_of(resumed, answered)["child"]["mission_id"]
+    ]
+
+    # And the second answer launches the second child, exactly once.
+    finished = _resume_with(resumed, home, "continue")
+    assert _plan_of(finished, other)["child"]["ok"] is True
+    assert finished.paused is None
+    assert _launched_children(home, first.mission_id) == sorted(
+        _plan_of(finished, name)["child"]["mission_id"] for name in (answered, other)
+    )
+
+
+def test_stop_launches_neither_planners_child(repo, home, monkeypatch, tmp_path):
+    """D1: `stop` answered to one planner's pause refused that lane before,
+    and launched every other parked planner's child anyway."""
+    _by_first_word(monkeypatch, _two_planner_table(repo, slow="PLANB"))
+    first = run_mission(_two_planners(repo, tmp_path), home=home)
+    assert first.paused["lane"] == "plana"
+
+    stopped = _resume_with(first, home, "stop")
+
+    refused = next(lane for lane in stopped.lanes if lane["name"] == "plana")
+    assert refused["ok"] is False
+    assert refused["attempts"][-1]["error"] == "plan: child launch refused by the operator"
+    assert refused["plan"].get("child") is None
+    assert _plan_of(stopped, "planb").get("child") is None
+    assert stopped.children == []
+    assert stopped.paused["answer"] == "stop"
+    assert _launched_children(home, first.mission_id) == []
+
+
+def test_a_human_pause_answered_stop_launches_no_planner_child(
+    repo, home, monkeypatch, tmp_path
+):
+    """D1 (lead verification): the only stop guard checked `kind == "child"`
+    and the lane name, so a `stop` answered to a *human* pause fell through
+    it and launched every parked planner's child."""
+    table = _two_planner_table(repo)
+    table["APPROVE"] = ["sh", "-c", "false"]  # never dispatched
+    _by_first_word(monkeypatch, table)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "concurrency": 2,
+            "lanes": [
+                {
+                    "name": "plana",
+                    "fleet": "claude",
+                    "prompt": "PLANA write the child mission",
+                    "plan": True,
+                    "deliverable": {"path": "childa.json"},
+                },
+                {"name": "ask", "fleet": "human", "prompt": "APPROVE this plan?"},
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    assert first.paused["kind"] == "human"
+    assert _plan_of(first, "plana")["refused"] is None
+    assert _plan_of(first, "plana").get("child") is None
+
+    stopped = _resume_with(first, home, "stop")
+
+    assert _plan_of(stopped, "plana").get("child") is None
+    assert stopped.children == []
+    assert _launched_children(home, first.mission_id) == []

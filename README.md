@@ -2204,6 +2204,16 @@ carries its `depth` and `parent`. `--answer stop` fails the plan lane as
 stopped pause does. `--unattended` refuses a mission with a plan lane --
 nobody is there to answer its pause.
 
+**One answer launches exactly one child.** Two plan lanes can park in the
+same pass -- the scheduler submits every ready lane and raises a pause only
+for the first completion -- so an answer is consumed by the one lane the
+pause it answers names, and by no other. A `continue` launches that lane's
+child alone; a `stop` refuses that lane alone; an answer to a `human`,
+`lane`, or `spend` pause, which names no plan lane, launches nothing at all.
+Any planner still parked raises its own `kind: "child"` pause on the same
+resume, once nothing else has parked the mission, so a two-planner mission
+takes two answers and the mission parks again after the first.
+
 **The child's budget is the parent's.** At launch, when the parent has a
 budget, the child's `max_cost_usd` is clamped to `min(child's own, parent's
 ledger.remaining())` and the child's snapshot gets `budget_from_parent:

@@ -4147,6 +4147,30 @@ def _answer_human_pause(
     return None
 
 
+_PLAN_PAUSE_CHILD_FIELDS = ("child_path", "child_name", "child_max_cost_usd")
+
+
+def _plan_pause_info(lane_name: str, plan: dict) -> dict:
+    """E10: the `kind: "child"` pause a parked plan lane raises. Built in two
+    places -- when the lane's own dispatch settles ok, and (D1) when a later
+    run finds it still parked because the answer it saw named another lane --
+    so the operator sees the same question either way."""
+    info = {
+        "kind": "child",
+        "lane": lane_name,
+        "spent_usd": None,
+        "threshold": None,
+        "reason": (f"lane {lane_name} planned a mission and is waiting for the operator"),
+        "question": (
+            f"Lane '{lane_name}' planned mission '{plan['child_name']}' "
+            f"(${plan['child_max_cost_usd']:.2f}); launch it?"
+        ),
+    }
+    for key in _PLAN_PAUSE_CHILD_FIELDS:
+        info[key] = plan.get(key)
+    return info
+
+
 def _launch_plan_child(
     lane: Lane,
     parked: LaneResult,
@@ -4304,7 +4328,13 @@ def run_mission(
     # C2: a paused mission is refused before the running lock is taken, so an
     # unanswered pause never claims the lock and blocks a later, answered
     # resume. A dry run rehearses without needing or recording an answer.
+    #
+    # D1: `pause_answer` is the record of *which* pause this resume answered
+    # -- its `kind` and its `lane`. `stop_answer` stays what it always was
+    # (set only on a stop), but a `continue` is now carried too, because one
+    # answer may resolve only the one lane the pause it answers names.
     stop_answer: dict | None = None
+    pause_answer: dict | None = None
     if resume_dir is not None and not dry_run:
         pause_path = mission_dir / "pause.json"
         pause_doc = _json_object(pause_path)
@@ -4314,6 +4344,7 @@ def run_mission(
                     mission, mission_dir, pause_path, pause_doc, answer=answer,
                     answer_file=answer_file,
                 )
+                pause_answer = {"kind": "human", "lane": pause_doc.get("lane")}
             else:
                 if answer_file is not None:
                     raise MissionInvalid("--answer-file only applies to a human lane pause")
@@ -4330,6 +4361,7 @@ def run_mission(
                 pause_doc["answer"] = answer
                 pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
                 pause_path.write_text(json.dumps(pause_doc, indent=2))
+                pause_answer = resolved
                 if answer == "stop":
                     stop_answer = resolved
         elif answer is not None or answer_file is not None:
@@ -4370,6 +4402,7 @@ def run_mission(
             resume=resume,
             is_resume=resume_dir is not None,
             stop_answer=stop_answer,
+            pause_answer=pause_answer,
             dispatcher=dispatcher,
             human_answers=human_answers,
             unattended=unattended,
@@ -4400,6 +4433,7 @@ def _execute_mission(
     resume: _ResumePlan,
     is_resume: bool,
     stop_answer: dict | None = None,
+    pause_answer: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
     human_answers: dict[str, str] | None = None,
     unattended: bool = False,
@@ -4943,13 +4977,25 @@ def _execute_mission(
 
     # E10: a plan lane's launch decision. Only a resume can reach here with a
     # plan lane already parked (a fresh launch's plan lane, if any, has not
-    # dispatched yet), and only a resume of the exact pause it raised ever
-    # answers it, so this always runs whether that answer was continue or
-    # stop -- `_launch_plan_child` itself tells the two apart.
+    # dispatched yet).
+    #
+    # D1: exactly one lane -- the one named by the `kind: "child"` pause this
+    # resume actually answered -- is resolved here, continue or stop alike
+    # (`_launch_plan_child` tells those two apart). Two plan lanes can both
+    # park in one pass (the scheduler submits every ready lane and raises a
+    # pause only for the first completion), and before this an answer to one
+    # of them, or to a `human`/`lane`/`spend` pause naming no plan lane at
+    # all, launched every parked planner's child. Any planner this answer
+    # does not name stays parked and asks for itself further down.
     plan_children: list[str] = []
-    if is_resume and not dry_run:
+    answered_plan_lane = (
+        pause_answer.get("lane")
+        if pause_answer is not None and pause_answer.get("kind") == "child"
+        else None
+    )
+    if is_resume and not dry_run and answered_plan_lane is not None:
         for lane in mission.lanes:
-            if not lane.plan:
+            if not lane.plan or lane.name != answered_plan_lane:
                 continue
             parked = done.get(lane.name)
             if parked is None or not parked.ok or parked.plan is None:
@@ -5194,26 +5240,27 @@ def _execute_mission(
                     # disables it, and it fires the moment the checks above
                     # pass, in the same place a `pause.before` lane's own
                     # park is decided.
-                    pause_info = {
-                        "kind": "child",
-                        "lane": result.name,
-                        "spent_usd": None,
-                        "threshold": None,
-                        "reason": (
-                            f"lane {result.name} planned a mission and is waiting for "
-                            "the operator"
-                        ),
-                        "question": (
-                            f"Lane '{result.name}' planned mission "
-                            f"'{result.plan['child_name']}' "
-                            f"(${result.plan['child_max_cost_usd']:.2f}); launch it?"
-                        ),
-                        "child_path": result.plan["child_path"],
-                        "child_name": result.plan["child_name"],
-                        "child_max_cost_usd": result.plan["child_max_cost_usd"],
-                    }
+                    pause_info = _plan_pause_info(result.name, result.plan)
             if not running and idle_since is None:
                 idle_since = time.monotonic()
+
+    if pause_info is None and stop_answer is None and not dry_run:
+        # D1: a planner that parked but whose pause this run did not answer
+        # is still waiting for the operator. It asks again here, in mission
+        # order, the moment nothing else in this run has parked the mission
+        # -- so two planners that parked together are launched by two
+        # answers, never by one.
+        for lane in mission.lanes:
+            if not lane.plan:
+                continue
+            still_parked = done.get(lane.name)
+            if still_parked is None or not still_parked.ok or still_parked.plan is None:
+                continue
+            plan_block = still_parked.plan
+            if plan_block.get("refused") is not None or plan_block.get("child") is not None:
+                continue
+            pause_info = _plan_pause_info(lane.name, plan_block)
+            break
 
     if pause_info is not None and not stop_requested():
         # A stop that arrives while a lane already dispatched before the
@@ -5233,7 +5280,7 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             new_pause_doc["ask_path"] = pause_info["ask_path"]
-        for key in ("child_path", "child_name", "child_max_cost_usd"):
+        for key in _PLAN_PAUSE_CHILD_FIELDS:
             if key in pause_info:
                 new_pause_doc[key] = pause_info[key]
         (mission_dir / "pause.json").write_text(json.dumps(new_pause_doc, indent=2))
@@ -5258,7 +5305,7 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             pause_park["ask_path"] = pause_info["ask_path"]
-        for key in ("child_path", "child_name", "child_max_cost_usd"):
+        for key in _PLAN_PAUSE_CHILD_FIELDS:
             if key in pause_info:
                 pause_park[key] = pause_info[key]
     lane_results = [done[lane.name] for lane in mission.lanes]
