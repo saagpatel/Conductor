@@ -2621,7 +2621,8 @@ The report has seven sections, in this order:
   `n/a`, never `0`, so a missing stage is never mistaken for a clean one.
 - **Wall clock**: one row per mission ever recorded, from that mission's own
   `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
-  "paused_s", "gate_s", "lanes_s", "idle_s"}`. `launched_at` is the
+  "paused_s", "gate_s", "lanes_s", "idle_s", "occupied_s",
+  "critical_path_s", "lead_s"}`. `launched_at` is the
   mission's first launch, carried across every resume; `wall_s` is the
   span since; `paused_s` sums the time each pause point actually sat
   waiting for an answer (from `pause.json`'s own `asked_at`/`answered_at`
@@ -2631,11 +2632,31 @@ The report has seven sections, in this order:
   scheduler had nothing running and nothing ready to start, carried across a
   resume from the mission's own prior `result.json` (not the scheduler's
   clock, which only spans the current process) and added to by this run's
-  own idle time. The report prints `wall_s`, `paused_s`, `gate_s`,
-  `lanes_s`, `idle_s`, `concurrency`, and `busy` (`lanes_s / (wall_s *
-  concurrency)`, blank when `wall_s`, `lanes_s`, or `concurrency` is blank
-  or `wall_s` is zero). A mission recorded before this field existed still
-  gets its row, every figure blank, never skipped or read as `0`.
+  own idle time. `lanes_s` and `gate_s` are lane-work sums that overlap
+  each other whenever more than one lane runs at a time, so neither one nor
+  the pair is a decomposition of `wall_s`. `occupied_s` is the one that is:
+  the length of the union of every attempt's interval, where an attempt
+  starts at the UTC stamp at the front of its run id and ends its own
+  `duration_s` plus that run's gate seconds later, counting overlapping
+  attempts once. `critical_path_s` is the longest path through the lane
+  dependency graph (a lane's `needs`, `base`, and `resume` edges), each lane
+  weighted by its final attempt's duration plus that run's gate seconds,
+  which is the floor no amount of concurrency gets under; collate and
+  resolve are not lanes and are never on the path. `lead_s` is `wall_s`
+  minus `occupied_s` minus `paused_s`, clamped at zero: elapsed time the
+  mission was neither waiting on the operator nor running a dispatch, which
+  is the lead's own integration time. Each of the three is blank, never
+  `0`, when the receipts cannot answer (an attempt with no parseable start
+  or no measured duration, or a gate that ran before its time was
+  recorded). The report prints `wall_s`, `paused_s`, `gate_s`, `lanes_s`,
+  `idle_s`, `concurrency`, `busy` (`lanes_s / (wall_s * concurrency)`,
+  blank when `wall_s`, `lanes_s`, or `concurrency` is blank or `wall_s` is
+  zero), `occupied_s`, `critical_path_s`, `lead_s`, and `stretch`
+  (`wall_s / critical_path_s`, blank when either is blank or the path is
+  zero), which is how much longer the mission took than its own critical
+  path and the figure to read for that instead of `busy`. A mission
+  recorded before this field existed still gets its row, every figure
+  blank, never skipped or read as `0`.
   `report.md` carries the same figures as one line under the mission
   header, and `conductor missions` carries `wall_s`.
 

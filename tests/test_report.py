@@ -620,6 +620,12 @@ def test_report_wall_clock_table_lists_every_mission_blanks_for_missing_wall(hom
         "idle_s": None,
         "concurrency": None,
         "busy": None,
+        # W8: a receipt that predates these three carries no figure for
+        # them either, and `stretch` follows `critical_path_s` blank.
+        "occupied_s": None,
+        "critical_path_s": None,
+        "lead_s": None,
+        "stretch": None,
     }
 
 
@@ -1181,3 +1187,104 @@ def test_report_prints_the_three_cap_loss_cohorts(home: Path, monkeypatch, capsy
     printed = capsys.readouterr().out
     assert "rule 10: Claude runs capped, by what their own gate did" in printed
     assert "gate not run" in printed
+
+
+def test_wall_clock_row_carries_occupied_critical_path_lead_and_stretch(home: Path):
+    """W8: the three new figures come straight off the `wall` block, and
+    `stretch` (`wall_s / critical_path_s`) is computed here the way `busy`
+    is -- how much longer the mission took than its own longest chain."""
+    _write_mission(
+        home,
+        "m-w8",
+        name="mission-w8",
+        ok=True,
+        lanes=[],
+        wall={
+            "launched_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T01:00:00+00:00",
+            "wall_s": 3600.0,
+            "paused_s": 600.0,
+            "gate_s": 60.0,
+            "lanes_s": 400.0,
+            "idle_s": 5.0,
+            "concurrency": 2,
+            "occupied_s": 1200.0,
+            "critical_path_s": 900.0,
+            "lead_s": 1800.0,
+        },
+    )
+    row = {r.mission: r for r in report(home).wall_clock}["m-w8"].to_dict()
+    assert row["occupied_s"] == 1200.0
+    assert row["critical_path_s"] == 900.0
+    assert row["lead_s"] == 1800.0
+    assert row["stretch"] == 4.0
+    # `busy` keeps exactly its old definition, off the lane-work sums.
+    assert row["busy"] == round(400.0 / (3600.0 * 2), 3)
+
+
+def test_wall_clock_row_stretch_is_blank_without_a_critical_path():
+    assert WallClockRow(mission="m", wall_s=12.0).stretch() is None
+    assert WallClockRow(mission="m", wall_s=12.0, critical_path_s=0.0).stretch() is None
+    assert WallClockRow(mission="m", critical_path_s=4.0).stretch() is None
+
+
+def test_report_prints_the_new_wall_clock_columns(home: Path, capsys, monkeypatch):
+    _write_mission(
+        home,
+        "m-w8",
+        name="mission-w8",
+        ok=True,
+        lanes=[],
+        wall={
+            "wall_s": 3600.0,
+            "paused_s": 600.0,
+            "gate_s": 60.0,
+            "lanes_s": 400.0,
+            "idle_s": 5.0,
+            "concurrency": 2,
+            "occupied_s": 1200.0,
+            "critical_path_s": 900.0,
+            "lead_s": 1800.0,
+        },
+    )
+    # And a receipt from before W8: its three columns print blank, not 0.
+    _write_mission(home, "m-old", name="mission-old", ok=True, lanes=[])
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    out = capsys.readouterr().out
+    header = next(line for line in out.splitlines() if "critical_path_s" in line)
+    for column in ("occupied_s", "critical_path_s", "lead_s", "stretch"):
+        assert column in header
+    row = next(line for line in out.splitlines() if line.strip().startswith("m-w8"))
+    assert "1200.0" in row and "900.0" in row and "1800.0" in row and "4.0" in row
+    old_row = next(line for line in out.splitlines() if line.strip().startswith("m-old"))
+    assert old_row.split().count("n/a") >= 4
+
+
+def test_report_json_emits_the_new_wall_clock_figures(home: Path, capsys, monkeypatch):
+    _write_mission(
+        home,
+        "m-w8",
+        name="mission-w8",
+        ok=True,
+        lanes=[],
+        wall={
+            "wall_s": 3600.0,
+            "paused_s": 600.0,
+            "gate_s": 60.0,
+            "lanes_s": 400.0,
+            "idle_s": 5.0,
+            "concurrency": 2,
+            "occupied_s": 1200.0,
+            "critical_path_s": 900.0,
+            "lead_s": 1800.0,
+        },
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = payload["wall_clock"][0]
+    assert row["occupied_s"] == 1200.0
+    assert row["critical_path_s"] == 900.0
+    assert row["lead_s"] == 1800.0
+    assert row["stretch"] == 4.0

@@ -199,3 +199,113 @@ def test_gate_s_is_null_when_a_receipt_ran_a_gate_but_predates_duration_s(home):
         name="a", ok=True, attempts=[{"run_id": "20260101T000000Z-old"}]
     )
     assert mission_mod._gate_seconds([lane], home) is None
+
+
+def _receipt(home: Path, run_id: str, gate_s: float) -> None:
+    """A run receipt whose gate ran for `gate_s` seconds and nothing else."""
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps({"tests": {"ran": True, "exit_code": 0, "tail": "", "duration_s": gate_s}})
+    )
+
+
+def _lane(
+    name: str, run_id: str, duration_s: float | None, *, needs: list[str] | None = None
+) -> mission_mod.LaneResult:
+    attempt: dict = {"run_id": run_id}
+    if duration_s is not None:
+        attempt["duration_s"] = duration_s
+    return mission_mod.LaneResult(
+        name=name, ok=True, attempts=[attempt], needs=list(needs or [])
+    )
+
+
+def test_occupied_s_is_the_union_of_two_overlapping_lanes_not_their_sum(home):
+    """W8: `lanes_s` sums, so two lanes that ran at the same time count
+    their overlap twice -- `occupied_s` counts the wall clock during which
+    at least one dispatch was running, so it is the union instead."""
+    lanes = [
+        _lane("a", "20260101T000000Z-a", 60.0),
+        # starts 30s in, so 30s of the two lanes' 120s of work overlaps.
+        _lane("b", "20260101T000030Z-b", 60.0),
+    ]
+    assert mission_mod._occupied_seconds(lanes, home) == 90.0
+    lanes_s = sum(lane.attempts[0]["duration_s"] for lane in lanes)
+    assert lanes_s == 120.0
+
+
+def test_occupied_s_counts_a_lanes_gate_inside_its_own_interval(home):
+    _receipt(home, "20260101T000000Z-a", 20.0)
+    lanes = [_lane("a", "20260101T000000Z-a", 60.0)]
+    assert mission_mod._occupied_seconds(lanes, home) == 80.0
+
+
+def test_critical_path_s_follows_the_chain_and_a_parallel_reviewer_adds_nothing(home):
+    """W8: build -> review -> fix is the chain the mission could not have
+    run any faster than; a second reviewer hanging off the build in parallel
+    is real lane work but is not on the path, so it must not lengthen it."""
+    _receipt(home, "20260101T000000Z-build", 5.0)
+    lanes = [
+        _lane("build", "20260101T000000Z-build", 100.0),
+        _lane("review", "20260101T001000Z-review", 30.0, needs=["build"]),
+        _lane("fix", "20260101T002000Z-fix", 20.0, needs=["review"]),
+        # off the path: same depth as `review`, and longer than it.
+        _lane("review2", "20260101T001000Z-review2", 45.0, needs=["build"]),
+    ]
+    assert mission_mod._critical_path_seconds(lanes, home) == 105.0 + 30.0 + 20.0
+    lanes_only = [lane for lane in lanes if lane.name != "review2"]
+    assert mission_mod._critical_path_seconds(lanes_only, home) == 155.0
+
+
+def test_critical_path_s_counts_a_skipped_lane_as_zero(home):
+    lanes = [
+        _lane("build", "20260101T000000Z-build", 100.0),
+        mission_mod.LaneResult(
+            name="review", ok=False, needs=["build"], skipped="build was not ok"
+        ),
+    ]
+    assert mission_mod._critical_path_seconds(lanes, home) == 100.0
+
+
+def test_an_attempt_without_duration_s_blanks_occupied_and_critical_path(home):
+    """The receipt cannot say how long that dispatch ran, so the union and
+    the path through it are unknown, not shorter -- None, never 0. `wall_s`
+    is a measured span and is unaffected."""
+    lanes = [
+        _lane("a", "20260101T000000Z-a", 60.0),
+        _lane("b", "20260101T000030Z-b", None, needs=["a"]),
+    ]
+    assert mission_mod._occupied_seconds(lanes, home) is None
+    assert mission_mod._critical_path_seconds(lanes, home) is None
+
+
+def test_lead_s_is_wall_minus_occupied_minus_paused_clamped_at_zero():
+    assert mission_mod._lead_seconds(1000.0, 400.0, 100.0) == 500.0
+    assert mission_mod._lead_seconds(100.0, 400.0, 0.0) == 0.0
+    assert mission_mod._lead_seconds(1000.0, None, 100.0) is None
+    assert mission_mod._lead_seconds(None, 400.0, 100.0) is None
+
+
+def test_a_real_mission_carries_occupied_critical_path_and_lead(repo, home, monkeypatch, tmp_path):
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: say("ok"))
+    mission = mission_from_dict(
+        {
+            "name": "wall-w8",
+            "cwd": str(repo),
+            "lanes": [
+                {"name": "a", "fleet": "claude", "prompt": "A"},
+                {"name": "b", "fleet": "claude", "prompt": "B", "needs": ["a"]},
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+    assert result.ok is True
+    wall = result.wall
+    assert wall["occupied_s"] is not None
+    assert wall["critical_path_s"] is not None
+    # every figure on the block is rounded to a tenth independently, so the
+    # identity holds to within one rounding step, not to the bit.
+    expected = max(0.0, wall["wall_s"] - wall["occupied_s"] - wall["paused_s"])
+    assert abs(wall["lead_s"] - expected) <= 0.15
