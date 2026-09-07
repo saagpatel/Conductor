@@ -1,0 +1,57 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "28835c49b8e70ea8a0b7a4d8e92217196cfff547c89ef5c497893a3cf8c99ccc",
+    "lanes/build.json": "84aca76766bca8360b19247e8dcbafe6929eba869d8b8b99dbc2bfbc47de9afc",
+    "lanes/fix.json": "fba691a2b154f5f5e6adae75021f072fc4563e993864cdb769ee2a951b820678",
+    "lanes/review-gemini.json": "84abd16abc0e3ea1024424d643256b5ef6319c56c304fb0f32afa356e8956f5d",
+    "lanes/review-grok.json": "7f852e53a7fbb19d60cf787b61c508831494939515949b7de18c330d90bf3351",
+    "mission.json": "191830145eb9448b46d8f809509973f6ac6adf6d1472a27210a2984de770db56",
+    "pause.json": "6865b2cc54a187803f48e2c3406e7e3b5dc08f13bf4116ed6e804c246e4155d7",
+    "report.md": "d8fa410a490da73b34dc61d275182007d0568f324e1f6a053b62a28b2a7f646c",
+    "result.json": "38e854746efec693e60d5eb25be87ccdcb7317a3b0d666498522d557b6b47c54",
+    "runs/20260907T071119Z-claude-you-are-one-lane-of-a-conductor/answer.txt": "5f4d3aedad187c42f490d1939ba72ff4965a70296b9c6edd75dd0859941f69ef",
+    "runs/20260907T071119Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "f780104e705ddc97ff0caabfbde0e5f3d1fad740244b6f7eb4a6eed58a576bdc",
+    "runs/20260907T071119Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "a55d952a1134f1ae1411a469bb78dc7c187e6a99ec075b51e3b71c537f45ab6c",
+    "runs/20260907T071119Z-claude-you-are-one-lane-of-a-conductor/result.json": "8c9bb35f1dd696068377f5d8418ccdca926e70ba78e364fd2e018fccdc1cd548",
+    "runs/20260907T071119Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "617e6d912badebb9f37c9baac8741bc0e3ee85f4a50b4f1d280aee8344066f3a",
+    "runs/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/answer.txt": "858c79958e4a2803559df62a64ed931222ede3a81ae8ea7a91ca859c241755f7",
+    "runs/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/prompt.txt": "3167e69045da06c3f77cab422b2f754921232ba260803a51faffb94667fddf29",
+    "runs/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/result.json": "ca9d5c657eeacde6c6aced992e06885611bb2d3cda17721e38bac165b748b91e",
+    "runs/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/stdout.jsonl": "c45a401f9df1fb603f5412436ee70c57897425978b47732190129e1474060e1f",
+    "runs/20260907T072120Z-cursor-you-are-one-lane-of-a-conductor/answer.txt": "a2d532b507480a4839cdb902b770e7b0a3b327b010728b235332e037417c52c9",
+    "runs/20260907T072120Z-cursor-you-are-one-lane-of-a-conductor/prompt.txt": "44b03515453fd12d2199d2425a28252855c1be2f519a015295cc587e9626de9f",
+    "runs/20260907T072120Z-cursor-you-are-one-lane-of-a-conductor/result.json": "438f53be7ee0a1583c7c797b154693fcf6eb19811b2f015197ef8a665f938b1a",
+    "runs/20260907T072120Z-cursor-you-are-one-lane-of-a-conductor/stdout.jsonl": "e63ab2419b9f9314333d95e2243014c8f9ffb4ec47882b75ad2cc0339d6ecedc"
+  },
+  "fleet_versions": {
+    "antigravity": "1.1.27",
+    "claude": "2.1.263 (Claude Code)",
+    "cursor": "2026.09.02-c22c1a3"
+  },
+  "fleets": [
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T071119Z-core-guard-reaudit-fixes",
+  "name": "f10-shape-a-reaudit-fixes",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:42:54.652283Z"
+}

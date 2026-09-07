@@ -1,0 +1,54 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "3d1d310d43d1b4d7e006d08c0403d63b18c6b4d9c4f0801469a59965cf775d9f",
+    "lanes/audit-claude.json": "dcc4595a015411a0eac906a5080b00004cdc2071d1f726e522ce2c873c1280d9",
+    "lanes/audit-gemini.json": "ce71a4bd09ef8f9c6ecea95cf3a93314bbdcff4b2f711c2066a74fd051ae8b21",
+    "lanes/audit-grok.json": "212271c875b245e9e94b5aa29078e08ba27fc03d9069ac92fa15308dda45bc52",
+    "mission.json": "52be3c7c42ce15386df9ca372183758dcada9e1db431f52c8b746a777164ff76",
+    "report.md": "8c922b53a9abfb34ca851ffd16dd74f705c3161e1536c5522e87217ae2e4adda",
+    "result.json": "edc278540628aefeb049ebe7f6618e1ec2fa4d1f204cc56e9b90a7c2d9ea3f66",
+    "runs/20260907T065900Z-antigravity-you-are-one-read-lane-of-a-condu/answer.txt": "59f650d3a14b19ea4fd008928c74bb395f9990fdab8a92e0d164e756c595bc43",
+    "runs/20260907T065900Z-antigravity-you-are-one-read-lane-of-a-condu/prompt.txt": "3d5dbac5797aee036e78e2bce3db07fad0d0bf0be74eafa19856de2d9ed0e5e8",
+    "runs/20260907T065900Z-antigravity-you-are-one-read-lane-of-a-condu/result.json": "132aa95dc3cf810ff2d7db0ba9044d67c1593dbf3c3a8d9fc79a6dd754924ae6",
+    "runs/20260907T065900Z-antigravity-you-are-one-read-lane-of-a-condu/stdout.jsonl": "09b3adb17e0c869f6f2a5284e6df0ac849463cce407c950218d3605a8584bc50",
+    "runs/20260907T065900Z-claude-you-are-one-read-lane-of-a-condu/answer.txt": "105025b5b152c5695870d81cb321d4e4586a3d7f18bf336d1ed6f841f7ef62cc",
+    "runs/20260907T065900Z-claude-you-are-one-read-lane-of-a-condu/prompt.txt": "8769200611dd634d3c564124cf64176615bc2288573c7bc6ff06225cb0267cf3",
+    "runs/20260907T065900Z-claude-you-are-one-read-lane-of-a-condu/result.json": "761ade2619968f20b74c0bf6497876f34b8d42e357ab5f8e21ebb7bf218d4e28",
+    "runs/20260907T065900Z-claude-you-are-one-read-lane-of-a-condu/stdout.jsonl": "afba88e9b800a9bd38c2d9a450cb31b3a0397724471e4f7bbab1a7bbd121da15",
+    "runs/20260907T065900Z-cursor-you-are-one-read-lane-of-a-condu/answer.txt": "d27c13c6dbb808489516e19753718eba835e4a0e646cae67150a8c1ce6206fbc",
+    "runs/20260907T065900Z-cursor-you-are-one-read-lane-of-a-condu/prompt.txt": "c1bbc15b59f6406dc939629571c3c614be169c09ddb3a60301fc8e15c648debe",
+    "runs/20260907T065900Z-cursor-you-are-one-read-lane-of-a-condu/result.json": "dbbad618faf89f800030d470549a057d929e71cb5e4aa9283de6aacce70ca37c",
+    "runs/20260907T065900Z-cursor-you-are-one-read-lane-of-a-condu/stdout.jsonl": "f2cd00bd96a8f5708e7aec7629fb62f1a43c8ffb29a999361869c4c23904c716"
+  },
+  "fleet_versions": {
+    "antigravity": "1.1.27",
+    "claude": "2.1.263 (Claude Code)",
+    "cursor": "2026.09.02-c22c1a3"
+  },
+  "fleets": [
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T065900Z-core-guard-reaudit",
+  "name": "f11-unattended-read-notify",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:42:54.429372Z"
+}

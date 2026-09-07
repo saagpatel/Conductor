@@ -1,0 +1,21 @@
+{
+  "kind": "lane",
+  "lane": "fix",
+  "spent_usd": null,
+  "threshold": null,
+  "asked_at": "2026-09-07T07:27:13.832131+00:00",
+  "question": "Lane 'fix' is a pause point; continue the mission?",
+  "answer": "stop",
+  "answers": [
+    {
+      "kind": "lane",
+      "lane": "fix",
+      "spent_usd": null,
+      "threshold": null,
+      "asked_at": "2026-09-07T07:27:13.832131+00:00",
+      "question": "Lane 'fix' is a pause point; continue the mission?",
+      "answer": "stop",
+      "answered_at": "2026-09-07T07:27:47.131536+00:00"
+    }
+  ]
+}

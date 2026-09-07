@@ -1,0 +1,19 @@
+The change applied in [`hooks/core-guard.py`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py) and [`hooks/tests/core-guard-test.py`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py) was reviewed against the spec:
+
+1. **Item 1 (Interpreter behind arbitrary launcher)**:
+   - [`hooks/core-guard.py:L624-L656`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L624-L656) walks segment tokens for any token whose basename is in `INTERPRETERS`, preserving `-n` skipping behavior, and falls back to path execution on the command word (`toks[i]`) requiring shebang inspection.
+   - Test coverage in [`hooks/tests/core-guard-test.py:L647-L661`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L647-L661) (CATCH) and [`hooks/tests/core-guard-test.py:L1104-L1109`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1104-L1109) (QUIET).
+
+2. **Item 2 (Glued short upload flags)**:
+   - [`hooks/core-guard.py:L679`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L679) and [`hooks/core-guard.py:L730-L735`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L730-L735) recognize `-d`, `-F`, and `-T` with glued arguments (`len(t) > 2`), slicing `base = t[:2]` and `value = t[2:]`, correctly passing to `_upload_names_a_file`.
+   - Test coverage in [`hooks/tests/core-guard-test.py:L664-L678`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L664-L678) (CATCH) and [`hooks/tests/core-guard-test.py:L1112-L1121`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1112-L1121) (QUIET).
+
+3. **Item 3 (Quoted assignment value)**:
+   - [`hooks/core-guard.py:L444-L453`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L444-L453) adds `_bare_word(v)` to strip matching outer single or double quotes before validating against `^[\w./~-]+$`. Unquoted bare words and single/double-quoted bare words resolve; values containing spaces, `$`, or backticks stay unresolved.
+   - Test coverage in [`hooks/tests/core-guard-test.py:L681-L690`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L681-L690) (CATCH) and [`hooks/tests/core-guard-test.py:L1124-L1133`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1124-L1133) (QUIET).
+
+4. **Item 4 (Quoted standalone reference)**:
+   - [`hooks/core-guard.py:L476-L502`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L476-L502) in `resolve_same_line_assigns` scans outward past double quotes (`"`), replaces the reference along with its double quotes, and leaves single quotes (`'$V'`) untouched.
+   - Test coverage in [`hooks/tests/core-guard-test.py:L693-L697`](file://<home>/worktrees/20260907T064413Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L693-L697) (CATCH) with existing quiet controls intact.
+
+NO_FINDINGS

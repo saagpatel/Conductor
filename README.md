@@ -1995,7 +1995,12 @@ verdict. Conductor never blocks on it beyond `timeout`, and whether it
 succeeded never changes `ok`, an exit code, or a pause -- it is recorded,
 in order, as `notifications: [{"event", "ok", "exit_code", "timed_out",
 "error"}, ...]` on the mission result and as a `## Notifications` section in
-`report.md`. A dry run emits nothing.
+`report.md`. A dry run emits nothing, and neither does a golden replay:
+`mission.run_mission(..., notifier=...)` takes a callable in place of
+`notify.emit`, the way `dispatcher` stands in for `runner.dispatch`, and
+`golden.replay` passes one that records the event name without running the
+command -- a fixture's recorded hook is the operator's, never a replay's to
+run (see "Golden missions").
 
 ### Planner lanes
 
@@ -2639,7 +2644,12 @@ note, never a failure.
 `golden.projection(result)` is the slice of a `MissionResult` a routing or
 template change is allowed to move -- `ok`, `require`, `notes`, `errors`,
 `escalation`, `early_cancel`, `paused`, `quorum`, a trimmed `ranking`
-(`lane`, `rank`, `ok`), the cache hit rate, and per lane and attempt the
+(`lane`, `rank`, `ok`), the cache hit rate, `notifications` as the ordered
+list of event names that reached the mission's `notify` hook (only when any
+did, so a fixture recorded without `notify` keeps a byte-identical
+projection; the hook's own outcome is never pinned, since a replay's
+notifier always answers ok and a live hook's exit code belongs to the
+operator's machine, not the routing), and per lane and attempt the
 fields that describe what happened, never a path, a duration, a run id, a
 timestamp, or a dollar amount. `expected.json` pins that projection at
 record time. `golden.check(fixture_dir, *, update=False, cwds=None)` takes
@@ -2660,9 +2670,25 @@ you meant.
 `fleet_versions` entry (E22) disagrees with `fleets.cli_version` on this
 machine (`<fleet> recorded <old>, installed <new>`), or `recorded version
 unknown` when the fixture predates that field and carries none at all --
-both of the fixtures shipped under `tests/golden/` today. Drift is a note,
+the two C5 fixtures under `tests/golden/`. Drift is a note,
 not a failure: it never changes the exit code, and `--update` never writes
 it back into `golden.json`.
+
+### Fixtures shipped
+
+Every fixture under `tests/golden/` is a real mission, recorded as-is (a
+fixture is never hand-edited; a defect `record` or `check` exposes is fixed
+in conductor and the fixture re-recorded). `c5-build-cascade-capped` and
+`c5-review-fix` are the two C5 recordings (a capped cascade build, a
+review-and-fix). F8 added four from the Phase F consumer run on the
+operator's harness repository (`docs/research/2026-09-07-f8-golden-fixtures.md`):
+`f10-shape-a-foreign-repo` (a launcher-written Shape A on a foreign
+repository, all four lanes green, the fix on the build's resumed thread),
+`f10-shape-a-fix-stopped` and `f10-shape-a-reaudit-fixes` (Shape A whose
+fix pause was answered `stop`, so the fixture carries `pause.json` with
+the answer and a fix lane that never ran), and `f11-unattended-read-notify`
+(three read lanes under `--unattended` with a `notify` hook and a
+per-mission ceiling, the `end` event pinned in the projection).
 
 ```
 conductor golden record 20260905T171417Z-c5-error-kinds --out tests/golden/c5-build-cascade-capped
@@ -2721,7 +2747,7 @@ Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 
 ```
 uv venv && uv sync --frozen --group dev
-.venv/bin/pytest -n auto
+.venv/bin/pytest -n auto --dist loadgroup
 .venv/bin/ruff check .
 ```
 

@@ -1,0 +1,23 @@
+No new imports added (still stdlib-only, one file). Everything is green: 120 catch / 108 quiet, all 86 original cases preserved unmodified in behavior, all 34 new CG-14 cases passing.
+
+## Summary
+
+All 13 items implemented in `hooks/core-guard.py`, with regression coverage added to `hooks/tests/core-guard-test.py` (group **CG-14**). Gate: `python3 hooks/tests/core-guard-test.py` → **120 catch / 108 quiet, ALL GREEN**.
+
+**Items 1–12** (core-guard.py):
+1. Same-line variable resolution — new `resolve_same_line_assigns` + third view in `command_views`.
+2. Direct-path script execution — `script_bodies` rewritten with `_shebang_shell`, reads a script run with no interpreter word if its shebang names a shell.
+3. Bundled/lease force-push — `check_history`'s `hit` search extended for `-[A-Za-z]+` bundles containing `f` and `--flag=value` splitting.
+4. Case-insensitive verbs — `verb()` casefolds when `CASE_INSENSITIVE`; also fixed `check_exfil`'s raw `os.path.basename` comparison to use `verb()`.
+5. Command/process substitution — `verb()` now strips `$(`, `<(`, `>(`, backtick found anywhere in the token (not just at position 0); also had to fix `SPLIT_REDIR` (item 9) which was eating `<(`/`>(` tokens before `verb()` saw them.
+6. Heredoc/pipe/stdin/file SQL — `check_db` gained `raw_cmd`/`cwd` params, new `heredoc_bodies_data`, `_db_file_ref`, `_read_bounded`.
+7. Credential dirs without trailing slash — `CRED`'s four directory alternatives now match at a boundary (`/`, whitespace, quote, or end).
+8. System-root subdirectories — `SYSTEM_ROOTS` split into `SYSTEM_DESCENDANT_ROOTS`/`SYSTEM_EXACT_ROOTS`; new `_under_system_root` in `_judge_target`.
+9. Redirect glued to target — `SPLIT_REDIR` splits tokens at the operator, keeping a real pre-operator argument.
+10. Long-option letter soup — new shared `_rm_flags` helper used by `check_rm` and `check_xargs`.
+11. Any `://host` read as DB host — new `_uri_hosts`/`DB_URI_SCHEMES`, host only taken from a token beginning with an accepted scheme.
+12. Credential-shaped payload as upload — new `_upload_names_a_file`/`UPLOAD_ALWAYS_FILE`, requires the flag's own argument to name a file.
+
+**Item 13** (core-guard-test.py): every CATCH tuple now carries its expected rule via a `C(name, cmd, rule, cwd=None)` helper; `main()` asserts `[<rule>]` appears in the deny reason and prints per-rule counts. All 86 pre-existing cases retagged with their actual firing rule (verified by running each). Nothing weakened, deleted, or reworded.
+
+Nothing was left undone — all 12 items plus the gate restructuring are complete and verified.

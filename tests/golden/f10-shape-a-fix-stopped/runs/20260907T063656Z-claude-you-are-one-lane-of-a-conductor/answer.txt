@@ -1,0 +1,11 @@
+All four items are fixed and gated green (129 catch / 116 quiet, exit 0). Summary:
+
+**Item 1 — interpreter word not first** (`hooks/core-guard.py`, `script_bodies`, ~lines 588-618): after skipping env assigns/`LAUNCH_PREFIX`, the code now scans the segment's remaining tokens for the *first* one whose basename is in `INTERPRETERS` (any position, so `timeout 60 bash evil.sh` / `sudo bash evil.sh` / `nice -n 10 bash evil.sh` all resolve); falls back to the old shebang-on-command-word check when no token is an interpreter. `LAUNCH_PREFIX` was left untouched. CATCH added: `CG-14 item13` (timeout/sudo/nice cases). QUIET added: `CG-14 item13` (timeout+BENIGN, `sudo -n true`).
+
+**Item 2 — glued short upload form** (`check_exfil`, ~lines 689-705, plus new `SHORT_UPLOAD_FLAGS` constant at line 651): a token starting with `-d`/`-F`/`-T` with more text after the flag letters now has that trailing text treated as the flag's argument, in addition to the existing long-`=`/separate-token cases. CATCH added: `CG-14 item14` (`-d@`, `-T`, `-F...=@` glued to credential paths). QUIET added: `CG-14 item14` (`-d@payload.json`, `-dgrant_type=...`).
+
+**Item 3 — quoted assignment value** (`resolve_same_line_assigns`, new `_bare_word` helper at line 444): the assignment value may now be a single/double-quoted bare word; quotes are stripped and the same bare-word test applied to the interior. CATCH added: `CG-14 item15` (`V="rm"`, `V='rm'`). QUIET added: `CG-14 item15` (multi-word quoted value, quoted value used only as a commit message).
+
+**Item 4 — quoted standalone reference** (`resolve_same_line_assigns` rewritten to build output manually instead of via `VAR_REF.sub`): looks outward past *double* quotes only (never single, since those never expand in the shell) before judging standalone-ness, and replaces the reference including its quotes. CATCH added: `CG-14 item16` (`"$V"`). The single-quote non-case was verified manually to stay allowed, per the spec's explicit instruction not to add it as a test. The QUIET counterpart (`cd "$PROJECT_ROOT" && rm -rf dist`) already exists as `CG-7 limit: quoted project variable` and continues to pass, so no duplicate was added.
+
+Gate: `python3 hooks/tests/core-guard-test.py` — exit 0, 129 catch / 116 quiet, all green, no existing case weakened or reworded.

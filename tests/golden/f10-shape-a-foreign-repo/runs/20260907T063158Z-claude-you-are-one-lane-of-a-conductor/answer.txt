@@ -1,0 +1,9 @@
+Gate green: 120 catch / 110 quiet, exit 0.
+
+## Summary
+
+**review-grok item 1** (only reported item): confirmed real. `check_db` at `hooks/core-guard.py` (was L1084, now ~L1078-1092) checked `segs[:i]` for "earlier stage of the same pipeline," but `segs` comes from `segments()`, which also splits on `;`, `&&`, `||`, `&`, and newlines — not just `|`. Reproduced with `echo 'DROP TABLE users'; psql -h prod.example.com -c 'SELECT 1'` (and the `&&` variant), both wrongly denied before the fix. Added two failing QUIET cases under item 6 in `hooks/tests/core-guard-test.py` (~L958-970), confirmed they failed on the pre-fix tree, then fixed `check_db` to derive `pipe_parts = cmd.split("|")` (mirroring `check_xargs`) and only check `pipe_parts[:pidx]` where `pidx` is the pipe-stage containing the current segment. Existing pipe CATCH case and all other db cases still pass.
+
+**review-gemini**: `NO_FINDINGS` — no action.
+
+DISPOSITION: review-grok 1 fixed: `check_db`'s "earlier pipeline stage" check used `segs[:i]` (split on `;`/`&&`/`||`/`&`/newline too) instead of a `|`-only pipeline split, so an unrelated sequential command earlier on the line was misread as an upstream pipe stage; reproduced, added two QUIET regression cases, and scoped the check to `cmd.split("|")` stages before the current segment's pipe index.
