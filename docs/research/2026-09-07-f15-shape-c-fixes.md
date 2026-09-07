@@ -17,9 +17,9 @@ required behaviour, and a test: a read lane whose worktree vanished read as ok (
 precision table admitted an unparsed verdict as zero findings (F1 #4); a disposition naming an
 unknown lane vanished with no counter and `dispositions_malformed` was printed nowhere (F1 #5);
 `gate_s` omitted the reproduce gate and setup/teardown (F2 #2); `idle_s` reset on resume beside
-whole-life columns (F2 #3); `busy` exceeded 1.0 whenever lanes overlapped (F2 #6). Sizing: 8
-items, 6 defects with tests counted twice, 4 modules, and scheduler tax for the resume touch.
-Build cap $15, fix cap $9, budget $28.
+whole-life columns (F2 #3); `busy` exceeded 1.0 whenever lanes overlapped (F2 #6). Sizing: 6
+defects plus the tests item counted twice makes 8 items, 4 modules, and scheduler tax for the
+resume touch. Build cap $15, fix cap $9, budget $28.
 
 | lane | model | outcome | cost |
 |---|---|---|---|
@@ -41,8 +41,8 @@ under the precision table. `_review_fix_label` appends `N malformed`. `_gate_sec
 invariant is replaced by `wall_s * concurrency >= lanes_s`.
 
 Grok's finding held, and applied only to the test: a fix lane under the reproduce gate cannot
-add a test that passes on the current tree. The fix lane was stopped. `conductor land` merged the build tip, 91d74af: merge, gate, golden,
-and attest all reported ok. The lead then added the printed-line assertion by hand (6d6e47a).
+add a test that passes on the current tree, so the fix lane was stopped. `conductor land`
+merged the build tip, 91d74af: merge, gate, golden, and attest all reported ok. The lead then added the printed-line assertion by hand (6d6e47a).
 Fix-lane spend avoided: about $2.50 for one assertion.
 
 ## Mission 2: F1's `dispositions.json` deliverable, per-finding confidence, calibration (`20260907T090336Z-f15-m2-dispositions-deliverable`)
@@ -84,20 +84,20 @@ block from mission 1's code (`wall_s 3456.1, paused_s 18.1, gate_s 119.9, lanes_
 idle_s 0.0, concurrency 2`), and a probe launch of the new launcher wrote
 `dispositions.schema.json` beside the mission file, with the fix lane declaring
 `{"path": "dispositions.json", "schema": "dispositions.schema.json", "commit": false}`.
-`conductor mission --dry-run` loaded it. The first mission to run with the fix lane's
+`conductor mission --dry-run` loaded that mission file. The first mission to run with the fix lane's
 deliverable live will be the next Shape A on this repository.
 
 ## What is still open from the Shape C list
 
-Not built here, on purpose: the `c5-review-fix` projection backfill F3 asked for, a hand edit to
-a golden fixture that the F8 sitting rejected in favour of fixing code and re-recording, and the
-four latent items (`settle()` reading an answer without `errors="replace"`, a second fix lane
-overwriting the first's dispositions in the report, and two shapes not in use). They stay on the
-F15 roadmap line as record.
+Not built here, on purpose. First, the `c5-review-fix` projection backfill F3 asked for: it is a
+hand edit to a golden fixture, which the F8 sitting rejected in favour of fixing code and
+re-recording. Second, the four latent items: `settle()` reading an answer without
+`errors="replace"`, a second fix lane overwriting the first's dispositions in the report, and two
+shapes not in use. They stay on the F15 roadmap line as record.
 
 ## Cost
 
-$22.17 for the two missions ($7.45 and $14.72), against the roadmap's "about $6 each." The specs
+$22.17 for the two missions ($7.45 and $14.72), against the roadmap's "about $6 each". The specs
 were larger than the estimate: six defects across four modules with a resume touch for mission
 1, four items across seven modules for mission 2. The launcher's own arithmetic priced them at
 $28 and $27 budgets, of which $22 was spent. Fix-lane spend avoided by stopping mission 1's fix
