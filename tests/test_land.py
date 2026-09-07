@@ -13,6 +13,17 @@ import pytest
 
 from conductor.cli import main
 from conductor.land import LandInvalid, land
+
+
+@pytest.fixture(autouse=True)
+def _not_inside_a_lane(monkeypatch):
+    """These tests stand in for the lead's shell. When the suite itself runs
+    under a lane's gate, or under `conductor land`'s own gate (which
+    carries the lane marker on purpose, so a gate can never land), every
+    call to `land()` here would inherit `CONDUCTOR_LANE` and refuse -- the
+    first live landing (F12, 2026-09-07) failed its gate on exactly that.
+    The one test that asserts the refusal sets the marker itself."""
+    monkeypatch.delenv("CONDUCTOR_LANE", raising=False)
 from conductor.mission import mission_from_dict, run_mission
 
 
