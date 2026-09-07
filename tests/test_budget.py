@@ -9,13 +9,16 @@ refused rather than silently dropped.
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from pathlib import Path
 
 import pytest
 
+from conductor import runner as runner_mod
 from conductor.budget import _Tail
 from conductor.fleets import DispatchRefused, Spec, build_argv
+from conductor.mission import mission_from_dict, run_mission
 from conductor.outputs import parse
 from conductor.runner import dispatch
 
@@ -313,3 +316,63 @@ def test_resumed_codex_thread_counts_only_usage_after_spawn(tmp_path, monkeypatc
     # Without a spawn time (an unstamped legacy fixture) nothing is discounted.
     fresh = _CodexRollout(stdout)
     assert fresh.poll().output_tokens == 520
+
+
+# --- D11: the retry loop goes through the ledger too --------------------------
+
+
+def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
+    repo, home, monkeypatch, tmp_path
+):
+    """D11: a dispatch that came back with no usage at all makes
+    `Ledger.blocker()` refuse while `remaining()` still reads finite, so the
+    outer attempt walk stops but the same-attempt retry loop used to dispatch
+    straight past it. One lane lands unpriced while another sits in its retry
+    backoff; the retry must consult the same gate the outer walk does.
+    """
+    counter = tmp_path / "flaky-dispatches"
+    counter.write_text("0")
+    silent = json.dumps({"result": "done, trust me"})  # spawned, no usage: unpriced
+    transport = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "",
+            "error": "ECONNRESET while streaming",
+            "usage": {"input_tokens": 10, "output_tokens": 1},
+        }
+    )
+    flaky_script = (
+        f"n=$(cat {counter}); n=$((n + 1)); echo $n > {counter}; "
+        f"printf '%s\\n' {shlex.quote(transport)}; exit 1"
+    )
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            return ["sh", "-c", f"printf '%s\\n' {shlex.quote(silent)}"]
+        return ["sh", "-c", flaky_script]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "concurrency": 2,
+        "max_cost_usd": 5.0,
+        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 2},
+        "lanes": [
+            {"name": "flaky", "fleet": "claude"},
+            {"name": "silent", "fleet": "cursor"},
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    flaky = by_name["flaky"]
+    assert counter.read_text().strip() == "1"  # the retry never dispatched
+    assert len(flaky["attempts"]) == 1
+    assert flaky["kinds"] == ["transport"]
+    assert "budget unverifiable" in flaky["skipped"]
+    assert "retry 1" in flaky["skipped"] and "not started" in flaky["skipped"]
+    assert result.budget["unverifiable"] is True

@@ -506,6 +506,13 @@ it exactly as it would end a running dispatch, as `interrupted` or
 attempt's run id and `retry` its index; the lane's `kinds` lists every
 attempt's kind in order, retries included. A dry run never retries.
 
+A retry passes the same pre-dispatch gate the outer attempt walk does, so it
+starts nothing the mission may no longer pay for: when the attempt it is
+retrying (or any lane running beside it) came back with no priced usage at
+all, the budget is unverifiable and the retry is refused rather than
+dispatched, the lane's `skipped` reading `budget unverifiable: ...; retry
+<n> of <attempt> not started`.
+
 `MissionResult.errors` (`result.json`, `conductor missions`) tallies every
 kind seen across every lane's attempts, empty when nothing failed; when it
 is non-empty `report.md` shows one line, `Errors: <kind> x<n>, ...`, and
@@ -1625,7 +1632,13 @@ cancelled lane's `LaneResult` is not ok; its `skipped` reads
 `cancelled: lane <name> already passed`, so `report.md`'s table shows it and
 `require: any` still reads true from the lane that actually passed. The
 mission result carries `early_cancel: {"winner": "<lane>", "cancelled":
-["<lane>", ...]}`, null when nothing needed cancelling. On resume, a lane
+["<lane>", ...]}`, null when nothing needed cancelling. A lane that was
+still sitting in the worker pool's queue when the winner passed never
+spawns at all: its cancel event is checked when the lane starts, again
+before every dispatch and retry, and once more immediately before the fleet
+process would be created, so a queued lane's `skipped` reads `cancelled
+before spawn: lane <name> already passed` and its receipt, if it got that
+far, is `cancelled` with `spawned: false` rather than a paid run. On resume, a lane
 `skipped` for this reason is treated as finished rather than rerun, as long
 as the mission it belongs to was itself ok — rerunning it would just repeat
 the same cancellation.
@@ -1756,6 +1769,18 @@ ok, the same as a failed collate. `report.md` shows a `## Resolve` section
 with the outcome, and `conductor missions` rows carry
 `"resolve": "ok" | "failed" | "skipped" | null`. The ledger's blocker rules
 apply before the resolver starts, exactly as they do before the collate.
+
+A resume that dispatches a second resolver (the first one failed, or a sink
+lane reran) keeps the first one's outcome in `previous_resolves`, oldest
+first -- what `previous_collates` already does for the collate -- so a paid
+resolver is never overwritten by its own rerun. Resume accounting, the
+mission's token and cache totals, `conductor spend --by mission`, and
+`conductor report`'s join all read it; it is absent on a receipt written
+before this, and every reader treats that as an empty list. The resolver's
+and the collate's own run receipts also carry `lane` (`resolve`,
+`collate`, `collate:<judge>:<order>`) and `mission`, the same two fields a
+lane's dispatch stamps, so an auxiliary run is attributable on its own
+bytes rather than only through the mission snapshot.
 
 #### Collisions across repositories
 

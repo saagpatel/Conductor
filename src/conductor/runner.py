@@ -1945,6 +1945,12 @@ def dispatch(
         with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
             proc: subprocess.Popen | None = None
             try:
+                if cancel is not None and cancel.is_set():
+                    # D12: cancelled while this dispatch was still queued.
+                    # Nothing spawns, and the receipt reads `cancelled`, not
+                    # `interrupted`: a stop is not what ended it.
+                    cancelled = True
+                    raise Interrupted(f"cancelled: {cancel_reason}; not spawned")
                 if stop_requested():
                     raise Interrupted("stop requested before the fleet was spawned")
                 proc = subprocess.Popen(
@@ -2002,8 +2008,12 @@ def dispatch(
             except OSError as exc:
                 error = f"cannot spawn {fleet.binary}: {exc}"
             except Interrupted as exc:
-                interrupted = True
-                error = f"interrupted: {exc}"
+                if cancelled:
+                    # D12's pre-spawn cancel already said what ended this.
+                    error = str(exc)
+                else:
+                    interrupted = True
+                    error = f"interrupted: {exc}"
             if proc is not None:
                 exit_code, timed_out, capped, interrupted, breaker_reason = _wait(
                     proc,

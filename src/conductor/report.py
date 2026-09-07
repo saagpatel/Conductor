@@ -127,8 +127,9 @@ def _scan_missions(
     "lanes"}` read from the snapshot's own top-level `ok` and lane count.
 
     A lane attempt joins to its declared name and stage; a collate or
-    `previous_collates` run (`spend._collate_run_ids`) joins to the mission
-    alone, since neither is a lane and carries no stage of its own.
+    `previous_collates` run (`spend._collate_run_ids`), and a `resolve` or
+    `previous_resolves` run (D13), join to the mission alone, since none of
+    them is a lane and none carries a stage of its own.
 
     `mission` here is the snapshot directory's own name (`result_file.parent.
     name`) -- the same `mission_id` `mission.py`'s dispatch_one stamps
@@ -243,6 +244,19 @@ def _scan_missions(
             if isinstance(one_collate, dict):
                 for run_id in _collate_run_ids(one_collate):
                     join.setdefault(run_id, (mission, None, None))
+        # D13: the resolver is an auxiliary dispatch like the collate, and
+        # its superseded reruns are paid work too. Both keys are absent on a
+        # snapshot written before D13.
+        resolves: list[object] = []
+        resolve = raw.get("resolve")
+        if isinstance(resolve, dict):
+            resolves.append(resolve)
+        previous_resolves = raw.get("previous_resolves")
+        if isinstance(previous_resolves, list):
+            resolves.extend(previous_resolves)
+        for one_resolve in resolves:
+            if isinstance(one_resolve, dict) and isinstance(one_resolve.get("run_id"), str):
+                join.setdefault(one_resolve["run_id"], (mission, None, None))
     return join, meta
 
 

@@ -215,6 +215,16 @@ def _mission_runs(data: dict[str, object]) -> set[str]:
     collate = data.get("collate")
     if isinstance(collate, dict):
         run_ids |= _collate_run_ids(collate)
+    # D13: the resolver's own run, and every superseded resolver a rerun
+    # retained. Both are absent on a snapshot written before D13.
+    resolve = data.get("resolve")
+    if isinstance(resolve, dict) and isinstance(resolve.get("run_id"), str):
+        run_ids.add(resolve["run_id"])
+    previous_resolves = data.get("previous_resolves")
+    if isinstance(previous_resolves, list):
+        for old_resolve in previous_resolves:
+            if isinstance(old_resolve, dict) and isinstance(old_resolve.get("run_id"), str):
+                run_ids.add(old_resolve["run_id"])
     return run_ids
 
 
