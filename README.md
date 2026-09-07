@@ -1801,6 +1801,84 @@ in order, as `notifications: [{"event", "ok", "exit_code", "timed_out",
 "error"}, ...]` on the mission result and as a `## Notifications` section in
 `report.md`. A dry run emits nothing.
 
+### Planner lanes
+
+A lane whose deliverable is a mission file: conductor loads and dry-runs it,
+then asks the operator to launch it. This is the first place conductor
+spends on the operator's behalf without a human-written mission, so the
+pause is unconditional.
+
+```json
+{
+  "name": "plan",
+  "fleet": "claude",
+  "mode": "read",
+  "plan": true,
+  "deliverable": {"path": "child.json"},
+  "prompt": "Write a mission file at child.json that fixes the failing test."
+}
+```
+
+`plan` is a boolean lane key. It must be a read-mode lane on every attempt
+(primary, fallback, and any cascade attempt), must declare a `deliverable`
+whose `path` ends in `.json` or `.toml`, and may not be a `human` or
+`script` lane, tainted, `untrusted_output`, or named as another lane's
+`base` or `resume` -- each refused at load, the lane named. A mission
+carries two load-derived fields no mission file may set directly: `depth`
+(0 unless conductor stamped it as a child) and `parent`
+(`{"mission_id", "lane"}`, or `null`). `mission.PLAN_MAX_DEPTH` (1) bounds
+how deep a plan lane's own child may itself plan a grandchild.
+
+When a plan lane's own dispatch settles ok, conductor loads the deliverable
+with `load_mission` (so the child's `source` is the deliverable's own path),
+stamps it with `depth = parent depth + 1` and `parent = {parent mission id,
+lane name}`, and checks, in order: the file loads as a mission (a
+`MissionInvalid` fails the lane with the message, kind `plan`); its `depth`
+does not exceed `PLAN_MAX_DEPTH`, and it declares no plan lane of its own
+when it is already at the limit; it declares `max_cost_usd`, bounded, and at
+or under the parent's `ledger.remaining()` when the parent has a budget; its
+`ceiling` is no looser than the parent's (a bound the parent has may not be
+`null` or larger in the child). Conductor then dry-runs the child
+(`run_mission(child, home=home, dry_run=True)`); a dry run that is not ok
+fails the plan lane with its first error. Every one of these is conductor's
+own check, never a fleet's word, and reads back as `kind: "plan"` like the
+agent, taint, and adversarial checks above. The lane's `LaneResult` and
+receipt gain `plan: {"child_path", "child_name", "child_max_cost_usd",
+"depth", "dry_run_ok", "refused": <reason or null>}`.
+
+Once every check passes the mission parks, unconditionally -- there is no
+key that disables it, and `pause.before` need not name the lane:
+
+```json
+{
+  "kind": "child",
+  "lane": "plan",
+  "child_path": "/repo/child.json",
+  "child_name": "fix-the-test",
+  "child_max_cost_usd": 3.0,
+  "question": "Lane 'plan' planned mission 'fix-the-test' ($3.00); launch it?"
+}
+```
+
+`conductor mission --resume MISSION_ID --answer continue` launches the child
+as its own mission, synchronously, through `run_mission(child, home=home)`
+in the parent's process -- its own directory, ledger, running lock, and
+receipt chain, never the parent's; the child's snapshot carries its `depth`
+and `parent`. `--answer stop` fails the plan lane as `child launch refused
+by the operator`, and the mission settles as any stopped pause does. When
+the child returns, the plan lane's `plan` block gains `child: {"mission_id",
+"ok", "cost_usd", "paused", "report_path"}`, the parent's `MissionResult`
+and `result.json` gain `children: [<child mission id>, ...]`, the child's
+cost is recorded in the parent's `notes` as `child '<id>' spent $X (not
+rolled into this budget)`, and the lane is ok when the child was ok. A child
+that pauses on its own pause point is left paused; the parent's plan lane
+fails as `child paused: <child id>`, naming it, so the operator resumes the
+child by hand. `--unattended` refuses a mission with a plan lane -- nobody
+is there to answer its pause.
+
+Budget rollup into the parent's ledger, and resuming a parent whose child is
+still mid-run, are not yet defined; that is the second E10 spec.
+
 ## Isolation: a branch is not a worktree
 
 HEAD and the index are shared mutable state, so two fleets editing one

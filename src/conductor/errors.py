@@ -39,6 +39,7 @@ KINDS: tuple[str, ...] = (
     "deliverable",
     "taint",
     "adversarial",
+    "plan",
     "rate_limit",
     "transport",
     "refusal",
@@ -239,6 +240,11 @@ def error_kind(result: Result) -> str | None:
     # lane's base -- never a fleet's word, like `agent` and `taint` above.
     if error_text.startswith("adversarial lane changed source:"):
         return "adversarial"
+    # E10: a plan lane's child mission checks (load, depth, budget, ceiling,
+    # dry run) and its launch outcome -- conductor's own checks and its own
+    # recursive `run_mission` result, never a fleet's word.
+    if error_text.startswith("plan:"):
+        return "plan"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):
