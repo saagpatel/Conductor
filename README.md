@@ -463,6 +463,49 @@ every capture and verdict, with a note on the receipt, so the worktree is releas
 and a later lane may build on the tip; the captured copy under the run directory is the
 deliverable. In the operator's own checkout nothing is removed.
 
+#### Validators
+
+A code change gets `runner._reproduce_receipt`'s reproduce gate: a `stage:
+fix` lane's own check must fail on the base and pass after. A prose or data
+deliverable has no test surface, so it had no equivalent -- a fix lane on a
+document was refused with `fix without a reproducing check` and the lead
+applied reviews by hand. `deliverable.validator` closes that gap without
+pretending a document is a test: a non-empty shell command in which the
+literal `{path}` is replaced by the deliverable's repo-relative path before
+it runs (a command without `{path}` runs as written). `conductor dispatch`
+takes `--deliverable-validator CMD` beside `--deliverable-schema`.
+
+Once `_check_deliverable` has judged the file and before the gate runs, a
+declared validator runs twice with the same command and the same
+environment the gate gets: once against the deliverable as it stood at the
+base commit (`git show <base>:<path>`, written to a temporary file under the
+run directory, never into the worktree -- recorded as `null` when the file
+did not exist at the base or the tree is not a repository), and once against
+the file in the worktree. Each run is capped by the dispatch's gate timeout
+and records `exit_code`, `timed_out`, and a 20-line tail. The result lands
+on `Result.deliverable["validator"]`: `{"command", "before", "after",
+"verdict"}`, where `verdict` is `accepted` (the after run passed, and the
+before run passed or was `null`), `reproduced` (the after run passed, the
+before run failed), or `rejected` (the after run failed or timed out). A
+`rejected` verdict sinks `deliverable["ok"]` and gives `Result.failure()`
+`deliverable rejected by validator: <path>: <first line of the after
+tail>`, kind `deliverable`. On a dry run the block is recorded with
+`before` and `after` `null` and `verdict` `null`, like the rest of the
+deliverable record. A deliverable with no declared validator carries no
+`validator` key at all, and the rest of the receipt is unaffected.
+
+For a `stage: fix` lane, a `reproduced` verdict is itself the reproduction
+when there is no test-surface change to transplant: the reproduce receipt
+reads `verdict: "validator"`, and the lane lands through its ordinary gate
+exactly like a fix whose reproduce verdict is `reproduced`. An `accepted`
+verdict on a fix that changed nothing outside its deliverable is refused
+with `fix without a reproducing check: validator passed on the base too`,
+the same shape as the existing no-test-surface-change refusal. A fix that
+also changed the test surface keeps the ordinary transplant path, with the
+validator's own verdict recorded beside it on the deliverable block. A
+validator checks what a machine can check; whether the document still means
+what it meant is the reviewers' question, not the validator's.
+
 ### Cheap-first cascade
 
 A mission may set `"cascade"`: an attempt-shaped object (the same keys a
@@ -1509,11 +1552,12 @@ the transplanted test surface, never a fleet's word.
 
 The receipt gains a `reproduce` block: `ran`, `exit_code`, `timed_out`,
 `tail`, `worktree`, `patch_bytes`, and `verdict` — `reproduced`,
-`not-reproduced`, `no-check`, `inherited` (below), or `skipped` (reason in
-`tail`) for every dispatch that is not a `stage: fix` or `stage:
-adversarial` write, including a plain dispatch with no stage at all. The
-reproduce worktree is always removed once the gate ends, exactly like the
-clean gate's.
+`not-reproduced`, `no-check`, `inherited` (below), `validator` (a fix lane's
+declared deliverable validator reproduced something instead; see
+"Validators" above), or `skipped` (reason in `tail`) for every dispatch that
+is not a `stage: fix` or `stage: adversarial` write, including a plain
+dispatch with no stage at all. The reproduce worktree is always removed once
+the gate ends, exactly like the clean gate's.
 
 #### Adversarial test lanes (E16)
 

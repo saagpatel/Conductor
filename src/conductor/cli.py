@@ -137,8 +137,12 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             deliverable = {"path": args.deliverable}
             if args.deliverable_schema:
                 deliverable["schema"] = args.deliverable_schema
+            if args.deliverable_validator:
+                deliverable["validator"] = args.deliverable_validator
         elif args.deliverable_schema:
             raise DispatchRefused("--deliverable-schema needs --deliverable")
+        elif args.deliverable_validator:
+            raise DispatchRefused("--deliverable-validator needs --deliverable")
         spec = Spec(
             fleet=args.fleet,
             prompt=prompt,
@@ -970,6 +974,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--deliverable-schema",
         metavar="FILE",
         help="JSON Schema path the deliverable must satisfy; needs --deliverable",
+    )
+    p_dispatch.add_argument(
+        "--deliverable-validator",
+        metavar="CMD",
+        help="shell command run on the deliverable's before/after bytes; needs --deliverable",
     )
     p_dispatch.add_argument("--resume", metavar="SESSION_ID", help="resume a fleet session")
     p_dispatch.add_argument(

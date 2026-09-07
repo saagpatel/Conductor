@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from conductor import runner as runner_mod
+from conductor.errors import error_kind
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
@@ -365,6 +366,63 @@ def test_reproduce_gate_records_skipped_for_read_mode_and_unstaged_dispatches(
     fake_fleet(["sh", "-c", "echo x > y.txt"])
     unstaged_result = dispatch(_spec(repo), home=home)
     assert unstaged_result.reproduce["verdict"] == "skipped"
+
+
+# --- 5. F22: a validated deliverable is itself a reproducing check -----------
+
+_TODO_GATE = "! grep -q TODO {path}"
+
+
+def _commit_doc(repo: Path, text: str) -> None:
+    (repo / "doc.txt").write_text(text)
+    _commit(repo)
+
+
+def test_reproduce_gate_reads_a_reproduced_validator_as_the_reproduction(
+    repo, home, fake_fleet
+):
+    _commit_doc(repo, "before\nTODO: fix\n")
+    fake_fleet(["sh", "-c", "printf 'before\\nfixed\\n' > doc.txt"])
+
+    result = dispatch(
+        _spec(
+            repo,
+            stage="fix",
+            deliverable={"path": "doc.txt", "validator": _TODO_GATE},
+        ),
+        home=home,
+        test_command="true",
+        commit_message="fix: remove todo",
+    )
+
+    assert result.reproduce["verdict"] == "validator"
+    assert result.reproduce["ran"] is False
+    assert result.ok is True, result.failure()
+    assert result.commit["committed"] is True
+
+
+def test_reproduce_gate_refuses_a_fix_whose_validator_already_passed_on_the_base(
+    repo, home, fake_fleet
+):
+    _commit_doc(repo, "before\nno problem words here\n")
+    fake_fleet(["sh", "-c", "printf 'before\\nstill fine\\n' > doc.txt"])
+
+    result = dispatch(
+        _spec(
+            repo,
+            stage="fix",
+            deliverable={"path": "doc.txt", "validator": _TODO_GATE},
+        ),
+        home=home,
+        test_command="true",
+        commit_message="fix: attempted",
+    )
+
+    assert result.reproduce["verdict"] == "no-check"
+    assert result.error == "fix without a reproducing check: validator passed on the base too"
+    assert result.ok is False
+    assert result.commit is None
+    assert error_kind(result) == "reproduce"
 
 
 def test_stage_fix_mission_lane_carries_the_reproduce_block_into_its_lane_json(

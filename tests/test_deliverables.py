@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from conductor import golden as golden_mod
+from conductor import runner as runner_mod
 from conductor.cli import build_parser, cmd_dispatch
 from conductor.errors import error_kind
 from conductor.fleets import DispatchRefused, Spec, build_argv
@@ -99,6 +100,191 @@ def test_deliverable_commit_must_be_a_boolean():
 
 def test_deliverable_commit_false_is_accepted():
     build_argv(spec(deliverable={"path": "a.txt", "commit": False}))
+
+
+# --- F22: validator, Spec.validate() (item 1) --------------------------------
+
+
+def test_deliverable_validator_empty_string_is_refused():
+    with pytest.raises(DispatchRefused, match="validator must be a non-empty string"):
+        build_argv(spec(deliverable={"path": "a.txt", "validator": ""}))
+
+
+def test_deliverable_validator_non_string_is_refused():
+    with pytest.raises(DispatchRefused, match="validator must be a non-empty string"):
+        build_argv(spec(deliverable={"path": "a.txt", "validator": 3}))
+
+
+def test_deliverable_validator_accepted_alongside_schema_and_commit_false(tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    build_argv(
+        spec(
+            deliverable={
+                "path": "a.json",
+                "schema": str(schema),
+                "commit": False,
+                "validator": "true {path}",
+            }
+        )
+    )
+
+
+def test_cli_dispatch_deliverable_validator_flag_reaches_the_spec(repo, home, monkeypatch):
+    import conductor.cli as cli_mod
+    from conductor import runner as real_runner
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dispatch",
+            "hello",
+            "--fleet",
+            "claude",
+            "--cwd",
+            str(repo),
+            "--mode",
+            "read",
+            "--deliverable",
+            "out.txt",
+            "--deliverable-validator",
+            "true {path}",
+            "--dry-run",
+        ]
+    )
+    captured: dict = {}
+    real_dispatch = real_runner.dispatch
+
+    def capturing(spec_arg, **kwargs):
+        captured["spec"] = spec_arg
+        kwargs["dry_run"] = True
+        kwargs["home"] = home
+        return real_dispatch(spec_arg, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "dispatch", capturing)
+    rc = cmd_dispatch(args)
+    assert rc == 0
+    assert captured["spec"].deliverable == {"path": "out.txt", "validator": "true {path}"}
+
+
+def test_cli_dispatch_deliverable_validator_without_deliverable_is_refused(repo, capsys):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "dispatch",
+            "hello",
+            "--fleet",
+            "claude",
+            "--cwd",
+            str(repo),
+            "--deliverable-validator",
+            "true {path}",
+        ]
+    )
+    rc = cmd_dispatch(args)
+    assert rc == 3
+    out = json.loads(capsys.readouterr().err)
+    assert "--deliverable-validator needs --deliverable" in out["refused"]
+
+
+# --- F22: validator, before/after evidence (item 2) ---------------------------
+
+_TODO_GATE = "! grep -q TODO {path}"
+
+
+def _commit_doc(repo: Path, text: str) -> None:
+    (repo / "doc.txt").write_text(text)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "doc"], cwd=repo, check=True, capture_output=True)
+
+
+def test_validator_reproduced_when_the_fleet_removes_the_todo(repo, home, fake_fleet):
+    _commit_doc(repo, "before\nTODO: fix this\n")
+    fake_fleet(["sh", "-c", "printf 'before\\nfixed\\n' > doc.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "doc.txt", "validator": _TODO_GATE}),
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+    validator = result.deliverable["validator"]
+    assert validator["command"] == "! grep -q TODO doc.txt"
+    assert validator["before"]["exit_code"] != 0
+    assert validator["before"]["timed_out"] is False
+    assert validator["after"]["exit_code"] == 0
+    assert validator["verdict"] == "reproduced"
+    assert result.deliverable["ok"] is True
+
+
+def test_validator_rejected_when_the_todo_remains(repo, home, fake_fleet):
+    _commit_doc(repo, "before\nTODO: fix this\n")
+    fake_fleet(["sh", "-c", "printf 'before\\nTODO: still not fixed\\n' > doc.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "doc.txt", "validator": _TODO_GATE}),
+        home=home,
+    )
+    assert result.ok is False
+    assert result.deliverable["validator"]["verdict"] == "rejected"
+    assert result.deliverable["ok"] is False
+    assert result.failure().startswith("deliverable rejected by validator: doc.txt:")
+    assert error_kind(result) == "deliverable"
+
+
+def test_validator_before_is_none_when_the_deliverable_is_new(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", "printf 'no problem words here\\n' > doc.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "doc.txt", "validator": _TODO_GATE}),
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+    validator = result.deliverable["validator"]
+    assert validator["before"] is None
+    assert validator["after"]["exit_code"] == 0
+    assert validator["verdict"] == "accepted"
+
+
+def test_validator_that_hangs_past_the_gate_timeout_is_rejected(
+    repo, home, fake_fleet, monkeypatch
+):
+    _commit_doc(repo, "before\n")
+    fake_fleet(["sh", "-c", "printf 'still fine\\n' > doc.txt"])
+    monkeypatch.setattr(
+        runner_mod,
+        "_run_validator_command",
+        lambda cwd, cmd, timeout, env: {
+            "exit_code": None,
+            "timed_out": True,
+            "tail": f"timed out after {timeout}s; process group killed",
+        },
+    )
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "doc.txt", "validator": _TODO_GATE}),
+        home=home,
+    )
+    assert result.deliverable["validator"]["after"]["timed_out"] is True
+    assert result.deliverable["validator"]["verdict"] == "rejected"
+
+
+def test_dry_run_records_the_validator_block_as_declared_and_unchecked(repo, home):
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "doc.txt", "validator": _TODO_GATE}),
+        dry_run=True,
+        home=home,
+    )
+    assert result.deliverable["validator"] == {
+        "command": "! grep -q TODO doc.txt",
+        "before": None,
+        "after": None,
+        "verdict": None,
+    }
+
+
+def test_a_deliverable_without_a_validator_carries_no_validator_key(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", f"echo out > report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is True, result.failure()
+    assert "validator" not in result.deliverable
 
 
 # --- conductor dispatch CLI flags (item 1) ----------------------------------
@@ -634,6 +820,20 @@ def test_schema_type_as_a_list_does_not_crash_the_dispatch(repo, home, fake_flee
         home=home,
     )
     assert result.ok is True, result.failure()
+
+
+def test_readme_documents_the_deliverable_validator_contract():
+    readme = Path(__file__).parents[1] / "README.md"
+    text = readme.read_text()
+    section = text.split("#### Validators", 1)[1].split("\n### ", 1)[0]
+    assert "{path}" in section
+    assert "--deliverable-validator" in section
+    assert "`accepted`" in section
+    assert "`reproduced`" in section
+    assert "`rejected`" in section
+    assert "the reviewers' question, not the validator's" in section
+    reproduce_section = text.split("#### Reproduce before fix", 1)[1].split("\n#### ", 1)[0]
+    assert "`validator`" in reproduce_section
 
 
 def test_readme_lists_deliverable_among_the_template_and_taint_surfaces():
