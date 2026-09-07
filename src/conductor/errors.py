@@ -49,6 +49,7 @@ KINDS: tuple[str, ...] = (
     "agent",
     "deliverable",
     "taint",
+    "settings",
     "adversarial",
     "plan",
     "denied",
@@ -256,6 +257,12 @@ def error_kind(result: Result) -> str | None:
     # inventing a second confinement label.
     if error_text.startswith("restricted mode not enforced:"):
         return "taint"
+    # W8: a claude write lane that created, changed, or deleted one of its own
+    # `.claude/settings*.json` files -- conductor's own digest comparison
+    # across the run, never a fleet's word, and its own kind rather than
+    # `taint` because it fires on an untainted lane too.
+    if error_text.startswith("settings modified:"):
+        return "settings"
     if not result.spawned and result.error:
         return "refused"
     # D3: the persona assertion writes its own `error` text directly on the

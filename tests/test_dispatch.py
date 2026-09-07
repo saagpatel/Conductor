@@ -580,3 +580,79 @@ def test_a_teardown_that_changes_nothing_leaves_the_verdict_as_judged(repo, home
     assert not any(
         "teardown changed the tree" in note for note in result.git_verdict["notes"]
     )
+
+
+# --- W8: a claude write lane may not rewrite its own settings files ----------
+
+
+def _seed_settings(repo: Path) -> Path:
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"permissions": {"deny": ["Bash"]}}) + "\n")
+    return settings
+
+
+def test_a_write_lane_that_rewrites_its_settings_file_fails(repo, home, fake_fleet):
+    """Live drill 2026-09-07, third pass: a write lane's subagent edited the
+    project deny rule out of `.claude/settings.json`, Claude Code applied the
+    edit to the next subagent it spawned, and the receipt read ok with
+    `dirty_delta: 1` as its only trace."""
+    _seed_settings(repo)
+    fake_fleet(["sh", "-c", "printf '{}\\n' > .claude/settings.json"])
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+    assert result.exit_code == 0
+    assert result.ok is False
+    assert result.error == "settings modified: .claude/settings.json"
+    assert result.to_dict()["kind"] == "settings"
+    assert result.settings == {"checked": True, "modified": [".claude/settings.json"]}
+    receipt = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert receipt["settings"]["modified"] == [".claude/settings.json"]
+
+
+def test_a_rewritten_settings_file_fails_even_with_a_green_gate(repo, home, fake_fleet):
+    """The check runs before the gate verdict, so a green gate does not
+    rescue a lane that moved its own permission policy."""
+    _seed_settings(repo)
+    fake_fleet(
+        ["sh", "-c", "echo work > new.txt; printf '{}\\n' > .claude/settings.json"]
+    )
+    result = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 0")
+    assert result.gate_passed is True
+    assert result.git_verdict["no_op"] is False
+    assert result.ok is False
+    assert result.error == "settings modified: .claude/settings.json"
+    assert result.to_dict()["kind"] == "settings"
+
+
+def test_a_write_lane_that_creates_a_local_settings_file_fails(repo, home, fake_fleet):
+    """Absence is a value: a lane that creates a policy file where there was
+    none has changed the policy as surely as one that edits it."""
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "mkdir -p .claude && printf '{}\\n' > .claude/settings.local.json",
+        ]
+    )
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+    assert result.ok is False
+    assert result.error == "settings modified: .claude/settings.local.json"
+    assert result.settings["modified"] == [".claude/settings.local.json"]
+
+
+def test_a_write_lane_that_leaves_the_settings_alone_passes_checked(repo, home, fake_fleet):
+    _seed_settings(repo)
+    fake_fleet(["sh", "-c", "echo work > new.txt"])
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+    assert result.ok is True, result.failure()
+    assert result.settings == {"checked": True, "modified": []}
+
+
+def test_a_read_lane_is_not_settings_checked(repo, home, fake_fleet):
+    """A read lane runs in plan mode, which cannot edit these files, and a
+    denial there is already a note rather than a failure."""
+    _seed_settings(repo)
+    fake_fleet(["sh", "-c", "echo 'here is my analysis'"])
+    result = dispatch(spec_for(repo, mode="read"), home=home)
+    assert result.ok is True, result.failure()
+    assert result.settings == {"checked": False, "modified": []}

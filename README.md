@@ -486,7 +486,7 @@ now also classifies as exactly one of a fixed set of kinds, checked in this
 order, first match wins:
 
 ```
-interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent, deliverable,
+interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent, deliverable, settings,
 adversarial, rate_limit, transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op,
 read_moved_bytes, no_answer, commit, unknown
 ```
@@ -916,6 +916,28 @@ fails outright, kind `denied`, naming the tools: the fleet's own summary
 will say it succeeded, and it did not. A read lane's list is not a
 failure -- a read lane's tool set is meant to be thin -- and lands instead
 as a note on `Result.git_verdict`.
+
+**A write lane may not rewrite its own settings files (W8).** A project-scope
+`permissions.deny` rule is not a boundary for a write lane: the lane can edit
+the file the rule lives in, and Claude Code applies the edit to the next
+subagent it spawns. Before spawning any `claude` dispatch in `mode: write`,
+`runner.dispatch` records the sha256 (or the absence) of
+`.claude/settings.json` and `.claude/settings.local.json` in the directory the
+fleet runs in (the isolated worktree, under `--isolate`), and re-hashes both
+after the run. A file the run created, changed, or deleted
+fails the lane as `settings modified: <comma-separated relative paths>`, kind
+`settings`, and the lane is not committed. The check runs before the
+deliverable check, the commit, and either gate, so a green gate does not
+rescue it. Every receipt carries `settings`: `{"checked": true, "modified":
+[...]}` on a claude write lane, `{"checked": false, "modified": []}` on every
+other fleet and on read mode (a read lane runs in plan mode, which cannot edit
+these files, and a denial there is already a note). A lane whose own `commit`
+was meant to include a settings file is not a case this supports: the operator
+edits settings by hand, never through a lane. Evidence: the third pass of
+`docs/research/2026-09-07-live-drills-fail-closed-checks.md`, where a write
+lane's subagent edited `permissions.deny` out of `.claude/settings.json`, the
+next subagent ran Bash, and the receipt read `ok: true` with `dirty_delta: 1`
+as the only trace.
 
 `--restricted` removes the tools that run commands or fetch a URL (Bash,
 WebFetch) from the model's tool list and confines the file tools to the
