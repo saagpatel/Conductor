@@ -26,6 +26,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | G wave 2: spend and lifecycle (D1, D2, D9-D15), plus salvage, collisions, the build prompt, and two README claims from wave 3 | 0.62.0 | lead with four Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 | G wave 3: measurement (D18, D20, D21) | 0.63.0 | lead with one Opus subagent in a worktree, gated on the merged tree | $0 |
 | Live taint shell-deny drill; denied_calls counted from tool errors | 0.64.0 | one tainted Antigravity read dispatch on a scratch repo; lead fix | $0.06 |
+| W3 resume authenticates artifact bytes; W4 deliverable captured after the gates, tree re-judged after teardown | 0.65.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -35,7 +36,10 @@ record. Verified live 2026-09-07 (0.64.0, `docs/research/2026-09-07-live-probe-t
 a tainted Antigravity read lane on a scratch repo had `run_command` and a write to its own
 `.agents/hooks.json` denied by the hook on bytes, digests untouched, preflight naming all 35
 matchers, six cents. The drill also found `denied_calls` counting the model's quoted error text;
-fixed the same release. Phase H item 1 is done.
+fixed the same release. Phase H item 1 is done. Item 2 shipped as 0.65.0: W3 (artifact digests on
+every receipt, re-hashed on resume) and W4 (deliverable captured after the gates, tree re-judged
+after teardown with `cleanup_required`). Item 3's worklist is
+`docs/research/2026-09-07-fail-closed-check-inventory.md`.
 
 ## Waves
 
