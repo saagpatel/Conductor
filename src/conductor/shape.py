@@ -232,7 +232,11 @@ def _prefix(repo: Path, about: str | None) -> str:
     return (
         f"You are one lane of a conductor mission on {what}. Every claim is judged on "
         "bytes: the diff, the gate, the receipts. Read before you write; cite file and line "
-        "for anything you report."
+        "for anything you report. You are operating autonomously: nobody is watching in real "
+        "time and nobody can answer a question mid-task, so a question blocks the work; make "
+        "the routine call, state it in one line, and keep going. Keep changes and tests to "
+        "what the task asks for: no unrequested fixes, no surplus test files. Before ending, "
+        "check your last paragraph: if it is a plan or a promise, do that work now."
     )
 
 

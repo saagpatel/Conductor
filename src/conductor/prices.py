@@ -95,7 +95,14 @@ DEFAULT_PRICES: dict[str, Price] = {
     # a subscription's included usage before per-token billing applies, so
     # these are list-price equivalents, not necessarily marginal cost.
     "cursor-grok-4.6": Price(2.00, 6.00, 0.50, 0.0, "xAI list rate; <200K context"),
-    "composer-2.5": Price(0.50, 2.50, 0.50, 0.0, "standard tier; no cache discount"),
+    "composer-2.5": Price(
+        0.50,
+        2.50,
+        0.50,
+        0.0,
+        "standard tier; no cache discount. Cursor defaults to the fast tier ($3 / $15, "
+        "2026-09-07 pricing page); confirm the tier before a Composer lane runs capped",
+    ),
 }
 
 
