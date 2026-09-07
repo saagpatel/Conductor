@@ -228,6 +228,46 @@ def test_bundle_holds_logs_when_asked(repo, home, monkeypatch, tmp_path):
 # --- scrubbing ---------------------------------------------------------
 
 
+def test_a_scrubbed_env_secret_in_a_diff_does_not_refuse_the_export(
+    repo, home, monkeypatch, tmp_path
+):
+    """The build lane commits a file carrying an env-secret shape (a Python
+    kwarg named `*_tokens=` reads as one). The scrubber redacts it and the
+    guard must accept its own redaction: the export succeeds, the bundle
+    holds `<redacted>`, never the value."""
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: (
+            ["sh", "-c", "printf 'cache_write_tokens=usage.cache_write_tokens\\n' > built.py"]
+            if spec.prompt.split()[0] == "BUILD"
+            else ["sh", "-c", "echo reviewed"]
+        ),
+    )
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {
+                "name": "build",
+                "fleet": "claude",
+                "mode": "write",
+                "prompt": "BUILD it",
+                "commit": "build",
+            },
+            {"name": "review", "fleet": "claude", "base": "build", "prompt": "REVIEW it"},
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    out = tmp_path / "bundle"
+
+    export.export(home, result.mission_id, out)
+
+    patch = (out / "diffs" / "build.patch").read_text()
+    assert "cache_write_tokens=<redacted>" in patch
+    assert "usage.cache_write_tokens" not in patch
+    assert scrub_guard(out) == []
+
+
 def test_no_real_path_survives_anywhere_in_the_bundle_including_dsse_payloads(
     repo, home, monkeypatch, tmp_path
 ):

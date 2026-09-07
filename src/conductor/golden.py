@@ -189,7 +189,14 @@ def _pattern_hits(text: str, patterns: list[tuple[str, str]]) -> list[str]:
     for needle, name in patterns:
         if needle and needle in text:
             hits.append(name)
-    if _ENV_SECRET_RE.search(text):
+    # A value the scrubber already replaced is not a leak: `_redact_secrets`
+    # rewrites `NAME_TOKEN=value` to `NAME_TOKEN=<redacted>`, and the same
+    # regex would otherwise match the redaction itself, refusing every
+    # bundle that held an env-secret shape after it was scrubbed (the first
+    # live export of a diff carrying `cache_write_tokens=...` kwargs). Inside
+    # a JSON string the run continues as an escaped `\n`, so the exemption
+    # is on the prefix, which no real value can start with.
+    if any(not m.group(2).startswith("<redacted>") for m in _ENV_SECRET_RE.finditer(text)):
         hits.append("env secret")
     if _BEARER_RE.search(text):
         hits.append("bearer token")

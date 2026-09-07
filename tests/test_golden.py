@@ -117,6 +117,20 @@ def test_scrub_guard_does_not_read_a_signature_ending_in_key_as_an_env_secret(tm
     assert golden.scrub_guard(tmp_path) == []
 
 
+def test_scrub_guard_does_not_read_a_redacted_value_as_an_env_secret(tmp_path):
+    """The scrubber rewrites `NAME_TOKEN=value` to `NAME_TOKEN=<redacted>`;
+    the guard must not read its own redaction as a live secret, or every
+    scrubbed bundle that ever held one is refused."""
+    (tmp_path / "env.txt").write_text("cache_write_tokens=<redacted>\nAPI_TOKEN=<redacted>\n")
+    # The same shape inside a JSON string: the newline is escaped, so the
+    # regex's value runs on past the marker.
+    (tmp_path / "argv.json").write_text('["cache_write_tokens=<redacted>\\n  table=x"]\n')
+    assert golden.scrub_guard(tmp_path) == []
+    assert golden._redact_secrets("cache_write_tokens=usage.cache_write_tokens") == (
+        "cache_write_tokens=<redacted>"
+    )
+
+
 def test_scrub_guard_still_finds_a_long_alphanumeric_secret_value(tmp_path):
     (tmp_path / "env.txt").write_text("MY_SECRET_KEY=" + "a" * 48 + "\n")
     assert golden.scrub_guard(tmp_path) == ["env.txt:1: env secret"]
