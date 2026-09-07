@@ -50,11 +50,23 @@ def _hooks_preflight_argv(hooks: list[dict] | None):
     def _argv(cwd: str) -> list[str]:
         if hooks is None:
             hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
-            found = (
-                [{"name": "hooks", "enabled": True, "source": hooks_path}]
-                if os.path.exists(hooks_path)
-                else []
-            )
+            if os.path.exists(hooks_path):
+                with open(hooks_path) as fh:
+                    written = json.load(fh)["hooks"]["PreToolUse"]
+                actions = [
+                    {
+                        "event": "PreToolUse",
+                        "matcher": entry["matcher"],
+                        "type": "command",
+                        "command": entry["hooks"][0]["command"],
+                    }
+                    for entry in written
+                ]
+                found = [
+                    {"name": "hooks", "enabled": True, "source": hooks_path, "actions": actions}
+                ]
+            else:
+                found = []
         else:
             found = hooks
         payload = json.dumps(
@@ -264,7 +276,9 @@ def _agy_argv(
 
 
 def _passing_log_line() -> str:
-    return f"loaded {HOOKS_WRITTEN} named hooks from 1 hooks.json file(s)"
+    # The real shape (F10 anti-slop consumer, 2026-09-07): agy counts named
+    # hooks per hooks.json file, so the whole deny file is one named hook.
+    return "loaded 1 named hooks from 1 hooks.json file(s)"
 
 
 def test_tainted_lane_writes_hooks_before_the_baseline_and_excludes_them(
@@ -347,16 +361,19 @@ def test_matching_log_line_and_covered_tools_pass(repo, home, fake_fleet):
     assert result.ok is True, result.failure()
     te = result.taint_enforcement
     assert te["hooks_written"] == HOOKS_WRITTEN
-    assert te["hooks_loaded"] == HOOKS_WRITTEN
+    assert te["hooks_loaded"] == 1
+    assert te["preflight"]["matchers_missing"] == []
     assert te["uncovered"] == []
     assert set(te["tools_seen"]) == {*TAINT_AGY_DENIED_TOOLS, "list_dir"}
 
 
-def test_disagreeing_hook_count_fails(repo, home, fake_fleet):
+def test_zero_named_hooks_loaded_fails(repo, home, fake_fleet):
+    """The live probe's malformed-file signal: agy logs "loaded 0 named
+    hooks from 1 hooks.json file(s)" and runs on with nothing denied."""
     fake_fleet(
         _agy_argv(
             home,
-            log_line=f"loaded {HOOKS_WRITTEN - 1} named hooks from 1 hooks.json file(s)",
+            log_line="loaded 0 named hooks from 1 hooks.json file(s)",
             tools=[*TAINT_AGY_DENIED_TOOLS],
             extra_lines=[],
         )
@@ -365,7 +382,26 @@ def test_disagreeing_hook_count_fails(repo, home, fake_fleet):
     assert result.ok is False
     assert error_kind(result) == "taint"
     assert "taint hooks not enforced" in result.error
-    assert result.taint_enforcement["hooks_loaded"] == HOOKS_WRITTEN - 1
+    assert "did not parse" in result.error
+    assert result.taint_enforcement["hooks_loaded"] == 0
+
+
+def test_one_named_hook_for_many_matchers_is_the_passing_shape(repo, home, fake_fleet):
+    """Regression for the F10 anti-slop consumer's Gemini lane: thirty
+    matchers written, agy logged one named hook, and the count check failed
+    a lane whose hooks the preflight had already shown loaded in full."""
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line="loaded 1 named hooks from 1 hooks.json file(s)",
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert result.taint_enforcement["hooks_written"] == HOOKS_WRITTEN
+    assert result.taint_enforcement["hooks_loaded"] == 1
 
 
 def test_missing_log_line_fails(repo, home, fake_fleet):
@@ -504,6 +540,45 @@ def test_preflight_finding_no_hooks_file_fails_before_the_paid_turn(
     assert result.taint_enforcement["preflight"]["ok"] is False
     assert result.taint_enforcement["preflight"]["loaded"] == []
     assert not marker.exists(), "the paid turn's own argv must never have run"
+
+
+def test_preflight_missing_a_matcher_fails_before_the_paid_turn(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """Our file is listed and enabled, but agy's answer names one matcher
+    fewer than conductor wrote: the per-tool evidence is the answer's own
+    `actions`, so this fails closed with the missing name."""
+    def _short_by_one(cwd: str) -> list[str]:
+        hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
+        with open(hooks_path) as fh:
+            written = json.load(fh)["hooks"]["PreToolUse"]
+        actions = [
+            {"event": "PreToolUse", "matcher": entry["matcher"], "type": "command", "command": "x"}
+            for entry in written
+            if entry["matcher"] != "search_web"
+        ]
+        return _hooks_preflight_argv(
+            [{"name": "hooks", "enabled": True, "source": hooks_path, "actions": actions}]
+        )(cwd)
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _short_by_one)
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert "without matcher(s) for search_web" in result.error
+    assert result.taint_enforcement["preflight"]["matchers_missing"] == ["search_web"]
+    assert not marker.exists()
 
 
 def test_preflight_query_timeout_fails_closed(repo, home, fake_fleet, monkeypatch, tmp_path):

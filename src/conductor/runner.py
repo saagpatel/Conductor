@@ -718,6 +718,9 @@ def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str
 # probe's tool list was not exhaustive -- see the comment above
 # TAINT_AGY_DENIED_TOOLS in fleets.py).
 _TAINT_AGY_UNCOVERED_SUBSTRINGS = ("subagent", "mcp", "web", "url", "message", "schedule", "inbox")
+# Every PreToolUse matcher `fleets.taint_hook_files` writes, in the order it
+# writes them; the preflight requires each one back by name.
+_TAINT_AGY_MATCHERS = (*TAINT_AGY_DENIED_TOOLS, "run_command")
 _TAINT_AGY_LOG_RE = re.compile(r"loaded (\d+) named hooks? from \d+ hooks\.json file\(s\)")
 _TAINT_AGY_DENIED_CALL_MARKER = "denied by pre-tool hook"
 
@@ -833,7 +836,24 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
     if match is None:
         detail = f"hooks preflight did not find {TAINT_AGY_HOOKS_REL!r} enabled among {hooks}"
         return {"ok": False, "loaded": hooks, "detail": detail}, detail
-    return {"ok": True, "loaded": hooks, "detail": None}, None
+    # F10 anti-slop consumer (2026-09-07): agy's "loaded N named hooks" log
+    # line counts hooks *files*, not matchers -- the whole deny file is one
+    # named hook -- so the per-tool evidence lives here, in the answer's own
+    # `actions` list: every matcher conductor wrote must be back, by name.
+    actions = match.get("actions")
+    matchers = {
+        str(action.get("matcher"))
+        for action in (actions if isinstance(actions, list) else [])
+        if isinstance(action, dict) and action.get("event") == "PreToolUse"
+    }
+    missing = sorted(set(_TAINT_AGY_MATCHERS) - matchers)
+    if missing:
+        detail = (
+            f"hooks preflight loaded {TAINT_AGY_HOOKS_REL!r} without matcher(s) for "
+            f"{', '.join(missing)}"
+        )
+        return {"ok": False, "loaded": hooks, "detail": detail, "matchers_missing": missing}, detail
+    return {"ok": True, "loaded": hooks, "detail": None, "matchers_missing": []}, None
 
 
 def _taint_agy_enforcement(
@@ -859,8 +879,14 @@ def _taint_agy_enforcement(
     }
     if log_match is None:
         return receipt, "no 'loaded N named hooks' line in agy.log"
-    if hooks_loaded != hooks_written:
-        return receipt, f"agy loaded {hooks_loaded} named hook(s), expected {hooks_written}"
+    # agy counts named hooks per hooks.json file, not per matcher: the deny
+    # file conductor writes is exactly one named hook however many tools it
+    # covers (a tainted Gemini review lane on the F10 anti-slop consumer
+    # read "loaded 1 named hooks from 1 hooks.json file(s)" for 30 matchers
+    # and was wrongly failed against 30). Zero is the malformed-file signal
+    # the live probe found; the per-matcher check is the preflight's.
+    if hooks_loaded < 1:
+        return receipt, f"agy loaded {hooks_loaded} named hook(s); the hooks file did not parse"
     if uncovered:
         return receipt, f"uncovered tool(s) reach outside the worktree: {', '.join(uncovered)}"
     return receipt, None

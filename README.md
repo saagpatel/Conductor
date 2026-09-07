@@ -725,16 +725,23 @@ on the fleet's word, and there are now two independent sources of evidence.
 `agy -p "/hooks" --output-format stream-json --add-dir <cwd>` query in the
 lane's own worktree -- print mode, `num_turns: 0`, every usage counter zero
 -- and requires its `command_result` event to name `.agents/hooks.json`
-enabled; a query that cannot spawn, times out, or answers with no such event
-fails the run before any spend, and its stdout is kept beside the run as
-`hooks-preflight.json`. **After the run**, conductor still requires the agy
-log's own "loaded N named hooks" line to name exactly as many hooks as it
-wrote, and computes `uncovered` -- any tool in the stream's init event that
+enabled with an `actions` entry for every `PreToolUse` matcher conductor
+wrote (the answer names each matcher, so this is the per-tool evidence); a
+query that cannot spawn, times out, answers with no such event, or lists the
+file short of a matcher fails the run before any spend, and its stdout is
+kept beside the run as `hooks-preflight.json`. **After the run**, conductor
+still requires the agy log's own "loaded N named hooks" line and fails on
+`N` of zero, the malformed-file signal the live probe found; agy counts
+named hooks per `hooks.json` file, so the whole deny file is one named hook
+however many matchers it carries (the F10 anti-slop consumer's tainted
+Gemini lane logged "loaded 1 named hooks" for thirty matchers), and the
+count is never compared with the matcher count. It also computes `uncovered` -- any tool in the stream's init event that
 reaches outside the worktree by name (`browser_*`, or containing `subagent`,
 `mcp`, `web`, `url`, `message`, `schedule`, or `inbox`) and is not in the
 deny set. Any of the three checks failing fails the run as `taint hooks not
 enforced: <reason>`, kind `taint`, and the lane is not committed. The
-receipt gains `taint_enforcement`: `{"preflight": {"ok", "loaded", "detail"},
+receipt gains `taint_enforcement`: `{"preflight": {"ok", "loaded", "detail",
+"matchers_missing"},
 "hooks_written", "hooks_loaded", "tools_seen", "uncovered", "denied_calls"}`
 (`denied_calls` counts the stream's own "denied by pre-tool hook" tool
 errors; on a run the preflight itself refused, `spawned` is false and the block
