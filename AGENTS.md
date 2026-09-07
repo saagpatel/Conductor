@@ -5,6 +5,14 @@ Cursor, Grok Build, OpenCode all read `AGENTS.md`). The README explains what con
 this file says how to work on it and how to prompt the models it drives. Evidence for every
 claim below lives in `docs/research/` (dated reports with URLs and live-probe receipts).
 
+## Peer review sitting, 2026-09-07
+
+An outside reviewer (GPT-6 Astra, run by the operator in the Codex app, not as a conductor lane)
+is reviewing the project from first principles. The brief is
+`docs/review/2026-09-07-peer-review-brief.md`; the reviewer writes only to
+`docs/review/2026-09-07-astra-notes.md`. If you are that reviewer, read the brief first; its
+rules for the sitting (no other file changes, no commits, no dispatch) apply on top of this file.
+
 ## The repo contract
 
 - Python 3.12, stdlib only, `src/conductor`. Branch `feat/conductor-v1`; never commit to `main`.
