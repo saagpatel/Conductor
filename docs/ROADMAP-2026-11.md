@@ -22,6 +22,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 
 | item | version | shape | cost |
 |---|---|---|---|
+| F3 no gate on a read lane that moved no source bytes | 0.48.0 | Shape A via the launcher, salvaged on the lead's gate command, both reviewers NO_FINDINGS | $4.09 |
 
 ## What the receipts say
 
