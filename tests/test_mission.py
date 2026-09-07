@@ -366,7 +366,7 @@ def test_a_never_spawned_attempt_does_not_poison_the_budget_or_stop_collate(
     assert result.budget["unverifiable"] is False
 
 
-# --- W9: outstanding caps on the ledger (item 2) ---------------------------
+# --- W6: outstanding caps on the ledger (item 2) ---------------------------
 
 
 def test_ledger_reports_in_flight_caps_and_worst_case_without_reserving_them():
@@ -377,7 +377,7 @@ def test_ledger_reports_in_flight_caps_and_worst_case_without_reserving_them():
     assert state["in_flight_dispatches"] == 2
     assert state["outstanding_cap_usd"] == 5.0
     assert state["worst_case_usd"] == 5.0
-    # W9: a report of possible overshoot, never a reservation -- two
+    # W6: a report of possible overshoot, never a reservation -- two
     # dispatches still in flight must not shrink what a third sees as free.
     assert ledger.remaining() == 10.0
 
@@ -418,6 +418,41 @@ def test_a_finished_missions_ledger_reads_zero_outstanding_and_worst_case_as_spe
     assert result.budget["outstanding_cap_usd"] == 0.0
     assert result.budget["worst_case_usd"] == result.budget["spent_usd"]
     assert result.budget["spent_usd"] == 0.1
+
+
+def test_a_script_attempts_in_flight_cap_is_its_free_price_not_the_remaining_budget(
+    repo, home, monkeypatch, tmp_path
+):
+    """Grok cross-vendor review of w6w9-price-basis-export-scope, item 1:
+    `Attempt.spec` forces a script attempt's own `Spec.cap_usd` to `None`
+    (mission.py's `cap_usd=None if script else ...`) because a script never
+    carries a cap and always prices at exactly $0 (E6). `dispatch_one` must
+    track that same $0 ceiling on the ledger, not the pre-override
+    `_tighter(attempt.cap_usd, ledger.remaining())` figure that never
+    actually reaches the dispatch -- otherwise a free script in flight
+    reads as able to spend the whole remaining budget."""
+    captured: list[float | None] = []
+    original_start = Ledger.start
+
+    def spy(self: Ledger, cap_usd: float | None) -> None:
+        captured.append(cap_usd)
+        original_start(self, cap_usd)
+
+    monkeypatch.setattr(Ledger, "start", spy)
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "max_cost_usd": 5.0,
+        "lanes": [
+            {
+                "fleet": "script",
+                "command": "echo work > seed.txt && git add -A && git commit -qm work",
+            }
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.lanes[0]["ok"] is True
+    assert captured == [0.0]
 
 
 def test_report_marks_unpriced_attempts_instead_of_rendering_them_as_zero(

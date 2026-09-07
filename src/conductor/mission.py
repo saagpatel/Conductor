@@ -2307,7 +2307,7 @@ class Ledger:
     total unknowable, and a budget that cannot be accounted for is treated
     as spent: nothing more starts, and the skip says why.
 
-    W9: `start`/`finish` track every in-flight dispatch's own cap so
+    W6: `start`/`finish` track every in-flight dispatch's own cap so
     `to_dict()` can report `outstanding_cap_usd` and `worst_case_usd` --
     what the ledger could still owe if every dispatch running right now
     finished at its own cap. This is a report of possible overshoot, read
@@ -2372,7 +2372,7 @@ class Ledger:
             self.unpriced += int(unpriced_dispatches)
 
     def start(self, cap_usd: float | None) -> None:
-        """W9: record one more dispatch in flight, at the cap it was given
+        """W6: record one more dispatch in flight, at the cap it was given
         (its own, `remaining()`-tightened, cap -- `None` when it has none).
         """
         with self._lock:
@@ -5193,7 +5193,15 @@ def _execute_mission(
                 base_ref=base_ref,
                 cancel=lane_cancel_events.get(lane.name),
             )
-            ledger.start(cap_usd)
+            # W6 cross-vendor review (Grok): `attempt.spec` above forces a
+            # script attempt's own `Spec.cap_usd` to None (E6: it never
+            # carries a cap and always prices at exactly $0), so the ledger
+            # must track that same $0 ceiling here too -- not the pre-
+            # override `cap_usd` figure, which never actually reaches the
+            # dispatch and would otherwise read a free script in flight as
+            # able to spend the whole remaining budget.
+            ledger_cap_usd = 0.0 if attempt.fleet == "script" else cap_usd
+            ledger.start(ledger_cap_usd)
             try:
                 if dispatcher is not None:
                     # C7: golden.replay's offline dispatcher, in place of a
@@ -5220,7 +5228,7 @@ def _execute_mission(
                         **dispatch_kwargs,
                     )
             finally:
-                ledger.finish(cap_usd)
+                ledger.finish(ledger_cap_usd)
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
                 (Path(result.run_dir) / "result.json").write_text(

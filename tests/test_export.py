@@ -294,6 +294,31 @@ def _add_snapshot_only_runs(mission_dir: Path, run_ids: list[str]) -> dict:
     return result_raw
 
 
+def test_scope_run_files_names_only_files_a_run_actually_copied(
+    repo, home, monkeypatch, tmp_path
+):
+    """Opus review of w6w9-price-basis-export-scope, item 5: `mission_files`
+    and `mission_subdirs` are filtered to what was actually copied, but
+    `run_files` was the static six-name config list regardless of whether
+    any run in the bundle actually had a `diff.patch` -- unlike its two
+    neighbors, it did not describe the bundle's real contents."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    for run_id in (
+        result.lanes[0]["attempts"][-1]["run_id"],
+        result.lanes[1]["attempts"][-1]["run_id"],
+    ):
+        diff_path = home / "runs" / run_id / "diff.patch"
+        diff_path.unlink(missing_ok=True)
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert "diff.patch" not in export_result.scope["run_files"]
+    assert list((out / "runs").rglob("diff.patch")) == []
+    for candidate in ("result.json", "attestation.json", "prompt.txt", "argv.json"):
+        assert candidate in export_result.scope["run_files"]
+
+
 def test_export_includes_snapshot_only_runs_counted_from_snapshot(
     repo, home, monkeypatch, tmp_path
 ):
@@ -520,6 +545,27 @@ def test_export_refuses_when_the_receipt_key_appears_in_hex(repo, home, monkeypa
     with pytest.raises(export.ExportError, match="receipt key material found in") as excinfo:
         export.export(home, result.mission_id, out)
     assert f"runs/{build_run_id}/answer.txt" in str(excinfo.value)
+    assert not out.exists()
+
+
+def test_cli_export_exits_1_when_the_receipt_key_leaks_in_the_bundle(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Opus review of w6w9-price-basis-export-scope, item 4: the receipt-key
+    refusal is the same severity class as the scrub_guard leak refusal right
+    above it (both remove the bundle and say a secret was found in it), so a
+    caller branching on exit code must see the same exit -- 1, not 3 (the
+    generic bad-argument exit `MISSION_ID does not exist` also uses)."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    key = attest.read_receipt_key(home)
+    assert key is not None
+    (home / "runs" / build_run_id / "answer.txt").write_text(key.hex() + "\n")
+
+    out = tmp_path / "leaky-key-bundle"
+    rc = main(["export", result.mission_id, "--out", str(out)])
+    assert rc == 1
     assert not out.exists()
 
 

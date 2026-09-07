@@ -396,6 +396,7 @@ def export(
                 copy_one(file, file.relative_to(mission_dir))
 
         run_files = RUN_FILES + (RUN_LOG_FILES if logs else ())
+        run_files_present: list[str] = []
         for run_id in run_ids:
             run_dir = home / "runs" / run_id
             if not run_dir.is_dir():
@@ -404,6 +405,8 @@ def export(
                 src = run_dir / name
                 if src.is_file():
                     copy_one(src, Path("runs") / run_id / name)
+                    if name not in run_files_present:
+                        run_files_present.append(name)
 
         attestations_manifest: dict[str, dict] = {}
         verified_count = 0
@@ -436,7 +439,7 @@ def export(
             "missing_run_dirs": missing_run_dirs,
             "mission_files": mission_files_present,
             "mission_subdirs": mission_subdirs_present,
-            "run_files": list(run_files),
+            "run_files": [name for name in run_files if name in run_files_present],
             "omitted": _OMITTED,
         }
 
@@ -464,7 +467,15 @@ def export(
         key_leak = _find_key_material(work, key)
         if key_leak is not None:
             shutil.rmtree(work)
-            raise ExportError(f"export refused: receipt key material found in {key_leak}")
+            # Opus review of w6w9-price-basis-export-scope, item 4: the
+            # same severity class as the scrub_guard leak refusal right
+            # below (a secret found in the bundle) must exit the same way
+            # -- `leaks=` is what routes cli.py to exit 1 instead of the
+            # generic bad-argument exit 3.
+            raise ExportError(
+                f"export refused: receipt key material found in {key_leak}",
+                leaks=[f"{key_leak}: receipt key material"],
+            )
 
         leaks = scrub_guard(work)
         if leaks:

@@ -28,9 +28,14 @@ buys depends on the enforcement kind, and no one sentence covers all four:
     so a watched fleet overshoots by at most one model response plus one
     `POLL_S` poll.
   * `post-hoc` (cursor): usage arrives once, at the end, so the cap is a
-    verdict rather than a stop -- the overshoot is bounded only by the whole
-    run, and the mission ledger's `outstanding_cap_usd` (W9) is the only
-    figure that bounds it while the run is still going.
+    verdict rather than a stop -- the overshoot is bounded only by the
+    whole run, and the mission ledger's `outstanding_cap_usd` (W6) is the
+    only figure that names what it could still turn out to cost. It is a
+    report, never an admission check: nothing reads it back to gate what
+    starts next (`Ledger.remaining()`/`blocker()` are unchanged), and
+    nothing writes it out until the finished mission's own `budget` block,
+    the same place `spent_usd` lands -- not yet anything a reader can watch
+    update while the dispatch is still live.
   * `none` (script): a script dispatch is priced at zero and never
     overshoots anything.
 
