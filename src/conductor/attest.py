@@ -71,9 +71,14 @@ def receipt_key(home: Path) -> bytes:
     winner wrote, waiting briefly for the winner to finish its own write.
     """
     existing = read_receipt_key(home)
-    if existing is not None:
+    if existing is not None and len(existing) == _KEY_BYTES:
         return existing
     path = _key_path(home)
+    if existing is not None:
+        # The file exists but is short: a concurrent first use has created
+        # it with O_EXCL and not yet written it. Wait for that write rather
+        # than returning the empty bytes as the key.
+        return _await_key(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     try:

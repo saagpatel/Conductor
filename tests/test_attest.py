@@ -14,6 +14,7 @@ import json
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 
 from conductor import attest
@@ -117,6 +118,25 @@ def test_two_concurrent_first_uses_agree_on_one_key(home):
         t.join()
     assert len(results) == 4
     assert len(set(results)) == 1
+
+
+def test_first_use_waits_for_a_key_file_another_process_is_still_writing(home):
+    """The winner of the O_EXCL race creates the file before it writes it; a
+    reader that lands in between sees an empty file and must wait for the
+    32 bytes, not return the empty bytes as the key."""
+    path = home / "keys" / "receipt.key"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"")
+    key = b"k" * 32
+
+    def finish_write() -> None:
+        time.sleep(0.05)
+        path.write_bytes(key)
+
+    writer = threading.Thread(target=finish_write)
+    writer.start()
+    assert attest.receipt_key(home) == key
+    writer.join()
 
 
 def test_file_sha256_is_none_for_a_missing_file(tmp_path):
