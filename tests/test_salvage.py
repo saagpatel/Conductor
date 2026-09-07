@@ -8,6 +8,7 @@ lane with no `commit` key, so any edit leaves the worktree dirty and
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from conductor.mission import mission_from_dict, run_mission
 from conductor.report import report
 from conductor.salvage import SalvageInvalid, emit, salvage
 from conductor.shape import cap_arithmetic
+from conductor.verify import diff_since
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -295,6 +297,31 @@ def test_salvage_refuses_a_lane_whose_environment_it_cannot_rebuild(repo, home, 
     receipts = list((home / "missions" / mission_id / "salvage").glob("build-*.json"))
     assert len(receipts) == 1
     assert "cannot reconstruct setup" in json.loads(receipts[0].read_text())["refused"]
+
+
+def test_salvage_hashes_the_bytes_it_gated_and_keeps_the_receipts_digest_as_lineage(
+    repo, home, fake_fleet
+):
+    """D17: the lead repairs the kept worktree, then salvages. `diff_sha256`
+    must name what was gated today; the run's own digest survives only as
+    `lineage_diff_sha256`."""
+    mission_id, lane = _run_lane(repo, home, fake_fleet, edit="echo edited >> app.py", test="true")
+    lane_raw = json.loads((home / "missions" / mission_id / "lanes" / f"{lane}.json").read_text())
+    run_diff = Path(lane_raw["diff_path"]).read_text()
+    worktree = Path(lane_raw["attempts"][-1]["worktree"])
+    (worktree / "app.py").write_text("repaired\n")
+
+    result = salvage(home, mission_id, lane)
+
+    assert "repaired" in result.diff
+    assert result.diff == diff_since(str(worktree), result.base_sha)
+    assert "repaired" not in run_diff
+    assert result.diff_sha256 == hashlib.sha256(result.diff.encode()).hexdigest()
+    assert result.lineage_diff_sha256 == hashlib.sha256(run_diff.encode()).hexdigest()
+    assert result.diff_sha256 != result.lineage_diff_sha256
+    receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["diff_sha256"] == result.diff_sha256
+    assert receipt["lineage_diff_sha256"] == result.lineage_diff_sha256
 
 
 def _commit_the_salvage(worktree: str, message: str = "feat: salvage") -> None:

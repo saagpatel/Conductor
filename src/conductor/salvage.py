@@ -16,6 +16,7 @@ mission's signed receipt chain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -51,6 +52,11 @@ class SalvageResult:
     # from the base, so it never lints or runs a kept worktree's new tests;
     # E17's salvage lost a review round to one long line for exactly that.
     own_gate: dict = field(default_factory=dict)
+    # D17: the digest the run's own receipt carried for this lane's diff --
+    # lineage, not evidence. `diff_sha256` above hashes the bytes this
+    # salvage actually gated; when they differ, the kept worktree was
+    # repaired after the run and the run's digest names a different tree.
+    lineage_diff_sha256: str | None = None
     # Set after the receipt is written; not itself part of the receipt (the
     # timestamp in its name is not known before the write happens).
     receipt_path: str = ""
@@ -97,6 +103,13 @@ def _lane_snapshot(mission_raw: dict, lane: str) -> dict | None:
         if isinstance(entry, dict) and entry.get("name") == lane:
             return entry
     return None
+
+
+def _text_sha256(text: str) -> str:
+    """The digest of a diff held in memory, comparable with the digest
+    `attest.file_sha256` takes of the same patch written to disk (both hash
+    the UTF-8 bytes `Path.write_text` would have stored)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _matching_attempt(lane_snapshot: dict | None, attempt: dict, position: int) -> dict | None:
@@ -213,15 +226,16 @@ def _gather(
     test_surface = last_attempt.get("test_surface") or {}
     patterns = test_surface.get("patterns") or []
 
-    diff_text = ""
-    diff_sha256: str | None = None
-    if lane_result.diff_path:
-        diff_path = Path(lane_result.diff_path)
-        try:
-            diff_text = diff_path.read_text()
-        except OSError:
-            diff_text = ""
-        diff_sha256 = attest.file_sha256(diff_path)
+    # D17: the diff the receipt records is what the fleet left at run time;
+    # what the gates below judge is what the kept worktree holds now. A
+    # worktree repaired by hand after the run would otherwise pass here with
+    # the pre-repair digest attached. Snapshot the current bytes once, hash
+    # those, and keep the run's own digest as lineage only.
+    diff_text = diff_since(str(worktree), base_sha)
+    diff_sha256 = _text_sha256(diff_text)
+    lineage_diff_sha256 = (
+        attest.file_sha256(Path(lane_result.diff_path)) if lane_result.diff_path else None
+    )
 
     status = git_run(worktree, "status", "--porcelain")
     dirty = status.returncode != 0 or bool(status.stdout.strip())
@@ -258,6 +272,16 @@ def _gather(
             worktree=scratch,
         )
 
+    # Both gates read the kept worktree, so the digest above is only evidence
+    # about what they judged for as long as those bytes held still. Re-read
+    # them once: an edit landing mid-salvage is refused, never receipted as
+    # if the snapshot had been gated.
+    if _text_sha256(diff_since(str(worktree), base_sha)) != diff_sha256:
+        raise SalvageInvalid(
+            f"lane '{lane}' kept worktree changed while it was being gated; "
+            "re-run the salvage"
+        )
+
     return SalvageResult(
         mission=mission_id,
         lane=lane,
@@ -270,6 +294,7 @@ def _gather(
         test_command=test_command,
         gate=outcome,
         own_gate=own_outcome,
+        lineage_diff_sha256=lineage_diff_sha256,
     )
 
 

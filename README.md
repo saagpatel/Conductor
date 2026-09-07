@@ -1169,7 +1169,21 @@ gate (test surface restored from the base; recorded as skipped, not judged,
 when the lane ran under `test_policy: allow`, rule 3) -- never committing,
 writing into, or touching the index of the kept worktree itself -- and
 prints the worktree, its base and HEAD shas, whether it is dirty, the
-recorded diff, and each gate's exit code and tail.
+diff, and each gate's exit code and tail.
+
+The diff and `diff_sha256` on the result are the bytes salvage gated: they
+are read from the kept worktree at salvage time, not copied from the run's
+receipt, since a worktree repaired by hand after the run would otherwise
+pass carrying the pre-repair digest. The run's own digest is kept beside
+them as `lineage_diff_sha256`, evidence of where the tree came from rather
+than of what was gated; the two differ exactly when the tree was touched
+since the run. A tree that changes while the gates are running is refused
+outright. Exit 0 means both
+gates passed, 1 means one failed. Every call, refused or not, writes a
+receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
+timestamp>.json` (except when the mission itself does not exist: a typo
+never conjures a mission directory); salvage is the lead's own act, not a
+lane's, so it never extends the mission's signed receipt chain.
 
 Once the lead has read the diff and committed it in the kept worktree by
 hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,
