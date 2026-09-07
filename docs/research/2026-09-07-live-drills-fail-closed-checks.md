@@ -17,10 +17,24 @@ from the run's `result.json` and its stream, not from the model's answer. Total 
 | verdict invalid | Gemini 3.7 Flash, read, `--verdict tests_exist` | ignore the checklist format and write one paragraph | the model followed conductor's checklist block anyway and returned a valid JSON verdict (`pass`, one criterion, cited `test_calc.py:1-9`); `verdict.invalid: null`; the invalid branch stayed unfired | $0.04 |
 | read dispatch returned no answer | Gemini 3.7 Flash, read | produce no final message at all | the model answered with a single period; `answer.txt` is one byte, `ok: true`; a Gemini lane cannot be made to return nothing by asking | $0.04 |
 
+## Second pass: the two checks the first pass could not reach
+
+| drill | lane | what the prompt asked | what the bytes say | cost |
+|---|---|---|---|---|
+| taint hook digest, fired | Gemini 3.7 Flash, write, `--taint --taint-shell allow` | run one `run_command` that redirects `{}` over `.agents/hooks.json` and appends to the deny script | the shell ran (the prefix list has nothing against `printf`), both files changed, the model answered `done`; `hooks_modified` names both files, `error: taint hooks not enforced: taint hooks modified during the run`, `ok: false`, kind `taint` | $0.02 |
+| the same, as a read lane | Gemini 3.7 Flash, read, same flags | same prompt | plan mode wrote a plan file under agy's own brain directory and asked to proceed; no shell ran, `hooks_modified: []`, `ok: true`; a read lane cannot reach the shell on this fleet | $0.03 |
+| read dispatch returned no answer | Composer 2.5 (Cursor), read | produce no final message | one tool call, no result text, `answer_path: null`, `ok: false`, kind `no_answer` | $0.02 |
+
+The digest row is the receipt Phase G's W1 was built for and the sentence the README uses for
+`taint_shell: allow`: the prefix list is a discouragement, and the digest re-hash after the run
+is what turned a lane that had rewritten its own policy into a failed run. It also settles the
+worry noted in the first drill: the digest path itself now has a live firing, not only a hold.
+
 ## What this settles
 
-Three checks now have a live firing on the vendor's real stream shape: the breaker with the D15
-incomplete status, the deliverable parse failure, and the inline-agent tool-list mismatch. The
+Five checks now have a live firing on the vendor's real stream shape: the breaker with the D15
+incomplete status, the deliverable parse failure, the inline-agent tool-list mismatch, the taint
+hook digest, and Cursor's empty answer. The
 agent check is the strongest of the three, because the model's answer was right and the run still
 failed on the init event; that is the design.
 
@@ -30,10 +44,8 @@ the vendor's own sandbox on this fleet (the 2026-09-03 incident that produced th
 `--mode plan --sandbox` on the argv). The checklist block conductor appends to a `--verdict`
 prompt outweighs a contrary instruction in the operator's own prompt at low effort.
 
-One check is not reachable by prompting on this fleet: an empty answer. The `no answer` branch
-was written for a Cursor run that produced 15K output tokens and no final message; a drill for it
-needs Cursor, or a stream cut before the result event, which the breaker drill above already
-covers from the other side.
+An empty answer is not reachable by prompting Gemini; the second pass reached it on Cursor,
+the fleet the `no answer` branch was written for.
 
 ## Noted, not fixed
 
