@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -45,15 +46,37 @@ VENDORS = ("anthropic", "openai", "google", "xai", "cursor", "script")
 # loses its way will happily spin until something outside it says stop.
 DEFAULT_TIMEOUT = {"read": 600, "write": 1200}
 
-# D2: what a tainted Claude dispatch may not use, headless. Every entry closes
-# one path an instruction hiding in quoted outside text (an issue, a PR, a web
-# page) could otherwise use to do damage beyond misleading this one dispatch's
-# own answer or diff.
+# D5: how a tainted dispatch treats shell execution. "deny" is the default and
+# the only setting that is a boundary: a tainted lane runs no shell at all.
+# "allow" is an opt-in per-lane discouragement -- the pre-2026-09-07 prefix
+# list -- kept for a lane whose work genuinely needs a shell and whose operator
+# has read what it does not stop (README, "Taint").
+TAINT_SHELL_MODES = ("deny", "allow")
+
+# D2/D5: what a tainted Claude dispatch may not use, headless. Every entry
+# closes one path an instruction hiding in quoted outside text (an issue, a PR,
+# a web page) could otherwise use to do damage beyond misleading this one
+# dispatch's own answer or diff. `Bash` is denied whole: a prefix list is not a
+# boundary (see TAINT_SHELL_PREFIX_DISALLOWED_TOOLS below).
 TAINT_DISALLOWED_TOOLS: tuple[str, ...] = (
     "WebFetch",  # network egress: exfiltrate repo contents, fetch a second-stage payload
     "WebSearch",  # network egress, same risk as WebFetch
     "Task",  # a subagent inherits the tainted context without inheriting this deny list
     "Agent",  # Claude Code's other subagent-spawning name; same risk as Task
+    "Bash",  # D5: the shell reaches every one of the above, by a hundred spellings
+)
+
+# D5: the opt-in `taint_shell: "allow"` list -- what a tainted Claude dispatch
+# ran under until 2026-09-07. It denies a handful of command *prefixes* and
+# leaves the shell itself, so `command curl x`, `/usr/bin/curl x`, `env curl
+# x`, `\curl x`, `(curl x)`, `bash -c 'curl x'`, `nc host 80`, and
+# `python3 -c "import urllib.request"` all still run. It is a discouragement,
+# never a boundary; the Astra review (2026-09-07, D5) probed exactly these.
+TAINT_SHELL_PREFIX_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Agent",
     "Bash(curl *)",  # network egress via the shell
     "Bash(wget *)",  # network egress via the shell
     "Bash(git push *)",  # push rights: an injected instruction must not publish anything
@@ -62,14 +85,25 @@ TAINT_DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash(scp *)",  # file exfiltration over the network
 )
 
-# E21: the shell prefixes a tainted dispatch may not run, derived from
-# TAINT_DISALLOWED_TOOLS's own `Bash(<prefix> *)` entries so the Claude list
-# and the Antigravity hook script can never drift apart.
+# E21: the shell prefixes an opt-in `taint_shell: "allow"` dispatch may not
+# run, derived from TAINT_SHELL_PREFIX_DISALLOWED_TOOLS's own `Bash(<prefix>
+# *)` entries so the Claude list and the Antigravity hook script can never
+# drift apart. Empty under the default, where there is no shell to prefix.
 TAINT_SHELL_DENIED_PREFIXES: tuple[str, ...] = tuple(
     pattern[len("Bash(") : -len(" *)")]
-    for pattern in TAINT_DISALLOWED_TOOLS
+    for pattern in TAINT_SHELL_PREFIX_DISALLOWED_TOOLS
     if pattern.startswith("Bash(") and pattern.endswith(" *)")
 )
+
+
+def taint_disallowed_tools(taint_shell: str = "deny") -> tuple[str, ...]:
+    """D5: the `--disallowedTools` names for a tainted Claude dispatch. The
+    default denies `Bash` outright; `taint_shell="allow"` returns the older
+    prefix list instead (opt-in, per lane, and not a boundary)."""
+    return (
+        TAINT_SHELL_PREFIX_DISALLOWED_TOOLS if taint_shell == "allow" else TAINT_DISALLOWED_TOOLS
+    )
+
 
 # E21: the Antigravity tool names that reach outside the worktree, named
 # individually because agy's hooks.json has no wildcard matcher (a matcher
@@ -115,7 +149,32 @@ TAINT_AGY_DENIED_TOOLS: tuple[str, ...] = (
     "manage_inbox",  # reads and writes messages outside the worktree
     "schedule",  # schedules work that runs after this dispatch's oversight ends
     "generate_image",  # network egress to an image-generation backend
+    # D5: the shell, denied outright by default -- the same decision as
+    # Claude's bare `Bash` above. Under the opt-in `taint_shell: "allow"` it
+    # is still matched (the hook must see the call) but decided by
+    # TAINT_SHELL_DENIED_PREFIXES instead; see taint_hook_files.
+    "run_command",
 )
+
+# W1: the tool names that edit files in the worktree. They are not denied --
+# a tainted write lane's job is to edit -- but they are matched, so the hook
+# can refuse a write to its own policy directory. The hook payload's argument
+# shape for these tools is not on record from any probe (only `run_command`'s
+# `CommandLine` is), so the check is a conservative scan of the call's string
+# arguments for a `.agents` path component; the digest check in
+# `runner._taint_agy_enforcement` is the evidence that does not depend on it.
+TAINT_AGY_EDIT_TOOLS: tuple[str, ...] = (
+    "write_to_file",
+    "replace_file_content",
+    "multi_replace_file_content",
+    "sed_file",
+    "notebook_edit",
+)
+
+# The directory the hook files live in, relative to the lane's cwd. A tainted
+# lane may not write into it (W1: the hook script is re-read from a writable
+# worktree on every tool call).
+TAINT_AGY_RESERVED_DIR = ".agents"
 
 # E21: the PreToolUse deny hook, written by taint_hook_files() into a tainted
 # Antigravity dispatch's worktree. Placeholders are substituted with
@@ -126,8 +185,12 @@ _TAINT_AGY_HOOK_SCRIPT = '''#!/usr/bin/env python3
 
 Written by taint_hook_files(); never edited by hand. Reads one JSON object
 from stdin and denies a tool call that reaches outside the worktree by name
-or, for run_command, by a denied shell prefix found after leading
-whitespace, environment assignments, sudo, or a chain operator (; && || |).
+-- which by default includes run_command, the shell, outright. Under the
+opt-in taint_shell "allow" mode run_command is decided instead by a denied
+shell prefix found after leading whitespace, environment assignments, sudo,
+or a chain operator (; && || |), which is a discouragement and not a
+boundary. An edit tool naming a path inside the reserved policy directory is
+denied too, so the hook cannot be rewritten under its own feet.
 Fails closed: anything this script cannot parse is denied, not allowed.
 """
 import json
@@ -136,6 +199,8 @@ import sys
 
 DENIED_TOOLS = __DENIED_TOOLS__
 DENIED_PREFIXES = __DENIED_PREFIXES__
+EDIT_TOOLS = __EDIT_TOOLS__
+RESERVED_DIR = __RESERVED_DIR__
 _CHAIN_RE = re.compile(r";|&&|\\|\\||\\|")
 _ENV_RE = re.compile(r"^\\s*[A-Za-z_][A-Za-z0-9_]*=\\S*\\s+")
 
@@ -163,6 +228,20 @@ def _shell_denied(command_line):
     return False
 
 
+def _reserved_strings(value, found):
+    if isinstance(value, str):
+        parts = value.replace("\\\\", "/").split("/")
+        if RESERVED_DIR in parts:
+            found.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _reserved_strings(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _reserved_strings(item, found)
+    return found
+
+
 def _decide(payload):
     call = payload.get("toolCall")
     if not isinstance(call, dict):
@@ -172,6 +251,8 @@ def _decide(payload):
         return "deny", "conductor: taint: malformed tool call"
     if name in DENIED_TOOLS:
         return "deny", "conductor: taint: %s reaches outside the worktree" % name
+    if name in EDIT_TOOLS and _reserved_strings(call.get("args"), []):
+        return "deny", "conductor: taint: %s may not write under %s/" % (name, RESERVED_DIR)
     if name == "run_command":
         args = call.get("args")
         command = args.get("CommandLine") if isinstance(args, dict) else None
@@ -209,21 +290,50 @@ TAINT_AGY_HOOKS_REL = ".agents/hooks.json"
 TAINT_AGY_SCRIPT_REL = ".agents/conductor-taint.py"
 
 
-def taint_hook_files(cwd: str) -> dict[str, str]:
+def taint_agy_matchers(taint_shell: str = "deny") -> tuple[str, ...]:
+    """Every `PreToolUse` matcher `taint_hook_files` writes, in the order it
+    writes them. The same names in both shell modes: under `taint_shell:
+    "allow"` `run_command` is still matched, only decided by prefix rather
+    than denied outright."""
+    return (*TAINT_AGY_DENIED_TOOLS, *TAINT_AGY_EDIT_TOOLS)
+
+
+def taint_agy_denied_tools(taint_shell: str = "deny") -> tuple[str, ...]:
+    """The names the hook denies outright. `run_command` leaves this set --
+    and only this set -- under the opt-in `taint_shell: "allow"`."""
+    if taint_shell == "allow":
+        return tuple(name for name in TAINT_AGY_DENIED_TOOLS if name != "run_command")
+    return TAINT_AGY_DENIED_TOOLS
+
+
+def taint_hook_files(cwd: str, *, taint_shell: str = "deny") -> dict[str, str]:
     """E21: the two files a tainted Antigravity dispatch needs in its
     worktree, keyed by their path relative to `cwd` -- `.agents/hooks.json`,
-    naming one `PreToolUse` command hook per `TAINT_AGY_DENIED_TOOLS` name
-    plus one for `run_command`, and the command hook script itself, stdlib
-    only. `cwd` is baked into the hook's own command line because agy runs
-    it as a plain subprocess with no fixed working directory guarantee.
+    naming one `PreToolUse` command hook per `taint_agy_matchers()` name, and
+    the command hook script itself, stdlib only. `cwd` is baked into the
+    hook's own command line because agy runs it as a plain subprocess with no
+    fixed working directory guarantee, and quoted (W2) because a worktree path
+    with a space in it would otherwise split into two arguments and the hook
+    would fail silently.
+
+    D5: under the default `taint_shell="deny"` the script denies
+    `run_command` by name and carries no prefix list at all; `"allow"` is the
+    opt-in that restores the prefix list instead.
     """
     script_abs = str(Path(cwd) / TAINT_AGY_SCRIPT_REL)
-    script_text = _TAINT_AGY_HOOK_SCRIPT.replace(
-        "__DENIED_TOOLS__", repr(frozenset(TAINT_AGY_DENIED_TOOLS))
-    ).replace("__DENIED_PREFIXES__", repr(TAINT_SHELL_DENIED_PREFIXES))
+    prefixes = TAINT_SHELL_DENIED_PREFIXES if taint_shell == "allow" else ()
+    script_text = (
+        _TAINT_AGY_HOOK_SCRIPT.replace(
+            "__DENIED_TOOLS__", repr(frozenset(taint_agy_denied_tools(taint_shell)))
+        )
+        .replace("__DENIED_PREFIXES__", repr(prefixes))
+        .replace("__EDIT_TOOLS__", repr(frozenset(TAINT_AGY_EDIT_TOOLS)))
+        .replace("__RESERVED_DIR__", repr(TAINT_AGY_RESERVED_DIR))
+    )
+    command = f"python3 {shlex.quote(script_abs)}"
     entries = [
-        {"matcher": name, "hooks": [{"type": "command", "command": f"python3 {script_abs}"}]}
-        for name in (*TAINT_AGY_DENIED_TOOLS, "run_command")
+        {"matcher": name, "hooks": [{"type": "command", "command": command}]}
+        for name in taint_agy_matchers(taint_shell)
     ]
     hooks_text = json.dumps({"hooks": {"PreToolUse": entries}}, indent=2) + "\n"
     return {TAINT_AGY_HOOKS_REL: hooks_text, TAINT_AGY_SCRIPT_REL: script_text}
@@ -489,6 +599,12 @@ class Spec:
     # (an issue, a PR, a web page). Opt-in, never inferred; enforced with a
     # Claude tool deny list because no other fleet exposes one headless.
     taint: bool = False
+    # D5: what a tainted dispatch may do with a shell. "deny" (the default)
+    # denies it outright -- `Bash` on claude, `run_command` on antigravity.
+    # "allow" is the per-lane opt-in that restores the old command-prefix
+    # list, which stops the literal spellings and nothing else; the operator
+    # asks for it by name, on the lane, and the receipt records which one ran.
+    taint_shell: str = "deny"
     # F12: forces `--restricted --permission-mode acceptEdits` on a claude
     # read lane even without a declared `deliverable` -- a reviewer that
     # reads only (Gemini's role in Shape A, on the Claude side). A read lane
@@ -587,6 +703,24 @@ class Spec:
             raise DispatchRefused(
                 f"taint is enforceable on the claude and antigravity fleets only: {detail}"
             )
+        # D5: the shell mode is part of the taint mechanism, so it is refused
+        # exactly where taint is -- and refused on a dispatch that is not
+        # tainted at all, rather than silently describing nothing.
+        if self.taint_shell not in TAINT_SHELL_MODES:
+            raise DispatchRefused(
+                f"unknown taint_shell '{self.taint_shell}'. Known: {', '.join(TAINT_SHELL_MODES)}"
+            )
+        if self.taint_shell != "deny":
+            if not self.taint:
+                raise DispatchRefused(
+                    "taint_shell describes what a tainted dispatch may do with a shell; "
+                    "set taint too, or drop it"
+                )
+            if self.fleet not in {"claude", "antigravity"}:
+                raise DispatchRefused(
+                    "taint_shell is enforceable on the claude and antigravity fleets only: "
+                    f"{self.fleet} exposes no tool deny list headless"
+                )
         # F12: --restricted is a Claude Code flag; every other fleet is
         # refused by name, not silently ignored. A write lane is refused too:
         # --restricted refuses --permission-mode bypassPermissions outright
@@ -730,6 +864,10 @@ class Spec:
         if self.taint:
             raise DispatchRefused(
                 "fleet 'script' has no tool surface to deny; taint is a no-op there"
+            )
+        if self.taint_shell != "deny":
+            raise DispatchRefused(
+                "fleet 'script' has no tool surface to deny; taint_shell is a no-op there"
             )
 
     def _validate_schema(self) -> None:
@@ -944,7 +1082,7 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
     if spec.taint:
         # D2: one name per argv element; the CLI also accepts a comma-joined
         # string, but a list of exact names cannot be reassembled wrong.
-        argv += ["--disallowedTools", *TAINT_DISALLOWED_TOOLS]
+        argv += ["--disallowedTools", *taint_disallowed_tools(spec.taint_shell)]
     if spec.agent:
         # D3: --agents defines the persona for the session; --agent selects
         # it for the main dispatch. One name, one compact JSON object, in

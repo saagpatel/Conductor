@@ -16,7 +16,13 @@ import pytest
 
 from conductor import attest
 from conductor.cli import build_parser, main
-from conductor.fleets import TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv
+from conductor.fleets import (
+    TAINT_DISALLOWED_TOOLS,
+    TAINT_SHELL_PREFIX_DISALLOWED_TOOLS,
+    DispatchRefused,
+    Spec,
+    build_argv,
+)
 from conductor.mission import (
     LaneResult,
     MissionInvalid,
@@ -41,6 +47,93 @@ def test_tainted_claude_argv_carries_every_disallowed_tool():
     assert "--disallowedTools" in argv
     i = argv.index("--disallowedTools")
     assert argv[i + 1 : i + 1 + len(TAINT_DISALLOWED_TOOLS)] == list(TAINT_DISALLOWED_TOOLS)
+
+
+def test_tainted_claude_argv_denies_bash_whole_by_default():
+    """D5 (Astra 2026-09-07): the old list denied `Bash(curl *)` and left
+    `command curl x`, `/usr/bin/curl x`, `env curl x`, and `bash -c 'curl x'`
+    running. Shell execution is denied outright on a tainted lane now."""
+    argv = build_argv(spec(taint=True))
+    i = argv.index("--disallowedTools")
+    denied = argv[i + 1 : i + 1 + len(TAINT_DISALLOWED_TOOLS)]
+    assert "Bash" in denied
+    assert not [name for name in denied if name.startswith("Bash(")]
+    for kept in ("WebFetch", "WebSearch", "Task", "Agent"):
+        assert kept in denied
+
+
+def test_taint_shell_allow_restores_the_prefix_list_on_claude():
+    """The opt-in, per lane: the pre-2026-09-07 behavior, and nothing about
+    it is a boundary -- the README says so in the same words."""
+    argv = build_argv(spec(taint=True, taint_shell="allow"))
+    i = argv.index("--disallowedTools")
+    denied = argv[i + 1 : i + 1 + len(TAINT_SHELL_PREFIX_DISALLOWED_TOOLS)]
+    assert denied == list(TAINT_SHELL_PREFIX_DISALLOWED_TOOLS)
+    assert "Bash(curl *)" in denied and "Bash" not in denied
+
+
+def test_taint_shell_allow_is_refused_without_taint():
+    with pytest.raises(DispatchRefused, match="set taint too"):
+        build_argv(spec(taint_shell="allow"))
+
+
+def test_unknown_taint_shell_is_refused():
+    with pytest.raises(DispatchRefused, match="unknown taint_shell"):
+        build_argv(spec(taint=True, taint_shell="prefix"))
+
+
+def test_taint_shell_allow_is_refused_off_claude_and_antigravity():
+    with pytest.raises(DispatchRefused, match="taint is enforceable on the claude"):
+        build_argv(spec(fleet="cursor", model="grok-4.6", taint=True, taint_shell="allow"))
+
+
+def test_taint_shell_allow_receipt_records_prefix(repo, home, fake_fleet):
+    fake_fleet(session_id=None)
+    result = dispatch(spec(cwd=str(repo), taint=True, taint_shell="allow"), home=home)
+    assert result.ok is True
+    assert result.taint == {
+        "declared": True,
+        "tools_denied": list(TAINT_SHELL_PREFIX_DISALLOWED_TOOLS),
+        "taint_shell": "prefix",
+    }
+
+
+def test_a_lane_may_opt_into_taint_shell_allow(repo, home, fake_fleet, tmp_path):
+    """The opt-in is stated on the lane, beside `taint`, and reaches the
+    real argv: the prefix list, not the bare `Bash` deny."""
+    fake_fleet(session_id=None)
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "claude",
+                "taint": True,
+                "taint_shell": "allow",
+                "prompt": "A",
+            }
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    run_id = result.lanes[0]["attempts"][0]["run_id"]
+    argv = json.loads((home / "runs" / run_id / "argv.json").read_text())
+    real = argv[argv.index("fake-fleet") + 1 :]
+    i = real.index("--disallowedTools")
+    assert real[i + 1 : i + 1 + len(TAINT_SHELL_PREFIX_DISALLOWED_TOOLS)] == list(
+        TAINT_SHELL_PREFIX_DISALLOWED_TOOLS
+    )
+
+
+def test_an_unknown_lane_taint_shell_is_refused_at_load(repo, tmp_path):
+    raw = {
+        "cwd": str(repo),
+        "lanes": [
+            {"name": "a", "fleet": "claude", "taint": True, "taint_shell": "off", "prompt": "A"}
+        ],
+    }
+    with pytest.raises(MissionInvalid, match="taint_shell must be one of"):
+        mission_from_dict(raw, base_dir=tmp_path)
 
 
 def test_untainted_claude_argv_carries_no_disallowed_tools():
@@ -260,7 +353,11 @@ def test_tainted_dispatch_writes_taint_into_result_and_attestation(repo, home, f
     fake_fleet(session_id=None)
     result = dispatch(spec(cwd=str(repo), taint=True), home=home)
     assert result.ok is True
-    expected = {"declared": True, "tools_denied": list(TAINT_DISALLOWED_TOOLS)}
+    expected = {
+        "declared": True,
+        "tools_denied": list(TAINT_DISALLOWED_TOOLS),
+        "taint_shell": "denied",
+    }
     assert result.taint == expected
     assert result.summary()["taint"] == expected
 
@@ -345,7 +442,11 @@ def test_conductor_attest_shows_taint(repo, home, fake_fleet, tmp_path, monkeypa
 
     assert main(["attest", result.mission_id]) == 0
     out = json.loads(capsys.readouterr().out)
-    expected = {"declared": True, "tools_denied": list(TAINT_DISALLOWED_TOOLS)}
+    expected = {
+        "declared": True,
+        "tools_denied": list(TAINT_DISALLOWED_TOOLS),
+        "taint_shell": "denied",
+    }
     for link in out["links"]:
         assert link["taint"] == expected
 
@@ -501,7 +602,19 @@ def test_readme_documents_taint():
         assert name in section
     assert "never holds a deliverable `branch`" in section
     assert "refused at load, naming the lane" in section
-    assert 'taint: {"declared": true, "tools_denied": [...]}' in section
+    assert 'taint: {"declared": true, "tools_denied": [...], "taint_shell": "denied"}' in section
+    # D5: the section must say what the boundary is, and what the opt-in
+    # gives up, in plain words -- the old wording claimed "no network
+    # egress" while the prefix list let `env curl x` straight through.
+    assert "no shell at all" in section
+    assert "a command-prefix list is not a boundary" in section
+    assert "env curl x" in section
+    assert '`taint_shell: "allow"`, per lane, opt-in' in section
+    assert "discouragement, not a boundary" in section
+    # W1: worktrees are not sandboxes, said once, out loud.
+    assert "A worktree is not a sandbox" in section
+    assert "same OS\nuser as conductor" in section
+    assert "taint hooks modified during the run" in section
     assert '"taint": true|false' in section
     assert "tainted: came from outside the operator's trust" in section
     assert "docs/ROADMAP-2026-09.md" in section and "item D2" in section

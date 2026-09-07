@@ -24,6 +24,7 @@ from .fleets import (
     EFFORTS,
     FLEETS,
     MODES,
+    TAINT_SHELL_MODES,
     TEST_POLICIES,
     DispatchRefused,
     Spec,
@@ -163,6 +164,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             teardown=args.teardown,
             include=args.include,
             taint=args.taint,
+            taint_shell=args.taint_shell,
             agent=agent,
             deliverable=deliverable,
             restricted=args.restricted,
@@ -1010,7 +1012,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--taint",
         action="store_true",
         help="this dispatch handles text pulled from outside the operator's trust; "
-        "claude only, runs with a tool deny list (no web, no subagents, no push)",
+        "claude and antigravity only, runs with a tool deny list (no web, no subagents, "
+        "no shell)",
+    )
+    p_dispatch.add_argument(
+        "--taint-shell",
+        choices=list(TAINT_SHELL_MODES),
+        default="deny",
+        help="what a tainted dispatch may do with a shell: 'deny' (default, the boundary) "
+        "or 'allow', the opt-in that runs the old command-prefix list instead -- a "
+        "discouragement, not a boundary (README, 'Taint')",
     )
     p_dispatch.add_argument(
         "--agent-file",
