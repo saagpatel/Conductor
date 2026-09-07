@@ -413,6 +413,10 @@ def test_cli_gate_preflight_refuses_the_launch_and_writes_nothing(
     assert code == 3
     assert "gate preflight" in capsys.readouterr().err
     assert not out.exists()
+    # Cross-vendor review (Grok): the prompt files are written after the
+    # preflight, so a refused launch leaves nothing beside the mission path.
+    assert not (out.parent / "prompts").exists()
+    assert sorted(path.name for path in out.parent.iterdir()) == []
 
 
 def test_cli_skip_preflight_says_so_and_still_writes_the_file(

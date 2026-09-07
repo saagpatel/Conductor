@@ -764,14 +764,17 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 3
-        if not args.inline:
-            _write_lane_prompts(raw, base_dir)
-        mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
+        # Cross-vendor review (Grok): the preflight runs before anything is
+        # written beside the mission file, so a refused launch leaves no
+        # prompts/*.md behind for the lead to clean up.
         if args.skip_preflight:
             preflight_note = "gate preflight: skipped (--skip-preflight)"
         else:
             shape.gate_preflight(Path(args.repo), args.test)
             preflight_note = "gate preflight: passed"
+        if not args.inline:
+            _write_lane_prompts(raw, base_dir)
+        mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
     except (shape.ShapeInvalid, MissionInvalid) as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
