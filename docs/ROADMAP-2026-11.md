@@ -34,6 +34,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F9 Shape B and Shape C receipts; golden source placeholder landed from the Shape B sitting | 0.57.0 | Shape B twice (scratch, then conductor via land), Shape C once, three Opus verifiers | $11.85 |
 | F15 the Shape C findings: six verify, report, and wall-clock defects; F1's dispositions.json deliverable, per-finding confidence, calibration line | 0.58.0 | two Shape A missions via the launcher, both builds green under cap, Grok one real finding each (one fixed by the fix lane, one test-only added by hand), both landed by conductor land | $22.17 |
 | F10 anti-slop consumer over one document; taint hook count corrected to per-file with a per-matcher preflight | 0.59.0 | Sonnet edit lane with untrusted output and an E1 deliverable, Gemini and Opus cold reviews under taint, prose gate, lead applied the reviews by hand | $1.63 |
+| F15 latent items closed: settle answer reads tolerate bad bytes; multi-fix-lane dispositions kept in the report | 0.60.0 | lead work, two hand fixes with tests | $0 |
 
 Status 2026-09-07, end of the first Phase F sitting: every build item that survived Group 0
 is shipped (F1, F2, F3, F5, F6, F7, F12, F13; F4 was already on the tree, F14 dropped on its
@@ -55,9 +56,10 @@ two Shape A missions, the six defects and the three F1 spec gaps all on the tree
 finding per mission, both landed by `conductor land`). F10's anti-slop consumer ran
 (`docs/research/2026-09-07-consumer-anti-slop.md`, 0.59.0, $1.63: Sonnet edit as an untrusted
 E1 deliverable, Gemini and Opus cold under taint, a prose gate; it found E21's hook-count check
-wrong for every tainted Antigravity lane, fixed and re-proven live). OPERANT-J sitting 2 and the
-HarnessBench live tier are not yet run. The last five build releases were landed by `conductor
-land`.
+wrong for every tainted Antigravity lane, fixed and re-proven live). Two of F15's latent items
+closed by hand (0.60.0). OPERANT-J sitting 2 and the HarnessBench live tier are deferred by
+operator decision (2026-09-07: Operant is updated separately, later) and carry into the next
+roadmap. Phase F is closed. The last five build releases were landed by `conductor land`.
 
 ## What the receipts say
 
@@ -230,7 +232,7 @@ Group 1 missions; the receipt is whether it reports anything the pair missed, wi
 dispositions saying whether what it reported was real. About $12 for B and $9 for C. Depends
 on E4, F1 for the C receipt to be readable.
 
-**F15. What Shape C found (from F9).** *Shipped 0.58.0, see the status above; the fixture backfill and the four latent items stay here as record.* Opus 5's cold review of the F3, F1, and F2 build commits,
+**F15. What Shape C found (from F9).** *Shipped 0.58.0; the two `settle`/report latent items closed in 0.60.0; the fixture backfill and the two shapes-not-in-use items stay here as record.* Opus 5's cold review of the F3, F1, and F2 build commits,
 verified on bytes (`docs/research/2026-09-07-f9-shape-b-c.md`). Defects still on the tree: (1) a
 read lane whose fleet deletes its worktree comes back ok with `tests: null`, because `verify`
 maps a vanished tree to a no-op and F3's skip then never gates it (`verify.py`, `runner.py`);
