@@ -197,6 +197,49 @@ def test_spend_counts_malformed_receipts_on_only_the_total_row(home: Path, monke
     assert rows[-1]["skipped"] == 1
 
 
+def test_spend_reads_a_receipt_with_and_without_a_price_block(home: Path, monkeypatch, capsys):
+    """W6: `usage.price` is new; a receipt written before it existed, and one
+    that never estimated (a reported figure), both carry none of it -- and
+    `conductor spend` must still load both, same as any other receipt."""
+    without_price = "20260101T000000Z-codex-no-price"
+    _run(home, without_price, fleet="codex", model="sol", cost=1.0, basis="estimated", tokens=10)
+
+    with_price = home / "runs" / "20260101T000100Z-claude-with-price"
+    with_price.mkdir(parents=True)
+    (with_price / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": with_price.name,
+                "fleet": "claude",
+                "model": "sonnet",
+                "usage": {
+                    "cost_usd": 2.0,
+                    "cost_basis": "estimated",
+                    "total_tokens": 20,
+                    "price": {
+                        "key": "claude-sonnet-5",
+                        "source": "default",
+                        "as_of": "2026-09-03",
+                        "note": "",
+                    },
+                },
+                "duration_s": 1.0,
+                "breaker": {"tool_calls": 0, "tripped": None},
+                "ok": True,
+                "interrupted": False,
+                "dry_run": False,
+            }
+        )
+    )
+
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert rows[-1]["runs"] == 2
+    assert rows[-1]["skipped"] == 0
+    assert rows[-1]["cost_usd"] == 3.0
+
+
 def test_spend_text_calls_out_unpriced_runs(home: Path, monkeypatch, capsys):
     _sample(home)
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))

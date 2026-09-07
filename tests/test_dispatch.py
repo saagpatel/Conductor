@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from conductor import prices as prices_mod
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict, run_mission
@@ -259,6 +260,29 @@ def test_tokens_without_dollars_are_priced_from_the_table(repo, home, fake_fleet
     assert result.usage["cost_basis"] == "estimated"
     assert result.usage["cost_usd"] == 0.5 + 2.5
     assert result.summary()["cost_usd"] == 3.0
+    # W6: the receipt names which table entry, from which source, priced it.
+    assert result.usage["price"]["key"] == "composer-2.5"
+    assert result.usage["price"]["source"] == "default"
+    assert result.usage["price"]["as_of"] == prices_mod.AS_OF
+
+
+def test_an_estimate_from_an_override_priced_model_says_so_on_the_receipt(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """W6: an operator override is visible on the run it priced, not only in
+    prices.json itself."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "prices.json").write_text(json.dumps({"composer-2.5": {"input": 1.0, "output": 1.0}}))
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"usage":{"inputTokens":1000000,"outputTokens":1000000}}'
+    )
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
+    result = dispatch(spec_for(repo, fleet="cursor", model="composer-2.5"), home=home)
+    assert result.usage["cost_basis"] == "estimated"
+    assert result.usage["price"]["key"] == "composer-2.5"
+    assert result.usage["price"]["source"] == "override"
 
 
 def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, fake_fleet):
@@ -270,6 +294,8 @@ def test_a_reported_cost_is_never_overwritten_by_an_estimate(repo, home, fake_fl
     result = dispatch(spec_for(repo, fleet="claude", model="haiku"), home=home)
     assert result.usage["cost_basis"] == "reported"
     assert result.usage["cost_usd"] == 0.231398
+    # W6: a reported figure is the fleet's own number, not the table's.
+    assert result.usage["price"] is None
 
 
 def test_an_invalid_reported_cost_is_noted_and_only_valid_tokens_are_estimated(

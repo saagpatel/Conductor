@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from conductor import attest, export
+from conductor import attest, export, spend
 from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.golden import scrub_guard
@@ -262,7 +262,7 @@ def test_manifest_lists_every_file_with_both_digests(repo, home, monkeypatch, tm
     assert manifest["logs"] is False
     assert manifest["chain"]["verified_at_export"] is True
     assert len(manifest["chain"]["links"]) == 2
-    assert manifest["not_verifiable_here"] == ["signatures"]
+    assert manifest["not_verifiable_here"] == ["signatures", "completeness"]
     assert "manifest.json" not in manifest["files"]
 
     for relpath, meta in manifest["files"].items():
@@ -276,6 +276,95 @@ def test_manifest_lists_every_file_with_both_digests(repo, home, monkeypatch, tm
 
     for run_id, entry in manifest["attestations"].items():
         assert entry["verified_at_export"] is True, (run_id, entry["problems"])
+
+
+# --- W9: the D13 inventory and the declared scope -----------------------
+
+
+def _add_snapshot_only_runs(mission_dir: Path, run_ids: list[str]) -> dict:
+    """Names `run_ids` on the mission's `result.json` the way a judge
+    sitting's extra orders and a resolver do -- a `collate` with an
+    `orders` list and a `resolve` block -- neither of which any lane
+    attempt or chain link names on its own."""
+    result_path = mission_dir / "result.json"
+    result_raw = json.loads(result_path.read_text())
+    result_raw["collate"] = {"run_id": run_ids[0], "orders": [{"run_id": run_ids[1]}]}
+    result_raw["resolve"] = {"run_id": run_ids[2]}
+    result_path.write_text(json.dumps(result_raw, indent=2))
+    return result_raw
+
+
+def test_scope_run_files_names_only_files_a_run_actually_copied(
+    repo, home, monkeypatch, tmp_path
+):
+    """Opus review of w6w9-price-basis-export-scope, item 5: `mission_files`
+    and `mission_subdirs` are filtered to what was actually copied, but
+    `run_files` was the static six-name config list regardless of whether
+    any run in the bundle actually had a `diff.patch` -- unlike its two
+    neighbors, it did not describe the bundle's real contents."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    for run_id in (
+        result.lanes[0]["attempts"][-1]["run_id"],
+        result.lanes[1]["attempts"][-1]["run_id"],
+    ):
+        diff_path = home / "runs" / run_id / "diff.patch"
+        diff_path.unlink(missing_ok=True)
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert "diff.patch" not in export_result.scope["run_files"]
+    assert list((out / "runs").rglob("diff.patch")) == []
+    for candidate in ("result.json", "attestation.json", "prompt.txt", "argv.json"):
+        assert candidate in export_result.scope["run_files"]
+
+
+def test_export_includes_snapshot_only_runs_counted_from_snapshot(
+    repo, home, monkeypatch, tmp_path
+):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    mission_dir = home / "missions" / result.mission_id
+    extra_ids = ["fake-collate-run", "fake-order-run", "fake-resolve-run"]
+    result_raw = _add_snapshot_only_runs(mission_dir, extra_ids)
+    for extra_id in extra_ids:
+        run_dir = home / "runs" / extra_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text(
+            json.dumps({"run_id": extra_id, "fleet": "claude", "model": "sonnet", "ok": True})
+        )
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    for extra_id in extra_ids:
+        assert (out / "runs" / extra_id / "result.json").is_file()
+    assert export_result.scope["run_ids"]["from_snapshot"] == len(spend.mission_run_ids(result_raw))
+    assert export_result.scope["missing_run_dirs"] == []
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["scope"]["run_ids"] == export_result.scope["run_ids"]
+
+
+def test_export_lists_a_missing_run_directory_and_still_succeeds(
+    repo, home, monkeypatch, tmp_path
+):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    mission_dir = home / "missions" / result.mission_id
+    extra_ids = ["fake-collate-run", "fake-order-run", "fake-resolve-run"]
+    _add_snapshot_only_runs(mission_dir, extra_ids)
+    # Only two of the three named runs actually have a directory under runs/.
+    for extra_id in extra_ids[:2]:
+        run_dir = home / "runs" / extra_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text(
+            json.dumps({"run_id": extra_id, "fleet": "claude", "model": "sonnet", "ok": True})
+        )
+    out = tmp_path / "bundle"
+
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.scope["missing_run_dirs"] == ["fake-resolve-run"]
+    assert not (out / "runs" / "fake-resolve-run").exists()
+    assert (out / "runs" / "fake-order-run" / "result.json").is_file()
 
 
 # --- conductor export --check -----------------------------------------
@@ -443,3 +532,62 @@ def test_cli_export_exits_1_on_a_leak(repo, home, monkeypatch, tmp_path, capsys)
     rc = main(["export", result.mission_id, "--out", str(out)])
     assert rc == 1
     assert not out.exists()
+
+
+def test_export_refuses_when_the_receipt_key_appears_in_hex(repo, home, monkeypatch, tmp_path):
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    key = attest.read_receipt_key(home)
+    assert key is not None
+    (home / "runs" / build_run_id / "answer.txt").write_text(key.hex() + "\n")
+
+    out = tmp_path / "leaky-key-bundle"
+    with pytest.raises(export.ExportError, match="receipt key material found in") as excinfo:
+        export.export(home, result.mission_id, out)
+    assert f"runs/{build_run_id}/answer.txt" in str(excinfo.value)
+    assert not out.exists()
+
+
+def test_cli_export_exits_1_when_the_receipt_key_leaks_in_the_bundle(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Opus review of w6w9-price-basis-export-scope, item 4: the receipt-key
+    refusal is the same severity class as the scrub_guard leak refusal right
+    above it (both remove the bundle and say a secret was found in it), so a
+    caller branching on exit code must see the same exit -- 1, not 3 (the
+    generic bad-argument exit `MISSION_ID does not exist` also uses)."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    key = attest.read_receipt_key(home)
+    assert key is not None
+    (home / "runs" / build_run_id / "answer.txt").write_text(key.hex() + "\n")
+
+    out = tmp_path / "leaky-key-bundle"
+    rc = main(["export", result.mission_id, "--out", str(out)])
+    assert rc == 1
+    assert not out.exists()
+
+
+def test_cli_export_check_prints_omissions_when_present_and_still_passes_without(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    out = _export_bundle(repo, home, monkeypatch, tmp_path)
+
+    assert main(["export", "--check", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "omitted:" in printed
+    assert any(
+        "receipt key itself never leaves the exporting machine" in line
+        for line in printed.splitlines()
+    )
+
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["scope"]
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    assert main(["export", "--check", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "omitted:" not in printed

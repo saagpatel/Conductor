@@ -271,7 +271,13 @@ summary and a report path.
   remains of the budget also caps every dispatch it starts (tightening any
   `cap_usd` the lane set), so the overshoot is bounded in dollars, not just
   in dispatches; a dispatch that lands unpriced makes the total unknowable,
-  and an unknowable budget is treated as spent (`budget unverifiable`);
+  and an unknowable budget is treated as spent (`budget unverifiable`); the
+  result's `budget` block also carries `in_flight_dispatches`,
+  `outstanding_cap_usd` (the sum of the caps still running right now, `null`
+  when any of them has no cap), and `worst_case_usd` (`spent_usd +
+  outstanding_cap_usd`) -- a report of possible overshoot while dispatches
+  are still in flight, never subtracted from what a dispatch may still
+  spend (W6);
 - copies each lane's final attempt's answer to `answers/<lane>.txt` and its
   patch (committed, uncommitted, and untracked work against the base) to
   `diffs/<lane>.patch`; if `collate` is set, hands all of them to one
@@ -2043,11 +2049,25 @@ bundled file by its bundle-relative path with three numbers: `sha256` (the
 scrubbed bytes actually in the bundle), `sha256_original` (the file's digest
 on the exporting machine, before scrubbing), and `bytes`. `verifiable_here`
 names what a reader can check from the bundle alone -- file digests and the
-chain's linkage; `not_verifiable_here` names what they cannot -- signatures.
-`note` says why: the receipt key is a shared secret (`attest.py`), so a
-bundle a third party could verify standalone would be a bundle that shipped
-the key that forges everything. Verifying it once, here, with the key, and
-shipping the verdict instead of the key is the whole design.
+chain's linkage; `not_verifiable_here` names what they cannot -- signatures,
+and, since W9, completeness (the manifest proves the files it lists are
+unchanged, never that nothing was omitted). `note` says why: the receipt
+key is a shared secret (`attest.py`), so a bundle a third party could
+verify standalone would be a bundle that shipped the key that forges
+everything. Verifying it once, here, with the key, and shipping the
+verdict instead of the key is the whole design. A `scope` object records
+what the bundle actually holds and why: `run_ids` (how many run ids each
+of `from_lanes`, `from_chain`, and `from_snapshot` contributed, and their
+union's `total`), `missing_run_dirs` (a run id named by a receipt, a chain
+link, or the mission's own snapshot whose directory was never found under
+`runs/`), `mission_files`/`mission_subdirs` (which of `MISSION_TOP_FILES`/
+`MISSION_SUBDIRS` were actually copied), `run_files` (the run file names a
+copied run may carry, logs included only with `--logs`), and `omitted` (a
+fixed list of plain sentences naming what a bundle never holds at all --
+logs without `--logs`, `running.json`/`liveness.json`, a run directory
+never found, worktrees and branches, the receipt key, and any run this
+mission's receipts, chain, and snapshot never named). A manifest written
+before W9 carries no `scope` at all.
 
 ```
 conductor export --check DIR
@@ -2063,7 +2083,10 @@ first), and each statement's `run_id` has a `runs/<run id>/attestation.json`
 in the bundle whose `sha256_original` matches the statement's own
 `attestation_sha256`. It says nothing about signatures -- that would need
 the key -- and exits 0 when every check passes, 1 otherwise, printing
-`not_verifiable_here` alongside whatever it found.
+`not_verifiable_here` alongside whatever it found. When the manifest
+carries a `scope` (W9), `--check` also prints `omitted:` followed by each
+of its sentences; a manifest recorded before `scope` existed is read
+exactly as before, with no `omitted:` line.
 
 ### Pausing for the operator
 
@@ -2532,6 +2555,19 @@ shows as a gap. Override or extend the table without a code change in
 `$CONDUCTOR_HOME/prices.json` (a null entry drops a model; a malformed file
 falls back to defaults rather than stopping a run).
 
+The table itself is dated list price transcribed from local notes
+(`prices.AS_OF`), not a live billing feed, and it can drift out from under
+the vendor's own page between updates. A `cursor-grok-4.6` or
+`composer-2.5` entry in particular does not establish which Cursor variant,
+tier, or long-context billing band actually ran; see the per-model notes in
+`prices.py` before trusting a Cursor figure past a rough order of magnitude.
+An estimated run's own receipt carries the specifics: `usage.price` names
+the table `key` that matched, whether that entry is a table `"default"` or
+an operator `"override"`, and the table's `as_of` date -- so a stale table
+is visible on the run it priced, not only in `prices.json` itself. `price`
+is `null` on a `"reported"` figure (the fleet's own number, not the table's)
+and on an unpriced run.
+
 Token conventions are normalized first: `input_tokens` excludes cache reads
 on every fleet (OpenAI and Google count them inside the input figure and are
 split out), and `output_tokens` includes reasoning (Antigravity's separate
@@ -2720,8 +2756,17 @@ it allows, and the result's `budget` field says which:
 | `cursor` | `post-hoc` | usage arrives once, at the end; the cap is checked then. |
 | `script` | `none` | costs nothing; `cap_usd` is refused at dispatch rather than enforced. |
 
-A watched fleet overshoots by at most one model response plus one two-second
-poll. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
+What "overshoots" means depends on the enforcement kind: `native` reports
+whatever Claude Code itself stopped at, so that figure is the fleet's
+promise, not conductor's; `watcher` (codex, antigravity) can only kill after
+the fact, so it overshoots by at most one model response plus one
+two-second poll; `post-hoc` (cursor) gets its usage once, at the end, so the
+whole run can pass before the cap is even checked, and the mission ledger's
+`outstanding_cap_usd` is the only figure that names what it could still
+turn out to cost -- a report, never an admission check, and not written
+out until the finished mission's own `budget` block, so it is not yet
+anything a reader can watch update while the run is live; `none`
+(script) never overshoots, being free. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
 a $1.0000 cap"`), whether it was killed or merely judged afterwards; work it
 landed is still on its branch. The watcher runs on every codex and
 antigravity dispatch, cap or not, because it is also the only price a run

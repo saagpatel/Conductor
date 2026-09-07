@@ -19,9 +19,27 @@ and kills the process group the moment the estimate crosses the cap:
     dollar cap remains authoritative; conductor tails those messages only so
     a breaker-killed run still has a best available price.
 
-The check runs on conductor's own wait loop every `POLL_S` seconds, so a
-watched fleet overshoots by at most one model response plus one poll. The
-same tail prices a run that conductor killed for any reason: without it a
+The check runs on conductor's own wait loop every `POLL_S` seconds. What that
+buys depends on the enforcement kind, and no one sentence covers all four:
+
+  * `native` (claude): Claude Code stops itself; the receipt's figure is the
+    fleet's own, not conductor's watcher.
+  * `watcher` (codex, antigravity): the poll can only kill after the fact,
+    so a watched fleet overshoots by at most one model response plus one
+    `POLL_S` poll.
+  * `post-hoc` (cursor): usage arrives once, at the end, so the cap is a
+    verdict rather than a stop -- the overshoot is bounded only by the
+    whole run, and the mission ledger's `outstanding_cap_usd` (W6) is the
+    only figure that names what it could still turn out to cost. It is a
+    report, never an admission check: nothing reads it back to gate what
+    starts next (`Ledger.remaining()`/`blocker()` are unchanged), and
+    nothing writes it out until the finished mission's own `budget` block,
+    the same place `spent_usd` lands -- not yet anything a reader can watch
+    update while the dispatch is still live.
+  * `none` (script): a script dispatch is priced at zero and never
+    overshoots anything.
+
+The same tail prices a run that conductor killed for any reason: without it a
 timed-out Codex dispatch would land in the ledger as `cost_usd: null`.
 """
 
@@ -163,7 +181,9 @@ class Watcher:
                 cache_write_tokens=usage.cache_write_tokens,
                 table=self.table,
             )
-            usage.cost_basis = "estimated" if usage.cost_usd is not None else None
+            priced = usage.cost_usd is not None
+            usage.cost_basis = "estimated" if priced else None
+            usage.price = prices.basis(self.model_id, self.table) if priced else None
             self.usage = usage
         return self.usage
 

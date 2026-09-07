@@ -188,7 +188,14 @@ def _read_run(path: Path) -> Run | None:
         return None
 
 
-def _mission_runs(data: dict[str, object]) -> set[str]:
+def mission_run_ids(data: dict[str, object]) -> set[str]:
+    """Every run id a mission's `result.json` snapshot (`data`) named as
+    paid for: lane attempts and their final run, every collate's own run and
+    order runs (a judge sitting's extra judges included), and the resolver's
+    run plus every superseded resolver a rerun kept. W9: public so `export`
+    can union it with what lane receipts and the receipt chain separately
+    name, catching a judge-order or resolver run that no lane attempt does.
+    """
     run_ids: set[str] = set()
     lanes = data.get("lanes")
     if isinstance(lanes, list):
@@ -226,6 +233,10 @@ def _mission_runs(data: dict[str, object]) -> set[str]:
             if isinstance(old_resolve, dict) and isinstance(old_resolve.get("run_id"), str):
                 run_ids.add(old_resolve["run_id"])
     return run_ids
+
+
+# Kept as an alias: every internal caller predates the public name above.
+_mission_runs = mission_run_ids
 
 
 def _collate_run_ids(collate: dict[str, object]) -> set[str]:

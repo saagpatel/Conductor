@@ -135,6 +135,7 @@ def test_script_dispatch_is_free_not_unpriced(repo, home):
         "thinking_tokens": 0,
         "cost_usd": 0.0,
         "cost_basis": None,
+        "price": None,
         "total_tokens": 0,
     }
     assert result.budget == {

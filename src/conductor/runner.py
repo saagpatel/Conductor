@@ -2627,6 +2627,7 @@ def dispatch(
             if estimated is not None:
                 usage.cost_usd = estimated
                 usage.cost_basis = "estimated"
+                usage.price = prices.basis(model_id)
         usage_dict = usage.to_dict() if usage is not None else None
         if budget is not None:
             budget.settle(
@@ -3143,6 +3144,7 @@ def _parse_failure_result(
         if estimated is not None:
             usage.cost_usd = estimated
             usage.cost_basis = "estimated"
+            usage.price = prices.basis(model_id)
     notes = [error, "receipt written after the run; the tree was not judged"]
     if usage is None or usage.cost_usd is None:
         notes.append("no priced usage was recovered before the failure; this run is unpriced")

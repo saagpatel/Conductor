@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, attest
+from . import __version__, attest, spend
 from .golden import _placeholder_map, _scrub_json_value, scrub_guard, scrub_text
 
 FORMAT = "conductor/export/v1"
@@ -69,8 +69,28 @@ _CHAIN_RELPATH = Path("receipts") / "chain.json"
 _NOTE = (
     "The receipt key is a shared secret that stays on the exporting machine; "
     "signatures were verified there at export time and cannot be re-verified "
-    "from this bundle."
+    "from this bundle. The manifest proves that the files it lists are "
+    "unchanged since export; it does not prove that work this bundle omits "
+    "is absent."
 )
+
+# W9: what a bundle never holds, regardless of this particular mission --
+# read by `conductor export --check` when a bundle's own manifest carries
+# `scope`, so a reader outside this machine knows the boundary of what was
+# checked without having to infer it from what is merely missing.
+_OMITTED = [
+    "stdout.log and stderr.log are omitted unless the export runs with --logs.",
+    "running.json and liveness.json are never included; they describe a mission "
+    "or run still in progress, not a finished one.",
+    "run directories named by a lane receipt, a chain link, or the mission's "
+    "result.json snapshot but not found under runs/ are omitted.",
+    "worktrees and branches are never included; only the diffs and patches "
+    "already captured travel with the bundle.",
+    "the receipt key itself never leaves the exporting machine and is never "
+    "included.",
+    "any run this mission's lane receipts, its receipt chain, and its "
+    "result.json snapshot never named is omitted.",
+]
 
 
 class ExportError(ValueError):
@@ -93,6 +113,9 @@ class ExportResult:
     # exactly `chain_state_at_export == "verified"`.
     chain_state_at_export: str = "missing"
     leaks: list[str] = field(default_factory=list)
+    # W9: the manifest's own `scope` object, carried on the result too so a
+    # caller (cli.py) does not have to re-read manifest.json to print it.
+    scope: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -201,6 +224,24 @@ def _copy_scrubbed(
     return original_sha, hashlib.sha256(final_bytes).hexdigest(), len(final_bytes)
 
 
+def _find_key_material(work: Path, key: bytes) -> str | None:
+    """The first bundle file, relative to `work`, that carries the receipt
+    key itself -- as raw bytes, as hex, or as base64 -- or None on a clean
+    bundle. The key signs every receipt; it must never travel with a bundle
+    that ships to a reader outside this machine, whatever shape it hides in.
+    """
+    hex_form = key.hex()
+    b64_form = base64.b64encode(key).decode("ascii")
+    for file in sorted(p for p in work.rglob("*") if p.is_file()):
+        raw = file.read_bytes()
+        if key in raw:
+            return str(file.relative_to(work))
+        text = raw.decode("utf-8", errors="ignore")
+        if hex_form in text or b64_form in text:
+            return str(file.relative_to(work))
+    return None
+
+
 # --- run id discovery -------------------------------------------------------
 
 
@@ -291,8 +332,24 @@ def export(
     chain_rows = chain_evaluation["rows"]
     chain_verified = chain_state == "verified"
 
+    # W9: `spend.mission_run_ids` already knows every run a mission paid
+    # for, including a judge sitting's extra orders and a superseded
+    # resolver that no lane attempt or chain link ever names on its own.
+    result_path = mission_dir / "result.json"
+    result_raw: dict = {}
+    if result_path.is_file():
+        try:
+            loaded_result = json.loads(result_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            loaded_result = None
+        if isinstance(loaded_result, dict):
+            result_raw = loaded_result
+
+    lane_run_ids = _lane_run_ids(mission_dir)
     chain_run_ids = {row["run_id"] for row in chain_rows if isinstance(row["run_id"], str)}
-    run_ids = sorted(_lane_run_ids(mission_dir) | chain_run_ids)
+    snapshot_run_ids = spend.mission_run_ids(result_raw)
+    run_ids = sorted(lane_run_ids | chain_run_ids | snapshot_run_ids)
+    missing_run_dirs = sorted(run_id for run_id in run_ids if not (home / "runs" / run_id).is_dir())
     link_statement_by_run: dict[str, dict] = {
         row["run_id"]: row["_statement"]
         for row in chain_rows
@@ -320,21 +377,26 @@ def export(
                 "bytes": size,
             }
 
+        mission_files_present: list[str] = []
         for name in MISSION_TOP_FILES:
             src = mission_dir / name
             if src.is_file():
                 copy_one(src, Path(name))
+                mission_files_present.append(name)
 
+        mission_subdirs_present: list[str] = []
         for name in MISSION_SUBDIRS:
             src_dir = mission_dir / name
             if not src_dir.is_dir():
                 continue
+            mission_subdirs_present.append(name)
             for file in sorted(p for p in src_dir.rglob("*") if p.is_file()):
                 if file.name in _SKIP_NAMES:
                     continue
                 copy_one(file, file.relative_to(mission_dir))
 
         run_files = RUN_FILES + (RUN_LOG_FILES if logs else ())
+        run_files_present: list[str] = []
         for run_id in run_ids:
             run_dir = home / "runs" / run_id
             if not run_dir.is_dir():
@@ -343,6 +405,8 @@ def export(
                 src = run_dir / name
                 if src.is_file():
                     copy_one(src, Path("runs") / run_id / name)
+                    if name not in run_files_present:
+                        run_files_present.append(name)
 
         attestations_manifest: dict[str, dict] = {}
         verified_count = 0
@@ -365,6 +429,20 @@ def export(
             for row in chain_rows
         ]
 
+        scope = {
+            "run_ids": {
+                "from_lanes": len(lane_run_ids),
+                "from_chain": len(chain_run_ids),
+                "from_snapshot": len(snapshot_run_ids),
+                "total": len(run_ids),
+            },
+            "missing_run_dirs": missing_run_dirs,
+            "mission_files": mission_files_present,
+            "mission_subdirs": mission_subdirs_present,
+            "run_files": [name for name in run_files if name in run_files_present],
+            "omitted": _OMITTED,
+        }
+
         manifest = {
             "_type": FORMAT,
             "conductor_version": __version__,
@@ -379,11 +457,25 @@ def export(
                 "links": manifest_chain_links,
             },
             "attestations": attestations_manifest,
+            "scope": scope,
             "verifiable_here": ["file digests", "chain linkage"],
-            "not_verifiable_here": ["signatures"],
+            "not_verifiable_here": ["signatures", "completeness"],
             "note": _NOTE,
         }
         (work / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+        key_leak = _find_key_material(work, key)
+        if key_leak is not None:
+            shutil.rmtree(work)
+            # Opus review of w6w9-price-basis-export-scope, item 4: the
+            # same severity class as the scrub_guard leak refusal right
+            # below (a secret found in the bundle) must exit the same way
+            # -- `leaks=` is what routes cli.py to exit 1 instead of the
+            # generic bad-argument exit 3.
+            raise ExportError(
+                f"export refused: receipt key material found in {key_leak}",
+                leaks=[f"{key_leak}: receipt key material"],
+            )
 
         leaks = scrub_guard(work)
         if leaks:
@@ -404,6 +496,7 @@ def export(
         attestations_verified_at_export=(verified_count, len(run_ids)),
         chain_state_at_export=chain_state,
         leaks=[],
+        scope=scope,
     )
 
 
