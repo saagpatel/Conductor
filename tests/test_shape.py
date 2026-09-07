@@ -70,6 +70,7 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     spec = _spec(tmp_path)
     caps = shape.cap_arithmetic(2, 1)
     raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps)
+    shape.write_dispositions_schema(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
     names = [lane.name for lane in mission.lanes]
     assert names == ["build", "review-gemini", "review-grok", "fix"]
@@ -95,6 +96,11 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     assert grok["cap_usd"] == 1.5 and "Do not run the test suite" in grok["prompt"]
     assert fix["resume"] == "build" and fix["branch"] == "feat/widget"
     assert fix["commit"] == f"fix({repo.name}): address cross-vendor review of widget"
+    assert fix["deliverable"] == {
+        "path": "dispositions.json",
+        "schema": "dispositions.schema.json",
+        "commit": False,
+    }
 
 
 def test_grok_prompt_lets_it_run_the_gate_only_when_asked(repo, tmp_path):
@@ -152,6 +158,7 @@ def test_paths_are_relative_to_the_mission_dir_when_under_it(repo, tmp_path):
     )
     assert raw["prompt_file"] == "specs/widget.md"
     assert raw["cwd"] == "repo"
+    shape.write_dispositions_schema(tmp_path)
     mission = mission_from_dict(raw, base_dir=tmp_path)
     assert mission.cwd == str(repo)
 
@@ -438,3 +445,52 @@ def test_cli_skip_preflight_says_so_and_still_writes_the_file(
     assert code == 0
     assert "gate preflight: skipped (--skip-preflight)" in capsys.readouterr().out
     assert out.is_file()
+
+
+# --- F15 mission 2 item 2: dispositions.json deliverable on the fix lane -----
+
+
+def test_cli_writes_the_dispositions_schema_and_dry_run_passes(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = _spec(tmp_path)
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    code = main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "1", "--modules", "1", "--out", str(out), "--dry-run",
+        ]
+    )
+    assert code == 0
+    schema_path = out.parent / "dispositions.schema.json"
+    assert schema_path.is_file()
+    assert json.loads(schema_path.read_text()) == shape.DISPOSITIONS_SCHEMA
+    raw = json.loads(out.read_text())
+    fix = next(lane for lane in raw["lanes"] if lane["name"] == "fix")
+    assert fix["deliverable"] == {
+        "path": "dispositions.json",
+        "schema": "dispositions.schema.json",
+        "commit": False,
+    }
+    printed = capsys.readouterr().out
+    assert '"ok": true' in printed
+
+
+def test_cli_inline_still_writes_the_dispositions_schema(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = _spec(tmp_path)
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    code = main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "1", "--modules", "1", "--out", str(out), "--inline",
+        ]
+    )
+    assert code == 0
+    assert not (out.parent / "prompts").exists()
+    assert (out.parent / "dispositions.schema.json").is_file()

@@ -360,6 +360,17 @@ answer: `{{lanes.<name>.deliverable}}` renders the file's text, fenced and
 budgeted like `{{lanes.<name>.answer}}`, empty when the lane declared none
 or left none behind.
 
+`deliverable.commit` (optional boolean, default `true`) keeps a receipt out
+of the harness's own commit: `false` means the declared path is staged like
+everything else and then unstaged before conductor commits, so a fix lane's
+`dispositions.json` -- a record of what it did, not source -- never lands
+in the repository's history. The file is still checked on the filesystem
+and still copied into the mission's `deliverables/` directory beforehand,
+same as any other deliverable; only the commit is affected. When the
+excluded path was the only change in the tree, nothing is committed and the
+run's `ok` is unaffected by that, the same as any other no-op write lane
+with `no_op_ok` set.
+
 ### Cheap-first cascade
 
 A mission may set `"cascade"`: an attempt-shaped object (the same keys a

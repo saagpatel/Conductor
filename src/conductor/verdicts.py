@@ -282,6 +282,12 @@ _DISPOSITION_LINE = re.compile(
     r"^DISPOSITION:\s+(?P<lane>\S+)\s+(?P<index>\d+)\s+"
     r"(?P<disposition>fixed|refused|already|wording):\s*(?P<reason>.+)$"
 )
+_FINDING_PREFIX = "FINDING:"
+_FINDING_LINE = re.compile(
+    r"^FINDING:\s+(?P<index>\d+)\s+(?P<file>.+):(?P<line>\d+)\s+confidence\s+(?P<confidence>\d+)$"
+)
+_DISPOSITION_KINDS = frozenset({"fixed", "refused", "already", "wording"})
+_DISPOSITION_ENTRY_KEYS = frozenset({"lane", "index", "disposition", "reason"})
 
 
 def _final_marker_line(answer: str) -> str:
@@ -299,17 +305,66 @@ def _final_marker_line(answer: str) -> str:
     return ""
 
 
+def _parse_review_items(answer: str) -> tuple[list[dict], int]:
+    items: list[dict] = []
+    malformed = 0
+    for raw_line in answer.splitlines():
+        line = raw_line.strip()
+        if not line.startswith(_FINDING_PREFIX):
+            continue
+        match = _FINDING_LINE.fullmatch(line)
+        if match is None:
+            malformed += 1
+            continue
+        confidence = int(match.group("confidence"))
+        if not 1 <= confidence <= 10:
+            malformed += 1
+            continue
+        items.append(
+            {
+                "index": int(match.group("index")),
+                "file": match.group("file"),
+                "line": int(match.group("line")),
+                "confidence": confidence,
+            }
+        )
+    return items, malformed
+
+
 def review_verdict(answer: str) -> dict:
     """A review lane narrates before its verdict; only the final line is
     the answer conductor tallies. `NO_FINDINGS` is exact, `FINDINGS: N`
-    names a count, anything else is unparsed rather than guessed at."""
+    names a count, anything else is unparsed rather than guessed at.
+
+    F15 mission 2 item 1: every `FINDING: <n> <file>:<line> confidence
+    <1-10>` line, in order, is parsed into `items` regardless of the final
+    verdict; a line that opens with the marker but does not match the
+    shape (or whose confidence falls outside 1-10) is skipped and counted
+    in `items_malformed`, the same convention `fix_dispositions` uses for
+    `DISPOSITION:` lines."""
     line = _final_marker_line(answer)
+    items, items_malformed = _parse_review_items(answer)
     if line == "NO_FINDINGS":
-        return {"verdict": "no_findings", "findings": 0}
+        return {
+            "verdict": "no_findings",
+            "findings": 0,
+            "items": items,
+            "items_malformed": items_malformed,
+        }
     match = _FINDINGS_LINE.fullmatch(line)
     if match:
-        return {"verdict": "findings", "findings": int(match.group(1))}
-    return {"verdict": "unparsed", "findings": None}
+        return {
+            "verdict": "findings",
+            "findings": int(match.group(1)),
+            "items": items,
+            "items_malformed": items_malformed,
+        }
+    return {
+        "verdict": "unparsed",
+        "findings": None,
+        "items": items,
+        "items_malformed": items_malformed,
+    }
 
 
 def _parse_dispositions(answer: str) -> tuple[list[dict], int]:
@@ -348,6 +403,48 @@ def dispositions_malformed(answer: str) -> int:
     `DISPOSITION:` but did not match the required shape."""
     _, malformed = _parse_dispositions(answer)
     return malformed
+
+
+def valid_disposition_entry(entry: object) -> bool:
+    """A well-formed disposition record, whichever channel it arrived
+    through -- the fix lane's `dispositions.json` deliverable or a
+    rehydrated lane receipt: exactly `lane` (non-empty string), `index`
+    (int), `disposition` (one of the four kinds), `reason` (string), no
+    other keys. Shared so a rehydrated receipt with a malformed entry is
+    refused the same way a freshly parsed one is skipped."""
+    return (
+        isinstance(entry, dict)
+        and set(entry) == _DISPOSITION_ENTRY_KEYS
+        and isinstance(entry.get("lane"), str)
+        and bool(entry["lane"])
+        and type(entry.get("index")) is int
+        and entry.get("disposition") in _DISPOSITION_KINDS
+        and isinstance(entry.get("reason"), str)
+    )
+
+
+def parse_dispositions_deliverable(text: str) -> tuple[list[dict], int]:
+    """F15 mission 2 item 2: the fix lane's `dispositions.json` deliverable,
+    `{"dispositions": [...]}`. Every entry that fails `valid_disposition_entry`
+    is counted in the second return value, not stored. A file that is not
+    JSON, not an object, or carries no `dispositions` list parses to no
+    entries and no malformed count -- the deliverable's own file-level
+    schema check (fleets/runner) is what refuses that shape; this function
+    only sorts the entries once the file shape is already right."""
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        return [], 0
+    if not isinstance(raw, dict) or not isinstance(raw.get("dispositions"), list):
+        return [], 0
+    dispositions: list[dict] = []
+    malformed = 0
+    for entry in raw["dispositions"]:
+        if valid_disposition_entry(entry):
+            dispositions.append(dict(entry))
+        else:
+            malformed += 1
+    return dispositions, malformed
 
 
 def _clip_line(text: object, limit: int) -> str:

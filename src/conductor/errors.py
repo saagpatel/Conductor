@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .verify import NO_OP_COMMIT_REASONS
+
 if TYPE_CHECKING:
     from .runner import Result
 
@@ -201,7 +203,7 @@ def _commit_failed(result: Result) -> bool:
     commit = result.commit
     if not commit or commit.get("committed"):
         return False
-    nothing = commit.get("reason") == "nothing to commit"
+    nothing = commit.get("reason") in NO_OP_COMMIT_REASONS
     return not (result.no_op_ok and nothing)
 
 

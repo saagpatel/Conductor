@@ -9,6 +9,7 @@ downstream lane can read it through `{{lanes.<name>.deliverable}}`.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,15 @@ def test_deliverable_schema_not_json_is_refused(tmp_path):
     bad.write_text("{not json")
     with pytest.raises(DispatchRefused, match="schema file is not valid JSON"):
         build_argv(spec(deliverable={"path": "a.txt", "schema": str(bad)}))
+
+
+def test_deliverable_commit_must_be_a_boolean():
+    with pytest.raises(DispatchRefused, match="commit must be a boolean"):
+        build_argv(spec(deliverable={"path": "a.txt", "commit": "no"}))
+
+
+def test_deliverable_commit_false_is_accepted():
+    build_argv(spec(deliverable={"path": "a.txt", "commit": False}))
 
 
 # --- conductor dispatch CLI flags (item 1) ----------------------------------
@@ -324,6 +334,51 @@ def test_deliverable_json_wrong_typed_property_fails_schema(repo, home, fake_fle
         result.failure()
         == "deliverable does not match schema: property 'count' must be of type integer"
     )
+
+
+def test_write_lane_deliverable_commit_false_is_kept_out_of_the_commit(repo, home, fake_fleet):
+    """F15 mission 2 item 3: a dispatched write lane with `commit: false`
+    has the deliverable in its receipt and not in its commit."""
+    fake_fleet(
+        ["sh", "-c", f"echo done > report.txt; echo receipt > record.json; echo '{_OK_ANSWER}'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "record.json", "commit": False}),
+        commit_message="feat: add report",
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable["ok"] is True
+    log = subprocess.run(
+        ["git", "show", "--stat", result.commit["sha"]],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "report.txt" in log
+    assert "record.json" not in log
+
+
+def test_no_op_ok_waives_a_commit_that_only_excluded_the_deliverable(repo, home, fake_fleet):
+    """Cross-vendor review (Grok) of F15 mission 2: `commit_work`'s more
+    specific "nothing to commit beyond the excluded deliverable" reason
+    must be waived by `no_op_ok` the same way the plain "nothing to
+    commit" is -- `Result.failure()` and `errors._commit_failed` both
+    matched only the old exact string, so a fix lane that wrote nothing
+    but its excluded `dispositions.json` failed with "commit did not
+    land" even though the spec says `ok` is unaffected."""
+    fake_fleet(["sh", "-c", f"echo receipt > record.json; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "record.json", "commit": False}),
+        commit_message="feat: add report",
+        no_op_ok=True,
+        home=home,
+    )
+    assert result.ok is True, result.failure()
+    assert result.commit["committed"] is False
+    assert result.commit["reason"] == "nothing to commit beyond the excluded deliverable"
+    assert error_kind(result) is None
 
 
 def test_write_lane_deliverable_is_ordinary_bytes_part_of_the_diff(repo, home, fake_fleet):

@@ -207,6 +207,7 @@ def _scan_missions(
                 if isinstance(fleet, str) and lane_name:
                     findings = lane_raw["review"].get("findings")
                     findings_parsed = isinstance(findings, int) and not isinstance(findings, bool)
+                    raw_items = lane_raw["review"].get("items")
                     review_lanes[lane_name] = {
                         "vendor": _vendor(fleet, model if isinstance(model, str) else ""),
                         "findings": findings if findings_parsed else 0,
@@ -216,6 +217,10 @@ def _scan_missions(
                         # not have a fix lane's dispositions tallied against
                         # it either -- see the precision loop below.
                         "unparsed": not findings_parsed,
+                        # F15 mission 2 item 4: each {"index", "file", "line",
+                        # "confidence"} the review lane's FINDING: lines
+                        # parsed to; [] on a receipt that predates item 1.
+                        "items": raw_items if isinstance(raw_items, list) else [],
                     }
             if stage == FIX_STAGE:
                 malformed = lane_raw.get("dispositions_malformed")
@@ -436,6 +441,11 @@ class ReviewerPrecisionRow:
     # disposition count above, since a fix lane's dispositions against an
     # unparsed verdict are not real dispositions against real findings.
     unparsed: int = 0
+    # F15 mission 2 item 4: the confidence (1-10) of every review item whose
+    # (lane, index) a fix lane's disposition matched -- refused and fixed
+    # kept apart so a calibration line can compare them.
+    refused_confidences: list[int] = field(default_factory=list)
+    fixed_confidences: list[int] = field(default_factory=list)
 
     def total(self) -> int:
         return self.fixed + self.refused + self.already + self.wording
@@ -445,6 +455,27 @@ class ReviewerPrecisionRow:
         if self.total() < 3 or denom == 0:
             return None
         return round(self.fixed / denom, 3)
+
+    def corrected_rate(self) -> float | None:
+        """`fixed` over `findings`: how much of what this vendor reported
+        actually landed a fix, not just how it split once refused too."""
+        if not self.findings:
+            return None
+        return round(self.fixed / self.findings, 3)
+
+    def calibration(self) -> dict[str, object]:
+        """Mean confidence (1 decimal) of the findings this vendor's own
+        reported confidence, split by what the fix lane did with them --
+        `matched` is the total count either mean was computed over."""
+
+        def mean(values: list[int]) -> float | None:
+            return round(float(statistics.mean(values)), 1) if values else None
+
+        return {
+            "refused_mean": mean(self.refused_confidences),
+            "fixed_mean": mean(self.fixed_confidences),
+            "matched": len(self.refused_confidences) + len(self.fixed_confidences),
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -456,6 +487,10 @@ class ReviewerPrecisionRow:
             "wording": self.wording,
             "unparsed": self.unparsed,
             "precision": self.precision(),
+            "refused_confidences": list(self.refused_confidences),
+            "fixed_confidences": list(self.fixed_confidences),
+            "calibration": self.calibration(),
+            "corrected_rate": self.corrected_rate(),
         }
 
 
@@ -579,6 +614,22 @@ def _is_no_findings(answer_path: str) -> dict | None:
     return verdicts_mod.review_verdict(text)
 
 
+def _matched_confidence(items: object, index: object) -> int | None:
+    """F15 mission 2 item 4: the review item whose own `index` matches a
+    fix lane disposition's `index`, on the same lane -- its confidence, or
+    None when nothing matches (a disposition against an old-style review
+    with no `items`, or an index the review never numbered)."""
+    if not isinstance(items, list) or type(index) is not int:
+        return None
+    for entry in items:
+        if isinstance(entry, dict) and entry.get("index") == index:
+            confidence = entry.get("confidence")
+            if isinstance(confidence, int) and not isinstance(confidence, bool):
+                return confidence
+            return None
+    return None
+
+
 def _build_report(
     rows: list[Run],
     skipped: int,
@@ -665,6 +716,15 @@ def _build_report(
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             setattr(row, disposition, getattr(row, disposition) + 1)
+            if disposition in ("fixed", "refused"):
+                confidence = _matched_confidence(info.get("items"), item.get("index"))
+                if confidence is not None:
+                    target = (
+                        row.fixed_confidences
+                        if disposition == "fixed"
+                        else row.refused_confidences
+                    )
+                    target.append(confidence)
 
     precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
     # F15 item 3: every fix lane's own `dispositions_malformed` count, summed
@@ -863,6 +923,20 @@ def _print_report(rpt: Report) -> None:
             for d in (row.to_dict() for row in rpt.reviewer_precision)
         ],
     )
+    # F15 mission 2 item 4: one calibration line per vendor, right under the
+    # precision table it refines -- confidence of what the fix lane refused
+    # versus what it fixed, plus the corrected finding rate (fixed/findings).
+    for row in rpt.reviewer_precision:
+        d = row.to_dict()
+        calib = d["calibration"]
+        refused_mean = _cell(calib["refused_mean"])
+        fixed_mean = _cell(calib["fixed_mean"])
+        corrected = _cell(d["corrected_rate"])
+        print(
+            f"  {row.vendor}: refused mean confidence {refused_mean} over "
+            f"{len(row.refused_confidences)}, fixed mean confidence {fixed_mean} over "
+            f"{len(row.fixed_confidences)}, corrected finding rate {corrected}"
+        )
     print(
         f"  dispositions naming an unknown lane: {rpt.dispositions_unknown_lane}"
         f"  |  malformed disposition lines: {rpt.dispositions_malformed}"

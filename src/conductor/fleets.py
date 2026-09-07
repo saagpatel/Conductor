@@ -504,9 +504,12 @@ class Spec:
     # Claude Code only (see _AGENT_KEYS above).
     agent: dict | None = None
     # E1: a lane's product can be a file, not just its reply --
-    # {"path": <repo-relative>, "schema": <path, optional>}. Checked on the
-    # filesystem after the fleet exits (runner.dispatch), never through
-    # `git status` (see the module docstring there for why).
+    # {"path": <repo-relative>, "schema": <path, optional>, "commit": <bool,
+    # optional, default True>}. Checked on the filesystem after the fleet
+    # exits (runner.dispatch), never through `git status` (see the module
+    # docstring there for why). F15 mission 2 item 3: `commit: false` keeps
+    # the deliverable out of the harness's own commit (verify.commit_work's
+    # `exclude`) -- a receipt, not source.
     deliverable: dict | None = None
     # E6: the shell command a `fleet: "script"` dispatch runs; ignored by
     # every other fleet. Refused as missing (script) or as set (any other
@@ -798,9 +801,11 @@ class Spec:
         deliverable = self.deliverable
         if not isinstance(deliverable, dict):
             raise DispatchRefused("deliverable must be an object")
-        unknown = sorted(set(deliverable) - {"path", "schema"})
+        unknown = sorted(set(deliverable) - {"path", "schema", "commit"})
         if unknown:
             raise DispatchRefused(f"deliverable has unknown field(s): {', '.join(unknown)}")
+        if "commit" in deliverable and type(deliverable["commit"]) is not bool:
+            raise DispatchRefused("deliverable commit must be a boolean")
         path = deliverable.get("path")
         if not isinstance(path, str) or not path:
             raise DispatchRefused("deliverable needs a non-empty 'path'")
