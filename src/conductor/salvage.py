@@ -27,6 +27,7 @@ from .fleets import DEFAULT_TIMEOUT
 from .mission import LaneResult, Mission, MissionInvalid, mission_from_dict
 from .runner import _clean_gate, _transplant_gate
 from .verify import TestOutcome, diff_since, git_run
+from .verify import same_repo as _same_repo
 
 
 class SalvageInvalid(ValueError):
@@ -56,22 +57,6 @@ class SalvageResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-
-def _git_common_dir(cwd: Path | str) -> Path | None:
-    result = git_run(cwd, "rev-parse", "--git-common-dir")
-    if result.returncode != 0:
-        return None
-    path = Path(result.stdout.strip())
-    return path if path.is_absolute() else Path(cwd).resolve() / path
-
-
-def _same_repo(worktree: Path, repo: str) -> bool:
-    a = _git_common_dir(worktree)
-    b = _git_common_dir(repo)
-    if a is None or b is None:
-        return False
-    return a.resolve() == b.resolve()
 
 
 def _write_receipt(home: Path, mission_id: str, lane: str, payload: dict) -> Path:

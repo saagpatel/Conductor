@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -30,7 +32,7 @@ from pathlib import Path
 from . import attest, golden
 from .mission import LaneResult
 from .runner import GATE_TIMEOUT
-from .verify import git_run, run_tests
+from .verify import git_run, run_tests, same_repo
 
 
 class LandInvalid(ValueError):
@@ -49,6 +51,11 @@ class LandResult:
     failed_step: str = ""
     merge_sha: str = ""
     pre_merge_sha: str = ""
+    # D6: the commit that was merged -- the lane receipt's own `tip_sha`,
+    # re-resolved from `refs/heads/<branch>^{commit}` in the lane's
+    # repository and refused when the two disagree. Every merge names this
+    # sha, never the branch name (a tag of the same name shadows it).
+    tip_sha: str = ""
     reset: bool = False
     # The scratch worktree the gate and `golden check` ran in, for the
     # merged head -- removed on every path by the time `land()` returns.
@@ -103,22 +110,93 @@ def _mission_test(mission_raw: dict) -> str | None:
     return test if isinstance(test, str) and test else None
 
 
-def _golden_check(worktree: Path) -> list[str]:
-    """The same replay `conductor golden check` runs against `tests/golden`
-    at the repo root, but through golden's own Python API and against the
-    merged worktree, never a subprocess of conductor calling itself."""
+# D19: the child that runs `golden check` for the merged worktree. It asserts
+# where `conductor` came from before it runs anything -- the whole point of
+# the subprocess is that the merged tree's own implementation replays the
+# merged tree's own fixtures, and an import that resolved to the running
+# `land`'s copy (a stale PYTHONPATH, an installed package ahead of it on
+# sys.path) would be exactly the silent staleness this replaces. Exit 3 is
+# that refusal; 0 and 1 are `cmd_golden_check`'s own clean and diff answers.
+_GOLDEN_CHILD = """\
+import sys
+from pathlib import Path
+
+import conductor
+
+root = Path(conductor.__file__).resolve().parent
+worktree = Path(sys.argv[1]).resolve()
+if not root.is_relative_to(worktree):
+    sys.stderr.write("golden check imported conductor from %s, not from %s\\n" % (root, worktree))
+    raise SystemExit(3)
+
+from conductor.cli import main
+
+raise SystemExit(main(["golden", "check", *sys.argv[2:]]))
+"""
+
+GOLDEN_TIMEOUT = GATE_TIMEOUT
+
+
+def _golden_check(worktree: Path, *, timeout: int = GOLDEN_TIMEOUT) -> list[str]:
+    """`conductor golden check` against the merged worktree's `tests/golden`.
+
+    D19: this used to call `golden.check` in this process, which meant the
+    merged tree's new fixtures were replayed by the *old* golden, mission,
+    and parser code -- precisely backwards when what is landing is a change
+    to those modules. The check now runs as a subprocess with the merged
+    worktree's `src` as its import root, and the child refuses (exit 3) if
+    `conductor` did not in fact resolve there.
+
+    A merged tree that is not conductor's own source (no `src/conductor`) has
+    no implementation to be stale about, so it keeps the in-process replay.
+    """
     golden_root = worktree / "tests" / "golden"
     if not golden_root.is_dir():
         return []
-    diffs: list[str] = []
-    for fixture_dir in sorted({p.parent for p in golden_root.glob("*/golden.json")}):
-        try:
-            lines = golden.check(fixture_dir)
-        except (golden.GoldenError, OSError, ValueError) as exc:
-            diffs.append(f"{fixture_dir.name}: {exc}")
-            continue
-        diffs.extend(f"{fixture_dir.name}: {line}" for line in lines)
-    return diffs
+    src = worktree / "src"
+    if not (src / "conductor" / "golden.py").is_file():
+        diffs: list[str] = []
+        for fixture_dir in sorted({p.parent for p in golden_root.glob("*/golden.json")}):
+            try:
+                lines = golden.check(fixture_dir)
+            except (golden.GoldenError, OSError, ValueError) as exc:
+                diffs.append(f"{fixture_dir.name}: {exc}")
+                continue
+            diffs.extend(f"{fixture_dir.name}: {line}" for line in lines)
+        return diffs
+
+    env = dict(os.environ)
+    # The merged worktree's source ahead of anything else the caller carried:
+    # the child's own import-root assertion is what makes that a fact rather
+    # than a hope.
+    env["PYTHONPATH"] = str(src)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # `golden check` with no directories reads `tests/golden` relative to its
+    # own cwd, and replay itself never dispatches a fleet or runs a notify
+    # command -- `golden.replay` passes its own dispatcher and notifier -- so
+    # the child has no live effect to guard against beyond where it imports
+    # from.
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _GOLDEN_CHILD, str(worktree)],
+            cwd=str(worktree),
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="surrogateescape",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"golden check did not run: {exc}"]
+    if done.returncode == 0:
+        # Clean. `cmd_golden_check` still prints E22's version-drift notes on
+        # this path, and those were never check failures.
+        return []
+    output = "\n".join(
+        line for line in (done.stdout + done.stderr).splitlines() if line.strip()
+    )
+    return output.splitlines() or [f"golden check exited {done.returncode} with no output"]
 
 
 def _gate_env(mission_id: str, lane: str, worktree: str) -> dict[str, str]:
@@ -195,9 +273,15 @@ def _perform(
     current_branch: str,
     pre_merge_head: str,
     test_command: str,
+    tip_sha: str = "",
 ) -> LandResult:
+    # D6: the merge names the pinned commit, never the branch name. The
+    # message still names the branch (that is what the log is read for), but
+    # what git resolves is the sha the lane's receipt was verified against,
+    # so a tag of the same name, or a branch that moved between the check and
+    # the merge, cannot change what lands.
     message = f"Merge branch '{branch}' into {current_branch}"
-    merged = git_run(root, "merge", "--no-ff", "-m", message, "--", branch)
+    merged = git_run(root, "merge", "--no-ff", "-m", message, "--", tip_sha or branch)
     if merged.returncode != 0:
         detail = merged.stderr.strip() or merged.stdout.strip() or f"exit {merged.returncode}"
         # No merge commit exists yet -- `git merge --abort` is exactly
@@ -213,6 +297,7 @@ def _perform(
             branch=branch,
             failed_step="merge",
             pre_merge_sha=pre_merge_head,
+            tip_sha=tip_sha,
             gate_command=test_command,
             steps=[{"name": "merge", "ok": False, "detail": _tail(detail)}],
         )
@@ -230,6 +315,7 @@ def _perform(
             ok=True,
             merge_sha=merge_sha,
             pre_merge_sha=pre_merge_head,
+            tip_sha=tip_sha,
             worktree=worktree,
             gate_command=test_command,
             steps=steps,
@@ -250,6 +336,7 @@ def _perform(
         failed_step=failed_step,
         merge_sha=merge_sha,
         pre_merge_sha=pre_merge_head,
+        tip_sha=tip_sha,
         reset=reset_done,
         worktree=worktree,
         gate_command=test_command,
@@ -285,9 +372,24 @@ def _land(
     lane_repo = lane_result.cwd or mission_raw.get("cwd")
     if not isinstance(lane_repo, str) or not lane_repo:
         raise LandInvalid(f"lane '{lane}' has no repository to land from")
-    branch_ref = git_run(lane_repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+    # D6: resolve the branch to a commit once, in the lane's own repository,
+    # and pin it to the sha the lane receipted. `mission._trusted_lane` makes
+    # exactly this comparison before it trusts a receipt; land merges what
+    # the receipt says was built, or it merges nothing. `^{commit}` is what
+    # keeps a tag of the same name from answering in the branch's place.
+    branch_ref = git_run(
+        lane_repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}"
+    )
     if branch_ref.returncode != 0:
         raise LandInvalid(f"branch '{branch}' does not exist in the lane's repository")
+    tip_sha = branch_ref.stdout.strip()
+    if not lane_result.tip_sha:
+        raise LandInvalid(f"lane '{lane}' has no tip commit on its receipt")
+    if tip_sha != lane_result.tip_sha:
+        raise LandInvalid(
+            f"branch '{branch}' is at {tip_sha}, but lane '{lane}' receipted "
+            f"{lane_result.tip_sha}: the branch moved since the run"
+        )
 
     if os.environ.get("CONDUCTOR_LANE"):
         raise LandInvalid(
@@ -298,6 +400,13 @@ def _land(
     if top.returncode != 0:
         raise LandInvalid(f"checkout '{checkout}' is not a git repository")
     root = top.stdout.strip()
+    # D6: the destination must be the lane's own repository (or a worktree of
+    # it). Otherwise the pinned sha is a stranger's commit at best, and a
+    # same-named branch in an unrelated repository is what would have landed.
+    if not same_repo(root, lane_repo):
+        raise LandInvalid(
+            f"checkout '{root}' is not the same repository as the lane's, '{lane_repo}'"
+        )
 
     on_branch = git_run(root, "symbolic-ref", "--quiet", "HEAD")
     if on_branch.returncode != 0:
@@ -314,7 +423,11 @@ def _land(
         raise LandInvalid("checkout is mid-merge")
 
     head = git_run(root, "rev-parse", "HEAD").stdout.strip()
-    branch_tip = git_run(root, "rev-parse", branch).stdout.strip()
+    # D6: the pinned sha from the lane's repository, not a second, unqualified
+    # `rev-parse <branch>` in the destination -- the identity checks above are
+    # what this ref stands on, and the already-merged shortcut below answers
+    # about that same commit.
+    branch_tip = tip_sha
 
     if git_run(root, "merge-base", "--is-ancestor", branch_tip, head).returncode == 0:
         return LandResult(
@@ -324,6 +437,7 @@ def _land(
             branch=branch,
             already_merged=True,
             ok=True,
+            tip_sha=tip_sha,
         )
     # A lane's branch almost never descends from the checkout's HEAD: every
     # Phase E and F item was launched on one tip and merged onto a later one
@@ -338,7 +452,7 @@ def _land(
         raise LandInvalid("no gate command: pass --test, or the mission snapshot must set one")
 
     if dry_run:
-        log = git_run(root, "log", "--oneline", f"HEAD..{branch}")
+        log = git_run(root, "log", "--oneline", f"{head}..{branch_tip}")
         would_merge = [ln for ln in log.stdout.splitlines() if ln.strip()]
         return LandResult(
             mission=mission_id,
@@ -347,6 +461,7 @@ def _land(
             branch=branch,
             dry_run=True,
             ok=True,
+            tip_sha=tip_sha,
             would_merge=would_merge,
             gate_command=test_command,
         )
@@ -360,6 +475,7 @@ def _land(
         current_branch=current_branch,
         pre_merge_head=head,
         test_command=test_command,
+        tip_sha=tip_sha,
     )
 
 

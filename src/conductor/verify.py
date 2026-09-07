@@ -69,6 +69,28 @@ def git_run(
 _git = git_run
 
 
+def git_common_dir(cwd: Path | str) -> Path | None:
+    """The repository a path belongs to, as its shared `.git` directory --
+    the same answer for a repository and for every worktree of it. `None`
+    when the path is not in a git repository at all."""
+    result = git_run(cwd, "rev-parse", "--git-common-dir")
+    if result.returncode != 0:
+        return None
+    path = Path(result.stdout.strip())
+    return path if path.is_absolute() else Path(cwd).resolve() / path
+
+
+def same_repo(worktree: Path | str, repo: Path | str) -> bool:
+    """Whether two paths belong to the same repository (D6: lifted here from
+    `salvage.py` so `land` can ask it too -- a destination checkout that is
+    a different repository with a same-named branch is not a place to land)."""
+    a = git_common_dir(worktree)
+    b = git_common_dir(repo)
+    if a is None or b is None:
+        return False
+    return a.resolve() == b.resolve()
+
+
 @dataclass
 class GitState:
     """Enough of a repo's state to tell whether a run actually did anything."""
