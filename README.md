@@ -2033,7 +2033,11 @@ remaining ledger -- see budget rollup, below). `mission.PLAN_MAX_DEPTH` (1)
 bounds how deep a plan lane's own child may itself plan a grandchild.
 
 When a plan lane's own dispatch settles ok, conductor loads the deliverable
-with `load_mission` (so the child's `source` is the deliverable's own path),
+with `load_mission` (so the child's `source` is the deliverable's own path;
+a relative `cwd`, `prompt_file`, or `schema` in the child resolves against
+the plan lane's own repository, since the kept copy lives under the parent's
+`deliverables/`, a directory the planner never saw -- F8's first scratch
+plan lane wrote `cwd: "."` and resolved to a non-repository before this),
 stamps it with `depth = parent depth + 1` and `parent = {parent mission id,
 lane name}`, and checks, in order: the file loads as a mission (a
 `MissionInvalid` fails the lane with the message, kind `plan`); its `depth`

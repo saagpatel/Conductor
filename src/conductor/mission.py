@@ -1297,11 +1297,16 @@ def _write_temp_schema(schema: dict) -> str:
 # --- loading ----------------------------------------------------------------
 
 
-def load_mission(path: str | Path) -> Mission:
+def load_mission(path: str | Path, *, base_dir: str | Path | None = None) -> Mission:
     """Read a .json or .toml mission file and resolve every inherited field.
 
     Relative `cwd`, `prompt_file`, and `schema` paths resolve against the
-    mission file's own directory, so a mission directory is portable.
+    mission file's own directory, so a mission directory is portable --
+    or against `base_dir` when given. F8: a plan lane's child is loaded
+    from its kept copy under the parent's `deliverables/`, a directory the
+    planning model never sees, so the two child loaders pass the plan
+    lane's own repository here and a child's `cwd: "."` means "where the
+    plan was written", never the parent's mission directory.
     """
     file = Path(path).expanduser().resolve()
     try:
@@ -1317,7 +1322,8 @@ def load_mission(path: str | Path) -> Mission:
         raise MissionInvalid(f"mission file is not valid {file.suffix or 'json'}: {exc}") from exc
     if not isinstance(raw, dict):
         raise MissionInvalid("mission file must be an object at the top level")
-    return mission_from_dict(raw, base_dir=file.parent, source=str(file))
+    resolved_base = Path(base_dir).expanduser().resolve() if base_dir is not None else file.parent
+    return mission_from_dict(raw, base_dir=resolved_base, source=str(file))
 
 
 def _reject_unknown(raw: dict, allowed: frozenset[str] | set[str], where: str) -> None:
@@ -3299,7 +3305,12 @@ def _first_child_error(result: MissionResult) -> str:
 
 
 def _plan_check_child(
-    mission: Mission, deliverable_path: str | None, *, ledger: Ledger, base: Path
+    mission: Mission,
+    deliverable_path: str | None,
+    *,
+    ledger: Ledger,
+    base: Path,
+    lane_cwd: str | None = None,
 ) -> tuple[dict, str | None]:
     """E10: everything the scheduler must confirm about a plan lane's
     deliverable before the mission may ask the operator to launch it: the
@@ -3322,7 +3333,7 @@ def _plan_check_child(
         plan["refused"] = message
         return plan, message
     try:
-        child = load_mission(deliverable_path)
+        child = load_mission(deliverable_path, base_dir=lane_cwd or mission.cwd)
     except MissionInvalid as exc:
         message = str(exc)
         plan["refused"] = message
@@ -4010,6 +4021,7 @@ def _launch_plan_child(
     mission_dir: Path,
     ledger: Ledger,
     stop_answer: dict | None,
+    child_base_dir: str | None = None,
 ) -> tuple[LaneResult, str | None, tuple[float, int] | None]:
     """E10: resolve a parked plan lane's unconditional pause. `stop` fails
     the lane naming the refusal, without ever loading the deliverable again.
@@ -4037,7 +4049,7 @@ def _launch_plan_child(
     ):
         return _fail("child launch refused by the operator"), None, None
 
-    child = load_mission(plan["child_path"])
+    child = load_mission(plan["child_path"], base_dir=child_base_dir)
     child.depth = plan["depth"]
     child.parent = {"mission_id": mission_id, "lane": lane.name}
 
@@ -4501,7 +4513,11 @@ def _execute_mission(
                     shutil.copyfile(child_deliverable_path, kept_path)
                     child_deliverable_path = str(kept_path)
                 plan, plan_message = _plan_check_child(
-                    mission, child_deliverable_path, ledger=ledger, base=base
+                    mission,
+                    child_deliverable_path,
+                    ledger=ledger,
+                    base=base,
+                    lane_cwd=attempt.effective_cwd(mission.cwd),
                 )
                 out.plan = plan
                 if plan_message is not None:
@@ -4798,6 +4814,7 @@ def _execute_mission(
                 mission_dir=mission_dir,
                 ledger=ledger,
                 stop_answer=stop_answer,
+                child_base_dir=lane.attempts[0].effective_cwd(mission.cwd),
             )
             settle(resolved)
             if child_id is not None:

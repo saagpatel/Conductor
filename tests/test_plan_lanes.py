@@ -605,3 +605,32 @@ def test_recorded_plan_lane_replays_up_to_the_pause(repo, home, fake_fleet, tmp_
     assert plan_entry["plan"]["refused"] is None
     assert plan_entry["plan"]["dry_run_ok"] is True
     assert golden_mod.check(fixture) == []
+
+
+def test_a_relative_child_cwd_resolves_against_the_plan_lanes_repository(
+    repo, home, fake_fleet, tmp_path
+):
+    """F8: the child's kept copy lives under the parent's `deliverables/`;
+    `cwd: "."` in it must mean the repository the plan was written in."""
+    child_raw = _child_raw(repo, max_cost_usd=1.0, name="relative-child")
+    child_raw["cwd"] = "."
+    fake_fleet(_write_deliverable_argv(child_raw, cost=0.1))
+    mission = mission_from_dict({"cwd": str(repo), "lanes": [_plan_lane()]}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.paused is not None and first.paused["kind"] == "child"
+    plan = next(lane for lane in first.lanes if lane["name"] == "plan")["plan"]
+    assert plan["refused"] is None and plan["dry_run_ok"] is True
+    from conductor.mission import load_mission
+
+    child = load_mission(plan["child_path"], base_dir=str(repo))
+    assert Path(child.cwd) == Path(repo).resolve()
+    fake_fleet(["sh", "-c", f"echo '{envelope('built', 0.2)}'"])
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="continue"
+    )
+    child_block = next(lane for lane in resumed.lanes if lane["name"] == "plan")["plan"]["child"]
+    assert child_block["state"] == "finished" and child_block["ok"] is True
+    child_snapshot = json.loads(
+        (Path(child_block["report_path"]).parent / "mission.json").read_text()
+    )
+    assert Path(child_snapshot["cwd"]) == Path(repo).resolve()
