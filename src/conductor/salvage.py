@@ -307,6 +307,10 @@ def emit(
         base_sha=result.base_sha,
         ceiling=ceiling,
     )
+    # F15 mission 2 item 2: the fix lane's dispositions.json deliverable
+    # needs its schema file on disk before the mission can load, the same
+    # as `cmd_shape_a` writes it beside a freshly launched mission.
+    shape.write_dispositions_schema(out.parent)
     try:
         mission: Mission = mission_from_dict(mission_dict, base_dir=out.parent, source=str(out))
     except MissionInvalid as exc:

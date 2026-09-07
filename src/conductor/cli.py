@@ -829,6 +829,9 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             preflight_note = "gate preflight: passed"
         if not args.inline:
             _write_lane_prompts(raw, base_dir)
+        # F15 mission 2 item 2: a schema is a path, not a prompt -- written
+        # beside the mission file whether or not --inline was given.
+        shape.write_dispositions_schema(base_dir)
         mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
     except (shape.ShapeInvalid, MissionInvalid) as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)

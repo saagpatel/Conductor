@@ -17,6 +17,7 @@ one printed number would reproduce it.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import shutil
 import tempfile
@@ -56,10 +57,12 @@ REVIEW_TAIL = (
     "Report anything that could cause incorrect behavior, a test failure, or a misleading "
     "result, including a spec item that is missing or only partly implemented. Omit pure "
     "style and naming. Number each item. For each item: file and line, what goes wrong, one "
-    "sentence of consequence, your confidence 1-10. End the reply with exactly one final "
-    "line: NO_FINDINGS if there is nothing to report, or FINDINGS: N where N is the number "
-    "of items you numbered above. Either answer is complete. Put the entire review in this "
-    "reply; the reply is the only thing the next agent receives."
+    "sentence of consequence, your confidence 1-10. Right before the final marker line "
+    "below, write one line per numbered item in the exact shape FINDING: <n> <file>:<line> "
+    "confidence <1-10> -- a review with no items writes none of these lines. End the reply "
+    "with exactly one final line: NO_FINDINGS if there is nothing to report, or FINDINGS: N "
+    "where N is the number of items you numbered above. Either answer is complete. Put the "
+    "entire review in this reply; the reply is the only thing the next agent receives."
 )
 
 GEMINI_REVIEW_PROMPT = (
@@ -110,14 +113,51 @@ FIX_PROMPT = (
     "it; then fix only what that test proves. This lane runs under conductor's reproduce "
     "gate: a fix with no test change is refused, and a test that already passes on the "
     "current tree is refused. If both reviews say NO_FINDINGS or nothing reproduces, change "
-    "nothing and reply NO_CHANGES. For every item either reviewer numbered, add one line: "
-    "DISPOSITION: <review-gemini or review-grok> <item number> "
-    "<fixed, refused, already, or wording>: <reason>. Use fixed for an item you changed code "
-    "for; refused, with the reason it is wrong, for one you rejected; already for one that "
-    "was already true before this fix; wording for one that only asked for a comment or "
-    "message change. Keep existing call signatures working. Run the gate named in the spec "
-    "before finishing, with --basetemp under $TMPDIR. Do not commit; the harness commits."
+    "nothing and reply NO_CHANGES. For every item either reviewer numbered, write one entry "
+    "to a file named dispositions.json at the repository root: a JSON object "
+    '{"dispositions": [...]}, each entry {"lane": "review-gemini" or "review-grok", "index": '
+    '<the item number>, "disposition": "fixed", "refused", "already", or "wording", '
+    '"reason": <why>}. Use fixed for an item you changed code for; refused, with the reason '
+    "it is wrong, for one you rejected; already for one that was already true before this "
+    "fix; wording for one that only asked for a comment or message change. Write "
+    "dispositions.json even when you reply NO_CHANGES -- one entry per item either reviewer "
+    "numbered (already, refused, or wording); an empty dispositions array is only correct "
+    "when both reviews said NO_FINDINGS. Keep existing call signatures working. Run the gate "
+    "named in the spec before finishing, with --basetemp under $TMPDIR. Do not commit; the "
+    "harness commits."
 )
+
+# F15 mission 2 item 2: the fix lane's dispositions.json deliverable schema.
+# The description carries the entry shape since runner._schema_mismatch only
+# checks top-level required/typed properties, never an array's items.
+DISPOSITIONS_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["dispositions"],
+    "properties": {
+        "dispositions": {
+            "type": "array",
+            "description": (
+                "One entry per item either reviewer numbered: "
+                '{"lane": "review-gemini" or "review-grok", "index": <the item number>, '
+                '"disposition": "fixed", "refused", "already", or "wording", '
+                '"reason": <why>}. An empty array is only correct when both reviews said '
+                "NO_FINDINGS."
+            ),
+        }
+    },
+}
+
+
+def write_dispositions_schema(base_dir: Path) -> Path:
+    """`dispositions.json`'s schema is data, not a prompt: written beside
+    the mission file (like `prompts/<lane>.md`) so `deliverable.schema` --
+    always a path -- resolves to something real, whether the mission goes
+    through `cmd_shape_a`'s prompt-writing dance (`--inline` skips that, not
+    this) or a salvage follow-on's `emit()`."""
+    path = Path(base_dir) / "dispositions.schema.json"
+    path.write_text(json.dumps(DISPOSITIONS_SCHEMA, indent=2) + "\n")
+    return path
 
 # E16: appended to FIX_PROMPT, right after the two review blocks, only when
 # `shape_a(adversarial=True)` -- the adversarial lane's own report and diff,
@@ -505,6 +545,11 @@ def shape_a(
         "branch": branch,
         "commit": fix_commit,
         "cascade": False,
+        "deliverable": {
+            "path": "dispositions.json",
+            "schema": "dispositions.schema.json",
+            "commit": False,
+        },
         "prompt": fix_prompt,
     }
     if caps.cap_grace_usd:
@@ -650,6 +695,11 @@ def shape_a_followon(
         "branch": branch,
         "commit": fix_commit,
         "cascade": False,
+        "deliverable": {
+            "path": "dispositions.json",
+            "schema": "dispositions.schema.json",
+            "commit": False,
+        },
         "prompt": FIX_PROMPT,
     }
     if caps.cap_grace_usd:

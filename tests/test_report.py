@@ -408,6 +408,130 @@ def test_report_sums_dispositions_malformed_across_fix_lanes(home: Path):
     assert rpt.dispositions_malformed == 2
 
 
+# --- F15 mission 2 item 4: calibration and corrected finding rate ----------
+
+
+def test_report_calibration_matches_confidences_to_dispositions(home: Path):
+    _write_receipt(
+        home,
+        "20260101T000000Z-m8-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m8",
+    )
+    _write_mission(
+        home,
+        "m8",
+        name="mission-eight",
+        ok=True,
+        lanes=[
+            {
+                "name": "review-gemini",
+                "stage": "review",
+                "review": {
+                    "verdict": "findings",
+                    "findings": 2,
+                    "items": [
+                        {"index": 1, "file": "a.py", "line": 1, "confidence": 9},
+                        {"index": 2, "file": "b.py", "line": 2, "confidence": 4},
+                    ],
+                },
+                "attempts": [{"fleet": "antigravity", "model": "gemini-3.7-flash"}],
+            },
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "refused", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 2, "disposition": "fixed", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.calibration() == {"refused_mean": 9.0, "fixed_mean": 4.0, "matched": 2}
+    assert row.corrected_rate() == 0.5
+    assert row.findings == 2
+    d = row.to_dict()
+    assert d["calibration"] == {"refused_mean": 9.0, "fixed_mean": 4.0, "matched": 2}
+    assert d["corrected_rate"] == 0.5
+    assert d["refused_confidences"] == [9]
+    assert d["fixed_confidences"] == [4]
+
+
+def test_report_calibration_ignores_a_disposition_with_no_matching_item(home: Path):
+    _write_receipt(
+        home,
+        "20260101T000000Z-m9-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m9",
+    )
+    _write_mission(
+        home,
+        "m9",
+        name="mission-nine",
+        ok=True,
+        lanes=[
+            # An old-style review receipt: no "items" key at all.
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.fixed == 1
+    assert row.refused_confidences == [] and row.fixed_confidences == []
+    assert row.calibration() == {"refused_mean": None, "fixed_mean": None, "matched": 0}
+    # findings=1, fixed=1: corrected_rate is a straight fixed/findings ratio,
+    # unaffected by whether any confidence matched.
+    assert row.corrected_rate() == 1.0
+
+
+def test_report_prints_a_calibration_line_per_vendor(home: Path, monkeypatch, capsys):
+    _write_receipt(
+        home,
+        "20260101T000000Z-m10-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m10",
+    )
+    _write_mission(
+        home,
+        "m10",
+        name="mission-ten",
+        ok=True,
+        lanes=[
+            {
+                "name": "review-gemini",
+                "stage": "review",
+                "review": {
+                    "verdict": "findings",
+                    "findings": 1,
+                    "items": [{"index": 1, "file": "a.py", "line": 1, "confidence": 7}],
+                },
+                "attempts": [{"fleet": "antigravity", "model": "gemini-3.7-flash"}],
+            },
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert (
+        "google: refused mean confidence n/a over 0, fixed mean confidence 7.0 over 1, "
+        "corrected finding rate 1.0" in printed
+    )
+
+
 # --- F2: wall clock on the ledger -------------------------------------------
 
 

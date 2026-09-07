@@ -492,6 +492,7 @@ def test_shape_a_adversarial_flag_adds_the_lane_policy_and_fix_prompt_block(repo
     assert "{{lanes.adversarial.answer}}" in fix_lane["prompt"]
     assert "{{lanes.adversarial.diff}}" in fix_lane["prompt"]
 
+    shape.write_dispositions_schema(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
     assert any(lane.stage == "adversarial" for lane in mission.lanes)
 
@@ -509,6 +510,7 @@ def test_shape_a_without_the_adversarial_flag_is_unchanged(repo, tmp_path):
     assert "<adversarial>" not in fix_lane["prompt"]
     assert fix_lane["prompt"] == shape.FIX_PROMPT
 
+    shape.write_dispositions_schema(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
     assert all(lane.stage != "adversarial" for lane in mission.lanes)
 

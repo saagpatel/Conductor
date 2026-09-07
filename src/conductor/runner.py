@@ -2123,7 +2123,14 @@ def dispatch(
             and exit_code == 0
             and not output.error
         ):
-            commit = commit_work(spec.cwd, commit_message)
+            # F15 mission 2 item 3: a deliverable declared `commit: false` is
+            # a receipt, not source -- excluded from the harness's own
+            # commit (it is still checked on the filesystem and copied to
+            # deliverables/ above, before this point).
+            exclude: tuple[str, ...] = ()
+            if spec.deliverable is not None and spec.deliverable.get("commit") is False:
+                exclude = (spec.deliverable["path"],)
+            commit = commit_work(spec.cwd, commit_message, exclude=exclude)
         # A fleet's self-commit is landed work even when conductor was not asked
         # to commit it. Only a descendant on the same branch belongs to this run:
         # treating a checkout of an existing branch as a commit would reset that

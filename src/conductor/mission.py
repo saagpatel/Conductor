@@ -2550,9 +2550,11 @@ class LaneResult:
         if raw.get("dispositions") is not None and not isinstance(raw["dispositions"], list):
             raise ValueError("lane receipt dispositions must be a list or null")
         if raw.get("dispositions") is not None and not all(
-            isinstance(item, dict) for item in raw["dispositions"]
+            verdicts_mod.valid_disposition_entry(item) for item in raw["dispositions"]
         ):
-            raise ValueError("lane receipt dispositions must contain objects")
+            raise ValueError(
+                "lane receipt dispositions must contain well-formed disposition entries"
+            )
         if raw.get("dispositions_malformed") is not None and (
             isinstance(raw["dispositions_malformed"], bool)
             or not isinstance(raw["dispositions_malformed"], int)
@@ -4770,19 +4772,39 @@ def _execute_mission(
         # parse both from the lane's own persisted answer, once, here, so
         # every path that reaches settle() (a live run, a skip, a kept or
         # salvaged lane) gets the same treatment on whatever text it wrote.
+        answer_text: str | None = None
         if lane_result.answer_path:
             try:
                 answer_text = Path(lane_result.answer_path).read_text()
             except OSError:
                 answer_text = None
-            if answer_text is not None:
-                if lane_result.stage == "review":
-                    lane_result.review = verdicts_mod.review_verdict(answer_text)
-                elif lane_result.stage == "fix":
-                    lane_result.dispositions = verdicts_mod.fix_dispositions(answer_text)
-                    lane_result.dispositions_malformed = verdicts_mod.dispositions_malformed(
-                        answer_text
+        if lane_result.stage == "review" and answer_text is not None:
+            lane_result.review = verdicts_mod.review_verdict(answer_text)
+        elif lane_result.stage == "fix":
+            # F15 mission 2 item 2: the kept deliverable copy (dispositions.json,
+            # when the fix lane declared one) is the receipt; prose
+            # `DISPOSITION:` lines are only read when no deliverable copy
+            # exists, so an older mission (or one written by hand) still
+            # settles the way it always has.
+            deliverable_dispositions: list[dict] | None = None
+            deliverable_malformed = 0
+            if lane_result.deliverable_path:
+                try:
+                    deliverable_text = Path(lane_result.deliverable_path).read_text()
+                except OSError:
+                    deliverable_text = None
+                if deliverable_text is not None:
+                    deliverable_dispositions, deliverable_malformed = (
+                        verdicts_mod.parse_dispositions_deliverable(deliverable_text)
                     )
+            if deliverable_dispositions is not None:
+                lane_result.dispositions = deliverable_dispositions
+                lane_result.dispositions_malformed = deliverable_malformed
+            elif answer_text is not None:
+                lane_result.dispositions = verdicts_mod.fix_dispositions(answer_text)
+                lane_result.dispositions_malformed = verdicts_mod.dispositions_malformed(
+                    answer_text
+                )
         done[lane_result.name] = lane_result
         # A per-lane receipt as each lane ends, so a crash mid-mission does
         # not lose every finished stage with the final result.json.

@@ -17,7 +17,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
@@ -336,7 +336,7 @@ class CommitOutcome:
         return asdict(self)
 
 
-def commit_work(cwd: str, message: str) -> CommitOutcome:
+def commit_work(cwd: str, message: str, *, exclude: Sequence[str] = ()) -> CommitOutcome:
     """Commit whatever the dispatch left in the working tree.
 
     Committing belongs to conductor rather than to the fleets, because the
@@ -350,6 +350,12 @@ def commit_work(cwd: str, message: str) -> CommitOutcome:
     Deletions are staged like anything else, but they are named in the receipt.
     A bulk stage that quietly swallows removed source files is the failure this
     reporting exists to prevent.
+
+    F15 mission 2 item 3: `exclude` (repo-relative paths, e.g. a
+    `deliverable.commit: false` path) is staged like everything else and then
+    unstaged -- a path not in the status is fine, nothing to reset. When the
+    excluded paths were the only change in the tree, nothing lands: the
+    reason says so instead of a bare "nothing to commit".
     """
     status = _git(cwd, "status", "--porcelain")
     if status.returncode != 0:
@@ -363,6 +369,25 @@ def commit_work(cwd: str, message: str) -> CommitOutcome:
     add = _git(cwd, "add", "-A")
     if add.returncode != 0:
         return CommitOutcome(attempted=True, reason=f"git add failed: {add.stderr.strip()}")
+
+    files = len(lines)
+    if exclude:
+        reset = _git(cwd, "reset", "--", *exclude)
+        if reset.returncode != 0:
+            return CommitOutcome(
+                attempted=True, reason=f"git reset failed: {reset.stderr.strip()}"
+            )
+        excluded = set(exclude)
+        deletions = [path for path in deletions if path not in excluded]
+        staged = _git(cwd, "diff", "--cached", "--name-only")
+        staged_paths = [ln for ln in staged.stdout.splitlines() if ln.strip()]
+        if not staged_paths:
+            return CommitOutcome(
+                attempted=True,
+                reason="nothing to commit beyond the excluded deliverable",
+            )
+        files = len(staged_paths)
+
     done = _git(cwd, "commit", "-m", message)
     if done.returncode != 0:
         return CommitOutcome(
@@ -374,7 +399,7 @@ def commit_work(cwd: str, message: str) -> CommitOutcome:
         attempted=True,
         committed=True,
         sha=sha,
-        files=len(lines),
+        files=files,
         deletions=deletions,
     )
 

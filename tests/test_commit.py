@@ -55,6 +55,44 @@ def test_nothing_to_commit_is_reported_not_faked(repo: Path):
     assert out.reason == "nothing to commit"
 
 
+# --- F15 mission 2 item 3: exclude keeps a deliverable out of the commit ----
+
+
+def test_exclude_leaves_the_named_file_untracked_and_commits_the_rest(repo: Path):
+    (repo / "new.txt").write_text("work\n")
+    (repo / "dispositions.json").write_text('{"dispositions": []}\n')
+    out = commit_work(str(repo), "feat: agent work", exclude=("dispositions.json",))
+    assert out.committed is True
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert "?? dispositions.json" in status
+    log = subprocess.run(
+        ["git", "show", "--stat", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert "new.txt" in log
+    assert "dispositions.json" not in log
+
+
+def test_exclude_alone_reports_nothing_to_commit(repo: Path):
+    (repo / "dispositions.json").write_text('{"dispositions": []}\n')
+    out = commit_work(
+        str(repo), "chore: nothing but the deliverable", exclude=("dispositions.json",)
+    )
+    assert out.committed is False
+    assert out.reason == "nothing to commit beyond the excluded deliverable"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+    assert "?? dispositions.json" in status
+
+
+def test_exclude_path_not_in_status_is_harmless(repo: Path):
+    (repo / "new.txt").write_text("work\n")
+    out = commit_work(str(repo), "feat: agent work", exclude=("never-written.json",))
+    assert out.committed is True
+
+
 def test_dispatch_commits_what_a_sandboxed_fleet_could_not(repo, tmp_path, monkeypatch):
     """The Codex case: the fleet writes the file and cannot commit it."""
     monkeypatch.setattr(
