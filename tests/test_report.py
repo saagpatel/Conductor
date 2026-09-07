@@ -33,6 +33,8 @@ def _write_receipt(
     tests: dict | None = None,
     test_surface: dict | None = None,
     dry_run: bool = False,
+    cache_read_tokens: int = 0,
+    input_tokens: int = 0,
 ) -> Path:
     directory = home / "runs" / run_id
     directory.mkdir(parents=True)
@@ -43,7 +45,13 @@ def _write_receipt(
         "ok": ok,
         "mode": mode,
         "duration_s": duration_s,
-        "usage": {"cost_usd": cost, "cost_basis": basis, "total_tokens": tokens},
+        "usage": {
+            "cost_usd": cost,
+            "cost_basis": basis,
+            "total_tokens": tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "input_tokens": input_tokens,
+        },
         "breaker": {"tool_calls": tool_calls, "tripped": None},
         "interrupted": False,
         "dry_run": dry_run,
@@ -71,12 +79,15 @@ def _write_mission(
     ok: bool,
     lanes: list[dict],
     collate: dict | None = None,
+    wall: dict | None = None,
 ) -> None:
     mission_dir = home / "missions" / mission_id
     mission_dir.mkdir(parents=True)
     payload: dict[str, object] = {"name": name, "ok": ok, "lanes": lanes}
     if collate is not None:
         payload["collate"] = collate
+    if wall is not None:
+        payload["wall"] = wall
     (mission_dir / "result.json").write_text(json.dumps(payload))
 
 
@@ -281,6 +292,91 @@ def test_report_reviewer_precision_table_over_two_missions(home: Path):
     assert row.already == 0
     assert row.wording == 0
     assert row.precision() == round(2 / 3, 3)
+
+
+# --- F2: wall clock on the ledger -------------------------------------------
+
+
+def test_report_vendor_stage_cache_column_is_cache_read_over_input_tokens(home: Path):
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-cached",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        cache_read_tokens=60,
+        input_tokens=20,
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.vendor_stage if r.vendor == "anthropic" and r.stage == "build")
+    assert row.cache_pct() == 300.0
+    assert row.to_dict()["cache_pct"] == 300.0
+
+
+def test_report_vendor_stage_cache_column_is_blank_with_no_input_tokens(home: Path):
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-nothing",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.vendor_stage if r.vendor == "anthropic" and r.stage == "build")
+    assert row.cache_pct() is None
+
+
+def test_report_wall_clock_table_lists_every_mission_blanks_for_missing_wall(home: Path):
+    _write_mission(
+        home,
+        "m-new",
+        name="mission-new",
+        ok=True,
+        lanes=[],
+        wall={
+            "launched_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T01:00:00+00:00",
+            "wall_s": 3600.0,
+            "paused_s": 3000.0,
+            "gate_s": 60.0,
+            "lanes_s": 400.0,
+            "idle_s": 5.0,
+        },
+    )
+    # A mission recorded before F2 shipped: no "wall" key at all.
+    _write_mission(home, "m-old", name="mission-old", ok=True, lanes=[])
+    rpt = report(home)
+    rows = {row.mission: row for row in rpt.wall_clock}
+    assert set(rows) == {"m-new", "m-old"}
+
+    fresh = rows["m-new"].to_dict()
+    assert fresh["wall_s"] == 3600.0
+    assert fresh["paused_s"] == 3000.0
+    assert fresh["gate_s"] == 60.0
+    assert fresh["lanes_s"] == 400.0
+    assert fresh["idle_s"] == 5.0
+    assert fresh["busy"] == round(400.0 / 3600.0, 3)
+
+    old = rows["m-old"].to_dict()
+    assert old == {
+        "mission": "m-old",
+        "wall_s": None,
+        "paused_s": None,
+        "gate_s": None,
+        "lanes_s": None,
+        "idle_s": None,
+        "busy": None,
+    }
+
+
+def test_readme_documents_wall_clock_in_the_report_section():
+    readme = Path(__file__).parents[1] / "README.md"
+    raw_section = readme.read_text().split("#### Ledger report", 1)[1].split("\n### ", 1)[0]
+    section = " ".join(raw_section.split())
+    assert "**Wall clock**" in section
+    assert "launched_at" in section and "paused_s" in section and "idle_s" in section
+    assert "lanes_s / wall_s" in section
+    assert "cache_read_tokens" in section and "input_tokens" in section
 
 
 def test_report_reviewer_precision_blank_under_three_dispositions(home: Path):
@@ -488,6 +584,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "missions",
         "rules",
         "skipped",
+        "wall_clock",
     ]
     assert list(payload["rules"].keys()) == ["review", "cap_losses"]
     row = payload["vendor_stage"][0]
@@ -500,6 +597,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "unpriced_runs",
         "mean_duration_s",
         "median_duration_s",
+        "cache_pct",
         "cap_misses",
         "gate_failures",
         "mean_tool_calls",

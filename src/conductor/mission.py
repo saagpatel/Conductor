@@ -2646,6 +2646,14 @@ class MissionResult:
     # on an earlier resume keeps making this budget unverifiable on every
     # later one too, not just the resume that discovered it.
     children_unpriced_dispatches: int = 0
+    # F2: {"launched_at", "finished_at", "wall_s", "paused_s", "gate_s",
+    # "lanes_s", "idle_s"} -- the lead's real wall-clock cost, not just the
+    # dispatch spend. `launched_at` never resets across a resume; every
+    # other figure is this mission's whole life, recomputed fresh each run
+    # from durable sources (pause.json, the run receipts, the scheduler's
+    # own clock), never carried and added to. None only when a receipt
+    # predates this field (report.py and golden.py backfill from there).
+    wall: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2682,6 +2690,7 @@ class MissionResult:
             "cost_usd": round(self.cost_usd, 6),
             "tokens": self.tokens,
             "cache": self.cache,
+            "wall": self.wall,
             "duration_s": round(self.duration_s, 1),
             "budget": self.budget,
             "collate": (
@@ -2707,6 +2716,89 @@ class MissionResult:
 
 def _usd(value: float | None) -> str:
     return "" if value is None else f"{value:.4f}"
+
+
+_MISSION_STAMP = re.compile(r"^(\d{8}T\d{6}Z)")
+
+
+def _mission_launched_at(mission_id: str) -> str:
+    """F2 (review finding): a mission resumed for the first time after this
+    field shipped has no prior `wall.launched_at` to carry -- but its own id
+    already opens with the UTC stamp of its first launch (`run_mission`
+    mints it once, at claim time, and a resume never remints it), the same
+    anchor `spend._run_time` reads off a run id. Recovering it from there
+    keeps `launched_at` truthful; stamping "now" would silently reset the
+    clock on exactly the mission this field exists to account for."""
+    match = _MISSION_STAMP.match(mission_id)
+    if match is None:
+        return datetime.now(UTC).isoformat()
+    try:
+        parsed = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return datetime.now(UTC).isoformat()
+    return parsed.isoformat()
+
+
+def _paused_seconds(mission_dir: Path) -> float:
+    """F2: `pause.json`'s own `answers` history already carries both
+    boundaries of every pause this mission ever parked on -- `asked_at` from
+    the moment it parked, `answered_at` from the resume that settled it
+    (continue or stop alike). A pause still waiting for an answer has no
+    matching record yet, so it contributes nothing until it is resolved."""
+    doc = _json_object(mission_dir / "pause.json")
+    total = 0.0
+    for record in (doc or {}).get("answers") or []:
+        if not isinstance(record, dict):
+            continue
+        asked, answered = record.get("asked_at"), record.get("answered_at")
+        if not isinstance(asked, str) or not isinstance(answered, str):
+            continue
+        try:
+            span = datetime.fromisoformat(answered) - datetime.fromisoformat(asked)
+        except ValueError:
+            continue
+        total += span.total_seconds()
+    return total
+
+
+def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
+    """F2: every lane's own gate and clean-gate time, summed from the
+    authoritative run receipts under `base/runs` (never the lane's own
+    attempt summary, which keeps only the gate's exit code) -- across every
+    attempt this mission ever dispatched, kept lanes included, so a resume
+    never loses an earlier resume's gate time.
+
+    Review finding: a receipt whose gate actually ran (`ran: true`) but
+    carries no `duration_s` predates that field -- its time is unknown, not
+    zero, so it makes the whole figure `None` rather than silently summing
+    the rest as if that gate cost nothing."""
+    total = 0.0
+    seen: set[str] = set()
+    incomplete = False
+    for lane in lane_results:
+        for attempt in [*lane.previous_attempts, *lane.attempts]:
+            run_id = attempt.get("run_id")
+            if not isinstance(run_id, str) or run_id in seen:
+                continue
+            seen.add(run_id)
+            receipt = _json_object(base / "runs" / run_id / "result.json")
+            if receipt is None:
+                continue
+            tests = receipt.get("tests")
+            if isinstance(tests, dict) and tests.get("ran"):
+                duration = tests.get("duration_s")
+                if isinstance(duration, int | float) and not isinstance(duration, bool):
+                    total += float(duration)
+                else:
+                    incomplete = True
+            clean = (receipt.get("test_surface") or {}).get("clean_gate")
+            if isinstance(clean, dict) and clean.get("ran"):
+                duration = clean.get("duration_s")
+                if isinstance(duration, int | float) and not isinstance(duration, bool):
+                    total += float(duration)
+                else:
+                    incomplete = True
+    return None if incomplete else total
 
 
 def _cache_summary(
@@ -4196,6 +4288,21 @@ def _execute_mission(
         children_cost_usd += rollup_cost_usd
         children_unpriced += rollup_unpriced
     started = time.monotonic()
+    # F2: the mission's very first launch, carried across every resume from
+    # the prior result.json's own `wall.launched_at` -- never reset, so
+    # `wall_s` always measures the whole mission's life, not just this run.
+    # A resume of a mission that predates this field has no such prior value
+    # to carry; recovering it from the mission id's own stamp (review
+    # finding) keeps it truthful instead of resetting to "now". A fresh
+    # launch needs no recovery -- its own start, at full precision, is
+    # already correct.
+    prior_wall = (resume.prior_result or {}).get("wall")
+    if isinstance(prior_wall, dict) and isinstance(prior_wall.get("launched_at"), str):
+        launched_at = prior_wall["launched_at"]
+    elif is_resume:
+        launched_at = _mission_launched_at(mission_id)
+    else:
+        launched_at = datetime.now(UTC).isoformat()
     done: dict[str, LaneResult] = dict(resume.kept)
     # E7 (review finding): a kept human lane never goes through `settle` (it
     # was never dispatched, so there is no run to wait on), but `settle` is
@@ -4727,6 +4834,12 @@ def _execute_mission(
     # refused at load).
     pending = [lane for lane in mission.lanes if lane.name not in done]
     running: dict[Future[LaneResult], Lane] = {}
+    # F2: the scheduler's own idle time -- no lane running and nothing ready
+    # to submit -- accrued between a `running` dict going empty and the next
+    # lane actually being submitted to the pool. Opened once, up front: the
+    # loop starts with nothing running either.
+    idle_total = 0.0
+    idle_since: float | None = time.monotonic()
 
     def _fire_early_cancel(winner: str) -> None:
         """The moment one sink passes: cancel every other lane, running or
@@ -4864,6 +4977,9 @@ def _execute_mission(
                         continue
                     lane_cancel_events[lane.name] = threading.Event()
                     running[pool.submit(run_lane, lane)] = lane
+                    if idle_since is not None:
+                        idle_total += time.monotonic() - idle_since
+                        idle_since = None
             if not running:
                 break
             finished, _ = wait(running, return_when=FIRST_COMPLETED)
@@ -4907,6 +5023,8 @@ def _execute_mission(
                         "child_name": result.plan["child_name"],
                         "child_max_cost_usd": result.plan["child_max_cost_usd"],
                     }
+            if not running and idle_since is None:
+                idle_since = time.monotonic()
 
     if pause_info is not None and not stop_requested():
         # A stop that arrives while a lane already dispatched before the
@@ -5204,6 +5322,37 @@ def _execute_mission(
         else []
     )
     duration = time.monotonic() - started
+    # F2: wall clock on the ledger -- the lead's real cost, not just the
+    # dispatch spend. `lanes_s` sums every attempt's own `duration_s` (the
+    # fleet's own busy time, gate excluded -- `dispatch` stamps it before its
+    # gate ever runs); `gate_s` sums that separately, from the run receipts.
+    # On a fresh launch, `launched_at` is this run's own start, so `wall_s`
+    # is exactly this run's own monotonic duration -- parsing it back out of
+    # the ISO strings would only lose precision, and a resume is the only
+    # case that actually needs the cross-process, wall-clock arithmetic.
+    finished_at = datetime.now(UTC).isoformat()
+    wall_s = (
+        (datetime.fromisoformat(finished_at) - datetime.fromisoformat(launched_at)).total_seconds()
+        if is_resume
+        else duration
+    )
+    lanes_s = sum(
+        float(attempt["duration_s"])
+        for lane in lane_results
+        for attempt in [*lane.previous_attempts, *lane.attempts]
+        if isinstance(attempt.get("duration_s"), int | float)
+        and not isinstance(attempt.get("duration_s"), bool)
+    )
+    gate_seconds = _gate_seconds(lane_results, base)
+    wall = {
+        "launched_at": launched_at,
+        "finished_at": finished_at,
+        "wall_s": round(wall_s, 1),
+        "paused_s": round(_paused_seconds(mission_dir), 1),
+        "gate_s": None if gate_seconds is None else round(gate_seconds, 1),
+        "lanes_s": round(lanes_s, 1),
+        "idle_s": round(idle_total, 1),
+    }
     report_path = mission_dir / "report.md"
     resume_entry: dict | None = None
     resumes = list(resume.history)
@@ -5235,6 +5384,7 @@ def _execute_mission(
             + int((resolve_out or {}).get("tokens") or 0)
         ),
         cache=_cache_summary(lane_results, previous_collates, collate_out, resolve_out),
+        wall=wall,
         duration_s=duration,
         budget=budget_state,
         collate=collate_out,
@@ -6259,6 +6409,13 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
         f"- {_cache_report_line(result.cache)}",
         f"- duration: {result.duration_s:.1f}s",
     ]
+    if result.wall:
+        w = result.wall
+        gates = "n/a" if w["gate_s"] is None else f"{w['gate_s']}s"
+        lines.append(
+            f"- wall: {w['wall_s']}s (paused {w['paused_s']}s, gates {gates}, "
+            f"lanes {w['lanes_s']}s, idle {w['idle_s']}s)"
+        )
     if result.chain:
         lines.append(
             f"- Receipt chain: {result.chain['links']} links, "

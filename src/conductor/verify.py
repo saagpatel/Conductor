@@ -433,6 +433,9 @@ class TestOutcome:
     timed_out: bool = False
     interrupted: bool = False  # a stop request ended the gate
     tail: str = ""
+    # F2: wall-clock seconds the gate process actually ran, from spawn to
+    # exit; None when it never spawned (an OSError before Popen returned).
+    duration_s: float | None = None
 
     @property
     def passed(self) -> bool:
@@ -467,6 +470,7 @@ def run_tests(
     `env` is the environment the command runs with; `None` (the default)
     inherits conductor's own, exactly as before this parameter existed.
     """
+    gate_started = time.monotonic()
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
         try:
             proc = subprocess.Popen(
@@ -504,15 +508,20 @@ def run_tests(
             # Every exit path kills stragglers and unregisters before pid reuse.
             _kill_live_group(proc.pid)
             proc.wait()
+        gate_duration = round(time.monotonic() - gate_started, 1)
         if timed_out:
             return TestOutcome(
-                ran=True, timed_out=True, tail=f"timed out after {timeout}s; process group killed"
+                ran=True,
+                timed_out=True,
+                tail=f"timed out after {timeout}s; process group killed",
+                duration_s=gate_duration,
             )
         if interrupted:
             return TestOutcome(
                 ran=True,
                 interrupted=True,
                 tail="interrupted: stop requested; process group killed",
+                duration_s=gate_duration,
             )
         out.seek(0)
         combined = out.read().strip().splitlines()
@@ -520,4 +529,5 @@ def run_tests(
         ran=True,
         exit_code=proc.returncode,
         tail="\n".join(combined[-15:]) if combined else "(no output)",
+        duration_s=gate_duration,
     )

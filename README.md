@@ -2279,14 +2279,15 @@ three; `conductor report` joins it back to its mission snapshot under
 `$CONDUCTOR_HOME/missions` to recover its lane and stage, the same way
 `conductor spend --by mission` already joins a run to its mission name.
 
-The report has six sections, in this order:
+The report has seven sections, in this order:
 
 - **Vendor and stage**: runs, ok count, cost, unpriced runs, mean and
-  median duration, cap misses (`kind == "cap"`), gate failures
-  (`kind == "gate"`), and mean tool calls, grouped by the vendor behind the
-  model (`fleets.py`) and the pipeline stage (the fleet name in place of an
-  unrecognized vendor, `null` stage for a dispatch outside a staged
-  pipeline).
+  median duration, cache (`cache_read_tokens` over `input_tokens`, summed
+  per group, as a percentage -- blank when the group read no input at all),
+  cap misses (`kind == "cap"`), gate failures (`kind == "gate"`), and mean
+  tool calls, grouped by the vendor behind the model (`fleets.py`) and the
+  pipeline stage (the fleet name in place of an unrecognized vendor, `null`
+  stage for a dispatch outside a staged pipeline).
 - **Error kinds**: count and cost per `errors.error_kind`.
 - **Reviewer finding rate**: among `stage: review` dispatches that wrote an
   answer, `verdicts.review_verdict` parses the LAST non-empty line (a
@@ -2315,6 +2316,21 @@ The report has six sections, in this order:
   gate had already passed -- a green run lost at the cap, the case the rule
   was written for). A figure with nothing to compute from reads `n/a`,
   never `0`, so a missing stage is never mistaken for a clean one.
+- **Wall clock**: one row per mission ever recorded, from that mission's own
+  `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
+  "paused_s", "gate_s", "lanes_s", "idle_s"}`. `launched_at` is the
+  mission's first launch, carried across every resume; `wall_s` is the
+  span since; `paused_s` sums the time each pause point actually sat
+  waiting for an answer (from `pause.json`'s own `asked_at`/`answered_at`
+  pairs); `gate_s` sums every lane's own gate and clean-gate time from its
+  run receipts; `lanes_s` sums every lane's dispatch time; `idle_s` is time
+  the scheduler had nothing running and nothing ready to start. The report
+  prints `wall_s`, `paused_s`, `gate_s`, `lanes_s`, `idle_s`, and `busy`
+  (`lanes_s / wall_s`, blank when `wall_s` is blank or zero). A mission
+  recorded before this field existed still gets its row, every figure
+  blank, never skipped or read as `0`. `report.md` carries the same figures
+  as one line under the mission header, and `conductor missions` carries
+  `wall_s`.
 
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`

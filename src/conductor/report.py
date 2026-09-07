@@ -45,6 +45,21 @@ def _cell(value: object) -> str:
     return "n/a" if value is None else str(value)
 
 
+_WALL_FIGURES = ("wall_s", "paused_s", "gate_s", "lanes_s", "idle_s")
+
+
+def _wall_figures(wall: dict | None) -> dict[str, float | None]:
+    """F2: one mission's `wall` block, as `WallClockRow`'s own keyword
+    arguments -- every figure blank (never 0) on a receipt that predates
+    the block, or where a single figure was never computable."""
+    out: dict[str, float | None] = {}
+    for key in _WALL_FIGURES:
+        value = wall.get(key) if isinstance(wall, dict) else None
+        numeric = isinstance(value, int | float) and not isinstance(value, bool)
+        out[key] = float(value) if numeric else None
+    return out
+
+
 def _vendor(fleet: str, model: str) -> str:
     """The vendor behind a receipt's resolved model id.
 
@@ -76,6 +91,9 @@ class Run(_SpendRun):
     lane: str | None = None
     mission: str | None = None
     duration_s: float = 0.0
+    # F2: the receipt's own `usage.input_tokens` -- the "cache" column's
+    # denominator, cache_read_tokens (already on spend.Run) over this.
+    input_tokens: int = 0
     kind: str | None = None
     mode: str | None = None
     answer_path: str | None = None
@@ -153,6 +171,9 @@ def _scan_missions(
             "landed": landed,
             "review_lanes": review_lanes,
             "fix_dispositions": fix_dispositions,
+            # F2: None on a receipt that predates the wall block -- the
+            # report lists that mission with blanks, never skips it.
+            "wall": raw.get("wall") if isinstance(raw.get("wall"), dict) else None,
         }
         for lane_raw in lane_list:
             if not isinstance(lane_raw, dict):
@@ -221,6 +242,14 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
     )
     gate_passed = _runner_gate_passed(raw.get("tests"), raw.get("test_surface"))
 
+    usage = raw.get("usage")
+    raw_input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
+    input_tokens = (
+        raw_input_tokens
+        if isinstance(raw_input_tokens, int) and not isinstance(raw_input_tokens, bool)
+        else 0
+    )
+
     budget = raw.get("budget")
     grace_used: Decimal | None = None
     finished_in_band = False
@@ -250,6 +279,7 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         lane=lane,
         mission=mission,
         duration_s=duration_s,
+        input_tokens=input_tokens,
         kind=_str_field(raw, "kind"),
         mode=_str_field(raw, "mode"),
         answer_path=_str_field(raw, "answer_path"),
@@ -269,6 +299,10 @@ class VendorStageRow:
     unpriced_runs: int = 0
     cap_misses: int = 0
     gate_failures: int = 0
+    # F2: the "cache" column -- cache_read_tokens over input_tokens, summed
+    # across every run in this vendor/stage group, as a percentage.
+    cache_read_tokens: int = 0
+    input_tokens: int = 0
     _durations: list[float] = field(default_factory=list)
     _tool_calls: list[int] = field(default_factory=list)
 
@@ -285,6 +319,13 @@ class VendorStageRow:
             self.gate_failures += 1
         self._durations.append(run.duration_s)
         self._tool_calls.append(run.tool_calls)
+        self.cache_read_tokens += run.cache_read_tokens
+        self.input_tokens += run.input_tokens
+
+    def cache_pct(self) -> float | None:
+        if not self.input_tokens:
+            return None
+        return round(self.cache_read_tokens / self.input_tokens * 100, 1)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -300,6 +341,7 @@ class VendorStageRow:
             "median_duration_s": (
                 round(statistics.median(self._durations), 1) if self._durations else None
             ),
+            "cache_pct": self.cache_pct(),
             "cap_misses": self.cap_misses,
             "gate_failures": self.gate_failures,
             "mean_tool_calls": (
@@ -405,6 +447,36 @@ class MissionRow:
 
 
 @dataclass
+class WallClockRow:
+    """F2: one mission's wall clock, straight off its own `result.json`
+    `wall` block -- `busy` (lanes_s / wall_s) is computed here, not stored,
+    since the two figures it divides are always read together."""
+
+    mission: str
+    wall_s: float | None = None
+    paused_s: float | None = None
+    gate_s: float | None = None
+    lanes_s: float | None = None
+    idle_s: float | None = None
+
+    def busy(self) -> float | None:
+        if not self.wall_s or self.lanes_s is None:
+            return None
+        return round(self.lanes_s / self.wall_s, 3)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "mission": self.mission,
+            "wall_s": self.wall_s,
+            "paused_s": self.paused_s,
+            "gate_s": self.gate_s,
+            "lanes_s": self.lanes_s,
+            "idle_s": self.idle_s,
+            "busy": self.busy(),
+        }
+
+
+@dataclass
 class Rules:
     """The figures behind AGENTS.md rules 7 (reviewer cap misses and finding
     rate, per vendor) and 10 (a green Claude build or fix run lost at its
@@ -426,6 +498,7 @@ class Report:
     missions: list[MissionRow]
     rules: Rules
     skipped: int = 0
+    wall_clock: list[WallClockRow] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -436,6 +509,7 @@ class Report:
             "missions": [row.to_dict() for row in self.missions],
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
+            "wall_clock": [row.to_dict() for row in self.wall_clock],
         }
 
 
@@ -564,6 +638,15 @@ def _build_report(
         }
     cap_losses["grace"] = grace
 
+    # F2: every mission this pass ever saw (`_scan_missions` reads every
+    # `result.json` under `home/missions`, not just the ones with a run in
+    # the window `rows` was filtered to), so a mission recorded before this
+    # field existed still gets its row, blanks and all.
+    wall_rows = [
+        WallClockRow(mission=name, **_wall_figures(mission_meta[name].get("wall")))
+        for name in sorted(mission_meta)
+    ]
+
     return Report(
         vendor_stage=vendor_stage_rows,
         error_kinds=error_kind_rows,
@@ -572,6 +655,7 @@ def _build_report(
         missions=mission_rows,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
+        wall_clock=wall_rows,
     )
 
 
@@ -626,6 +710,7 @@ def _print_report(rpt: Report) -> None:
             "unpriced",
             "mean_s",
             "median_s",
+            "cache",
             "cap_misses",
             "gate_failures",
             "mean_tools",
@@ -640,6 +725,7 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["unpriced_runs"]),
                 _cell(d["mean_duration_s"]),
                 _cell(d["median_duration_s"]),
+                _cell(d["cache_pct"]) + ("%" if d["cache_pct"] is not None else ""),
                 _cell(d["cap_misses"]),
                 _cell(d["gate_failures"]),
                 _cell(d["mean_tool_calls"]),
@@ -700,6 +786,22 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["landed"]),
             )
             for d in (row.to_dict() for row in rpt.missions)
+        ],
+    )
+    _print_section(
+        "Wall clock",
+        ("mission", "wall_s", "paused_s", "gate_s", "lanes_s", "idle_s", "busy"),
+        [
+            (
+                d["mission"],
+                _cell(d["wall_s"]),
+                _cell(d["paused_s"]),
+                _cell(d["gate_s"]),
+                _cell(d["lanes_s"]),
+                _cell(d["idle_s"]),
+                _cell(d["busy"]),
+            )
+            for d in (row.to_dict() for row in rpt.wall_clock)
         ],
     )
     print("Rules: AGENTS.md 7 (review cap misses and finding rate) and 10 (a green Claude")
