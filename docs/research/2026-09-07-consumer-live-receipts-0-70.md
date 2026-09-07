@@ -25,7 +25,7 @@ exit 0.
 ## What each receipt said
 
 **`usage.price`** (0.69.0, W6). Both estimated lanes carry the table key, source, vintage, and
-note that priced them; both Claude lanes carry `price: null` beside `cost_basis: "reported"`, as
+note behind the estimate; both Claude lanes carry `price: null` beside `cost_basis: "reported"`, as
 designed: the fleet's own figure is not from the table.
 
 **Ledger in flight** (0.70.0). Ninety seconds after launch `running.json` read
