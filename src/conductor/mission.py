@@ -32,6 +32,7 @@ own resolved cwd rather than the mission's.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -2765,7 +2766,8 @@ class MissionResult:
     # later one too, not just the resume that discovered it.
     children_unpriced_dispatches: int = 0
     # F2: {"launched_at", "finished_at", "wall_s", "paused_s", "gate_s",
-    # "lanes_s", "idle_s"} -- the lead's real wall-clock cost, not just the
+    # "lanes_s", "idle_s"}, and (W8) {"occupied_s", "critical_path_s",
+    # "lead_s"} -- the lead's real wall-clock cost, not just the
     # dispatch spend. `launched_at` never resets across a resume; every
     # other figure is this mission's whole life, recomputed fresh each run
     # from durable sources: pause.json for `paused_s`, the run receipts for
@@ -2776,6 +2778,15 @@ class MissionResult:
     # (report.py and golden.py backfill from there). `gate_s` (F15) covers
     # every lane's own gate, its clean-gate re-run, its reproduce gate, and
     # its setup/teardown commands -- see `_gate_seconds`.
+    #
+    # W8: `lanes_s` and `gate_s` are sums across lanes, so under concurrency
+    # they overlap each other and are lane-work measures, never a
+    # decomposition of `wall_s`. `occupied_s` (the union of the attempt
+    # intervals), `critical_path_s` (the longest chain through the lane
+    # graph), and `lead_s` (`wall_s - occupied_s - paused_s`, clamped at 0)
+    # are the ones that separate machine occupancy from the lead's own
+    # integration time -- each None, never 0, when the receipts cannot
+    # answer. See `_occupied_seconds` and `_critical_path_seconds`.
     wall: dict | None = None
 
     def to_dict(self) -> dict:
@@ -2852,14 +2863,41 @@ def _mission_launched_at(mission_id: str) -> str:
     anchor `spend._run_time` reads off a run id. Recovering it from there
     keeps `launched_at` truthful; stamping "now" would silently reset the
     clock on exactly the mission this field exists to account for."""
-    match = _MISSION_STAMP.match(mission_id)
+    stamp = _stamp_struct(mission_id)
+    if stamp is None:
+        return datetime.now(UTC).isoformat()
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", stamp)
+
+
+def _stamp_struct(identifier: str) -> time.struct_time | None:
+    """The UTC stamp at the front of a mission id or a run id
+    (`YYYYMMDDTHHMMSSZ-...`), or None when there is no parseable one there.
+    W8 reads the same anchor off every run id to place an attempt on the
+    wall clock, so the parser lives in one place. Deliberately parsed
+    through `time`, not `datetime`: a test that freezes this module's
+    `datetime.now` must not also take stamp parsing away."""
+    if not isinstance(identifier, str):
+        return None
+    match = _MISSION_STAMP.match(identifier)
     if match is None:
-        return datetime.now(UTC).isoformat()
+        return None
     try:
-        parsed = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+        return time.strptime(match.group(1), "%Y%m%dT%H%M%SZ")
     except ValueError:
-        return datetime.now(UTC).isoformat()
-    return parsed.isoformat()
+        return None
+
+
+def _stamp_epoch(identifier: str) -> float | None:
+    """`_stamp_struct` as UTC epoch seconds, for arithmetic on run ids."""
+    stamp = _stamp_struct(identifier)
+    return None if stamp is None else float(calendar.timegm(stamp))
+
+
+def _numeric(value: object) -> float | None:
+    """A real number, or None -- booleans are not numbers here."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 
 def _paused_seconds(mission_dir: Path) -> float:
@@ -2904,17 +2942,6 @@ def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
     total = 0.0
     seen: set[str] = set()
     incomplete = False
-
-    def add(outcome: object) -> None:
-        nonlocal total, incomplete
-        if not isinstance(outcome, dict) or not outcome.get("ran"):
-            return
-        duration = outcome.get("duration_s")
-        if isinstance(duration, int | float) and not isinstance(duration, bool):
-            total += float(duration)
-        else:
-            incomplete = True
-
     for lane in lane_results:
         for attempt in [*lane.previous_attempts, *lane.attempts]:
             run_id = attempt.get("run_id")
@@ -2924,13 +2951,167 @@ def _gate_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
             receipt = _json_object(base / "runs" / run_id / "result.json")
             if receipt is None:
                 continue
-            add(receipt.get("tests"))
-            add((receipt.get("test_surface") or {}).get("clean_gate"))
-            add(receipt.get("reproduce"))
-            lane_env = receipt.get("lane_env") or {}
-            add(lane_env.get("setup"))
-            add(lane_env.get("teardown"))
+            one = _receipt_gate_seconds(receipt)
+            if one is None:
+                incomplete = True
+            else:
+                total += one
     return None if incomplete else total
+
+
+def _receipt_gate_seconds(receipt: dict) -> float | None:
+    """W8: the gate seconds one run receipt records -- its own gate, its
+    clean-gate re-run, its reproduce gate, and its lane_env setup and
+    teardown, the same five outcomes `_gate_seconds` sums across a whole
+    mission. None (never 0) when one of them ran but predates `duration_s`,
+    so a caller that needs a single run's gate time inherits the same
+    "unknown, not zero" rule the mission-wide sum already follows."""
+    total = 0.0
+    for outcome in (
+        receipt.get("tests"),
+        (receipt.get("test_surface") or {}).get("clean_gate"),
+        receipt.get("reproduce"),
+        (receipt.get("lane_env") or {}).get("setup"),
+        (receipt.get("lane_env") or {}).get("teardown"),
+    ):
+        if not isinstance(outcome, dict) or not outcome.get("ran"):
+            continue
+        duration = _numeric(outcome.get("duration_s"))
+        if duration is None:
+            return None
+        total += duration
+    return total
+
+
+def _run_gate_seconds(run_id: str, base: Path) -> float | None:
+    """The gate seconds one run receipt records, or 0.0 when there is no
+    receipt to read (the same "no receipt, nothing to add" rule
+    `_gate_seconds` follows). None only when a gate ran unmeasured."""
+    receipt = _json_object(base / "runs" / run_id / "result.json")
+    return 0.0 if receipt is None else _receipt_gate_seconds(receipt)
+
+
+def _occupied_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
+    """W8: seconds during which at least one of this mission's dispatches was
+    running -- the length of the *union* of every attempt's interval, not the
+    sum of their lengths.
+
+    `lanes_s` and `gate_s` are sums across lanes, so under any concurrency
+    above 1 they overlap each other and cannot decompose `wall_s`. This one
+    can: an attempt starts at the UTC stamp at the front of its run id and
+    ends `duration_s` plus that run's own gate seconds later, and overlapping
+    attempts are counted once. `previous_attempts` and kept lanes count the
+    same way `lanes_s` counts them, so a resume never loses an earlier
+    resume's occupancy. Auxiliary dispatches (collate, resolve) are not lane
+    attempts and are outside this figure, as they are outside `lanes_s`.
+
+    None (never 0) when any attempt has no parseable start, no numeric
+    `duration_s`, or a gate that ran unmeasured: the union is then unknown,
+    not shorter. A mission that dispatched nothing at all is 0.0, which is
+    the true length of an empty union."""
+    spans: list[tuple[float, float]] = []
+    seen: set[str] = set()
+    for lane in lane_results:
+        for attempt in [*lane.previous_attempts, *lane.attempts]:
+            run_id = attempt.get("run_id")
+            if not isinstance(run_id, str):
+                return None
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            start = _stamp_epoch(run_id)
+            duration = _numeric(attempt.get("duration_s"))
+            if start is None or duration is None:
+                return None
+            gate = _run_gate_seconds(run_id, base)
+            if gate is None:
+                return None
+            spans.append((start, start + duration + gate))
+    total = 0.0
+    end_so_far: float | None = None
+    for start, end in sorted(spans):
+        if end_so_far is None or start > end_so_far:
+            total += end - start
+            end_so_far = end
+        elif end > end_so_far:
+            total += end - end_so_far
+            end_so_far = end
+    return total
+
+
+def _lead_seconds(
+    wall_s: float | None, occupied_s: float | None, paused_s: float | None
+) -> float | None:
+    """W8: the elapsed time that was neither parked on the operator nor
+    running one of this mission's dispatches -- scheduler idle, the lead's
+    own integration time, and nothing else. Gate time is already inside
+    `occupied_s` (an attempt's interval runs to the end of its own gate), so
+    it is never subtracted twice. Clamped at 0, because a run id is stamped
+    to the second and an occupancy rounded up past a very short mission is
+    not negative lead time. None if any operand is None."""
+    if wall_s is None or occupied_s is None or paused_s is None:
+        return None
+    return max(0.0, wall_s - occupied_s - paused_s)
+
+
+def _critical_path_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
+    """W8: the longest path through the lane dependency graph, weighting each
+    lane by its final attempt's `duration_s` plus that run receipt's gate
+    seconds.
+
+    This is the floor on the mission's elapsed time: no amount of
+    concurrency makes a mission finish faster than its longest chain. Edges
+    are the lane graph conductor already schedules on -- a lane's `needs`,
+    which validation guarantees already contains its `base` and its `resume`
+    source (`Mission.validate` refuses a `base` outside `needs` and a
+    `resume` that is neither in `needs` nor the `base`), so `needs` plus
+    `base` is the complete edge set.
+
+    Auxiliary dispatches are outside this graph and are never on the path:
+    collate and resolve run after the lanes settle, are not lanes, and carry
+    no `needs` edges.
+
+    A lane that never ran contributes 0 -- a skipped lane included, since
+    nothing waited on time it did not spend. None (never 0) when a lane that
+    did run has no numeric duration or an unmeasured gate, which makes the
+    length of any path through it unknown."""
+    weights: dict[str, float] = {}
+    for lane in lane_results:
+        final = lane.attempts[-1] if lane.attempts else None
+        if final is None:
+            weights[lane.name] = 0.0
+            continue
+        duration = _numeric(final.get("duration_s"))
+        run_id = final.get("run_id")
+        if duration is None or not isinstance(run_id, str):
+            return None
+        gate = _run_gate_seconds(run_id, base)
+        if gate is None:
+            return None
+        weights[lane.name] = duration + gate
+    edges = {
+        lane.name: [
+            name
+            for name in {*lane.needs, *([lane.base] if lane.base else [])}
+            if name in weights and name != lane.name
+        ]
+        for lane in lane_results
+    }
+    longest: dict[str, float] = {}
+    walking: set[str] = set()
+
+    def path(name: str) -> float:
+        if name in longest:
+            return longest[name]
+        if name in walking:  # validation forbids a cycle; never trust it here
+            return 0.0
+        walking.add(name)
+        upstream = max((path(need) for need in edges[name]), default=0.0)
+        walking.discard(name)
+        longest[name] = weights[name] + upstream
+        return longest[name]
+
+    return max((path(lane.name) for lane in lane_results), default=0.0)
 
 
 def _cache_summary(
@@ -5967,14 +6148,27 @@ def _execute_mission(
         and not isinstance(attempt.get("duration_s"), bool)
     )
     gate_seconds = _gate_seconds(lane_results, base)
+    # W8: `lanes_s` and `gate_s` are lane-work sums that overlap under
+    # concurrency, so they never decomposed elapsed time. These three do:
+    # `occupied_s` is the union of the attempt intervals (the machine busy),
+    # `critical_path_s` is the floor concurrency cannot go under, and
+    # `lead_s` is what is left of `wall_s` once the pauses and the machine's
+    # own occupancy are taken out -- the lead's integration time.
+    occupied_seconds = _occupied_seconds(lane_results, base)
+    critical_path = _critical_path_seconds(lane_results, base)
+    paused_seconds = _paused_seconds(mission_dir)
+    lead_seconds = _lead_seconds(wall_s, occupied_seconds, paused_seconds)
     wall = {
         "launched_at": launched_at,
         "finished_at": finished_at,
         "wall_s": round(wall_s, 1),
-        "paused_s": round(_paused_seconds(mission_dir), 1),
+        "paused_s": round(paused_seconds, 1),
         "gate_s": None if gate_seconds is None else round(gate_seconds, 1),
         "lanes_s": round(lanes_s, 1),
         "idle_s": round(idle_total, 1),
+        "occupied_s": None if occupied_seconds is None else round(occupied_seconds, 1),
+        "critical_path_s": None if critical_path is None else round(critical_path, 1),
+        "lead_s": None if lead_seconds is None else round(lead_seconds, 1),
         # F15 item 6: so `report.py`'s `busy` can divide by the concurrency
         # the mission actually ran under instead of assuming 1 -- `lanes_s`
         # is a sum across lanes, so any `concurrency` above 1 legitimately

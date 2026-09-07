@@ -45,7 +45,17 @@ def _cell(value: object) -> str:
     return "n/a" if value is None else str(value)
 
 
-_WALL_FIGURES = ("wall_s", "paused_s", "gate_s", "lanes_s", "idle_s")
+_WALL_FIGURES = (
+    "wall_s",
+    "paused_s",
+    "gate_s",
+    "lanes_s",
+    "idle_s",
+    # W8: blank on every receipt written before these shipped.
+    "occupied_s",
+    "critical_path_s",
+    "lead_s",
+)
 
 
 def _wall_figures(wall: dict | None) -> dict[str, float | int | None]:
@@ -567,7 +577,16 @@ class WallClockRow:
     more than one lane at once legitimately pushes it past `wall_s` on its
     own -- dividing by `wall_s` alone always read that as `busy` above 1.0.
     `concurrency` is None on a receipt that predates this field, and `busy`
-    follows it blank rather than assume 1."""
+    follows it blank rather than assume 1.
+
+    W8: `lanes_s` and `gate_s` are lane-work sums, so `busy` measures how
+    hard the lanes worked, not how the elapsed time was spent. `occupied_s`
+    (the union of the attempt intervals), `critical_path_s` (the longest
+    chain through the lane graph), and `lead_s` (elapsed time that was
+    neither paused nor occupied) are the decomposition, and `stretch`
+    (`wall_s / critical_path_s`) is the one figure to read for how much
+    longer the mission took than its own floor. `busy` keeps its old meaning
+    exactly, so an old receipt still reads the same."""
 
     mission: str
     wall_s: float | None = None
@@ -576,11 +595,22 @@ class WallClockRow:
     lanes_s: float | None = None
     idle_s: float | None = None
     concurrency: int | None = None
+    occupied_s: float | None = None
+    critical_path_s: float | None = None
+    lead_s: float | None = None
 
     def busy(self) -> float | None:
         if not self.wall_s or self.lanes_s is None or not self.concurrency:
             return None
         return round(self.lanes_s / (self.wall_s * self.concurrency), 3)
+
+    def stretch(self) -> float | None:
+        """W8: how many times its own critical path the mission actually
+        took. 1.0 is a mission that never waited on anything but its longest
+        chain; blank when either figure is missing or the path is zero."""
+        if self.wall_s is None or not self.critical_path_s:
+            return None
+        return round(self.wall_s / self.critical_path_s, 3)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -592,6 +622,10 @@ class WallClockRow:
             "idle_s": self.idle_s,
             "concurrency": self.concurrency,
             "busy": self.busy(),
+            "occupied_s": self.occupied_s,
+            "critical_path_s": self.critical_path_s,
+            "lead_s": self.lead_s,
+            "stretch": self.stretch(),
         }
 
 
@@ -1083,7 +1117,20 @@ def _print_report(rpt: Report) -> None:
     )
     _print_section(
         "Wall clock",
-        ("mission", "wall_s", "paused_s", "gate_s", "lanes_s", "idle_s", "concurrency", "busy"),
+        (
+            "mission",
+            "wall_s",
+            "paused_s",
+            "gate_s",
+            "lanes_s",
+            "idle_s",
+            "concurrency",
+            "busy",
+            "occupied_s",
+            "critical_path_s",
+            "lead_s",
+            "stretch",
+        ),
         [
             (
                 d["mission"],
@@ -1094,6 +1141,10 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["idle_s"]),
                 _cell(d["concurrency"]),
                 _cell(d["busy"]),
+                _cell(d["occupied_s"]),
+                _cell(d["critical_path_s"]),
+                _cell(d["lead_s"]),
+                _cell(d["stretch"]),
             )
             for d in (row.to_dict() for row in rpt.wall_clock)
         ],
