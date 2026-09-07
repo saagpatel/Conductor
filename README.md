@@ -3337,3 +3337,16 @@ never share state.
 Runtime is standard library only. Tests spawn real subprocesses against a
 throwaway git repo, so they exercise the timeout, process-group, and no-op
 paths for real without spending a token or requiring any fleet to be installed.
+
+`mission.py` is sliced by invariant, never by line count (peer review 2026-09-07,
+simplification 4): `graph.py` holds the lane-graph policy (taint to a fixed
+point over the whole graph, the resolver as a taint sink; D3, D4),
+`approvals.py` holds plan-lane approval consumption (one answer launches one
+child, the approval is bound to the child bytes checked at park time; D1, D2),
+and `attempts.py` holds attempt parsing and the resume-time trust checks (every
+paid dispatch counted once across a retry, a rehearsal never trusted). Each
+module re-exports its names through `mission.py`, keeps every call signature,
+never imports `mission` at module level (a structural test per module), and
+carries the tests that name its invariant. The scheduler body of
+`_execute_mission` stays whole: everything in it is closure state, and moving it
+would change a signature.

@@ -41,6 +41,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | F20 one effect inventory (spend.effects) read by resume, report, spend, and export | 0.77.0 | Shape A via the launcher with --opus-review, landed by conductor land | $7.64 |
 | F21 slice 1: graph policy extracted to graph.py, D3 and D4 pinned | 0.78.0 | Shape A via the launcher with --opus-review, landed by conductor land | $8.45 |
 | F21 slice 2: approval consumption extracted to approvals.py, D1 and D2 pinned | 0.79.0 | Shape A via the launcher with --opus-review; build landed by conductor land, fix lane salvaged by hand | $16.61 |
+| F21 slice 3: attempt lifecycle extracted to attempts.py, paid-once and never-trust-a-rehearsal pinned | 0.80.0 | Shape A via the launcher with --opus-review, landed by conductor land | $16.05 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -75,9 +76,9 @@ kind `reproduce` (F19). Five review items remain, approved in order: the README 
 (shipped 0.75.0), cost per landed item on the report (shipped 0.76.0, read live at $1.99 over
 today's four mapped missions), one effect inventory shared by `mission.py`
 and `report.py` (shipped 0.77.0 as `spend.effects`, F20), `mission.py` extracted by invariant with
-signatures intact (F21, three slices, one release each: graph policy shipped 0.78.0, approval
-consumption shipped 0.79.0, attempt lifecycle next), and non-code artifact acceptance with a
-before/after validator (F22, spec written).
+signatures intact (F21, three slices, one release each: graph policy 0.78.0, approval consumption
+0.79.0, attempt lifecycle 0.80.0), and non-code artifact acceptance with a before/after validator
+(F22, mission running).
 
 ## Waves
 
