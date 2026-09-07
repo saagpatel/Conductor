@@ -3420,6 +3420,30 @@ def _first_child_error(result: MissionResult) -> str:
     return "child dry run was not ok"
 
 
+def _child_digest(path: str | None) -> str | None:
+    """D2: sha256 of the child mission file's own bytes -- what the operator
+    was actually shown when the pause was raised. `None` when the file
+    cannot be read, which is never treated as a match."""
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _child_policy(child: Mission, depth: int) -> dict:
+    """D2: the part of a checked child a receipt should carry in words as
+    well as in a digest -- what the approval was an approval of."""
+    per_hour, per_day = _effective_ceiling(child)
+    return {
+        "max_cost_usd": child.max_cost_usd,
+        "ceiling": {"per_hour_usd": per_hour, "per_day_usd": per_day},
+        "depth": depth,
+        "lanes": len(child.lanes),
+    }
+
+
 def _plan_check_child(
     mission: Mission,
     deliverable_path: str | None,
@@ -3443,6 +3467,10 @@ def _plan_check_child(
         "depth": child_depth,
         "dry_run_ok": False,
         "refused": None,
+        # D2: what the operator is approving, in bytes and in words. Both are
+        # re-derived at launch and the launch is refused if either moved.
+        "child_sha256": None,
+        "child_policy": None,
     }
     if not deliverable_path:
         message = "plan lane produced no deliverable to load"
@@ -3456,6 +3484,8 @@ def _plan_check_child(
         return plan, message
     plan["child_name"] = child.name
     plan["child_max_cost_usd"] = child.max_cost_usd
+    plan["child_sha256"] = _child_digest(child.source)
+    plan["child_policy"] = _child_policy(child, child_depth)
     if child_depth > PLAN_MAX_DEPTH or (
         child_depth == PLAN_MAX_DEPTH and any(child_lane.plan for child_lane in child.lanes)
     ):
@@ -4147,7 +4177,15 @@ def _answer_human_pause(
     return None
 
 
-_PLAN_PAUSE_CHILD_FIELDS = ("child_path", "child_name", "child_max_cost_usd")
+_PLAN_PAUSE_CHILD_FIELDS = (
+    "child_path",
+    "child_name",
+    "child_max_cost_usd",
+    # D2: the approval is of these bytes under this policy, so the pause
+    # document carries both and the launch re-derives both.
+    "child_sha256",
+    "child_policy",
+)
 
 
 def _plan_pause_info(lane_name: str, plan: dict) -> dict:
@@ -4181,6 +4219,7 @@ def _launch_plan_child(
     ledger: Ledger,
     stop_answer: dict | None,
     child_base_dir: str | None = None,
+    parent: Mission | None = None,
 ) -> tuple[LaneResult, str | None, tuple[float, int] | None]:
     """E10: resolve a parked plan lane's unconditional pause. `stop` fails
     the lane naming the refusal, without ever loading the deliverable again.
@@ -4192,7 +4231,19 @@ def _launch_plan_child(
     parent's. Returns the finalized `LaneResult`, the launched child's
     mission id (None when nothing launched, i.e. the operator said stop),
     and a (cost_usd, unpriced_dispatches) rollup for the caller's ledger,
-    None until the child reaches its own finality."""
+    None until the child reaches its own finality.
+
+    D2: the approval is of the bytes that were checked. Before anything is
+    launched the child file is read and hashed again and the launch is
+    refused if the digest moved since the park, and `_plan_check_child`'s
+    own gates (depth, a bounded budget within the parent's remaining, a
+    ceiling no looser, a clean dry run) are rerun in full rather than
+    assumed -- an edit between the park and the answer changes none of them
+    otherwise, and only `max_cost_usd` was ever re-read here. Every one of
+    those is a recorded lane failure, never an exception out of the
+    scheduler: `parent` is the parent mission the gates are checked
+    against, and a call without it refuses rather than launching unchecked.
+    """
     plan = dict(parked.plan or {})
     resolved = replace(parked)
     resolved.attempts = [dict(attempt) for attempt in parked.attempts]
@@ -4208,7 +4259,45 @@ def _launch_plan_child(
     ):
         return _fail("child launch refused by the operator"), None, None
 
-    child = load_mission(plan["child_path"], base_dir=child_base_dir)
+    if parent is None:
+        return _fail("cannot re-check the approved child plan: no parent mission"), None, None
+    try:
+        child = load_mission(plan["child_path"], base_dir=child_base_dir)
+    except MissionInvalid as exc:
+        return _fail(f"child plan no longer loads: {exc}"), None, None
+
+    # D2: the operator approved bytes, not a path. Re-read and re-hash them
+    # before anything else; an approval that cannot be tied to what is on
+    # disk now is not an approval of it.
+    approved = plan.get("child_sha256")
+    current = _child_digest(child.source)
+    if not isinstance(approved, str) or current is None or current != approved:
+        old8 = approved[:8] if isinstance(approved, str) else "unrecorded"
+        new8 = current[:8] if current is not None else "unreadable"
+        return (
+            _fail(
+                f"child plan changed since it was approved: {old8} -> {new8}; "
+                "re-run to approve the revised plan"
+            ),
+            None,
+            None,
+        )
+
+    # And the gates the park ran are rerun in full against this ledger --
+    # the digest proves the file did not move, these prove the parent's
+    # budget and ceiling still admit it.
+    rechecked, refusal = _plan_check_child(
+        parent,
+        plan["child_path"],
+        ledger=ledger,
+        base=base,
+        lane_cwd=child_base_dir,
+    )
+    if refusal is not None:
+        plan["refused"] = refusal
+        return _fail(f"child plan no longer passes its checks: {refusal}"), None, None
+    plan["child_policy"] = rechecked["child_policy"]
+
     child.depth = plan["depth"]
     child.parent = {"mission_id": mission_id, "lane": lane.name}
 
@@ -4218,7 +4307,14 @@ def _launch_plan_child(
     # drifted by now).
     parent_remaining = ledger.remaining()
     if parent_remaining is not None:
-        assert child.max_cost_usd is not None  # `_plan_check_child` refused otherwise
+        if child.max_cost_usd is None:
+            # D2: an edit that dropped the cap used to hit an `assert` on the
+            # scheduler's own thread and take the resume down with it.
+            return (
+                _fail("child has no max_cost_usd; a planned mission's budget must be bounded"),
+                None,
+                None,
+            )
         child.max_cost_usd = min(child.max_cost_usd, parent_remaining)
         child.budget_from_parent = True
 
@@ -5011,6 +5107,7 @@ def _execute_mission(
                 ledger=ledger,
                 stop_answer=stop_answer,
                 child_base_dir=lane.attempts[0].effective_cwd(mission.cwd),
+                parent=mission,
             )
             settle(resolved)
             if child_id is not None:

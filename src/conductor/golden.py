@@ -1090,7 +1090,17 @@ def projection(result: MissionResult) -> dict:
         # `ask_path` (a human lane's own pause field, unaffected by this
         # item), which no test here has ever exercised through a still-paused
         # recording.
-        paused = {key: value for key, value in paused.items() if key != "child_path"}
+        #
+        # D2: `child_sha256` and `child_policy` go with it. The digest is
+        # over the child file's own bytes, which a fixture scrubs (its `cwd`
+        # is a real path), so a recording and a replay can never agree on
+        # it; the policy summary is dollar amounts, which this projection
+        # drops everywhere else.
+        paused = {
+            key: value
+            for key, value in paused.items()
+            if key not in ("child_path", "child_sha256", "child_policy")
+        }
     # F8: which settle boundaries reached the notify hook, in order. Only
     # when any did: a fixture recorded without `notify` (both C5 fixtures)
     # keeps a byte-identical projection, and an event's own outcome is

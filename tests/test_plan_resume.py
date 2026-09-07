@@ -151,7 +151,7 @@ def test_receipt_names_the_child_before_it_dispatches(
         {"cwd": str(repo), "max_cost_usd": 10.0, "lanes": [_plan_lane()]}, base_dir=tmp_path
     )
     first = run_mission(mission, home=home)
-    seen: dict = {}
+    seen: list = []
 
     def build(spec):
         if spec.prompt.split()[0] == "CHILDBUILD":
@@ -159,15 +159,19 @@ def test_receipt_names_the_child_before_it_dispatches(
             # "launched" before this, the child's *own* first dispatch, ever
             # runs.
             raw = json.loads(_lanes_plan_path(first.mission_dir).read_text())
-            seen["child"] = raw["plan"]["child"]
+            seen.append(raw["plan"].get("child"))
         return ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
 
     monkeypatch.setattr(runner_mod, "build_argv", build)
     resumed = _continue(first, home)
 
-    assert seen["child"]["state"] == "launched"
-    assert "ok" not in seen["child"]
-    assert seen["child"]["mission_id"] == _plan_child(resumed)["mission_id"]
+    # D2: the launch re-checks the approved child first, which dry-runs it
+    # once more -- a dry run builds an argv but spawns nothing, and the
+    # receipt is rightly still un-named there.
+    assert seen[0] is None
+    assert seen[-1]["state"] == "launched"
+    assert "ok" not in seen[-1]
+    assert seen[-1]["mission_id"] == _plan_child(resumed)["mission_id"]
 
 
 # --- item 3: resume over a child --------------------------------------------

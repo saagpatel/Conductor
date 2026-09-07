@@ -11,6 +11,7 @@ resolves a human lane's).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 from pathlib import Path
@@ -814,4 +815,123 @@ def test_a_human_pause_answered_stop_launches_no_planner_child(
 
     assert _plan_of(stopped, "plana").get("child") is None
     assert stopped.children == []
+    assert _launched_children(home, first.mission_id) == []
+
+
+# --- D2: the approval is bound to the child bytes that were checked ---------
+
+
+def _single_planner(repo, home, tmp_path, fake_fleet, *, max_cost_usd: float = 10.0):
+    child_raw = _child_raw(repo, max_cost_usd=1.0, name="approved-child")
+    fake_fleet(_write_deliverable_argv(child_raw, cost=0.1))
+    mission = mission_from_dict(
+        {"cwd": str(repo), "max_cost_usd": max_cost_usd, "lanes": [_plan_lane()]},
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    assert first.paused["kind"] == "child"
+    return first
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_park_records_the_bytes_and_the_policy_it_checked(
+    repo, home, fake_fleet, tmp_path
+):
+    """D2: nothing recorded what was approved, so nothing could tell at
+    launch whether the file had moved since."""
+    first = _single_planner(repo, home, tmp_path, fake_fleet)
+    plan = _plan_of(first, "plan")
+
+    assert plan["child_sha256"] == _digest(Path(plan["child_path"]))
+    assert plan["child_policy"] == {
+        "max_cost_usd": 1.0,
+        "ceiling": {"per_hour_usd": 10.0, "per_day_usd": 25.0},
+        "depth": 1,
+        "lanes": 1,
+    }
+    pause_doc = json.loads((Path(first.mission_dir) / "pause.json").read_text())
+    assert pause_doc["child_sha256"] == plan["child_sha256"]
+    assert pause_doc["child_policy"] == plan["child_policy"]
+    assert first.paused["child_sha256"] == plan["child_sha256"]
+
+
+def test_an_unedited_child_still_launches(repo, home, fake_fleet, monkeypatch, tmp_path):
+    """D2: the digest gate passes on the bytes that were approved."""
+    first = _single_planner(repo, home, tmp_path, fake_fleet)
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    )
+    resumed = _resume_with(first, home, "continue")
+
+    assert _plan_of(resumed, "plan")["child"]["ok"] is True
+    assert _launched_children(home, first.mission_id) == [
+        _plan_of(resumed, "plan")["child"]["mission_id"]
+    ]
+
+
+def test_a_child_edited_after_the_park_is_refused_at_launch(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """D2: `_launch_plan_child` reloaded the file and re-read only
+    `max_cost_usd` from it, so an edit between the park and the answer
+    launched a mission nobody had checked or approved."""
+    first = _single_planner(repo, home, tmp_path, fake_fleet)
+    plan = _plan_of(first, "plan")
+    child_file = Path(plan["child_path"])
+    edited = json.loads(child_file.read_text())
+    edited["lanes"].append({"name": "extra", "fleet": "claude", "prompt": "EXTRA go"})
+    child_file.write_text(json.dumps(edited))
+
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    )
+    resumed = _resume_with(first, home, "continue")
+
+    lane = next(item for item in resumed.lanes if item["name"] == "plan")
+    assert lane["ok"] is False
+    assert lane["attempts"][-1]["error"] == (
+        "plan: child plan changed since it was approved: "
+        f"{plan['child_sha256'][:8]} -> {_digest(child_file)[:8]}; "
+        "re-run to approve the revised plan"
+    )
+    assert lane["plan"].get("child") is None
+    assert _launched_children(home, first.mission_id) == []
+    assert resumed.ok is False
+
+
+def test_an_approved_child_that_lost_its_budget_is_refused_not_a_crash(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """D2 (lead verification): with the digest satisfied, dropping
+    `max_cost_usd` used to reach `assert child.max_cost_usd is not None` on
+    the scheduler's own thread and take the resume down. Every gate the park
+    ran is rerun instead, and its refusal is a lane failure."""
+    first = _single_planner(repo, home, tmp_path, fake_fleet)
+    plan = _plan_of(first, "plan")
+    child_file = Path(plan["child_path"])
+    edited = json.loads(child_file.read_text())
+    del edited["max_cost_usd"]
+    child_file.write_text(json.dumps(edited))
+    # The operator approved exactly these bytes: only the rerun gates can
+    # catch this one.
+    lane_path = Path(first.mission_dir) / "lanes" / "plan.json"
+    lane_raw = json.loads(lane_path.read_text())
+    lane_raw["plan"]["child_sha256"] = _digest(child_file)
+    lane_path.write_text(json.dumps(lane_raw, indent=2))
+
+    monkeypatch.setattr(
+        runner_mod, "build_argv", lambda spec: ["sh", "-c", f"echo '{envelope('built', 0.2)}'"]
+    )
+    resumed = _resume_with(first, home, "continue")
+
+    lane = next(item for item in resumed.lanes if item["name"] == "plan")
+    assert lane["ok"] is False
+    assert lane["attempts"][-1]["error"] == (
+        "plan: child plan no longer passes its checks: child has no max_cost_usd; "
+        "a planned mission's budget must be bounded"
+    )
+    assert lane["plan"].get("child") is None
     assert _launched_children(home, first.mission_id) == []
