@@ -306,6 +306,19 @@ nothing on bytes: web fetch returned the page and the shell wrote outside the wo
 calls beside it and did not cover the fetch, which confirms E21's gap live. Taint on Cursor
 stays refused; the probe is the record.
 
+**A read lane's deliverable has never worked live on Claude.** The F10 planner mission
+(2026-09-07, $2.18) was the first Claude read lane asked for an E1 deliverable outside the
+test suite, and it could not write it: a read lane runs under `--permission-mode plan`, and
+plan mode allows no write except the plan file, so Opus wrote the complete mission into its
+plan file and answered "say the word and I'll write it". E1 and E10 were built and tested
+against fake fleets that write whatever the test says. The fix belongs in F12: a Claude read
+lane that declares a deliverable dispatches under `--restricted --permission-mode acceptEdits`
+(the probe's only running combination: file tools confined to the working directory, no
+exec, no fetch), and the bytes check still refuses anything beyond the declared path. A plan
+lane on `antigravity` or `cursor` has the same question open and no probe yet. Until F12
+lands, a planner mission on Claude is a $2 way to get a mission file into a plan file, and
+the lead copies it out by hand, which is what happened.
+
 Noted, not items: `--fallback-model` can move a lane to another model on overload, which would
 break the review-vendor policy silently, so conductor should keep not passing it; `--fork-session`
 is the right primitive if a second fix attempt ever needs the build's thread without mutating
