@@ -277,7 +277,11 @@ summary and a report path.
   when any of them has no cap), and `worst_case_usd` (`spent_usd +
   outstanding_cap_usd`) -- a report of possible overshoot while dispatches
   are still in flight, never subtracted from what a dispatch may still
-  spend (W6);
+  spend (W6); the same block is written into `pause.json` under `budget`
+  whenever the mission parks, and refreshed into the mission directory's
+  `running.json` lock under `budget` every time a dispatch starts or
+  finishes, so those figures can be read from either file during a run and
+  not only from the finished mission;
 - copies each lane's final attempt's answer to `answers/<lane>.txt` and its
   patch (committed, uncommitted, and untracked work against the base) to
   `diffs/<lane>.patch`; if `collate` is set, hands all of them to one
@@ -2763,9 +2767,10 @@ the fact, so it overshoots by at most one model response plus one
 two-second poll; `post-hoc` (cursor) gets its usage once, at the end, so the
 whole run can pass before the cap is even checked, and the mission ledger's
 `outstanding_cap_usd` is the only figure that names what it could still
-turn out to cost -- a report, never an admission check, and not written
-out until the finished mission's own `budget` block, so it is not yet
-anything a reader can watch update while the run is live; `none`
+turn out to cost -- a report, never an admission check, written into the
+finished mission's own `budget` block and, while the run is live, into
+`pause.json` at every park and into `running.json` at every dispatch start
+and finish, so a reader can watch it move in either file; `none`
 (script) never overshoots, being free. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
 a $1.0000 cap"`), whether it was killed or merely judged afterwards; work it
 landed is still on its branch. The watcher runs on every codex and

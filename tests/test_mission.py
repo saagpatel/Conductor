@@ -8,6 +8,7 @@ are all real.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from conductor.mission import (
     mission_from_dict,
     run_mission,
 )
+from conductor.runner import Result
 
 
 def fake_fleets(monkeypatch, by_fleet: dict[str, list[str]]) -> None:
@@ -453,6 +455,74 @@ def test_a_script_attempts_in_flight_cap_is_its_free_price_not_the_remaining_bud
     result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
     assert result.lanes[0]["ok"] is True
     assert captured == [0.0]
+
+
+def test_running_lock_carries_the_ledger_while_a_dispatch_is_in_flight(
+    repo, home, monkeypatch, tmp_path
+):
+    """The in-flight figures are only interesting while something is in
+    flight, so the mission refreshes them into its own `running.json` lock
+    every time a dispatch starts or finishes. Read from inside the dispatch
+    itself, the lock names one dispatch outstanding at exactly its own
+    cap, and every key the lock's liveness check reads is still there."""
+    # A guard, not a fixture: nothing here may reach a real CLI if the
+    # offline dispatcher below is ever bypassed.
+    fake_fleets(monkeypatch, {"claude": say("done", cost=0.1)})
+    seen: dict = {}
+
+    def dispatcher(spec, **kwargs):
+        lock = next((home / "missions").glob("*/running.json"))
+        seen["lock"] = json.loads(lock.read_text())
+        seen["cap_usd"] = spec.cap_usd
+        run_dir = home / "runs" / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "answer.txt").write_text("done\n")
+        return Result(
+            run_id="fake-run",
+            fleet=spec.fleet,
+            model="claude-sonnet-5",
+            effort=spec.effort,
+            mode=spec.mode,
+            cwd=str(repo),
+            timeout=600,
+            exit_code=0,
+            timed_out=False,
+            duration_s=0.1,
+            run_dir=str(run_dir),
+            stdout_path="",
+            stderr_path="",
+            answer_path=str(run_dir / "answer.txt"),
+            tail="ok",
+            spawned=True,
+            git_verdict={"checked": False, "no_op": False},
+        )
+
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "lanes": [
+            {
+                "name": "w",
+                "fleet": "claude",
+                "mode": "read",
+                "isolate": False,
+                "cap_usd": 2.0,
+            }
+        ],
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dispatcher=dispatcher
+    )
+    assert result.lanes[0]["ok"] is True, result.lanes[0]
+
+    budget = seen["lock"]["budget"]
+    assert budget["in_flight_dispatches"] == 1
+    assert seen["cap_usd"] == 2.0
+    assert budget["outstanding_cap_usd"] == 2.0
+    assert budget["worst_case_usd"] == 2.0
+    # The lock is still a lock: nothing `_lock_status` reads has moved.
+    assert seen["lock"]["pid"] == os.getpid()
+    assert set(seen["lock"]) == {"pid", "started", "host", "owner", "budget"}
 
 
 def test_report_marks_unpriced_attempts_instead_of_rendering_them_as_zero(
