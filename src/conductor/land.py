@@ -122,13 +122,15 @@ def _golden_check(worktree: Path) -> list[str]:
 
 
 def _gate_env(mission_id: str, lane: str, worktree: str) -> dict[str, str]:
-    """The environment a lane's own gate gets (`runner.dispatch`): the
-    process environment plus the two variables every dispatched process
-    carries. Never `CONDUCTOR_LANE` -- this gate is land's own act, not a
-    lane's, so nothing it runs may itself refuse to run `land`."""
+    """The exact environment a lane's own gate gets (`runner.dispatch`,
+    runner.py:1615-1622): the process environment plus the three variables
+    every dispatched process carries, `CONDUCTOR_LANE` included -- this gate
+    re-runs the lane's own command against the merged head, and spec item 2
+    asks for the same environment, not a land-specific one."""
     env = dict(os.environ)
     env["CONDUCTOR_RUN_ID"] = f"land-{mission_id}-{lane}"
     env["CONDUCTOR_WORKTREE"] = worktree
+    env["CONDUCTOR_LANE"] = "1"
     return env
 
 
@@ -198,6 +200,12 @@ def _perform(
     merged = git_run(root, "merge", "--no-ff", "-m", message, "--", branch)
     if merged.returncode != 0:
         detail = merged.stderr.strip() or merged.stdout.strip() or f"exit {merged.returncode}"
+        # No merge commit exists yet -- `git merge --abort` is exactly
+        # enough here (unlike the post-commit case below, where only a
+        # reset can undo it): a rejecting commit-msg hook, for one, leaves
+        # MERGE_HEAD set and the tree staged even though the command itself
+        # failed, and the next `land` must not find the checkout mid-merge.
+        git_run(root, "merge", "--abort")
         return LandResult(
             mission=mission_id,
             lane=lane,
