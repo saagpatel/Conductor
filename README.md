@@ -841,8 +841,8 @@ receipt gains `taint_enforcement`: `{"preflight": {"ok", "loaded", "detail",
 "matchers_missing"},
 "hooks_written", "hooks_loaded", "tools_seen", "uncovered", "denied_calls",
 "hook_digests", "hooks_modified"}`
-(`denied_calls` counts the stream's own "denied by pre-tool hook" tool
-errors; on a run the preflight itself refused, `spawned` is false and the block
+(`denied_calls` counts the stream's tool-error events whose message is the
+hook's own "denied by pre-tool hook", never a line that merely quotes it; on a run the preflight itself refused, `spawned` is false and the block
 carries `preflight` with `ok` false and nothing else), `null` when the lane is
 not a tainted antigravity dispatch. Cursor's
 `.cursor/cli.json` has no rule kind for its native web fetch and search

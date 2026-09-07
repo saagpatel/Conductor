@@ -344,6 +344,7 @@ def _agy_argv(
     extra_lines: list[str],
     marker: Path | None = None,
     tamper: str | None = None,
+    answer: str = "ok",
 ) -> list[str]:
     """A fake `agy` that writes `agy.log` and its stream from inside the
     subprocess -- it needs $CONDUCTOR_RUN_ID, set by dispatch() only once the
@@ -370,7 +371,7 @@ def _agy_argv(
             "event": "result",
             "result": {
                 "status": "SUCCESS",
-                "response": "ok",
+                "response": answer,
                 "usage": {"input_tokens": 10, "output_tokens": 1},
             },
         }
@@ -583,14 +584,31 @@ def test_uncovered_tool_fails_with_the_real_nested_init_event_shape(repo, home, 
     assert result.taint_enforcement["uncovered"] == ["browser_future_tool"]
 
 
-def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):
-    denied_line = json.dumps(
+def _denied_tool_line(tool: str, message: str) -> str:
+    # The shape agy streams for a hook denial, from the 2026-09-07 live drill
+    # (docs/research/2026-09-07-live-probe-taint-shell-deny.md).
+    return json.dumps(
         {
             "event": "step_update",
             "step_update": {
-                "message": "tool call denied by pre-tool hook: conductor: taint: shell denied"
+                "step_index": 2,
+                "state": "ERROR",
+                "step_type": "tool",
+                "tool_name": tool,
+                "tool_info": {
+                    "name": tool,
+                    "parameters": {},
+                    "error": {"type": "TOOL_ERROR", "message": message},
+                },
             },
         }
+    )
+
+
+def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):
+    denied_line = _denied_tool_line(
+        "run_command",
+        "tool call denied by pre-tool hook: conductor: taint: run_command reaches outside",
     )
     fake_fleet(
         _agy_argv(
@@ -603,6 +621,40 @@ def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is True, result.failure()
     assert result.taint_enforcement["denied_calls"] == 2
+
+
+def test_denied_calls_ignore_the_answer_quoting_the_denial(repo, home, fake_fleet):
+    # Live drill 2026-09-07: the model's report repeated both denial messages
+    # verbatim, so a marker scan over every line read five denials for two
+    # tool errors. Only tool-error events count; text deltas, the final
+    # result, and a tool error without the marker do not.
+    denied_line = _denied_tool_line(
+        "write_to_file",
+        "tool call denied by pre-tool hook: conductor: taint: write_to_file may not write",
+    )
+    echo_delta = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {
+                "state": "ACTIVE",
+                "step_type": "agent_response",
+                "text_delta": "Error: tool call denied by pre-tool hook: conductor: taint",
+            },
+        }
+    )
+    other_error = _denied_tool_line("view_file", "file not found")
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[denied_line, echo_delta, other_error],
+            answer="Step 1 failed: tool call denied by pre-tool hook: conductor: taint",
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert result.taint_enforcement["denied_calls"] == 1
 
 
 # --- W1: the hook files must be the ones conductor wrote --------------------

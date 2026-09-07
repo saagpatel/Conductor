@@ -871,8 +871,31 @@ def _uncovered_agy_tools(tools: list[str]) -> list[str]:
     ]
 
 
+def _denied_tool_error(event: dict) -> bool:
+    """A `step_update` whose tool step ended in the hook's own denial: the
+    stream's `tool_info.error.message` carries the marker. Live drill
+    2026-09-07 (docs/research/2026-09-07-live-probe-taint-shell-deny.md):
+    the model's final answer quoted the two denial messages verbatim, and
+    a line scan for the marker counted five denials where the stream held
+    two, so the count is taken from the tool-error events alone."""
+    update = event.get("step_update")
+    if not isinstance(update, dict) or update.get("step_type") != "tool":
+        return False
+    if update.get("state") != "ERROR":
+        return False
+    info = update.get("tool_info")
+    error = info.get("error") if isinstance(info, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    return isinstance(message, str) and _TAINT_AGY_DENIED_CALL_MARKER in message
+
+
 def _count_denied_calls(stdout_text: str) -> int:
-    return sum(1 for line in stdout_text.splitlines() if _TAINT_AGY_DENIED_CALL_MARKER in line)
+    count = 0
+    for line in stdout_text.splitlines():
+        event = json_line(line)
+        if event is not None and _denied_tool_error(event):
+            count += 1
+    return count
 
 
 _TAINT_AGY_PREFLIGHT_TIMEOUT_S = 30
