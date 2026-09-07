@@ -28,6 +28,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | Live taint shell-deny drill; denied_calls counted from tool errors | 0.64.0 | one tainted Antigravity read dispatch on a scratch repo; lead fix | $0.06 |
 | W3 resume authenticates artifact bytes; W4 deliverable captured after the gates, tree re-judged after teardown | 0.65.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 | Live drills for six fail-closed checks; Shape C as shape a --opus-review | 0.66.0 | six scratch-repo dispatches; lead build for the launcher option | $0.19 |
+| W8 wall block: occupied, critical path, lead seconds, stretch; W10 notify process group and bounded output; drill pass two | 0.67.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; three scratch-repo dispatches | $0.08 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -41,10 +42,10 @@ fixed the same release. Phase H item 1 is done. Item 2 shipped as 0.65.0: W3 (ar
 every receipt, re-hashed on resume) and W4 (deliverable captured after the gates, tree re-judged
 after teardown with `cleanup_required`). Item 3's worklist is
 `docs/research/2026-09-07-fail-closed-check-inventory.md`; its first pass (0.66.0) fired three
-checks live and settled three more. Item 4 shipped in 0.66.0 as `shape a --opus-review`. Open:
-item 5 (wall-clock critical path), item 6 (evidence map), the rest of item 3's list (Cursor no-
-answer, taint digest under `taint_shell: allow`, write-lane permission denial, land and salvage
-refusals on a finished mission), W6 to W10.
+checks live and settled three more. Item 4 shipped in 0.66.0 as `shape a --opus-review`. Item 5 (W8) and
+W10 shipped in 0.67.0, with a second drill pass that fired the taint digest and Cursor's empty
+answer. Open: item 6 (the evidence map, a design call for the operator), the rest of item 3's
+list (write-lane permission denial, land and salvage refusals on a finished mission), W6, W7, W9.
 
 ## Waves
 

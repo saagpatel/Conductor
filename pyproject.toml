@@ -1,6 +1,6 @@
 [project]
 name = "conductor"
-version = "0.66.0"
+version = "0.67.0"
 description = "One dispatch contract across the Claude Code, Codex, Antigravity, and Cursor agent fleets"
 readme = "README.md"
 requires-python = ">=3.12"
