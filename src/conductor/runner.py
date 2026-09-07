@@ -213,6 +213,12 @@ class Result:
     # read lane with a declared `deliverable` (see `fleets._build_claude`).
     permission_mode: str | None = None
     restricted: bool = False
+    # W8: `{"checked": bool, "modified": [<relative path>]}` -- whether this
+    # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
+    # before and after the run (a claude write lane, never anything else), and
+    # which of them the run created, changed, or deleted. Conductor's own read
+    # of the bytes, never a fleet's word, like `taint_enforcement` above.
+    settings: dict = field(default_factory=lambda: {"checked": False, "modified": []})
 
     @property
     def gate_passed(self) -> bool:
@@ -897,6 +903,24 @@ def _sha256_file(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+# W8: the two files Claude Code reads a project's own permission policy from,
+# relative to the directory the fleet actually runs in. Both are checked even
+# when neither exists: a lane that creates one is the case that matters.
+CLAUDE_SETTINGS_FILES: tuple[str, ...] = (".claude/settings.json", ".claude/settings.local.json")
+
+
+def _settings_digests(cwd: str) -> dict[str, str | None]:
+    """The sha256 of each Claude settings file, or None where there is no
+    readable file. Absence is a value, not a gap: a lane that creates one of
+    these has changed the policy as surely as one that edits it."""
+    return {rel: _sha256_file(Path(cwd) / rel) for rel in CLAUDE_SETTINGS_FILES}
+
+
+def _settings_modified(cwd: str, before: dict[str, str | None]) -> list[str]:
+    after = _settings_digests(cwd)
+    return [rel for rel in CLAUDE_SETTINGS_FILES if before.get(rel) != after.get(rel)]
 
 
 def _write_taint_agy_hooks(
@@ -2038,6 +2062,13 @@ def dispatch(
     post_wait = False
     try:
         before = GitState.capture(spec.cwd)
+        # W8: hashed here, beside the bytes baseline and before the spawn, so
+        # a lane that edits its own permission policy mid-run is measured
+        # against what it started from. Only a claude write lane: a read lane
+        # runs in plan mode, which cannot edit these files, and a denial there
+        # is already a note rather than a failure.
+        settings_checked = spec.fleet == "claude" and spec.mode == "write"
+        settings_before = _settings_digests(spec.cwd) if settings_checked else {}
         try:
             surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
         except ValueError as exc:
@@ -2295,6 +2326,20 @@ def dispatch(
             taint_enforcement["preflight"] = taint_preflight
             if taint_problem is not None and error is None:
                 error = f"taint hooks not enforced: {taint_problem}"
+
+        # W8: re-hashed here, before the deliverable check, the commit, and
+        # either gate, so a green gate cannot rescue a lane that rewrote the
+        # policy it ran under. Live drill 2026-09-07 (third pass,
+        # docs/research/2026-09-07-live-drills-fail-closed-checks.md): a write
+        # lane's subagent edited `permissions.deny` out of `.claude/settings.json`,
+        # Claude Code applied the edit to the next subagent, and the receipt
+        # read `ok: true` with `dirty_delta: 1` as the only trace.
+        settings_state: dict = {"checked": settings_checked, "modified": []}
+        if settings_checked:
+            settings_modified = _settings_modified(spec.cwd, settings_before)
+            settings_state["modified"] = settings_modified
+            if settings_modified and error is None:
+                error = f"settings modified: {', '.join(settings_modified)}"
 
         answer = output.answer
         if not answer and spec_with_paths.last_message:
@@ -2848,6 +2893,7 @@ def dispatch(
         permission_denials=list(output.permission_denials),
         permission_mode=permission_mode,
         restricted=restricted_flag,
+        settings=settings_state,
     )
     if result.spawned:
         statement = _lane_receipt_statement(

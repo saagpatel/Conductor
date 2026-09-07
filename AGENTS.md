@@ -199,7 +199,10 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   test). Before that they ran with `acceptEdits`, which refuses Bash beyond `pwd`/`ls`: Haiku edited
   blind and reported success, Sonnet stopped and asked. Sonnet 5 at `hard` has since built four
   roadmap items; its one recurring trap is changing an existing call signature, so every spec says
-  not to.
+  not to. A project `permissions.deny` rule is not a boundary for a write lane (the lane can edit
+  the settings file and Claude Code hot-reloads it for the next subagent), so conductor fails a
+  write lane that changes `.claude/settings.json` or `.claude/settings.local.json`, kind
+  `settings`.
 
 ### Gemini 3.8 Flash and 3.7 Flash (fleet `antigravity`, binary `agy`)
 
