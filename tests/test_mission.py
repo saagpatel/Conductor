@@ -587,3 +587,25 @@ def test_dry_run_records_argv_and_spawns_nothing(repo, home, tmp_path):
         (home / "runs" / result.lanes[0]["attempts"][0]["run_id"] / "argv.json").read_text()
     )
     assert "gpt-5.6-luna" in argv
+
+
+def test_a_mission_cap_that_can_never_fire_is_refused():
+    """D14: `max_cost_usd <= 0` admits NaN (every comparison with it is
+    False) and inf (no finite spend exceeds it), either of which leaves the
+    mission running with a budget that can never stop it. `True` is not a
+    dollar figure either."""
+    for bad in (float("nan"), float("inf"), True, 0, -1):
+        raw = {
+            "cwd": ".",
+            "max_cost_usd": bad,
+            "lanes": [{"name": "a", "fleet": "claude", "prompt": "p"}],
+        }
+        with pytest.raises(MissionInvalid, match="max_cost_usd must be a positive finite number"):
+            mission_from_dict(raw, base_dir=Path(".")).validate()
+
+    ok = {
+        "cwd": ".",
+        "max_cost_usd": 2.5,
+        "lanes": [{"name": "a", "fleet": "claude", "prompt": "p"}],
+    }
+    mission_from_dict(ok, base_dir=Path(".")).validate()

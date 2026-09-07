@@ -125,3 +125,42 @@ def test_override_path_follows_conductor_home(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
     (tmp_path / "prices.json").write_text(json.dumps({"gpt-5.6-luna": {"input": 9, "output": 9}}))
     assert prices.load_prices()["gpt-5.6-luna"].input == 9.0
+
+
+def test_a_rate_that_is_not_finite_and_non_negative_is_reported_and_not_loaded(tmp_path):
+    """D14: `json.loads` accepts bare NaN and Infinity and `float()` takes
+    "-1" happily. A NaN rate makes every dollar comparison downstream
+    (`budget.over_cap`, `Ledger.add`) False forever, so a capped run spends
+    without limit; a negative rate pays the operator back. Both are the
+    operator's own typo, so they are reported and the default stands."""
+    override = tmp_path / "prices.json"
+    override.write_text(
+        """{
+          "claude-opus-5": {"input": NaN, "output": 25.0},
+          "claude-sonnet-5": {"input": 2.0, "output": -10.0},
+          "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": Infinity},
+          "gemini-3.7-flash": {"input": 1.0, "output": 2.0, "cache_write": true},
+          "cursor-grok-4.6": {"input": 3.0, "output": 9.0, "cache_read": 0}
+        }"""
+    )
+    errors: list[str] = []
+    table = load_prices(override, errors)
+
+    assert len(errors) == 4
+    assert all("must be finite and non-negative" in message for message in errors)
+    assert table["claude-opus-5"] == DEFAULT_PRICES["claude-opus-5"]
+    assert table["claude-sonnet-5"] == DEFAULT_PRICES["claude-sonnet-5"]
+    assert table["claude-haiku-4-5"] == DEFAULT_PRICES["claude-haiku-4-5"]
+    assert table["gemini-3.7-flash"] == DEFAULT_PRICES["gemini-3.7-flash"]
+    # Zero is a real rate (a free model), and the entry beside four bad ones
+    # still loads.
+    assert table["cursor-grok-4.6"].input == 3.0
+    assert table["cursor-grok-4.6"].cache_read == 0.0
+
+
+def test_finite_helpers_refuse_booleans_and_non_numbers():
+    for bad in (True, False, float("nan"), float("inf"), "1.0", None):
+        assert prices.finite_positive(bad) is False
+        assert prices.finite_nonnegative(bad) is False
+    assert prices.finite_positive(0) is False and prices.finite_nonnegative(0) is True
+    assert prices.finite_positive(0.5) is True
