@@ -29,6 +29,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | W3 resume authenticates artifact bytes; W4 deliverable captured after the gates, tree re-judged after teardown | 0.65.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree | $0 |
 | Live drills for six fail-closed checks; Shape C as shape a --opus-review | 0.66.0 | six scratch-repo dispatches; lead build for the launcher option | $0.19 |
 | W8 wall block: occupied, critical path, lead seconds, stretch; W10 notify process group and bounded output; drill pass two | 0.67.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; three scratch-repo dispatches | $0.08 |
+| Evidence map as the build lane's deliverable; W7 precision labels landed via shape a --opus-review | 0.68.0 | Shape A via the launcher with --opus-review, landed by conductor land | $5.45 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -44,8 +45,9 @@ after teardown with `cleanup_required`). Item 3's worklist is
 `docs/research/2026-09-07-fail-closed-check-inventory.md`; its first pass (0.66.0) fired three
 checks live and settled three more. Item 4 shipped in 0.66.0 as `shape a --opus-review`. Item 5 (W8) and
 W10 shipped in 0.67.0, with a second drill pass that fired the taint digest and Cursor's empty
-answer. Open: item 6 (the evidence map, a design call for the operator), the rest of item 3's
-list (write-lane permission denial, land and salvage refusals on a finished mission), W6, W7, W9.
+answer. Item 6 shipped in 0.68.0 as the build lane's `evidence.json`, and the first mission through the
+full shape (evidence map, Opus reviewer, W8 wall figures) landed W7. Open: the rest of item 3's
+list (write-lane permission denial, land and salvage refusals on a finished mission), W6, W9.
 
 ## Waves
 
