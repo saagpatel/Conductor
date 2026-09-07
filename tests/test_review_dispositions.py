@@ -212,3 +212,43 @@ def test_mission_settle_records_review_verdict_and_fix_dispositions(
     report = Path(result.report_path).read_text()
     assert "2 findings" in report
     assert "1 fixed, 1 refused" in report
+
+
+def test_every_report_table_row_has_the_header_cell_count(repo, home, monkeypatch, tmp_path):
+    """Cross-vendor review of F1: the `review/fix` column widened the header
+    to 19 cells, and the human row and the skipped-without-attempts row were
+    still 18, so `taint` rendered under `branch`."""
+    from conductor import runner as runner_mod
+    from conductor.mission import mission_from_dict, run_mission
+
+    def build(spec):
+        if "FAIL" in spec.prompt:
+            return ["sh", "-c", "exit 1"]
+        return ["sh", "-c", "echo ok"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "cwd": str(repo),
+        "prompt": "SPEC",
+        "lanes": [
+            {"name": "first", "fleet": "claude", "mode": "read", "prompt": "FAIL"},
+            {
+                "name": "second",
+                "fleet": "claude",
+                "mode": "read",
+                "needs": ["first"],
+                "prompt": "R",
+            },
+            {"name": "ask", "fleet": "human", "prompt": "answer me"},
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    report = Path(result.report_path).read_text()
+    table = [line for line in report.splitlines() if line.startswith("| ")]
+    header = table[0]
+    assert "review/fix" in header
+    width = header.count("|")
+    rows = [line for line in table[1:] if not line.startswith("|---")]
+    assert rows, report
+    assert {line.count("|") for line in rows} == {width}, "\n".join(rows)

@@ -6118,7 +6118,7 @@ def _human_report_row(lane: LaneResult) -> str:
         length = len(answer_file.read_text(errors="replace").strip())
         label = f"human, answered {answered_at} ({length} chars)"
     return (
-        f"| {lane.name} | {label} | {lane.ok} | | {_review_fix_label(lane)} | | no | | | "
+        f"| {lane.name} | {label} | {lane.ok} | | {_review_fix_label(lane)} | | | no | | | "
         f"{_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | no | |"
     )
 
@@ -6225,8 +6225,8 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
                 lines.append(_attempt_report_row(lane, lane.attempts[-1], "(skipped)"))
             else:
                 lines.append(
-                    f"| {lane.name} | (skipped) | False | | {_review_fix_label(lane)} | | no | "
-                    f"| | {_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | "
+                    f"| {lane.name} | (skipped) | False | | {_review_fix_label(lane)} | | | no "
+                    f"| | | {_taint_label(lane)} | {_untrusted_output_label(lane)} | | | | | - | "
                     "no | |"
                 )
             continue
