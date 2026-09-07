@@ -11,7 +11,11 @@ dependencies = []
 conductor = "conductor.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.6",
+    "ruff>=0.6",
+]
 
 [build-system]
 requires = ["hatchling"]

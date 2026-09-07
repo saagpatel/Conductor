@@ -2439,9 +2439,14 @@ Run directories live under `$CONDUCTOR_HOME` (default `~/.conductor`).
 
 ```
 uv venv && uv sync --frozen --group dev
-.venv/bin/pytest
+.venv/bin/pytest -n auto
 .venv/bin/ruff check .
 ```
+
+`-n auto` runs the suite across workers through pytest-xdist (a dev-group dependency; the
+runtime is still standard library only) and brings it from about four minutes to about thirty
+seconds on an M4 Pro. Every test uses its own temporary home and repository, so the workers
+never share state.
 
 Runtime is standard library only. Tests spawn real subprocesses against a
 throwaway git repo, so they exercise the timeout, process-group, and no-op

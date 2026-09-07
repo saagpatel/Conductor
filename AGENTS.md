@@ -13,9 +13,12 @@ claim below lives in `docs/research/` (dated reports with URLs and live-probe re
 - Gate before any commit, exit codes captured to files, never piped through `tail` or `head`:
   ```
   .venv/bin/ruff check src tests
-  .venv/bin/pytest -p no:cacheprovider -o addopts="-q"
+  .venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto
   ```
-  Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider`.
+  Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto`.
+  `-n auto` is pytest-xdist (dev group only; the runtime stays stdlib): the suite runs in about
+  30 seconds across workers instead of four minutes, and was clean three times in a row when it
+  was adopted on 2026-09-07. Always pass `--basetemp` outside the tree.
 - Conventional commits, one logical unit each, no co-author trailers, no absolute home paths or
   personal details in messages or committed docs.
 - A fleet's word is never evidence. Verify on bytes: diff, gate output, receipts in `~/.conductor`.
@@ -101,6 +104,14 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    for seven cents the next (D1): every Claude cap, build or fix, = estimate from rule 2, plus one dollar.
    E24 adds a smaller, opt-in per-lane `cap_grace_usd` for the same trap: a band folded into the same
    native cap so the terminal message itself has room to finish without moving rule 2's estimate.
+
+11. **Wall clock is the lead's cost, so overlap what does not depend on what.** Independent items
+   (no shared module, no scheduler tax) launch in parallel and merge in series, as E3 and E9 did.
+   The lead's fresh-worktree gate on a build tip runs while the reviewers read, not after. A fix
+   tip that fast-forwards a gated build tip is gated once, on the merged tree, not twice. And a
+   spec whose tests are a fifth of the items is sized as if they were half (count the tests item
+   twice in `--items`): E10's build spent its whole cap on code and none on tests, and the salvage
+   cost an hour of wall clock and two extra missions.
 
 `conductor shape a --adversarial` (E16) adds a lane whose deliverable is a test that fails
 on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
