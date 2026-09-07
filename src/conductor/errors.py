@@ -40,6 +40,7 @@ KINDS: tuple[str, ...] = (
     "taint",
     "adversarial",
     "plan",
+    "denied",
     "rate_limit",
     "transport",
     "refusal",
@@ -232,6 +233,12 @@ def error_kind(result: Result) -> str | None:
     # the same kind as a post-spawn one, like `setup` above.
     if error_text.startswith("taint hooks not enforced:"):
         return "taint"
+    # F12: --restricted's own promise (no Bash, no WebFetch in the init
+    # tool list), verified on bytes the same way E21 verifies agy's hooks --
+    # a claude-fleet-only check, so it shares the `taint` kind rather than
+    # inventing a second confinement label.
+    if error_text.startswith("restricted mode not enforced:"):
+        return "taint"
     if not result.spawned and result.error:
         return "refused"
     # D3: the persona assertion writes its own `error` text directly on the
@@ -248,6 +255,11 @@ def error_kind(result: Result) -> str | None:
     # recursive `run_mission` result, never a fleet's word.
     if error_text.startswith("plan:"):
         return "plan"
+    # F12: a write lane where `--permission-prompts none` denied something --
+    # conductor's own read of `result.permission_denials`, never a fleet's
+    # word, like `agent`, `taint`, and `plan` above.
+    if error_text.startswith("permission denied:"):
+        return "denied"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):

@@ -111,6 +111,7 @@ _INHERITED = (
     "include",
     "agent",
     "deliverable",
+    "restricted",
     "command",
 )
 _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "tool_idle_timeout"})
@@ -279,6 +280,9 @@ class Attempt:
     # cascades like `schema`, whose `schema` key resolves relative to the
     # mission file the same way. See fleets.Spec.deliverable for the shape.
     deliverable: dict | None = None
+    # F12: forces `--restricted` on a claude read lane even without a
+    # declared `deliverable`; cascades like `agent`. See fleets.Spec.restricted.
+    restricted: bool = False
     # C5: which of the previous attempt's error `KINDS` this fallback answers;
     # None (every fallback but a hand-set one) means every kind, as before.
     on: list[str] | None = None
@@ -337,6 +341,7 @@ class Attempt:
             taint=False if script else taint,
             agent=self.agent,
             deliverable=self.deliverable,
+            restricted=self.restricted,
             command=self.command,
         )
 
@@ -2031,6 +2036,7 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
             include=list(include) if include is not None else None,
             agent=fields.get("agent"),
             deliverable=fields.get("deliverable"),
+            restricted=bool(fields.get("restricted", False)),
             on=validated_on,
             command=fields.get("command"),
         )
@@ -2090,6 +2096,7 @@ _SCRIPT_ATTEMPT_DENIED = (
     "schema",
     "verdict",
     "agent",
+    "restricted",
 )
 
 

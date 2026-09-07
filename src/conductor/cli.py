@@ -164,6 +164,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             taint=args.taint,
             agent=agent,
             deliverable=deliverable,
+            restricted=args.restricted,
         )
         result = dispatch(
             spec,
@@ -959,6 +960,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="JSON file holding an inline agent {name, description, prompt, tools}; "
         "claude only, asserted against the run's own init event",
+    )
+    p_dispatch.add_argument(
+        "--restricted",
+        action="store_true",
+        help="claude read lane only; runs under --restricted --permission-mode acceptEdits "
+        "(no Bash, no WebFetch, file tools confined to cwd) instead of plan mode",
     )
     p_dispatch.add_argument("--dry-run", action="store_true", help="print argv, spawn nothing")
     p_dispatch.set_defaults(func=cmd_dispatch)
