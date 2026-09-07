@@ -1152,20 +1152,24 @@ conductor salvage MISSION_ID --lane build
 It reads the lane's receipt and the mission snapshot, and refuses (exit 3)
 when the mission or lane does not exist, the lane was not kept, its
 recorded worktree is missing on disk or is not a git worktree of the
-mission's repository, or the lane's effective test command is empty. It
-then runs two gates from the kept worktree, each in a fresh scratch copy
-under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the tree's own gate
-(everything transplanted, new tests included) and the clean gate (test
-surface restored from the base; recorded as skipped, not judged, when the
-lane ran under `test_policy: allow`, rule 3) -- never committing,
+lane's own repository, or the lane's effective test command is empty. The
+contract salvage gates under is the producing attempt's, not the lane's
+first: the kept worktree comes from the attempt that actually ran, so its
+repository (`cwd`, which a lane or one of its attempts may override), its
+`test` command, and its `timeout` come from that same attempt -- a fallback
+is never judged under the primary's gate. What a scratch gate cannot rebuild
+it refuses rather than substitutes: an attempt declaring `setup`, `include`,
+`ports`, or a `teardown` is answered with `salvage cannot reconstruct
+<setup|includes|ports|env> for lane <name>; gate the kept worktree by hand`,
+because a verdict without the lane environment is a verdict under a
+different contract. It then runs two gates from the kept worktree, each in a
+fresh scratch copy under `$CONDUCTOR_HOME/salvage/<mission-id>/<lane>/`: the
+tree's own gate (everything transplanted, new tests included) and the clean
+gate (test surface restored from the base; recorded as skipped, not judged,
+when the lane ran under `test_policy: allow`, rule 3) -- never committing,
 writing into, or touching the index of the kept worktree itself -- and
 prints the worktree, its base and HEAD shas, whether it is dirty, the
-recorded diff, and each gate's exit code and tail. Exit 0 means both
-gates passed, 1 means one failed. Every call, refused or not, writes a
-receipt to `$CONDUCTOR_HOME/missions/<mission-id>/salvage/<lane>-<UTC
-timestamp>.json` (except when the mission itself does not exist: a typo
-never conjures a mission directory); salvage is the lead's own act, not a
-lane's, so it never extends the mission's signed receipt chain.
+recorded diff, and each gate's exit code and tail.
 
 Once the lead has read the diff and committed it in the kept worktree by
 hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,

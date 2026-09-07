@@ -99,6 +99,59 @@ def _lane_snapshot(mission_raw: dict, lane: str) -> dict | None:
     return None
 
 
+def _matching_attempt(lane_snapshot: dict | None, attempt: dict, position: int) -> dict | None:
+    """The declared attempt that produced `attempt`, the lane receipt's last
+    dispatch (D16).
+
+    The receipt's attempts are dispatches, the snapshot's are declarations:
+    a retry repeats one declaration, so the two lists are not the same length
+    and `attempts[0]` is not the attempt whose worktree salvage gates. Match
+    on the dispatch contract (fleet, model, effort, mode), preferring the
+    declaration at the same position when it also matches, and fall back to
+    position alone when nothing matches (an older receipt, a hand-edited
+    snapshot) rather than silently gating under the primary's contract.
+    """
+    raw = lane_snapshot.get("attempts") if lane_snapshot else None
+    if not isinstance(raw, list):
+        return None
+    declared = [entry for entry in raw if isinstance(entry, dict)]
+    if not declared:
+        return None
+    keys = ("fleet", "model", "effort", "mode")
+    matches = [
+        index
+        for index, entry in enumerate(declared)
+        if all(entry.get(key) == attempt.get(key) for key in keys)
+    ]
+    if position in matches:
+        return declared[position]
+    if matches:
+        return declared[matches[-1]]
+    if 0 <= position < len(declared):
+        return declared[position]
+    return declared[-1]
+
+
+def _unreconstructable(attempt_snapshot: dict) -> list[str]:
+    """What the producing attempt declared that a salvage gate cannot rebuild.
+
+    `_transplant_gate` runs the command with no lane environment: no ports
+    claimed and exported, no `setup` run first, no `include` copied in. A
+    gate missing any of those is not the contract the lane ran under, so
+    salvage refuses instead of reporting a verdict from a different one.
+    """
+    missing: list[str] = []
+    if attempt_snapshot.get("setup"):
+        missing.append("setup")
+    if attempt_snapshot.get("include"):
+        missing.append("includes")
+    if attempt_snapshot.get("ports"):
+        missing.append("ports")
+    if attempt_snapshot.get("teardown"):
+        missing.append("env")
+    return missing
+
+
 def _gather(
     home: Path, mission_id: str, lane: str, *, stop: Callable[[], bool] | None
 ) -> SalvageResult:
@@ -123,7 +176,12 @@ def _gather(
         raise SalvageInvalid(f"lane '{lane}' kept worktree is missing on disk: {worktree}")
 
     mission_raw = _load_json(mission_dir / "mission.json", what=f"mission '{mission_id}' snapshot")
-    repo = mission_raw.get("cwd")
+    # D16: a lane (or one of its attempts) may declare its own cwd, and the
+    # attempt that ran is the one whose worktree is being gated -- so the
+    # repository this worktree must belong to is the lane's effective cwd,
+    # as `land.py` already reads it, with the mission's own cwd only as the
+    # default for a lane that never overrode it.
+    repo = lane_result.cwd or mission_raw.get("cwd")
     if not isinstance(repo, str) or not repo:
         raise SalvageInvalid(f"mission '{mission_id}' snapshot has no cwd")
     if not _same_repo(worktree, repo):
@@ -132,14 +190,18 @@ def _gather(
         )
 
     lane_snapshot = _lane_snapshot(mission_raw, lane)
-    attempt_snapshot = (
-        lane_snapshot.get("attempts", [None])[0]
-        if lane_snapshot and lane_snapshot.get("attempts")
-        else None
+    attempt_snapshot = _matching_attempt(
+        lane_snapshot, last_attempt, len(lane_result.attempts) - 1
     )
     test_command = attempt_snapshot.get("test") if attempt_snapshot else None
     if not test_command:
         raise SalvageInvalid(f"lane '{lane}' has no test command to salvage")
+    missing = _unreconstructable(attempt_snapshot) if attempt_snapshot else []
+    if missing:
+        raise SalvageInvalid(
+            f"salvage cannot reconstruct {', '.join(missing)} for lane {lane}; "
+            "gate the kept worktree by hand"
+        )
     timeout = (attempt_snapshot.get("timeout") if attempt_snapshot else None) or DEFAULT_TIMEOUT[
         "write"
     ]

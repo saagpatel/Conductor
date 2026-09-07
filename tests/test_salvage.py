@@ -183,6 +183,120 @@ def test_salvage_refuses_an_empty_effective_test_command(repo, home, fake_fleet)
         salvage(home, mission_id, lane)
 
 
+def _second_repo(tmp_path: Path, name: str = "other-repo") -> Path:
+    """A second real repository, so a lane with its own `cwd` has somewhere
+    to run that is not the mission's."""
+    path = tmp_path / name
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=path, check=True)
+    (path / "app.py").write_text("seed\n")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=path, check=True)
+    return path
+
+
+def test_salvage_uses_the_lanes_own_repository_not_the_missions(repo, home, tmp_path, fake_fleet):
+    """D16: a lane may declare its own `cwd`; the kept worktree then belongs
+    to that repository, not the mission's, and salvage must gate it instead
+    of refusing it as foreign."""
+    other = _second_repo(tmp_path)
+    fake_fleet(_claude_ok_argv("echo edited >> app.py"))
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "prompt": "x",
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "claude",
+                    "mode": "write",
+                    "cwd": str(other),
+                    "test": "exit 1",
+                }
+            ],
+        },
+        base_dir=repo,
+    )
+    result = run_mission(mission, home=home)
+    mission_id = Path(result.mission_dir).name
+
+    salvaged = salvage(home, mission_id, "build")
+
+    assert Path(salvaged.worktree).is_dir()
+    assert _git(Path(salvaged.worktree), "rev-parse", "--show-toplevel") != str(repo.resolve())
+    assert salvaged.gate["ran"] is True
+    assert "app.py" in salvaged.diff
+
+
+def test_salvage_gates_with_the_producing_attempts_test_command(repo, home, fake_fleet):
+    """D16: the worktree comes from the last attempt, so its gate and timeout
+    must too -- not the first declared attempt's."""
+    fake_fleet(_claude_ok_argv("echo edited >> app.py"))
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "prompt": "x",
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "claude",
+                    "mode": "write",
+                    "test": "exit 1",
+                    "timeout": 120,
+                    "fallback": [{"fleet": "claude", "model": "haiku", "test": "true"}],
+                }
+            ],
+        },
+        base_dir=repo,
+    )
+    result = run_mission(mission, home=home)
+    mission_id = Path(result.mission_dir).name
+    lane_raw = json.loads((home / "missions" / mission_id / "lanes" / "build.json").read_text())
+    assert len(lane_raw["attempts"]) == 2  # the primary failed its gate; the fallback ran
+
+    salvaged = salvage(home, mission_id, "build")
+
+    assert salvaged.test_command == "true"
+    assert salvaged.gate["exit_code"] == 0
+    assert salvaged.own_gate["exit_code"] == 0
+
+
+def test_salvage_refuses_a_lane_whose_environment_it_cannot_rebuild(repo, home, fake_fleet):
+    """D16: `setup`, `include`, and `ports` are the lane environment the gate
+    ran under; the transplant gates get none of it, so a verdict from them
+    would be a verdict under a different contract."""
+    fake_fleet(_claude_ok_argv("echo edited >> app.py"))
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "prompt": "x",
+            "lanes": [
+                {
+                    "name": "build",
+                    "fleet": "claude",
+                    "mode": "write",
+                    "test": "exit 1",
+                    "setup": "true",
+                }
+            ],
+        },
+        base_dir=repo,
+    )
+    result = run_mission(mission, home=home)
+    mission_id = Path(result.mission_dir).name
+
+    with pytest.raises(
+        SalvageInvalid,
+        match="salvage cannot reconstruct setup for lane build; gate the kept worktree by hand",
+    ):
+        salvage(home, mission_id, "build")
+    receipts = list((home / "missions" / mission_id / "salvage").glob("build-*.json"))
+    assert len(receipts) == 1
+    assert "cannot reconstruct setup" in json.loads(receipts[0].read_text())["refused"]
+
+
 def _commit_the_salvage(worktree: str, message: str = "feat: salvage") -> None:
     subprocess.run(["git", "add", "-A"], cwd=worktree, check=True)
     subprocess.run(["git", "commit", "-qm", message], cwd=worktree, check=True)
