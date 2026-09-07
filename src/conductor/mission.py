@@ -35,6 +35,7 @@ from __future__ import annotations
 import calendar
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -73,6 +74,8 @@ from .runner import (
 from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
 from .verify import GIT_UNRUN, git_run
+
+log = logging.getLogger("conductor.mission")
 
 REQUIRE = ("all", "any")
 # A lane's place in a pipeline. "review" lanes are read mode, "build",
@@ -2315,6 +2318,13 @@ class Ledger:
     in-flight cap from `remaining()` or `blocker()` was proposed and
     rejected, because two dispatches racing for the same remaining dollar
     would then each see it as unclaimed and both could be allowed to start.
+
+    Those figures are only interesting while something is in flight, and the
+    finished mission's `budget` block is written when nothing is, so the
+    ledger also publishes `to_dict()` to an optional observer after every
+    start and finish (`set_observer`). A mission points it at its own
+    `running.json` lock, and writes the same document into `pause.json`
+    whenever it parks, so a reader has two live places to look during a run.
     """
 
     def __init__(self, max_cost_usd: float | None) -> None:
@@ -2323,6 +2333,14 @@ class Ledger:
         self.unpriced = 0  # dispatches that reported no cost at all
         self._lock = threading.Lock()
         self._in_flight_caps: list[float | None] = []
+        # An optional sink for `to_dict()`, called after every `start` and
+        # every `finish`, so the in-flight figures have somewhere live to
+        # land while dispatches are still running rather than only reaching
+        # the finished mission's own `budget` block. `_execute_mission`
+        # points it at this run's `running.json` lock; a ledger built
+        # without one (every direct construction in the tests) publishes
+        # nowhere and behaves exactly as it did before.
+        self._observer: Callable[[dict], None] | None = None
 
     def blocker(self) -> str | None:
         """Why nothing more may start, or None while spending is allowed."""
@@ -2371,12 +2389,28 @@ class Ledger:
             self.spent += float(cost_usd)
             self.unpriced += int(unpriced_dispatches)
 
+    def set_observer(self, observer: Callable[[dict], None] | None) -> None:
+        """Point the ledger at somewhere to publish `to_dict()` after every
+        start and finish. Set once, before the first dispatch; the observer
+        runs on whichever lane thread moved the ledger, so it must be cheap
+        and must not raise."""
+        self._observer = observer
+
+    def _publish(self) -> None:
+        """Hand the current figures to the observer, if there is one. Called
+        outside `self._lock`: `to_dict()` takes that same non-reentrant lock,
+        and so may whatever the observer does."""
+        observer = self._observer
+        if observer is not None:
+            observer(self.to_dict())
+
     def start(self, cap_usd: float | None) -> None:
         """W6: record one more dispatch in flight, at the cap it was given
         (its own, `remaining()`-tightened, cap -- `None` when it has none).
         """
         with self._lock:
             self._in_flight_caps.append(cap_usd)
+        self._publish()
 
     def finish(self, cap_usd: float | None) -> None:
         """The counterpart to `start`, called in a `finally` so a dispatch
@@ -2387,6 +2421,7 @@ class Ledger:
                 self._in_flight_caps.remove(cap_usd)
             except ValueError:
                 pass
+        self._publish()
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -3582,6 +3617,40 @@ def _publish_lock(lock: Path, body: dict) -> bool:
     finally:
         tmp.unlink(missing_ok=True)
     return True
+
+
+def _refresh_lock_budget(lock: Path, owner: str, budget: dict) -> None:
+    """Carry the ledger's current figures into this run's own `running.json`,
+    so a reader can watch `in_flight_dispatches` and `outstanding_cap_usd`
+    move while dispatches are still running instead of waiting for the
+    finished mission's `budget` block.
+
+    Only a lock this run still holds is touched: a body whose `owner` has
+    moved on, or a lock already released, belongs to someone else and is
+    left alone, so a refresh can neither steal a lock nor resurrect one it
+    released. Every existing key -- `pid`, `started`, `host`, `owner`, and a
+    file lock's `mission_id` -- is carried through untouched, so nothing
+    `_lock_status` reads for liveness moves. The bytes go to a sibling temp
+    file and are moved in with `os.replace`, so a concurrent `_lock_holder`
+    read sees the old body or the new one and never a half-written file.
+
+    This runs on a lane thread, from inside the ledger, beside a dispatch
+    that is starting or ending: an OSError here is logged and dropped rather
+    than allowed to fail that dispatch.
+    """
+    current = _json_object(lock)
+    if current is None or current.get("owner") != owner:
+        return
+    tmp = lock.parent / f".{lock.name}.{os.getpid()}.{uuid.uuid4().hex}.budget.tmp"
+    try:
+        tmp.write_text(json.dumps({**current, "budget": budget}, indent=2))
+        os.replace(tmp, lock)
+    except OSError as exc:
+        log.warning("could not refresh %s with the ledger's figures: %s", lock, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _release_lock(lock: Path, owner: str | None) -> bool:
@@ -4927,6 +4996,7 @@ def run_mission(
             mission_dir=mission_dir,
             resume=resume,
             is_resume=resume_dir is not None,
+            lock_owner=running_owner,
             stop_answer=stop_answer,
             pause_answer=pause_answer,
             dispatcher=dispatcher,
@@ -4954,6 +5024,7 @@ def _execute_mission(
     mission_dir: Path,
     resume: _ResumePlan,
     is_resume: bool,
+    lock_owner: str | None = None,
     stop_answer: dict | None = None,
     pause_answer: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
@@ -4996,6 +5067,23 @@ def _execute_mission(
         ledger.add_child(rollup_cost_usd, rollup_unpriced)
         children_cost_usd += rollup_cost_usd
         children_unpriced += rollup_unpriced
+    if lock_owner is not None:
+        # The ledger publishes into this run's own `running.json` from here
+        # on. The owner token is what makes that safe (see
+        # `_refresh_lock_budget`); a caller that took no lock -- a test
+        # driving `_execute_mission` directly -- passes none and the ledger
+        # keeps its figures to itself.
+        # Every lane runs inside a `with ThreadPoolExecutor(...)`, so no
+        # publish can outlive this function and none can land after
+        # `run_mission` releases the lock.
+        running_lock = mission_dir / "running.json"
+        owner = lock_owner
+        ledger.set_observer(
+            lambda budget: _refresh_lock_budget(running_lock, owner, budget)
+        )
+        # The seeded figures, so the key is on the lock from the start of the
+        # run rather than only once the first dispatch moves the ledger.
+        _refresh_lock_budget(running_lock, owner, ledger.to_dict())
     started = time.monotonic()
     # F2: the mission's very first launch, carried across every resume from
     # the prior result.json's own `wall.launched_at` -- never reset, so
@@ -5880,6 +5968,13 @@ def _execute_mission(
             "question": pause_info["question"],
             "answer": None,
             "answers": prior_pause.get("answers") or [],
+            # A mission can park while other lanes are still dispatching, so
+            # the ledger as it stood at the park is written here too: this is
+            # the one artifact a paused mission has, and it is read while the
+            # figures still mean something. Readers of `pause.json` that
+            # predate this key ignore it, and an older pause file without it
+            # loads everywhere it is read.
+            "budget": ledger.to_dict(),
         }
         if "ask_path" in pause_info:
             new_pause_doc["ask_path"] = pause_info["ask_path"]

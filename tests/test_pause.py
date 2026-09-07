@@ -16,7 +16,13 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.cli import main
-from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from conductor.mission import (
+    Ledger,
+    Mission,
+    MissionInvalid,
+    mission_from_dict,
+    run_mission,
+)
 from conductor.runner import clear_stop, request_stop
 
 
@@ -436,6 +442,66 @@ def test_readme_documents_the_pause_primitive():
 
 
 # --- review fixes -------------------------------------------------------
+
+
+def test_a_park_writes_the_ledgers_own_figures_into_pause_json(
+    repo, home, monkeypatch, tmp_path
+):
+    """A parked mission's only artifact is `pause.json`, and it can park
+    while other lanes are still dispatching, so the ledger as it stood at
+    the park is written there under `budget` -- the same document the
+    finished mission's own `budget` block carries."""
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", 0.25), "REVIEW": ("reviewed", 0.5), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    assert result.paused is not None
+
+    pause_doc = json.loads((Path(result.mission_dir) / "pause.json").read_text())
+    budget = pause_doc["budget"]
+    assert set(budget) == set(Ledger(max_cost_usd=None).to_dict())
+    assert budget["spent_usd"] == 0.75
+    # The lanes that ran are done by the time a `before` pause parks the
+    # mission, so nothing is outstanding here; the point is the figures are
+    # on the artifact at all, at the moment of the write.
+    assert budget["in_flight_dispatches"] == 0
+    assert budget["outstanding_cap_usd"] == 0.0
+    assert budget["worst_case_usd"] == 0.75
+    # The keys that were always there are untouched.
+    assert pause_doc["kind"] == "lane" and pause_doc["lane"] == "fix"
+    assert pause_doc["answer"] is None and pause_doc["answers"] == []
+
+
+def test_a_pause_file_without_a_budget_key_still_resumes(repo, home, monkeypatch, tmp_path):
+    """Every `pause.json` written before the `budget` key existed lacks it,
+    and a resume reads that file for its question, its answer history, and
+    its `asked_at`. An older file must still answer, still resume, and still
+    record the answer."""
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+
+    pause_path = Path(first.mission_dir) / "pause.json"
+    old_doc = {
+        key: value
+        for key, value in json.loads(pause_path.read_text()).items()
+        if key != "budget"
+    }
+    pause_path.write_text(json.dumps(old_doc, indent=2))
+
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="continue"
+    )
+    assert resumed.ok is True
+    assert resumed.paused is None
+    answered = json.loads(pause_path.read_text())
+    assert answered["answer"] == "continue"
+    assert answered["answers"][0]["lane"] == "fix"
 
 
 def test_stop_requested_while_parking_is_interrupted_not_paused(

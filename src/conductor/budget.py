@@ -32,10 +32,13 @@ buys depends on the enforcement kind, and no one sentence covers all four:
     whole run, and the mission ledger's `outstanding_cap_usd` (W6) is the
     only figure that names what it could still turn out to cost. It is a
     report, never an admission check: nothing reads it back to gate what
-    starts next (`Ledger.remaining()`/`blocker()` are unchanged), and
-    nothing writes it out until the finished mission's own `budget` block,
-    the same place `spent_usd` lands -- not yet anything a reader can watch
-    update while the dispatch is still live.
+    starts next (`Ledger.remaining()`/`blocker()` are unchanged). It lands
+    in the finished mission's own `budget` block, the same place `spent_usd`
+    does, and while the run is live it is also written into `pause.json`
+    every time the mission parks and refreshed in the mission directory's
+    `running.json` lock every time a dispatch starts or finishes, so a
+    reader can look at either file during the run rather than waiting for
+    the mission to end.
   * `none` (script): a script dispatch is priced at zero and never
     overshoots anything.
 
