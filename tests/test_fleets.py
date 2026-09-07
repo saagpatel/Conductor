@@ -214,17 +214,31 @@ def test_claude_takes_the_schema_inline_not_as_a_path(tmp_path):
 
 def test_codex_and_antigravity_take_the_schema_as_an_absolute_path(tmp_path, monkeypatch):
     """The fleet runs in the target repo, not where the caller typed the
-    path, so a relative schema must be made absolute before spawn."""
+    path, so a relative schema must be made absolute before spawn.
+
+    Antigravity here is mode: write -- F13 refuses --schema on an
+    antigravity read lane (a live probe found it takes a second turn that
+    writes files under `--mode plan --sandbox`), so the schema-as-path
+    assertion moves to the mode this fleet still allows it in.
+    """
     path = _schema_file(tmp_path)
     codex = build_argv(spec(fleet="codex", schema=path))
     assert codex[codex.index("--output-schema") + 1] == path
-    agy = build_argv(spec(fleet="antigravity", schema=path))
+    agy = build_argv(spec(fleet="antigravity", schema=path, mode="write"))
     assert agy[agy.index("--json-schema") + 1] == path
     monkeypatch.chdir(tmp_path)
     codex = build_argv(spec(fleet="codex", schema="schema.json"))
     assert codex[codex.index("--output-schema") + 1] == path
-    agy = build_argv(spec(fleet="antigravity", schema="schema.json"))
+    agy = build_argv(spec(fleet="antigravity", schema="schema.json", mode="write"))
     assert agy[agy.index("--json-schema") + 1] == path
+
+
+def test_antigravity_refuses_schema_in_read_mode(tmp_path):
+    """F13: the live probe (docs/research/2026-09-07-live-probe-restricted-
+    denied-sandbox.md) found a schema'd read lane took a second turn that
+    wrote a file into the working directory under `--mode plan --sandbox`."""
+    with pytest.raises(DispatchRefused, match="mode 'read' refuses --schema"):
+        build_argv(spec(fleet="antigravity", schema=_schema_file(tmp_path)))
 
 
 def test_cursor_refuses_a_schema_because_it_has_no_flag_for_one(tmp_path):

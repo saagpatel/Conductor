@@ -696,26 +696,47 @@ script denies a call by tool name or, for `run_command`, by the same shell
 prefixes as Claude's `Bash(<prefix> *)` list, checked after leading
 whitespace, environment assignments, `sudo`, and shell chain operators,
 and fails closed (deny) on anything it cannot parse. Nothing here is trusted
-on the fleet's word: after the run, conductor requires the agy log's own
-"loaded N named hooks" line to name exactly as many hooks as it wrote, and
-computes `uncovered` -- any tool in the stream's init event that reaches
-outside the worktree by name (`browser_*`, or containing `subagent`, `mcp`,
-`web`, `url`, `message`, `schedule`, or `inbox`) and is not in the deny set.
-Either check failing fails the run as `taint hooks not enforced: <reason>`,
-kind `taint`, and the lane is not committed. The receipt gains
-`taint_enforcement`: `{"hooks_written", "hooks_loaded", "tools_seen",
-"uncovered", "denied_calls"}` (`denied_calls` counts the stream's own
-"denied by pre-tool hook" tool errors), `null` when the lane is not a
-tainted antigravity dispatch. Cursor's `.cursor/cli.json` has no rule kind
-for its native web fetch and search tools (`Shell`, `Write`, and `Mcp` only),
-so a tainted lane there would keep network egress whatever the config said;
-taint on Cursor (and on Codex, which exposes no deny list at all) stays
-refused.
+on the fleet's word, and there are now two independent sources of evidence.
+**Before the paid turn spawns (F13)**, `runner.dispatch` runs the free
+`agy -p "/hooks" --output-format stream-json --add-dir <cwd>` query in the
+lane's own worktree -- print mode, `num_turns: 0`, every usage counter zero
+-- and requires its `command_result` event to name `.agents/hooks.json`
+enabled; a query that cannot spawn, times out, or answers with no such event
+fails the run before any spend, and its stdout is kept beside the run as
+`hooks-preflight.json`. **After the run**, conductor still requires the agy
+log's own "loaded N named hooks" line to name exactly as many hooks as it
+wrote, and computes `uncovered` -- any tool in the stream's init event that
+reaches outside the worktree by name (`browser_*`, or containing `subagent`,
+`mcp`, `web`, `url`, `message`, `schedule`, or `inbox`) and is not in the
+deny set. Any of the three checks failing fails the run as `taint hooks not
+enforced: <reason>`, kind `taint`, and the lane is not committed. The
+receipt gains `taint_enforcement`: `{"preflight": {"ok", "loaded", "detail"},
+"hooks_written", "hooks_loaded", "tools_seen", "uncovered", "denied_calls"}`
+(`denied_calls` counts the stream's own "denied by pre-tool hook" tool
+errors; `preflight` is omitted on a run that never reached spawn), `null`
+when the lane is not a tainted antigravity dispatch. Cursor's
+`.cursor/cli.json` has no rule kind for its native web fetch and search
+tools (`Shell`, `Write`, and `Mcp` only), so a tainted lane there would keep
+network egress whatever the config said; taint on Cursor (and on Codex,
+which exposes no deny list at all) stays refused.
+
+Also from the same probe: `--json-schema` on an `antigravity` lane in
+`mode: read` took a second turn, under `--mode plan --sandbox`, that wrote a
+file into the working directory and ran a shell command. `Spec.validate`
+now refuses that combination at load, naming the probe, before any spend
+(write mode is unaffected, since it drops `--mode plan --sandbox`
+entirely); a checklist verdict or a ranking collate on a read-mode
+antigravity lane keeps working because the checklist and rank contracts
+already embed the same schema as prompt text and their parsers fall back to
+extracting embedded JSON, so conductor just drops the redundant flag for
+that one fleet instead of losing the mechanism.
 
 Evidence (`docs/ROADMAP-2026-09.md` item D2): CVSS 9.4 prompt injection
 through repo comments across Claude, Gemini, and Copilot CI agents (CSA,
 April 2026). E21's Antigravity mechanism and its failure modes are
-live-probed in `docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`.
+live-probed in `docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`;
+F13's preflight and schema refusal are live-probed in
+`docs/research/2026-09-07-live-probe-restricted-denied-sandbox.md`.
 
 ### Untrusted output: marking a lane's own output as a taint source
 

@@ -202,6 +202,13 @@ if __name__ == "__main__":
 '''
 
 
+# F13: the relative paths taint_hook_files() writes, named here so
+# runner.py's free `/hooks` preflight query can look for the same file
+# without re-deriving or re-writing it.
+TAINT_AGY_HOOKS_REL = ".agents/hooks.json"
+TAINT_AGY_SCRIPT_REL = ".agents/conductor-taint.py"
+
+
 def taint_hook_files(cwd: str) -> dict[str, str]:
     """E21: the two files a tainted Antigravity dispatch needs in its
     worktree, keyed by their path relative to `cwd` -- `.agents/hooks.json`,
@@ -210,9 +217,7 @@ def taint_hook_files(cwd: str) -> dict[str, str]:
     only. `cwd` is baked into the hook's own command line because agy runs
     it as a plain subprocess with no fixed working directory guarantee.
     """
-    script_rel = ".agents/conductor-taint.py"
-    hooks_rel = ".agents/hooks.json"
-    script_abs = str(Path(cwd) / script_rel)
+    script_abs = str(Path(cwd) / TAINT_AGY_SCRIPT_REL)
     script_text = _TAINT_AGY_HOOK_SCRIPT.replace(
         "__DENIED_TOOLS__", repr(frozenset(TAINT_AGY_DENIED_TOOLS))
     ).replace("__DENIED_PREFIXES__", repr(TAINT_SHELL_DENIED_PREFIXES))
@@ -221,7 +226,19 @@ def taint_hook_files(cwd: str) -> dict[str, str]:
         for name in (*TAINT_AGY_DENIED_TOOLS, "run_command")
     ]
     hooks_text = json.dumps({"hooks": {"PreToolUse": entries}}, indent=2) + "\n"
-    return {hooks_rel: hooks_text, script_rel: script_text}
+    return {TAINT_AGY_HOOKS_REL: hooks_text, TAINT_AGY_SCRIPT_REL: script_text}
+
+
+def build_agy_hooks_argv(cwd: str) -> list[str]:
+    """F13: the free `/hooks` slash-command query `runner.dispatch` runs
+    before a tainted antigravity dispatch's paid turn. Print mode answers
+    with `num_turns: 0` and every usage counter zero -- no model spend --
+    and a `command_result` event naming every loaded hooks file with its
+    `source` path and `enabled` flag (docs/research/2026-09-07-live-probe-
+    restricted-denied-sandbox.md, F13). Nothing else on the argv: no model,
+    no effort, no schema.
+    """
+    return ["agy", "-p", "/hooks", "--output-format", "stream-json", "--add-dir", cwd]
 
 # D3: an inline persona -- {"name", "description", "prompt", "tools": [...]}.
 # `tools`, when given, is an allow list; unlike D2's deny list, it is the only
@@ -685,6 +702,18 @@ class Spec:
             raise DispatchRefused(
                 "fleet 'cursor' has no structured-output flag; drop --schema or route the "
                 "dispatch to claude, codex, or antigravity"
+            )
+        # F13: the live probe (docs/research/2026-09-07-live-probe-restricted-
+        # denied-sandbox.md) ran a schema'd read lane under `--mode plan
+        # --sandbox` and got a second turn that wrote a file into the working
+        # directory and ran a shell command -- a schema turn on a plan-mode
+        # Antigravity lane has written files on record. Write mode drops
+        # `--mode plan --sandbox` (see `_build_antigravity`) and is unaffected.
+        if self.fleet == "antigravity" and self.mode == "read":
+            raise DispatchRefused(
+                "fleet 'antigravity' mode 'read' refuses --schema: the live probe recorded a "
+                "schema turn on a plan-mode Antigravity lane writing files into the working "
+                "directory; drop --schema or switch to mode: write"
             )
         try:
             json.loads(Path(self.schema).read_text())

@@ -10,6 +10,7 @@ fail-closed-on-the-evidence behavior.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -17,9 +18,11 @@ from pathlib import Path
 
 import pytest
 
+from conductor import runner as runner_mod
 from conductor.errors import error_kind
 from conductor.fleets import (
     TAINT_AGY_DENIED_TOOLS,
+    TAINT_AGY_HOOKS_REL,
     TAINT_SHELL_DENIED_PREFIXES,
     DispatchRefused,
     Spec,
@@ -35,6 +38,39 @@ def spec(**kw) -> Spec:
     base = dict(fleet="antigravity", prompt="triage the outside text", cwd="/tmp", taint=True)
     base.update(kw)
     return Spec(**base)
+
+
+def _hooks_preflight_argv(hooks: list[dict] | None):
+    """F13: a fake `build_agy_hooks_argv` -- never the real `agy` binary,
+    per the repo's fake-it-with-a-script-on-PATH rule. Reports `hooks` as
+    the free `/hooks` query's `command_result` answer; `None` reports
+    whichever `.agents/hooks.json` actually exists at the real `cwd` it is
+    called with, matching what the dispatch itself just wrote there."""
+
+    def _argv(cwd: str) -> list[str]:
+        if hooks is None:
+            hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
+            found = (
+                [{"name": "hooks", "enabled": True, "source": hooks_path}]
+                if os.path.exists(hooks_path)
+                else []
+            )
+        else:
+            found = hooks
+        payload = json.dumps(
+            {"event": "command_result", "command": {"name": "hooks", "data": {"hooks": found}}}
+        )
+        return ["sh", "-c", f"printf '%s\\n' {shlex.quote(payload)}"]
+
+    return _argv
+
+
+@pytest.fixture(autouse=True)
+def _default_hooks_preflight(monkeypatch):
+    """Every test in this file gets a preflight that answers truthfully
+    from the real `.agents/hooks.json` the dispatch wrote, so only the
+    tests that mean to exercise a failing preflight need to override it."""
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _hooks_preflight_argv(None))
 
 
 # --- the hook script itself, run as a real subprocess -----------------------
@@ -190,14 +226,23 @@ def test_non_git_cwd_is_refused(repo, home, tmp_path):
 
 
 def _agy_argv(
-    home: Path, *, log_line: str | None, tools: list[str], extra_lines: list[str]
+    home: Path,
+    *,
+    log_line: str | None,
+    tools: list[str],
+    extra_lines: list[str],
+    marker: Path | None = None,
 ) -> list[str]:
     """A fake `agy` that writes `agy.log` and its stream from inside the
     subprocess -- it needs $CONDUCTOR_RUN_ID, set by dispatch() only once the
-    child spawns, to find its own run directory."""
+    child spawns, to find its own run directory. `marker`, when given, is
+    touched first -- proof this is the paid turn's own argv, distinct from
+    the free `/hooks` preflight query, that actually ran."""
     home_q = shlex.quote(str(home))
     run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
     parts = [f"mkdir -p {run_dir}"]
+    if marker is not None:
+        parts.append(f"touch {shlex.quote(str(marker))}")
     if log_line is not None:
         parts.append(f"printf '%s\\n' {shlex.quote(log_line)} > {run_dir}/agy.log")
     init_event = json.dumps({"event": "init", "conversation_id": "c1", "init": {"tools": tools}})
@@ -414,3 +459,86 @@ def test_denied_calls_are_counted_from_the_stream(repo, home, fake_fleet):
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is True, result.failure()
     assert result.taint_enforcement["denied_calls"] == 2
+
+
+# --- F13: the free /hooks preflight, before any paid turn -------------------
+
+
+def test_preflight_finding_the_hooks_file_enabled_lets_the_dispatch_proceed(
+    repo, home, fake_fleet
+):
+    """The default (autouse) fake answers truthfully from the real
+    `.agents/hooks.json` `_write_taint_agy_hooks` wrote -- this is the
+    ordinary passing path, no override needed."""
+    fake_fleet(
+        _agy_argv(
+            home, log_line=_passing_log_line(), tools=[*TAINT_AGY_DENIED_TOOLS], extra_lines=[]
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert result.taint_enforcement["preflight"]["ok"] is True
+    assert result.taint_enforcement["preflight"]["loaded"]
+    assert (Path(result.run_dir) / "hooks-preflight.json").exists()
+
+
+def test_preflight_finding_no_hooks_file_fails_before_the_paid_turn(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _hooks_preflight_argv([]))
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert "taint hooks not enforced" in result.error
+    assert result.taint_enforcement["preflight"]["ok"] is False
+    assert result.taint_enforcement["preflight"]["loaded"] == []
+    assert not marker.exists(), "the paid turn's own argv must never have run"
+
+
+def test_preflight_query_timeout_fails_closed(repo, home, fake_fleet, monkeypatch, tmp_path):
+    monkeypatch.setattr(runner_mod, "_TAINT_AGY_PREFLIGHT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", lambda cwd: ["sleep", "5"])
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert "timed out" in result.taint_enforcement["preflight"]["detail"]
+    assert not marker.exists()
+
+
+def test_untainted_antigravity_lane_runs_no_preflight(repo, home, fake_fleet, monkeypatch):
+    called: list[str] = []
+
+    def _track(cwd: str) -> list[str]:
+        called.append(cwd)
+        return ["sh", "-c", "true"]
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _track)
+    fake_fleet(
+        _agy_argv(home, log_line=None, tools=["list_dir"], extra_lines=[])
+    )
+    result = dispatch(spec(cwd=str(repo), taint=False), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    assert called == []
+    assert result.taint_enforcement is None
