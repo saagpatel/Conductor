@@ -344,6 +344,20 @@ general JSON Schema validator. On a dry run the deliverable is recorded as
 declared (`ok: null`) and not checked. `errors.KINDS` gains `deliverable`
 for the four failures above.
 
+The path is validated at load, but the lane runs after that, so the check
+is repeated on bytes before anything reads the file: no component from the
+working tree down may be a symlink, and the file must still resolve inside
+the working tree. A lane that plants `plan.json -> ../outside.txt` where its
+product belongs fails with `deliverable is a symlink: <path>` (or
+`deliverable resolves outside the worktree: <path>`) and nothing is
+captured; without that, the link passed `is_file()` and was copied into the
+run directory as the lane's own product, so bytes from outside the worktree
+became the declared deliverable. The rule is the simplest one that closes
+it -- no symlink at all, not even to a sibling in the same worktree -- and
+the copy itself opens the file with `O_NOFOLLOW`. A human lane's
+deliverable, and every artifact path a resumed mission trusts from a
+receipt, is held to the same rule.
+
 A write lane's deliverable is ordinary bytes, gated the same way any other
 change is. A read lane is normally held to no bytes moved at all;
 declaring a deliverable lifts that by exactly the deliverable's own path:

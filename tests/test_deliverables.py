@@ -415,6 +415,68 @@ def test_deliverable_missing_does_not_mask_a_more_fundamental_failure(repo, home
     assert error_kind(result) == "exit"
 
 
+# --- W5: a deliverable is bytes in the worktree, never a symlink -------------
+
+
+def test_deliverable_symlinked_to_a_file_outside_the_worktree_fails(
+    repo, home, fake_fleet, tmp_path
+):
+    """W5: the declared path is validated at load, but the lane runs after
+    that. A symlink planted where the product belongs used to pass
+    `is_file()` and be copied into the run directory with `copyfile`, so
+    bytes from outside the worktree landed there as the lane's own."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    fake_fleet(["sh", "-c", f"ln -s '{outside}' report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable is a symlink: report.txt"
+    assert error_kind(result) == "deliverable"
+    assert result.deliverable["exists"] is False
+    assert result.deliverable_path is None
+    assert not (Path(result.run_dir) / "deliverable").exists()
+
+
+def test_deliverable_symlinked_inside_the_worktree_is_refused_too(repo, home, fake_fleet):
+    """The simplest rule that closes W5 is no symlink at all: a link to a
+    sibling in the same worktree is refused as well, so there is no
+    resolve-and-compare step left to get wrong."""
+    fake_fleet(
+        ["sh", "-c", f"echo real > real.txt; ln -s real.txt report.txt; echo '{_OK_ANSWER}'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable is a symlink: report.txt"
+    assert result.deliverable_path is None
+
+
+def test_deliverable_under_a_symlinked_directory_is_refused(repo, home, fake_fleet, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "report.txt").write_text("secret\n")
+    fake_fleet(["sh", "-c", f"ln -s '{outside}' sub; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "sub/report.txt"}), home=home
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable is a symlink: sub/report.txt"
+    assert result.deliverable_path is None
+
+
+def test_a_regular_file_deliverable_is_still_captured(repo, home, fake_fleet):
+    fake_fleet(["sh", "-c", f"echo out > report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is True, result.failure()
+    assert result.deliverable["ok"] is True
+    assert Path(result.deliverable_path).read_text() == "out\n"
+
+
 # --- {{lanes.<name>.deliverable}} template (item 2) --------------------------
 
 
