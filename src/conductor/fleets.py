@@ -441,9 +441,11 @@ class Spec:
     last_message: str | None = None  # path the fleet should write its answer to
     resume: str | None = None  # fleet session id to continue
     cap_usd: float | None = None  # per-dispatch dollar cap; see budget.py
-    # E24: a per-lane, opt-in band added on top of cap_usd, claude only --
-    # the cap is native there, so the CLI's own terminal message can finish
-    # inside cap_usd + cap_grace_usd instead of being cut off mid-summary.
+    # E24: a per-lane, opt-in band added on top of cap_usd. On claude (native
+    # cap) the CLI's own terminal message finishes inside cap_usd +
+    # cap_grace_usd instead of being cut off mid-summary. F5: on a cursor
+    # read lane (post-hoc cap) it is a band on the after-the-fact verdict --
+    # a complete answer a few cents over cap_usd is not failed for it.
     # Never inherited silently; see mission.py's _ATTEMPT_KEYS handling.
     cap_grace_usd: float | None = None
     # 900s, the gate's own default: a fleet running a long suite inside one
@@ -624,17 +626,30 @@ class Spec:
             )
 
     def _validate_cap_grace(self) -> None:
-        """E24: the grace band only ever finishes a native cap's own terminal
-        message. It needs a cap_usd to extend, and it is enforceable on the
-        claude fleet only -- every other fleet's cap is a watcher kill or a
-        post-hoc verdict, and a killed run has no terminal message left to
-        finish."""
+        """E24: on claude (native cap) the grace band finishes the CLI's own
+        terminal message. F5: on a cursor read lane (post-hoc cap) there is
+        no terminal message to finish, but the verdict is computed after the
+        run from an estimated cost, and that estimate is where a complete
+        answer a few cents over cap_usd was wrongly failed (rule 7's trap);
+        the band there widens the post-hoc verdict instead. It needs a
+        cap_usd to extend. Every other fleet's cap is a watcher kill (codex,
+        antigravity) or nothing at all (script): a killed run has no
+        terminal message left to finish and no verdict left to widen, so the
+        band is refused there, and refused on a cursor write lane -- a write
+        lane's cost is bytes, and the band would only buy more of them."""
         if self.cap_usd is None:
             raise DispatchRefused("cap_grace_usd needs a cap_usd to extend")
-        if self.fleet != "claude":
+        if self.fleet == "cursor":
+            if self.mode != "read":
+                raise DispatchRefused(
+                    "cap_grace_usd is refused on a cursor write lane: a write lane's cost is "
+                    "bytes, and the band would only buy more of them"
+                )
+        elif self.fleet != "claude":
             raise DispatchRefused(
-                f"cap_grace_usd is enforceable on the claude fleet only: {self.fleet}'s cap "
-                "is not native, and a watcher-killed run has no terminal message to finish"
+                "cap_grace_usd is enforceable on the claude fleet and on a cursor read lane "
+                f"only: {self.fleet}'s cap mode is '{FLEETS[self.fleet].cap}', which has no "
+                "terminal message to finish and no post-hoc verdict to widen"
             )
         if not (math.isfinite(self.cap_grace_usd) and self.cap_grace_usd > 0):
             raise DispatchRefused("cap_grace_usd must be a positive finite number")

@@ -80,10 +80,13 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     assert raw["max_cost_usd"] == caps.mission_budget
     build, gemini, grok, fix = raw["lanes"]
     assert build["cap_usd"] == caps.build_cap and build["test_policy"] == "allow"
-    # E24: the default grace band lands on the two claude (build/fix) lanes only.
+    # E24/F5: the default grace band lands on the two claude (build/fix)
+    # lanes (native cap) and the grok read lane (post-hoc cap), not gemini
+    # (antigravity, a watcher cap with no terminal message or verdict to help).
     assert build["cap_grace_usd"] == caps.cap_grace_usd == 0.25
     assert fix["cap_grace_usd"] == 0.25
-    assert "cap_grace_usd" not in gemini and "cap_grace_usd" not in grok
+    assert grok["cap_grace_usd"] == 0.25
+    assert "cap_grace_usd" not in gemini
     assert gemini["mode"] == "read" and "Do not run the test suite" in gemini["prompt"]
     assert grok["cap_usd"] == 1.5 and "Do not run the test suite" in grok["prompt"]
     assert fix["resume"] == "build" and fix["branch"] == "feat/widget"

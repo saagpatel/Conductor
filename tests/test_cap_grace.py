@@ -1,5 +1,10 @@
 """E24: cap grace, a per-lane, opt-in band on top of cap_usd so Claude Code's
 own terminal message can finish instead of being cut off mid-summary.
+
+F5 extends the band to a cursor read lane, whose cap is post-hoc: there is no
+terminal message to finish, but the band still widens the after-the-fact
+verdict, so a complete review a few cents over cap_usd settles ok instead of
+failing the lane and skipping the fix stage behind it (rule 7's trap).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from conductor.budget import Budget
 from conductor.cli import main
 from conductor.fleets import CAP_GRACE_CEILING_USD, DispatchRefused, Spec, build_argv
 from conductor.mission import MissionInvalid, mission_from_dict, run_mission
+from conductor.runner import dispatch
 
 
 def envelope(answer: str, cost: float | None = None) -> str:
@@ -41,10 +47,53 @@ def test_grace_without_a_cap_is_refused():
         Spec(fleet="claude", prompt="x", cwd="/tmp", cap_grace_usd=0.25).validate()
 
 
-def test_grace_is_refused_on_any_fleet_but_claude():
-    with pytest.raises(DispatchRefused, match="claude fleet only"):
+def test_grace_without_a_cap_is_refused_on_cursor_too():
+    with pytest.raises(DispatchRefused, match="needs a cap_usd"):
+        Spec(
+            fleet="cursor", model="composer-2.5", prompt="x", cwd="/tmp", mode="read",
+            cap_grace_usd=0.25,
+        ).validate()
+
+
+def test_grace_is_refused_on_any_fleet_but_claude_and_cursor_read():
+    # F5: codex's cap is a watcher kill -- still no terminal message or
+    # post-hoc verdict for the band to help, and the refusal now names the
+    # fleet and its cap mode instead of a bare "claude fleet only".
+    with pytest.raises(DispatchRefused, match="codex's cap mode is 'watcher'"):
         Spec(
             fleet="codex", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=0.25
+        ).validate()
+
+
+def test_grace_is_still_refused_on_antigravity_naming_fleet_and_mode():
+    with pytest.raises(DispatchRefused, match="antigravity's cap mode is 'watcher'"):
+        Spec(
+            fleet="antigravity", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=0.25
+        ).validate()
+
+
+def test_grace_is_allowed_on_a_cursor_read_lane():
+    Spec(
+        fleet="cursor",
+        model="composer-2.5",
+        prompt="x",
+        cwd="/tmp",
+        mode="read",
+        cap_usd=1.0,
+        cap_grace_usd=0.25,
+    ).validate()
+
+
+def test_grace_is_refused_on_a_cursor_write_lane():
+    with pytest.raises(DispatchRefused, match="cursor write lane"):
+        Spec(
+            fleet="cursor",
+            model="composer-2.5",
+            prompt="x",
+            cwd="/tmp",
+            mode="write",
+            cap_usd=1.0,
+            cap_grace_usd=0.25,
         ).validate()
 
 
@@ -53,6 +102,15 @@ def test_grace_must_be_a_positive_finite_number(bad):
     with pytest.raises(DispatchRefused, match="positive finite"):
         Spec(
             fleet="claude", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=bad
+        ).validate()
+
+
+@pytest.mark.parametrize("bad", [0, -0.1, float("inf"), float("nan")])
+def test_grace_on_cursor_must_be_a_positive_finite_number(bad):
+    with pytest.raises(DispatchRefused, match="positive finite"):
+        Spec(
+            fleet="cursor", model="composer-2.5", prompt="x", cwd="/tmp", mode="read",
+            cap_usd=1.0, cap_grace_usd=bad,
         ).validate()
 
 
@@ -68,6 +126,29 @@ def test_grace_above_the_ceiling_is_refused():
     # Right at the ceiling is fine.
     Spec(
         fleet="claude", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=CAP_GRACE_CEILING_USD
+    ).validate()
+
+
+def test_grace_above_the_ceiling_is_refused_on_cursor_too():
+    with pytest.raises(DispatchRefused, match="ceiling"):
+        Spec(
+            fleet="cursor",
+            model="composer-2.5",
+            prompt="x",
+            cwd="/tmp",
+            mode="read",
+            cap_usd=1.0,
+            cap_grace_usd=CAP_GRACE_CEILING_USD + 0.01,
+        ).validate()
+    # Right at the ceiling is fine.
+    Spec(
+        fleet="cursor",
+        model="composer-2.5",
+        prompt="x",
+        cwd="/tmp",
+        mode="read",
+        cap_usd=1.0,
+        cap_grace_usd=CAP_GRACE_CEILING_USD,
     ).validate()
 
 
@@ -132,6 +213,55 @@ def test_to_dict_omits_grace_fields_when_no_grace_was_set():
     b2 = Budget(cap_usd=1.0, enforcement="native", grace_usd=0.25)
     b2.settle(1.1, killed=False, fleet_status="success")
     assert b2.to_dict()["grace_used"] == pytest.approx(0.10)
+
+
+# --- a cursor read run through dispatch: the post-hoc verdict widens too ---
+
+
+def cursor_envelope(answer: str, cost: float) -> str:
+    """A cursor-shaped envelope: usage arrives once, in the final result."""
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": answer,
+        "usage": {"inputTokens": 10, "outputTokens": 5},
+        "total_cost_usd": cost,
+    }
+    return json.dumps(payload)
+
+
+def _cursor_spec(repo: Path, *, cap_grace_usd: float) -> Spec:
+    return Spec(
+        fleet="cursor",
+        model="composer-2.5",
+        prompt="review this",
+        cwd=str(repo),
+        mode="read",
+        cap_usd=1.0,
+        cap_grace_usd=cap_grace_usd,
+    )
+
+
+def test_a_cursor_read_run_inside_the_band_settles_ok(repo, home, fake_fleet):
+    # cap $1.00 + $0.20 over, band $0.25: a complete answer settles ok.
+    fake_fleet(["sh", "-c", f"echo '{cursor_envelope('NO_FINDINGS', 1.20)}'"])
+    result = dispatch(_cursor_spec(repo, cap_grace_usd=0.25), home=home)
+    assert result.ok is True
+    assert result.budget["enforcement"] == "post-hoc"
+    assert result.budget["exceeded"] is False
+    assert result.budget["grace_used"] == pytest.approx(0.20)
+
+
+def test_a_cursor_read_run_past_the_band_is_over_cap(repo, home, fake_fleet):
+    # Same $0.20 overrun, but a $0.10 band cannot cover it: over cap, as
+    # today, rather than a silent pass.
+    fake_fleet(["sh", "-c", f"echo '{cursor_envelope('NO_FINDINGS', 1.20)}'"])
+    result = dispatch(_cursor_spec(repo, cap_grace_usd=0.10), home=home)
+    assert result.ok is False
+    assert result.budget["enforcement"] == "post-hoc"
+    assert result.budget["exceeded"] is True
+    assert result.budget["grace_used"] == pytest.approx(0.10)  # capped at the band's own size
 
 
 # --- mission-level and cascade-level refusals; no cascade to fallbacks ------
@@ -255,9 +385,10 @@ def test_cap_arithmetic_refuses_grace_above_the_ceiling():
         shape.cap_arithmetic(1, 1, cap_grace_usd=CAP_GRACE_CEILING_USD + 0.01)
 
 
-def test_shape_a_cli_sets_the_default_grace_on_build_and_fix(
+def test_shape_a_cli_sets_the_default_grace_on_build_fix_and_grok(
     repo, home, monkeypatch, tmp_path, capsys
 ):
+    # F5: the band now also lands on review-grok, the cursor read lane.
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     spec = _spec(tmp_path)
     out = tmp_path / "m" / "mission.json"
@@ -270,9 +401,12 @@ def test_shape_a_cli_sets_the_default_grace_on_build_and_fix(
     )
     assert code == 0
     raw = json.loads(out.read_text())
-    build, _gemini, _grok, fix = raw["lanes"]
+    build, _gemini, grok, fix = raw["lanes"]
     assert build["cap_grace_usd"] == 0.25
+    assert grok["cap_grace_usd"] == 0.25
     assert fix["cap_grace_usd"] == 0.25
+    out_text = capsys.readouterr().out
+    assert "per claude lane and the grok read lane" in out_text
 
 
 def test_shape_a_cli_cap_grace_usd_zero_disables_it(repo, home, monkeypatch, tmp_path):
@@ -288,6 +422,7 @@ def test_shape_a_cli_cap_grace_usd_zero_disables_it(repo, home, monkeypatch, tmp
     )
     assert code == 0
     raw = json.loads(out.read_text())
-    build, _gemini, _grok, fix = raw["lanes"]
+    build, _gemini, grok, fix = raw["lanes"]
     assert "cap_grace_usd" not in build
+    assert "cap_grace_usd" not in grok
     assert "cap_grace_usd" not in fix
