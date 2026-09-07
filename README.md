@@ -2544,7 +2544,21 @@ The report has seven sections, in this order:
   recorded dispositions (see below): findings written, and how many of
   them the fix lane marked fixed, refused, already true, or wording-only.
   `precision` is `fixed / (fixed + refused)`, blank under three total
-  dispositions -- not enough to read as a rate.
+  dispositions -- not enough to read as a rate. D20: a disposition is
+  counted once per finding it names. Entries are keyed by (mission,
+  reviewer lane, finding index) and the last one a fix lane recorded wins,
+  so a restated disposition (or two fix lanes on one mission naming the same
+  finding) counts once and the rest are counted as `duplicate`; a
+  disposition whose index names no finding the review lane actually
+  reported is counted as `unmatched` and left out of every per-vendor tally,
+  so `corrected_rate` (`fixed / findings`) can never exceed 1.0. The line
+  under the calibration lines carries all four totals: `dispositions naming
+  an unknown lane: N | malformed disposition lines: M | duplicate
+  dispositions: D | dispositions naming no reported finding: U`, and
+  `--json` carries `dispositions_duplicate` and `dispositions_unmatched`
+  beside the other two. A review lane whose receipt parsed no `items` at
+  all (one recorded before findings were numbered) cannot match an index
+  either way, so its dispositions still count as before.
 - **Missions**: cost, whether the mission was ok, how many lanes it
   declared, whether any lane hit its cap, how many times
   `conductor salvage` was run against it (`salvaged`, 0 when
@@ -2553,10 +2567,16 @@ The report has seven sections, in this order:
   `$CONDUCTOR_HOME/missions/<id>/land/`).
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
-  and fix stages, how many runs were killed at their cap after their own
-  gate had already passed -- a green run lost at the cap, the case the rule
-  was written for). A figure with nothing to compute from reads `n/a`,
-  never `0`, so a missing stage is never mistaken for a clean one.
+  and fix stages, the runs killed at their cap). D21: a cap loss is
+  reported in three cohorts -- `gate passed`, `gate failed`, `gate not run`
+  -- beside the stage's `total`, because a receipt's `gate_passed` is also
+  True when no gate ran at all (`runner._gate_passed` reads "nothing to
+  fail" as not-failed, which is right for `ok` and wrong here). A run the
+  watcher kills at its cap never reaches its gate -- `runner.dispatch` gates
+  only when the run had no error -- so it now lands in `gate not run`
+  instead of reading as a green run lost at the cap, which is the case rule
+  10's dollar was written for. A stage with no Claude run at all reads
+  `n/a`, never `0`, so a missing stage is never mistaken for a clean one.
 - **Wall clock**: one row per mission ever recorded, from that mission's own
   `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
   "paused_s", "gate_s", "lanes_s", "idle_s"}`. `launched_at` is the
@@ -2877,7 +2897,27 @@ difference (`lane <name>: replay dispatched attempt <k> but the recording
 has <n>`), answered with a refused result so the mission still completes
 rather than raising; so is a recorded run id with no receipt in the
 fixture (`recorded run <id> has no result.json in the fixture`, the shape
-a pre-F8 fixture with a collate would show). `runner.Result.from_dict` rehydrates a stored
+a pre-F8 fixture with a collate would show).
+
+D18: the replay also compares the **dispatch contract** it was asked for
+against the one the recording actually ran under, before it looks at the
+transcript at all -- `fleet`, the resolved `model` id for the effort,
+`effort`, `mode`, `timeout`, `cap_usd` (from the receipt's `budget`),
+`taint` (and, on a tainted lane, which shell policy ran), and the
+`--restricted` flag a claude read lane would carry. Each field that moved
+is a difference of its own (`run <id>: contract cap_usd: recorded 4.0,
+replayed 2.0`), so a regression in how a lane becomes a `Spec` -- a default
+model, a tightened cap, a flipped mode, a dropped taint declaration -- fails
+`check` even when the recorded transcript still parses identically. A field
+the recording never carried (an older receipt that predates `taint` or
+`restricted`; the requested schema, which no receipt records) is not
+comparable and is reported as a note, listed once per fixture and never
+failing the check. At the end of the replay every recording must have been
+consumed: an unconsumed run id is a difference naming the lane and the run
+ids (`lane <name>: replay dispatched 0 attempt(s) but the recording has 1`),
+unless the replay deliberately did not start that lane -- a pause point, a
+skip, a cancellation -- in which case it is a note, because that decision is
+itself pinned in `expected.json`. `runner.Result.from_dict` rehydrates a stored
 `result.json` back into a `Result`; an unknown field is refused by name, and
 a field missing from an older receipt takes its dataclass default.
 
@@ -2921,15 +2961,17 @@ operator's machine, not the routing), `collate` (`ok`, `rank`,
 `resolve` (`ran`, `ok`, `error`) when the mission had one, and per lane
 and attempt the fields that describe what happened, never a path, a
 duration, a run id, a timestamp, or a dollar amount. `expected.json` pins that projection at
-record time. `golden.check(fixture_dir, *, update=False, cwds=None)` takes
-the same `cwds` as `replay`. `conductor golden check [DIR ...]` replays each fixture (every
+record time. `golden.check(fixture_dir, *, update=False, cwds=None,
+notes=None)` takes the same `cwds` as `replay`; `notes`, when a list is
+passed, collects the replay's own non-fatal notes (a contract field the
+recordings do not carry, a recording a paused lane never consumed). `conductor golden check [DIR ...]` replays each fixture (every
 directory under `tests/golden/` of the current working directory that holds
 a `golden.json`, by default) into a fresh temporary home and a fresh
 temporary git repository, and prints every difference -- the replay's own,
 plus one line per projection field that disagrees with `expected.json` --
 prefixed by the fixture's name; exit 1 if any difference printed, 0 if
-every fixture was clean (version-drift notes, below, print without changing
-the exit code). `--update` is for a deliberate change: it rewrites
+every fixture was clean (the replay's own notes and the version-drift
+notes, below, print without changing the exit code). `--update` is for a deliberate change: it rewrites
 `expected.json` from the replay instead of reporting projection
 differences, so the next `check` is clean once the new behavior is the one
 you meant.

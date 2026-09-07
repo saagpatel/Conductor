@@ -691,6 +691,10 @@ class Replay:
     differences: list[str] = field(default_factory=list)
     projection: dict = field(default_factory=dict)
     result: MissionResult | None = None
+    # D18: what the replay could not compare (a contract field no recording
+    # in this fixture carries). Never a difference: an old recording that
+    # predates a field is not evidence that the field regressed.
+    notes: list[str] = field(default_factory=list)
 
 
 def _strip_nonce(text: str) -> str:
@@ -703,9 +707,121 @@ def _token_fields(usage: dict | None) -> dict | None:
     return {key: usage.get(key, 0) for key in _TOKEN_FIELDS}
 
 
-def _compare(differences: list[str], run_id: str, name: str, recorded, replayed) -> None:
+def _compare(
+    differences: list[str], run_id: str, name: str, recorded, replayed, *, kind: str = "parser"
+) -> None:
     if recorded != replayed:
-        differences.append(f"run {run_id}: parser {name}: recorded {recorded}, replayed {replayed}")
+        differences.append(f"run {run_id}: {kind} {name}: recorded {recorded}, replayed {replayed}")
+
+
+# D18: the dispatch contract a replay compares. Everything here is decided
+# before a fleet is spawned -- it is what mission.py asked the runner for,
+# not what the vendor did with it -- so a regression in how a lane becomes a
+# Spec (a default model, a tightened cap, a flipped mode, a dropped taint)
+# shows up as a fixture difference instead of staying golden-green.
+_CONTRACT_KEYS = (
+    "fleet",
+    "model",
+    "effort",
+    "mode",
+    "timeout",
+    "cap_usd",
+    "taint",
+    "taint_shell",
+    "restricted",
+    "schema",
+)
+
+
+def _requested_contract(spec) -> dict[str, object]:
+    """The contract the currently loaded code asked for, normalized the way
+    a receipt records it: `model` is the resolved model id for the effort
+    (what `runner.dispatch` writes), `restricted` is the `--restricted` flag
+    `fleets._build_claude` would actually put on the argv, and `taint_shell`
+    is the policy name the receipt carries rather than the spec's spelling."""
+    try:
+        model = fleets_mod.FLEETS[spec.fleet].model(spec.model).id_for(spec.effort)
+    except (KeyError, fleets_mod.DispatchRefused):
+        # A spec this build would refuse outright is itself the difference;
+        # compare the raw name rather than raising inside the dispatcher.
+        model = spec.model or ""
+    contract: dict[str, object] = {
+        "fleet": spec.fleet,
+        "model": model,
+        "effort": spec.effort,
+        "mode": spec.mode,
+        "timeout": spec.resolved_timeout(),
+        "cap_usd": spec.cap_usd,
+        "taint": bool(spec.taint),
+        # fleets.py `_build_claude`: `--restricted` is a claude-only flag,
+        # set for a read lane that either declares `restricted` or declares
+        # a deliverable.
+        "restricted": spec.fleet == "claude"
+        and spec.mode == "read"
+        and bool(spec.restricted or spec.deliverable is not None),
+        # A verdict checklist generates its own schema, so either one is a
+        # structured-output request.
+        "schema": bool(spec.schema or spec.verdict),
+    }
+    if spec.taint:
+        contract["taint_shell"] = "prefix" if spec.taint_shell == "allow" else "denied"
+    return contract
+
+
+def _recorded_contract(recorded_result: dict) -> dict[str, object]:
+    """What a recorded receipt actually holds of the dispatch contract. A
+    key this returns is comparable; a key it omits was never recorded (an
+    older fixture predating the field, or a field no receipt carries) and is
+    reported as a note instead of failing the check."""
+    out: dict[str, object] = {}
+    for key in ("fleet", "model", "effort", "mode", "timeout"):
+        if key in recorded_result:
+            out[key] = recorded_result[key]
+    if "budget" in recorded_result:
+        # `runner.dispatch` writes a budget block exactly when a cap was
+        # asked for (or the fleet is `script`, which is priced at zero), so a
+        # recorded `null` budget is a recorded "no cap", not a missing field.
+        budget = recorded_result["budget"]
+        if budget is None:
+            out["cap_usd"] = None
+        elif isinstance(budget, dict) and "cap_usd" in budget:
+            out["cap_usd"] = budget["cap_usd"]
+    if "taint" in recorded_result:
+        taint = recorded_result["taint"]
+        out["taint"] = bool(isinstance(taint, dict) and taint.get("declared"))
+        if isinstance(taint, dict) and taint.get("taint_shell") is not None:
+            out["taint_shell"] = taint["taint_shell"]
+    if recorded_result.get("restricted") is not None and (
+        recorded_result.get("fleet") != "claude" or recorded_result.get("permission_mode")
+    ):
+        # `runner.dispatch` reads both `restricted` and `permission_mode`
+        # straight off the claude argv, and a real claude dispatch always
+        # carries `--permission-mode`. A claude receipt without one was not
+        # dispatched through the real argv builder (a test's faked fleet), so
+        # its `restricted: false` is not evidence about the flag.
+        out["restricted"] = bool(recorded_result["restricted"])
+    return out
+
+
+def _compare_contract(
+    differences: list[str],
+    uncomparable: set[str],
+    run_id: str,
+    spec,
+    recorded_result: dict,
+) -> None:
+    """D18: compare the requested dispatch contract against the recording's
+    own, one `_compare` line per field that moved. Field names absent from
+    the recording are collected in `uncomparable` for the caller to note."""
+    requested = _requested_contract(spec)
+    recorded = _recorded_contract(recorded_result)
+    for key in _CONTRACT_KEYS:
+        if key not in requested:
+            continue
+        if key not in recorded:
+            uncomparable.add(key)
+            continue
+        _compare(differences, run_id, key, recorded[key], requested[key], kind="contract")
 
 
 def _lane_recordings(fixture_dir: Path) -> dict[str, list[tuple[str, str]]]:
@@ -819,6 +935,10 @@ def replay(
 
     lane_recordings = _lane_recordings(fixture_dir)
     differences: list[str] = []
+    notes: list[str] = []
+    # D18: contract fields the recordings do not carry, so `check` can say
+    # what it could not compare instead of silently comparing nothing.
+    uncomparable: set[str] = set()
     call_index: dict[str, int] = {}
 
     def dispatcher(
@@ -891,6 +1011,11 @@ def replay(
             json.loads((dst / "result.json").read_text()) if (dst / "result.json").is_file() else {}
         )
         recorded_answer = (dst / "answer.txt").read_text() if (dst / "answer.txt").is_file() else ""
+        # D18: what this build asked for, against what the recording was
+        # actually dispatched with. Compared before the parser fields so a
+        # routing regression is reported even when the transcript still
+        # parses identically.
+        _compare_contract(differences, uncomparable, run_id, spec, recorded_result)
         parsed = outputs_mod.parse(fleet, recorded_stdout)
         _compare(differences, run_id, "answer", recorded_answer, parsed.answer)
         _compare(
@@ -958,8 +1083,39 @@ def replay(
         notifier=_replay_notifier,
         conflict_finder=_recorded_conflict_finder(recorded_result),
     )
+    # D18: a replay that never dispatched an attempt the recording holds has
+    # not replayed the recorded mission -- a lane dropped by a scheduling or
+    # routing regression would otherwise leave the projection green. A lane
+    # the replay deliberately did not start (a pause point, a skip, a
+    # cancellation) is a note instead: that decision is itself projected and
+    # already compared against `expected.json`, and a fixture recorded past
+    # its own pause point (f10-shape-a-foreign-repo) is the normal case.
+    skipped_lanes = {
+        lane.get("name"): lane.get("skipped")
+        for lane in mission_result.lanes
+        if isinstance(lane, dict) and lane.get("skipped")
+    }
+    for lane_name, recordings in sorted(lane_recordings.items()):
+        consumed = call_index.get(lane_name, 0)
+        if consumed >= len(recordings):
+            continue
+        unconsumed = ", ".join(run_id for run_id, _ in recordings[consumed:])
+        line = (
+            f"lane {lane_name}: replay dispatched {consumed} attempt(s) but the recording "
+            f"has {len(recordings)}; unconsumed: {unconsumed}"
+        )
+        if lane_name in skipped_lanes:
+            notes.append(f"{line} ({skipped_lanes[lane_name]})")
+        else:
+            differences.append(line)
+    if uncomparable:
+        notes.append(
+            "contract fields absent from the recording, not compared: "
+            + ", ".join(sorted(uncomparable))
+        )
     return Replay(
         differences=differences,
+        notes=notes,
         projection=projection(mission_result),
         result=mission_result,
     )
@@ -1241,7 +1397,11 @@ def _backfill_prompt_sha256(fixture_dir: Path, expected: dict) -> dict:
 
 
 def check(
-    fixture_dir: str | Path, *, update: bool = False, cwds: dict[str, str] | None = None
+    fixture_dir: str | Path,
+    *,
+    update: bool = False,
+    cwds: dict[str, str] | None = None,
+    notes: list[str] | None = None,
 ) -> list[str]:
     """Replay a fixture into a fresh temporary home and a fresh temporary
     git repository (one empty commit) as `cwd`. Returns the replay's own
@@ -1251,9 +1411,16 @@ def check(
 
     E19: `cwds` is `replay`'s own -- a cross-repo fixture's extra
     placeholders each get a fresh empty repository when the caller does not
-    name one."""
+    name one.
+
+    D18: `notes`, when given, is extended with the replay's own notes (a
+    contract field the recordings do not carry). Notes are never returned as
+    differences: like version drift, they are printed beside the check and
+    never fail it."""
     fixture_dir = Path(fixture_dir)
     replayed = _fresh_replay(fixture_dir, cwds=cwds)
+    if notes is not None:
+        notes.extend(replayed.notes)
     expected_path = fixture_dir / "expected.json"
     if update:
         expected_path.write_text(json.dumps(replayed.projection, indent=2, sort_keys=True))
