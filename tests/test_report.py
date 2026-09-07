@@ -848,6 +848,8 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "reviewer_precision",
         "dispositions_unknown_lane",
         "dispositions_malformed",
+        "dispositions_duplicate",
+        "dispositions_unmatched",
         "missions",
         "rules",
         "skipped",
@@ -958,3 +960,167 @@ def test_report_keeps_every_fix_lanes_dispositions_on_a_multi_fix_mission(home: 
     row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
     assert row.fixed == 1
     assert row.refused == 1
+
+
+# --- D20: one count per finding ------------------------------------------
+
+
+def _review_lane_with_items(name: str, *, fleet: str, model: str, items: list[dict]) -> dict:
+    return {
+        "name": name,
+        "stage": "review",
+        "review": {"verdict": "findings", "findings": len(items), "items": items},
+        "attempts": [{"fleet": fleet, "model": model}],
+    }
+
+
+def test_report_counts_a_repeated_disposition_once(home: Path):
+    # D20: one finding plus three copies of its fixed disposition read as
+    # fixed 3, precision 1.0, corrected rate 3.0 -- a quality metric above
+    # its own denominator.
+    _write_receipt(
+        home,
+        "20260101T000000Z-d20a-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="d20a",
+    )
+    _write_mission(
+        home,
+        "d20a",
+        name="mission-d20a",
+        ok=True,
+        lanes=[
+            _review_lane_with_items(
+                "review-gemini",
+                fleet="antigravity",
+                model="gemini-3.7-flash",
+                items=[{"index": 1, "file": "a.py", "line": 1, "confidence": 8}],
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.fixed == 1
+    assert row.findings == 1
+    assert row.corrected_rate() == 1.0
+    assert row.fixed_confidences == [8]
+    assert rpt.dispositions_duplicate == 2
+    assert rpt.dispositions_unmatched == 0
+
+
+def test_report_keeps_the_last_disposition_for_one_finding(home: Path):
+    # A fix lane that restates its own disposition settles on the last one.
+    _write_receipt(
+        home,
+        "20260101T000000Z-d20b-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="d20b",
+    )
+    _write_mission(
+        home,
+        "d20b",
+        name="mission-d20b",
+        ok=True,
+        lanes=[
+            _review_lane_with_items(
+                "review-gemini",
+                fleet="antigravity",
+                model="gemini-3.7-flash",
+                items=[{"index": 1, "file": "a.py", "line": 1, "confidence": 8}],
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 1, "disposition": "refused", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert (row.fixed, row.refused) == (0, 1)
+    assert rpt.dispositions_duplicate == 1
+
+
+def test_report_counts_a_disposition_naming_no_reported_finding_as_unmatched(home: Path):
+    # D20: `index: 99` against a review lane that reported one finding is
+    # not a disposition against a finding.
+    _write_receipt(
+        home,
+        "20260101T000000Z-d20c-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="d20c",
+    )
+    _write_mission(
+        home,
+        "d20c",
+        name="mission-d20c",
+        ok=True,
+        lanes=[
+            _review_lane_with_items(
+                "review-gemini",
+                fleet="antigravity",
+                model="gemini-3.7-flash",
+                items=[{"index": 1, "file": "a.py", "line": 1, "confidence": 8}],
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 99, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.fixed == 0
+    assert row.corrected_rate() == 0.0
+    assert rpt.dispositions_unmatched == 1
+    assert rpt.dispositions_duplicate == 0
+
+
+def test_report_prints_the_duplicate_and_unmatched_counts(home: Path, monkeypatch, capsys):
+    _write_receipt(
+        home,
+        "20260101T000000Z-d20d-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="d20d",
+    )
+    _write_mission(
+        home,
+        "d20d",
+        name="mission-d20d",
+        ok=True,
+        lanes=[
+            _review_lane_with_items(
+                "review-gemini",
+                fleet="antigravity",
+                model="gemini-3.7-flash",
+                items=[{"index": 1, "file": "a.py", "line": 1, "confidence": 8}],
+            ),
+            _fix_lane(
+                [
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {"lane": "review-gemini", "index": 99, "disposition": "fixed", "reason": "r2"},
+                ]
+            ),
+        ],
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert "duplicate dispositions: 1" in printed
+    assert "dispositions naming no reported finding: 1" in printed

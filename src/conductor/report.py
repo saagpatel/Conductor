@@ -603,6 +603,12 @@ class Report:
     # mission, and a fix lane's own malformed `DISPOSITION:` lines.
     dispositions_unknown_lane: int = 0
     dispositions_malformed: int = 0
+    # D20: a disposition superseded by a later one for the same (mission,
+    # reviewer lane, finding index), and a disposition whose index names no
+    # finding the review lane reported. Neither is counted as a disposition
+    # against a finding.
+    dispositions_duplicate: int = 0
+    dispositions_unmatched: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -612,6 +618,8 @@ class Report:
             "reviewer_precision": [row.to_dict() for row in self.reviewer_precision],
             "dispositions_unknown_lane": self.dispositions_unknown_lane,
             "dispositions_malformed": self.dispositions_malformed,
+            "dispositions_duplicate": self.dispositions_duplicate,
+            "dispositions_unmatched": self.dispositions_unmatched,
             "missions": [row.to_dict() for row in self.missions],
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
@@ -645,6 +653,55 @@ def _matched_confidence(items: object, index: object) -> int | None:
                 return confidence
             return None
     return None
+
+
+def _matches_a_finding(items: object, index: object) -> bool:
+    """D20: whether a disposition's `index` names a finding the review lane
+    actually parsed. A review lane with no parsed `items` at all (a receipt
+    that predates them) cannot answer the question, so every disposition
+    against it still counts -- the check applies only where there is
+    something to match against."""
+    if not isinstance(items, list) or not items:
+        return True
+    return any(
+        isinstance(entry, dict) and type(index) is int and entry.get("index") == index
+        for entry in items
+    )
+
+
+def _unique_dispositions(
+    mission: str, fix_dispositions: object, *, counts: dict[str, int]
+) -> list[dict]:
+    """D20: one entry per (mission, reviewer lane, finding index), keeping
+    the last one a fix lane recorded -- a fix lane that restates a
+    disposition, or two fix lanes on one mission that both name the same
+    finding, used to count once per copy (one finding with three copies of
+    its fixed disposition read as `fixed 3`, `corrected rate 3.0`).
+
+    Malformed entries are dropped here as before. An entry carrying no
+    integer index identifies no finding, so it cannot be deduplicated and is
+    returned as its own row; `counts["duplicate"]` counts every entry a
+    later one superseded."""
+    if not isinstance(fix_dispositions, list):
+        return []
+    keyed: dict[tuple[str, str, int], dict] = {}
+    unkeyed: list[dict] = []
+    for item in fix_dispositions:
+        if not isinstance(item, dict):
+            continue
+        lane_name = item.get("lane")
+        disposition = item.get("disposition")
+        if disposition not in DISPOSITIONS or not isinstance(lane_name, str):
+            continue
+        index = item.get("index")
+        if type(index) is not int:
+            unkeyed.append(item)
+            continue
+        key = (mission, lane_name, index)
+        if key in keyed:
+            counts["duplicate"] += 1
+        keyed[key] = item
+    return list(keyed.values()) + unkeyed
 
 
 def _build_report(
@@ -695,6 +752,11 @@ def _build_report(
     # well-formed but has nowhere to land in `precision` -- counted here
     # instead of vanishing silently.
     dispositions_unknown_lane = 0
+    # D20: `duplicate` is a repeated (mission, reviewer lane, finding index)
+    # -- only the last entry for a key is counted -- and `unmatched` is a
+    # well-formed disposition whose index names no finding the review lane
+    # reported. Both were previously counted as ordinary dispositions.
+    disposition_counts = {"duplicate": 0, "unmatched": 0}
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
@@ -718,18 +780,22 @@ def _build_report(
                 row.unparsed += 1
             else:
                 row.findings += info["findings"]
-        for item in fix_dispositions:
-            if not isinstance(item, dict):
-                continue
-            lane_name = item.get("lane")
-            disposition = item.get("disposition")
-            if disposition not in DISPOSITIONS or not isinstance(lane_name, str):
-                continue
+        for item in _unique_dispositions(name, fix_dispositions, counts=disposition_counts):
+            lane_name = item["lane"]
+            disposition = item["disposition"]
             info = review_lanes.get(lane_name)
             if info is None:
                 dispositions_unknown_lane += 1
                 continue
             if info.get("unparsed"):
+                continue
+            # D20: a disposition whose index names no finding the review lane
+            # actually reported is not a disposition against a finding --
+            # counted as unmatched and left out of every per-vendor tally, so
+            # `fixed` can never exceed `findings` (a `corrected_rate` above
+            # 1.0 was reachable from one bad index alone).
+            if not _matches_a_finding(info.get("items"), item.get("index")):
+                disposition_counts["unmatched"] += 1
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             setattr(row, disposition, getattr(row, disposition) + 1)
@@ -817,6 +883,8 @@ def _build_report(
         reviewer_precision=precision_rows,
         dispositions_unknown_lane=dispositions_unknown_lane,
         dispositions_malformed=dispositions_malformed,
+        dispositions_duplicate=disposition_counts["duplicate"],
+        dispositions_unmatched=disposition_counts["unmatched"],
         missions=mission_rows,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
@@ -957,6 +1025,8 @@ def _print_report(rpt: Report) -> None:
     print(
         f"  dispositions naming an unknown lane: {rpt.dispositions_unknown_lane}"
         f"  |  malformed disposition lines: {rpt.dispositions_malformed}"
+        f"  |  duplicate dispositions: {rpt.dispositions_duplicate}"
+        f"  |  dispositions naming no reported finding: {rpt.dispositions_unmatched}"
     )
     print()
     _print_section(

@@ -2488,7 +2488,21 @@ The report has seven sections, in this order:
   recorded dispositions (see below): findings written, and how many of
   them the fix lane marked fixed, refused, already true, or wording-only.
   `precision` is `fixed / (fixed + refused)`, blank under three total
-  dispositions -- not enough to read as a rate.
+  dispositions -- not enough to read as a rate. D20: a disposition is
+  counted once per finding it names. Entries are keyed by (mission,
+  reviewer lane, finding index) and the last one a fix lane recorded wins,
+  so a restated disposition (or two fix lanes on one mission naming the same
+  finding) counts once and the rest are counted as `duplicate`; a
+  disposition whose index names no finding the review lane actually
+  reported is counted as `unmatched` and left out of every per-vendor tally,
+  so `corrected_rate` (`fixed / findings`) can never exceed 1.0. The line
+  under the calibration lines carries all four totals: `dispositions naming
+  an unknown lane: N | malformed disposition lines: M | duplicate
+  dispositions: D | dispositions naming no reported finding: U`, and
+  `--json` carries `dispositions_duplicate` and `dispositions_unmatched`
+  beside the other two. A review lane whose receipt parsed no `items` at
+  all (one recorded before findings were numbered) cannot match an index
+  either way, so its dispositions still count as before.
 - **Missions**: cost, whether the mission was ok, how many lanes it
   declared, whether any lane hit its cap, how many times
   `conductor salvage` was run against it (`salvaged`, 0 when
