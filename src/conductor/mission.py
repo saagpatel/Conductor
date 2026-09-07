@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -3307,38 +3308,111 @@ def _lock_status(raw: dict) -> tuple[bool, str]:
     return True, f"pid {pid} is alive"
 
 
-def _acquire_running_lock(mission_dir: Path) -> tuple[Path, list[str]]:
-    """Claim one mission directory, replacing only a demonstrably stale lock."""
+def _lock_body(owner: str, **extra: object) -> dict:
+    """One lock's contents, always complete before the file is visible."""
+    return {
+        "pid": os.getpid(),
+        "started": datetime.now(UTC).isoformat(),
+        "host": socket.gethostname(),
+        # D10: the token that says whose lock this is. Release and reclaim
+        # both check it, so neither can remove a lock it does not own.
+        "owner": owner,
+        **extra,
+    }
+
+
+def _publish_lock(lock: Path, body: dict) -> bool:
+    """D10: publish a lock's bytes atomically. `open("x")` made a zero-byte
+    file visible and only then wrote the JSON into it; a contender reading
+    that window saw an unparseable file, `_lock_status({})` called `pid None`
+    not alive, and a live mission's lock was unlinked mid-publication. The
+    JSON is written to a temp file in the same directory instead and linked
+    into place -- `os.link` fails rather than replacing an existing lock, so
+    publication never steals one. True when this process now holds it."""
+    tmp = lock.parent / f".{lock.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp.write_text(json.dumps(body, indent=2))
+    try:
+        os.link(tmp, lock)
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+    return True
+
+
+def _release_lock(lock: Path, owner: str | None) -> bool:
+    """D10: unlink a lock only while it still carries `owner`. A lock whose
+    body has moved on belongs to someone else -- releasing it would hand a
+    running mission's directory to a third process -- and a lock that cannot
+    be read is not proven to be anyone's, so neither is removed. False says
+    the file was left alone, which is never an error here: the caller's own
+    claim is over either way."""
+    current = _json_object(lock)
+    if current is None or current.get("owner") != owner:
+        return False
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def _lock_holder(lock: Path, where: str) -> dict:
+    """The body of a lock a claim just lost the race to, or a refusal.
+
+    D10: an unreadable, empty, or half-written lock is *not* proven stale.
+    Reclaiming on that evidence is exactly how a lock still being published
+    was unlinked out from under a live mission, so it is reported instead."""
+    try:
+        raw = lock.read_text()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise MissionInvalid(f"{where}: lock at {lock} cannot be read ({exc})") from None
+    if not raw.strip():
+        raise MissionInvalid(
+            f"{where}: lock at {lock} is empty -- it is being written, or it was "
+            "left half-written; not reclaiming it"
+        )
+    try:
+        current = json.loads(raw)
+    except json.JSONDecodeError:
+        raise MissionInvalid(
+            f"{where}: lock at {lock} is not readable JSON -- it is being written, or "
+            "it was left corrupt; not reclaiming it"
+        ) from None
+    if not isinstance(current, dict):
+        raise MissionInvalid(f"{where}: lock at {lock} is not a JSON object; not reclaiming it")
+    return current
+
+
+def _acquire_running_lock(mission_dir: Path) -> tuple[Path, str, list[str]]:
+    """Claim one mission directory, replacing only a demonstrably stale lock.
+
+    Returns the lock path, this claim's owner token (`_release_lock` needs
+    it), and any notes."""
     lock = mission_dir / "running.json"
     notes: list[str] = []
     while True:
-        try:
-            with lock.open("x") as target:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "started": datetime.now(UTC).isoformat(),
-                        "host": socket.gethostname(),
-                    },
-                    target,
-                    indent=2,
-                )
-            return lock, notes
-        except FileExistsError:
-            current = _json_object(lock) or {}
-            live, reason = _lock_status(current)
-            if live:
-                raise MissionInvalid(
-                    f"mission '{mission_dir.name}' is still running ({reason})"
-                ) from None
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                continue
-            notes.append(f"removed stale running.json lock before resume ({reason})")
+        owner = uuid.uuid4().hex
+        if _publish_lock(lock, _lock_body(owner)):
+            return lock, owner, notes
+        current = _lock_holder(lock, f"mission '{mission_dir.name}'")
+        if not current:
+            continue  # gone between the failed link and the read; race again
+        live, reason = _lock_status(current)
+        if live:
+            raise MissionInvalid(
+                f"mission '{mission_dir.name}' is still running ({reason})"
+            ) from None
+        if not _release_lock(lock, current.get("owner")):
+            continue  # someone else moved it first; re-read rather than assume
+        notes.append(f"removed stale running.json lock before resume ({reason})")
 
 
-def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path, list[str]]:
+def _acquire_source_lock(
+    base: Path, source: str, mission_id: str
+) -> tuple[Path, str, list[str]]:
     """E9: beside the running lock (keyed by mission run), a lock keyed by
     the mission *file*, so two overlapping launches of the same file cannot
     both run -- `_acquire_running_lock` cannot catch this, since each launch
@@ -3352,32 +3426,21 @@ def _acquire_source_lock(base: Path, source: str, mission_id: str) -> tuple[Path
     lock = locks_dir / f"{digest}.json"
     notes: list[str] = []
     while True:
-        try:
-            with lock.open("x") as target:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "started": datetime.now(UTC).isoformat(),
-                        "host": socket.gethostname(),
-                        "mission_id": mission_id,
-                    },
-                    target,
-                    indent=2,
-                )
-            return lock, notes
-        except FileExistsError:
-            current = _json_object(lock) or {}
-            live, reason = _lock_status(current)
-            if live:
-                raise MissionInvalid(
-                    f"mission file is already running as '{current.get('mission_id')}' "
-                    f"({reason}); lock at {lock}"
-                ) from None
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                continue
-            notes.append(f"removed stale file lock at {lock} before resume ({reason})")
+        owner = uuid.uuid4().hex
+        if _publish_lock(lock, _lock_body(owner, mission_id=mission_id)):
+            return lock, owner, notes
+        current = _lock_holder(lock, "mission file")
+        if not current:
+            continue
+        live, reason = _lock_status(current)
+        if live:
+            raise MissionInvalid(
+                f"mission file is already running as '{current.get('mission_id')}' "
+                f"({reason}); lock at {lock}"
+            ) from None
+        if not _release_lock(lock, current.get("owner")):
+            continue
+        notes.append(f"removed stale file lock at {lock} before resume ({reason})")
 
 
 def _effective_ceiling(mission: Mission) -> tuple[float | None, float | None]:
@@ -3432,6 +3495,30 @@ def _first_child_error(result: MissionResult) -> str:
     return "child dry run was not ok"
 
 
+def _child_digest(path: str | None) -> str | None:
+    """D2: sha256 of the child mission file's own bytes -- what the operator
+    was actually shown when the pause was raised. `None` when the file
+    cannot be read, which is never treated as a match."""
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _child_policy(child: Mission, depth: int) -> dict:
+    """D2: the part of a checked child a receipt should carry in words as
+    well as in a digest -- what the approval was an approval of."""
+    per_hour, per_day = _effective_ceiling(child)
+    return {
+        "max_cost_usd": child.max_cost_usd,
+        "ceiling": {"per_hour_usd": per_hour, "per_day_usd": per_day},
+        "depth": depth,
+        "lanes": len(child.lanes),
+    }
+
+
 def _plan_check_child(
     mission: Mission,
     deliverable_path: str | None,
@@ -3455,6 +3542,10 @@ def _plan_check_child(
         "depth": child_depth,
         "dry_run_ok": False,
         "refused": None,
+        # D2: what the operator is approving, in bytes and in words. Both are
+        # re-derived at launch and the launch is refused if either moved.
+        "child_sha256": None,
+        "child_policy": None,
     }
     if not deliverable_path:
         message = "plan lane produced no deliverable to load"
@@ -3468,6 +3559,8 @@ def _plan_check_child(
         return plan, message
     plan["child_name"] = child.name
     plan["child_max_cost_usd"] = child.max_cost_usd
+    plan["child_sha256"] = _child_digest(child.source)
+    plan["child_policy"] = _child_policy(child, child_depth)
     if child_depth > PLAN_MAX_DEPTH or (
         child_depth == PLAN_MAX_DEPTH and any(child_lane.plan for child_lane in child.lanes)
     ):
@@ -3954,11 +4047,16 @@ def _resume_plan_child(
 
     if not child_dir.is_dir():
         return missing()
-    running_raw = _json_object(child_dir / "running.json")
-    if running_raw is not None:
-        live, reason = _lock_status(running_raw)
-        if live:
-            raise MissionInvalid(f"child '{child_id}' is still running ({reason})")
+    child_lock = child_dir / "running.json"
+    if child_lock.exists():
+        # D10: the same rule as a claim -- a lock whose body cannot be read
+        # is not proven stale, and a child that may still be running is not
+        # a child whose receipt may be adopted.
+        running_raw = _lock_holder(child_lock, f"child '{child_id}'")
+        if running_raw:
+            live, reason = _lock_status(running_raw)
+            if live:
+                raise MissionInvalid(f"child '{child_id}' is still running ({reason})")
     result_path = child_dir / "result.json"
     if not result_path.is_file():
         return missing()
@@ -4167,6 +4265,38 @@ def _answer_human_pause(
     return None
 
 
+_PLAN_PAUSE_CHILD_FIELDS = (
+    "child_path",
+    "child_name",
+    "child_max_cost_usd",
+    # D2: the approval is of these bytes under this policy, so the pause
+    # document carries both and the launch re-derives both.
+    "child_sha256",
+    "child_policy",
+)
+
+
+def _plan_pause_info(lane_name: str, plan: dict) -> dict:
+    """E10: the `kind: "child"` pause a parked plan lane raises. Built in two
+    places -- when the lane's own dispatch settles ok, and (D1) when a later
+    run finds it still parked because the answer it saw named another lane --
+    so the operator sees the same question either way."""
+    info = {
+        "kind": "child",
+        "lane": lane_name,
+        "spent_usd": None,
+        "threshold": None,
+        "reason": (f"lane {lane_name} planned a mission and is waiting for the operator"),
+        "question": (
+            f"Lane '{lane_name}' planned mission '{plan['child_name']}' "
+            f"(${plan['child_max_cost_usd']:.2f}); launch it?"
+        ),
+    }
+    for key in _PLAN_PAUSE_CHILD_FIELDS:
+        info[key] = plan.get(key)
+    return info
+
+
 def _launch_plan_child(
     lane: Lane,
     parked: LaneResult,
@@ -4177,6 +4307,7 @@ def _launch_plan_child(
     ledger: Ledger,
     stop_answer: dict | None,
     child_base_dir: str | None = None,
+    parent: Mission | None = None,
 ) -> tuple[LaneResult, str | None, tuple[float, int] | None]:
     """E10: resolve a parked plan lane's unconditional pause. `stop` fails
     the lane naming the refusal, without ever loading the deliverable again.
@@ -4188,7 +4319,19 @@ def _launch_plan_child(
     parent's. Returns the finalized `LaneResult`, the launched child's
     mission id (None when nothing launched, i.e. the operator said stop),
     and a (cost_usd, unpriced_dispatches) rollup for the caller's ledger,
-    None until the child reaches its own finality."""
+    None until the child reaches its own finality.
+
+    D2: the approval is of the bytes that were checked. Before anything is
+    launched the child file is read and hashed again and the launch is
+    refused if the digest moved since the park, and `_plan_check_child`'s
+    own gates (depth, a bounded budget within the parent's remaining, a
+    ceiling no looser, a clean dry run) are rerun in full rather than
+    assumed -- an edit between the park and the answer changes none of them
+    otherwise, and only `max_cost_usd` was ever re-read here. Every one of
+    those is a recorded lane failure, never an exception out of the
+    scheduler: `parent` is the parent mission the gates are checked
+    against, and a call without it refuses rather than launching unchecked.
+    """
     plan = dict(parked.plan or {})
     resolved = replace(parked)
     resolved.attempts = [dict(attempt) for attempt in parked.attempts]
@@ -4204,7 +4347,45 @@ def _launch_plan_child(
     ):
         return _fail("child launch refused by the operator"), None, None
 
-    child = load_mission(plan["child_path"], base_dir=child_base_dir)
+    if parent is None:
+        return _fail("cannot re-check the approved child plan: no parent mission"), None, None
+    try:
+        child = load_mission(plan["child_path"], base_dir=child_base_dir)
+    except MissionInvalid as exc:
+        return _fail(f"child plan no longer loads: {exc}"), None, None
+
+    # D2: the operator approved bytes, not a path. Re-read and re-hash them
+    # before anything else; an approval that cannot be tied to what is on
+    # disk now is not an approval of it.
+    approved = plan.get("child_sha256")
+    current = _child_digest(child.source)
+    if not isinstance(approved, str) or current is None or current != approved:
+        old8 = approved[:8] if isinstance(approved, str) else "unrecorded"
+        new8 = current[:8] if current is not None else "unreadable"
+        return (
+            _fail(
+                f"child plan changed since it was approved: {old8} -> {new8}; "
+                "re-run to approve the revised plan"
+            ),
+            None,
+            None,
+        )
+
+    # And the gates the park ran are rerun in full against this ledger --
+    # the digest proves the file did not move, these prove the parent's
+    # budget and ceiling still admit it.
+    rechecked, refusal = _plan_check_child(
+        parent,
+        plan["child_path"],
+        ledger=ledger,
+        base=base,
+        lane_cwd=child_base_dir,
+    )
+    if refusal is not None:
+        plan["refused"] = refusal
+        return _fail(f"child plan no longer passes its checks: {refusal}"), None, None
+    plan["child_policy"] = rechecked["child_policy"]
+
     child.depth = plan["depth"]
     child.parent = {"mission_id": mission_id, "lane": lane.name}
 
@@ -4214,7 +4395,14 @@ def _launch_plan_child(
     # drifted by now).
     parent_remaining = ledger.remaining()
     if parent_remaining is not None:
-        assert child.max_cost_usd is not None  # `_plan_check_child` refused otherwise
+        if child.max_cost_usd is None:
+            # D2: an edit that dropped the cap used to hit an `assert` on the
+            # scheduler's own thread and take the resume down with it.
+            return (
+                _fail("child has no max_cost_usd; a planned mission's budget must be bounded"),
+                None,
+                None,
+            )
         child.max_cost_usd = min(child.max_cost_usd, parent_remaining)
         child.budget_from_parent = True
 
@@ -4324,7 +4512,13 @@ def run_mission(
     # C2: a paused mission is refused before the running lock is taken, so an
     # unanswered pause never claims the lock and blocks a later, answered
     # resume. A dry run rehearses without needing or recording an answer.
+    #
+    # D1: `pause_answer` is the record of *which* pause this resume answered
+    # -- its `kind` and its `lane`. `stop_answer` stays what it always was
+    # (set only on a stop), but a `continue` is now carried too, because one
+    # answer may resolve only the one lane the pause it answers names.
     stop_answer: dict | None = None
+    pause_answer: dict | None = None
     if resume_dir is not None and not dry_run:
         pause_path = mission_dir / "pause.json"
         pause_doc = _json_object(pause_path)
@@ -4334,6 +4528,7 @@ def run_mission(
                     mission, mission_dir, pause_path, pause_doc, answer=answer,
                     answer_file=answer_file,
                 )
+                pause_answer = {"kind": "human", "lane": pause_doc.get("lane")}
             else:
                 if answer_file is not None:
                     raise MissionInvalid("--answer-file only applies to a human lane pause")
@@ -4350,12 +4545,13 @@ def run_mission(
                 pause_doc["answer"] = answer
                 pause_doc["answers"] = [*(pause_doc.get("answers") or []), resolved]
                 pause_path.write_text(json.dumps(pause_doc, indent=2))
+                pause_answer = resolved
                 if answer == "stop":
                     stop_answer = resolved
         elif answer is not None or answer_file is not None:
             raise MissionInvalid(f"mission '{mission_id}' is not paused")
 
-    running, lock_notes = _acquire_running_lock(mission_dir)
+    running, running_owner, lock_notes = _acquire_running_lock(mission_dir)
     try:
         # E9: beside the running lock (keyed by this run's own directory), a
         # lock keyed by the mission file, so a second overlapping launch of
@@ -4363,8 +4559,11 @@ def run_mission(
         # never trip `_acquire_running_lock` -- is refused too. A mission
         # built in code (an empty source, as the tests do) takes no lock.
         source_lock: Path | None = None
+        source_owner: str | None = None
         if mission.source:
-            source_lock, source_notes = _acquire_source_lock(base, mission.source, mission_id)
+            source_lock, source_owner, source_notes = _acquire_source_lock(
+                base, mission.source, mission_id
+            )
             lock_notes.extend(source_notes)
         if resume_dir is None:
             (mission_dir / "mission.json").write_text(
@@ -4390,6 +4589,7 @@ def run_mission(
             resume=resume,
             is_resume=resume_dir is not None,
             stop_answer=stop_answer,
+            pause_answer=pause_answer,
             dispatcher=dispatcher,
             human_answers=human_answers,
             unattended=unattended,
@@ -4399,15 +4599,11 @@ def run_mission(
             conflict_finder=conflict_finder,
         )
     finally:
-        try:
-            running.unlink()
-        except FileNotFoundError:
-            pass
+        # D10: owner-bound, both of them -- a release only ever removes the
+        # lock this run published.
+        _release_lock(running, running_owner)
         if source_lock is not None:
-            try:
-                source_lock.unlink()
-            except FileNotFoundError:
-                pass
+            _release_lock(source_lock, source_owner)
 
 
 def _execute_mission(
@@ -4420,6 +4616,7 @@ def _execute_mission(
     resume: _ResumePlan,
     is_resume: bool,
     stop_answer: dict | None = None,
+    pause_answer: dict | None = None,
     dispatcher: Callable[..., Result] | None = None,
     human_answers: dict[str, str] | None = None,
     unattended: bool = False,
@@ -5011,13 +5208,25 @@ def _execute_mission(
 
     # E10: a plan lane's launch decision. Only a resume can reach here with a
     # plan lane already parked (a fresh launch's plan lane, if any, has not
-    # dispatched yet), and only a resume of the exact pause it raised ever
-    # answers it, so this always runs whether that answer was continue or
-    # stop -- `_launch_plan_child` itself tells the two apart.
+    # dispatched yet).
+    #
+    # D1: exactly one lane -- the one named by the `kind: "child"` pause this
+    # resume actually answered -- is resolved here, continue or stop alike
+    # (`_launch_plan_child` tells those two apart). Two plan lanes can both
+    # park in one pass (the scheduler submits every ready lane and raises a
+    # pause only for the first completion), and before this an answer to one
+    # of them, or to a `human`/`lane`/`spend` pause naming no plan lane at
+    # all, launched every parked planner's child. Any planner this answer
+    # does not name stays parked and asks for itself further down.
     plan_children: list[str] = []
-    if is_resume and not dry_run:
+    answered_plan_lane = (
+        pause_answer.get("lane")
+        if pause_answer is not None and pause_answer.get("kind") == "child"
+        else None
+    )
+    if is_resume and not dry_run and answered_plan_lane is not None:
         for lane in mission.lanes:
-            if not lane.plan:
+            if not lane.plan or lane.name != answered_plan_lane:
                 continue
             parked = done.get(lane.name)
             if parked is None or not parked.ok or parked.plan is None:
@@ -5033,6 +5242,7 @@ def _execute_mission(
                 ledger=ledger,
                 stop_answer=stop_answer,
                 child_base_dir=lane.attempts[0].effective_cwd(mission.cwd),
+                parent=mission,
             )
             settle(resolved)
             if child_id is not None:
@@ -5262,26 +5472,27 @@ def _execute_mission(
                     # disables it, and it fires the moment the checks above
                     # pass, in the same place a `pause.before` lane's own
                     # park is decided.
-                    pause_info = {
-                        "kind": "child",
-                        "lane": result.name,
-                        "spent_usd": None,
-                        "threshold": None,
-                        "reason": (
-                            f"lane {result.name} planned a mission and is waiting for "
-                            "the operator"
-                        ),
-                        "question": (
-                            f"Lane '{result.name}' planned mission "
-                            f"'{result.plan['child_name']}' "
-                            f"(${result.plan['child_max_cost_usd']:.2f}); launch it?"
-                        ),
-                        "child_path": result.plan["child_path"],
-                        "child_name": result.plan["child_name"],
-                        "child_max_cost_usd": result.plan["child_max_cost_usd"],
-                    }
+                    pause_info = _plan_pause_info(result.name, result.plan)
             if not running and idle_since is None:
                 idle_since = time.monotonic()
+
+    if pause_info is None and stop_answer is None and not dry_run:
+        # D1: a planner that parked but whose pause this run did not answer
+        # is still waiting for the operator. It asks again here, in mission
+        # order, the moment nothing else in this run has parked the mission
+        # -- so two planners that parked together are launched by two
+        # answers, never by one.
+        for lane in mission.lanes:
+            if not lane.plan:
+                continue
+            still_parked = done.get(lane.name)
+            if still_parked is None or not still_parked.ok or still_parked.plan is None:
+                continue
+            plan_block = still_parked.plan
+            if plan_block.get("refused") is not None or plan_block.get("child") is not None:
+                continue
+            pause_info = _plan_pause_info(lane.name, plan_block)
+            break
 
     if pause_info is not None and not stop_requested():
         # A stop that arrives while a lane already dispatched before the
@@ -5301,7 +5512,7 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             new_pause_doc["ask_path"] = pause_info["ask_path"]
-        for key in ("child_path", "child_name", "child_max_cost_usd"):
+        for key in _PLAN_PAUSE_CHILD_FIELDS:
             if key in pause_info:
                 new_pause_doc[key] = pause_info[key]
         (mission_dir / "pause.json").write_text(json.dumps(new_pause_doc, indent=2))
@@ -5326,7 +5537,7 @@ def _execute_mission(
         }
         if "ask_path" in pause_info:
             pause_park["ask_path"] = pause_info["ask_path"]
-        for key in ("child_path", "child_name", "child_max_cost_usd"):
+        for key in _PLAN_PAUSE_CHILD_FIELDS:
             if key in pause_info:
                 pause_park[key] = pause_info[key]
     lane_results = [done[lane.name] for lane in mission.lanes]

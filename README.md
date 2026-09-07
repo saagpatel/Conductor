@@ -554,6 +554,16 @@ host is refused rather than guessed stale; after verifying that host is no
 longer running the mission, the operator may remove the lock. A demonstrably
 stale local lock is removed and recorded in the result.
 
+A lock is published whole: its JSON is written to a temp file beside it and
+hard-linked into place, so no contender ever reads a half-written one, and
+the link fails rather than replacing a lock that already exists. Only a
+readable lock can be proven stale -- an empty, truncated, or unparseable one
+refuses the claim, naming the file, instead of being reclaimed. Each lock
+also carries an `owner` token minted by the run that took it, and both the
+release at the end of a run and the removal of a stale lock check it, so
+neither can remove a lock this run does not hold. The mission-file lock
+(below) works the same way.
+
 The boundary is deliberately honest. A lane that half-committed before a crash
 has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted
 on their receipts and artifact paths; beyond commit and named-branch existence,
@@ -2227,7 +2237,12 @@ fails the plan lane with its first error. Every one of these is conductor's
 own check, never a fleet's word, and reads back as `kind: "plan"` like the
 agent, taint, and adversarial checks above. The lane's `LaneResult` and
 receipt gain `plan: {"child_path", "child_name", "child_max_cost_usd",
-"depth", "dry_run_ok", "refused": <reason or null>}`.
+"depth", "dry_run_ok", "refused": <reason or null>, "child_sha256",
+"child_policy"}` -- the last two being what the operator is about to be
+asked to approve: the sha256 of the child file's own bytes, and a summary
+of the policy those bytes declare (`max_cost_usd`, the effective `ceiling`,
+`depth`, lane count). Both are repeated in `pause.json` and in the paused
+result.
 
 Once every check passes the mission parks, unconditionally -- there is no
 key that disables it, and `pause.before` need not name the lane:
@@ -2239,6 +2254,9 @@ key that disables it, and `pause.before` need not name the lane:
   "child_path": "/repo/child.json",
   "child_name": "fix-the-test",
   "child_max_cost_usd": 3.0,
+  "child_sha256": "9f2c...",
+  "child_policy": {"max_cost_usd": 3.0, "ceiling": {"per_hour_usd": 10.0,
+    "per_day_usd": null}, "depth": 1, "lanes": 2},
   "question": "Lane 'plan' planned mission 'fix-the-test' ($3.00); launch it?"
 }
 ```
@@ -2251,6 +2269,29 @@ carries its `depth` and `parent`. `--answer stop` fails the plan lane as
 `child launch refused by the operator`, and the mission settles as any
 stopped pause does. `--unattended` refuses a mission with a plan lane --
 nobody is there to answer its pause.
+
+**One answer launches exactly one child.** Two plan lanes can park in the
+same pass -- the scheduler submits every ready lane and raises a pause only
+for the first completion -- so an answer is consumed by the one lane the
+pause it answers names, and by no other. A `continue` launches that lane's
+child alone; a `stop` refuses that lane alone; an answer to a `human`,
+`lane`, or `spend` pause, which names no plan lane, launches nothing at all.
+Any planner still parked raises its own `kind: "child"` pause on the same
+resume, once nothing else has parked the mission, so a two-planner mission
+takes two answers and the mission parks again after the first.
+
+**The approval is of the bytes that were checked.** Before a `continue`
+launches anything, the child file is read and hashed again: a digest that
+does not match the one recorded at the park fails the lane as `child plan
+changed since it was approved: <old8> -> <new8>; re-run to approve the
+revised plan`, and nothing is launched. Every check the park ran -- depth, a
+bounded `max_cost_usd` within the parent's remaining ledger, a ceiling no
+looser, a clean dry run -- is then rerun in full against the ledger as it
+stands now, and any refusal fails the lane as `child plan no longer passes
+its checks: <reason>`. Both are ordinary recorded lane failures, never an
+exception out of the scheduler, so an edited child (one that dropped its
+`max_cost_usd` included) refuses the launch rather than taking the resume
+down with it. Re-running the planner is how a revised plan gets approved.
 
 **The child's budget is the parent's.** At launch, when the parent has a
 budget, the child's `max_cost_usd` is clamped to `min(child's own, parent's
