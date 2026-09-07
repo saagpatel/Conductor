@@ -58,6 +58,11 @@ RUN_FILES = (
     "prompt.txt",
     "answer.txt",
     "diff.patch",
+    # E10: a plan lane's declared deliverable, copied here suffix-less by
+    # `runner.dispatch` before `mission._plan_check_child` ever runs -- a
+    # recorded plan lane's `load_mission` call has nothing to read back
+    # without this, and the fixture can never replay up to its pause.
+    "deliverable",
 )
 MISSION_FILES = ("mission.json", "result.json", "report.md")
 
@@ -923,6 +928,15 @@ def projection(result: MissionResult) -> dict:
         if plan is not None:
             entry["plan"] = {"refused": plan.get("refused"), "dry_run_ok": plan.get("dry_run_ok")}
         lanes.append(entry)
+    paused = data.get("paused")
+    if paused is not None and "child_path" in paused:
+        # E10: `child_path` is a filesystem path under the mission directory
+        # that a live launch and a replay never agree on (a fresh temp home
+        # per run), the same reason the plan block above drops it -- unlike
+        # `ask_path` (a human lane's own pause field, unaffected by this
+        # item), which no test here has ever exercised through a still-paused
+        # recording.
+        paused = {key: value for key, value in paused.items() if key != "child_path"}
     return {
         "ok": data.get("ok"),
         "require": data.get("require"),
@@ -930,7 +944,7 @@ def projection(result: MissionResult) -> dict:
         "errors": data.get("errors"),
         "escalation": data.get("escalation"),
         "early_cancel": data.get("early_cancel"),
-        "paused": data.get("paused"),
+        "paused": paused,
         "quorum": data.get("quorum"),
         "ranking": [
             {"lane": row.get("lane"), "rank": row.get("rank"), "ok": row.get("ok")}

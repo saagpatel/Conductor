@@ -4020,9 +4020,18 @@ def _execute_mission(
                 # attempt's own cost is counted, and mutate `.error` (the
                 # same mechanism the agent/taint/adversarial checks above
                 # use) so a failing check reads as an ordinary failed
-                # attempt, `kind` included.
+                # attempt, `kind` included. Kept under the mission directory
+                # with the declared extension restored first: the raw copy
+                # dispatch() left under `runs/<id>/deliverable` has none, and
+                # `load_mission` picks JSON vs. TOML from the suffix alone.
+                child_deliverable_path = result.deliverable_path
+                if child_deliverable_path:
+                    suffix = Path(attempt.deliverable["path"]).suffix if attempt.deliverable else ""
+                    kept_path = deliverables_dir / f"{lane.name}-child{suffix}"
+                    shutil.copyfile(child_deliverable_path, kept_path)
+                    child_deliverable_path = str(kept_path)
                 plan, plan_message = _plan_check_child(
-                    mission, result.deliverable_path, ledger=ledger, base=base
+                    mission, child_deliverable_path, ledger=ledger, base=base
                 )
                 out.plan = plan
                 if plan_message is not None:

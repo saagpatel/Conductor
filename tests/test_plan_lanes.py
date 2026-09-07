@@ -521,3 +521,72 @@ def test_golden_projection_carries_plan_entry_only_for_a_plan_lane(
     other_entry = next(entry for entry in projection["lanes"] if entry["name"] == "other")
     assert plan_entry["plan"] == {"refused": None, "dry_run_ok": True}
     assert "plan" not in other_entry
+
+
+# --- review fix: deliverable suffix and golden replay ------------------------
+
+
+def test_plan_lane_toml_deliverable_loads(repo, home, fake_fleet, tmp_path):
+    """Review finding (Gemini item 3 / Grok item a): the deliverable's bytes
+    are copied to a suffix-less file (`runs/<id>/deliverable`) before
+    `_plan_check_child` calls `load_mission` on it, so `load_mission` always
+    parses it as JSON regardless of the lane's declared extension. A `.toml`
+    child must load and dry-run clean, the same as a `.json` one."""
+    toml_text = (
+        f'name = "toml-child"\n'
+        f'cwd = "{repo}"\n'
+        f"max_cost_usd = 5.0\n\n"
+        f"[[lanes]]\n"
+        f'name = "childbuild"\n'
+        f'fleet = "claude"\n'
+        f'prompt = "CHILDBUILD go"\n'
+    )
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            f"printf '%s' {shlex.quote(toml_text)} > child.toml; "
+            f"printf '%s' {shlex.quote(envelope(cost=0.1))}",
+        ]
+    )
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "max_cost_usd": 10.0,
+            "lanes": [_plan_lane(deliverable_path="child.toml")],
+        },
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+
+    plan_lane = next(lane for lane in result.lanes if lane["name"] == "plan")
+    assert plan_lane["plan"]["refused"] is None
+    assert plan_lane["plan"]["dry_run_ok"] is True
+    assert plan_lane["ok"] is True
+    assert result.paused is not None
+    assert result.paused["kind"] == "child"
+    assert result.paused["child_name"] == "toml-child"
+
+
+def test_recorded_plan_lane_replays_up_to_the_pause(repo, home, fake_fleet, tmp_path):
+    """Review finding (Gemini item 2 / Grok item c): `RUN_FILES` never
+    copied a plan lane's deliverable into a golden fixture, and replay never
+    restored it, so `_plan_check_child`'s `load_mission` found nothing on
+    disk and a recorded plan lane could not replay up to its pause."""
+    child_raw = _child_raw(repo, max_cost_usd=5.0, name="fix-the-test")
+    fake_fleet(_write_deliverable_argv(child_raw, cost=0.1))
+    mission = mission_from_dict(
+        {"cwd": str(repo), "max_cost_usd": 10.0, "lanes": [_plan_lane()]},
+        base_dir=tmp_path,
+    )
+    result = run_mission(mission, home=home)
+
+    assert result.ok is False
+    assert result.paused["kind"] == "child"
+
+    fixture = golden_mod.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    expected = json.loads((fixture / "expected.json").read_text())
+    plan_entry = next(lane for lane in expected["lanes"] if lane["name"] == "plan")
+    assert plan_entry["plan"]["refused"] is None
+    assert plan_entry["plan"]["dry_run_ok"] is True
+    assert golden_mod.check(fixture) == []
