@@ -1253,6 +1253,28 @@ into the result's `notes`. Human and script lanes carry no cost history
 worth comparing and are skipped. A golden replay runs in a home with no
 run history at all, so its forecast is always empty.
 
+The warning used to be where it stopped, and on three launches running the
+lead answered it the same way by hand: raise the build lane's `cap_usd` to
+the p80 and the mission's `max_cost_usd` by the same difference before
+launching. `conductor shape a` now does that itself (F17). Every lane the
+forecast warns about, the fix lane as much as the build, gets its cap
+raised to the p80 rounded up to the next whole dollar, and the mission
+budget rises by the same amount. Each raise prints its own line:
+
+```
+cap raised: build $5.00 -> $8.00 (forecast p80 $8.04, 12 runs)
+```
+
+The mission file records the arithmetic under a top-level `caps` block, one
+entry per lane that has a cap, raised or not: `rule_2_usd` (the launcher's
+own figure), `forecast_p80_usd` and `forecast_runs` (the history it was
+read against, null and 0 when there is none), the `cap_usd` written, and
+`basis`, either `rule 2` or `forecast p80`. The block is a receipt; the
+scheduler never reads it, and the lane's own `cap_usd` stays the live
+figure. `--no-forecast-cap` declines the raise: the caps stay at their rule
+2 figures, the warning prints as before, and the `caps` block still carries
+the p80 that was turned down.
+
 ### Salvage
 
 AGENTS.md rule 6: when a write lane's own gate is green but the clean gate

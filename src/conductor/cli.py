@@ -861,6 +861,16 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
         # beside the mission file whether or not --inline was given.
         shape.write_shape_schemas(base_dir)
         mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
+        # F17: the forecast is read twice on purpose. The first pass sizes
+        # the caps against the history, `apply_caps` raises every warned
+        # lane and records the arithmetic on the mission file, and the
+        # second pass is what gets printed, so the block below and the
+        # --dry-run summary both describe the caps that were written.
+        fc = forecast_mod.forecast(mission, conductor_home())
+        cap_raises = forecast_mod.apply_caps(raw, fc, enabled=not args.no_forecast_cap)
+        if cap_raises:
+            mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
+            fc = forecast_mod.forecast(mission, conductor_home())
     except (shape.ShapeInvalid, MissionInvalid) as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
@@ -872,7 +882,12 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
     # this is printed against the real conductor home right here -- whether
     # or not --dry-run is also given (that branch's own JSON carries the
     # same block, via MissionResult.summary()).
-    fc = forecast_mod.forecast(mission, conductor_home())
+    for raised in cap_raises:
+        print(
+            f"cap raised: {raised['lane']} ${raised['old_usd']:.2f} -> "
+            f"${raised['cap_usd']:.2f} (forecast p80 ${raised['p80_usd']:.2f}, "
+            f"{raised['runs']} runs)"
+        )
     print("forecast:")
     for lane_fc in fc.lanes:
         marker = " [warn]" if lane_fc.warn else ""
@@ -1197,6 +1212,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="the mission's E9 rolling-spend ceiling: 'none' (default) writes null bounds -- "
         "an attended launch is watched, so the ceiling follows --unattended, not this "
         "launcher; 'default' copies ceiling.py's own constants; 'H,D' sets both explicitly",
+    )
+    p_shape_a.add_argument(
+        "--no-forecast-cap",
+        action="store_true",
+        help="leave a warned lane's cap at its rule 2 figure (F17); the warning is still "
+        "printed and the declined forecast p80 is still recorded in the mission's caps block",
     )
     p_shape_a.add_argument(
         "--skip-preflight",
