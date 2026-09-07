@@ -7,7 +7,9 @@ consumer), where the ordinary code gate says nothing about the deliverable.
 
 Checks: the file exists and is not empty; no em or en dash (the house style
 forbids them); none of the filler words below; every markdown table row has
-the same number of cells as its header.
+the same number of cells as its header. Fenced code blocks are skipped: a
+quoted tool result or log line is a receipt, and rewriting it to satisfy a
+style rule falsifies it (the F22 live consumer, 2026-09-07).
 """
 
 from __future__ import annotations
@@ -41,7 +43,13 @@ DASHES = ("—", "–")
 def problems(text: str) -> list[str]:
     out: list[str] = []
     lines = text.splitlines()
+    fenced = False
     for number, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
         lowered = line.lower()
         for dash in DASHES:
             if dash in line:
