@@ -13,14 +13,15 @@ claim below lives in `docs/research/` (dated reports with URLs and live-probe re
 - Gate before any commit, exit codes captured to files, never piped through `tail` or `head`:
   ```
   .venv/bin/ruff check src tests
-  .venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto
+  .venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto --dist loadgroup
   ```
-  Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto`.
+  Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup`.
   `-n auto` is pytest-xdist (dev group only; the runtime stays stdlib): the suite runs in about
   30 seconds across workers instead of four minutes, and was clean three times in a row when it
   was adopted on 2026-09-07. Always pass `--basetemp` outside the tree. If a load-sensitive test
-  ever flakes under workers, mark it `@pytest.mark.xdist_group(name="serial")` and run with
-  `--dist loadgroup`; never go back to the serial gate (operator decision 2026-09-07).
+  ever flakes under workers, mark it `@pytest.mark.xdist_group(name="serial")`; `--dist loadgroup`
+  is part of the gate for that reason (first member: a cascade resume test, 2026-09-07). Never go
+  back to the serial gate (operator decision 2026-09-07).
 - Conventional commits, one logical unit each, no co-author trailers, no absolute home paths or
   personal details in messages or committed docs.
 - A fleet's word is never evidence. Verify on bytes: diff, gate output, receipts in `~/.conductor`.

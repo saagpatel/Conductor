@@ -261,6 +261,10 @@ def test_cascade_escalation_across_two_lanes(repo, home, monkeypatch, tmp_path, 
     assert rows_out[0]["escalation"] == result.escalation
 
 
+# Flaked once under `-n auto` on 2026-09-07 (first launch red, gw8, full
+# suite; green solo and under a 24-run stress): the serial group per
+# AGENTS.md, and the assertion carries the lanes so the next one is a receipt.
+@pytest.mark.xdist_group(name="serial")
 def test_a_resume_keeps_the_escalated_flag_on_the_kept_lane(repo, home, monkeypatch, tmp_path):
     def fake_build(spec):
         if spec.fleet == "cursor":
@@ -287,7 +291,7 @@ def test_a_resume_keeps_the_escalated_flag_on_the_kept_lane(repo, home, monkeypa
     }
     mission = mission_from_dict(raw, base_dir=tmp_path)
     first = run_mission(mission, home=home)
-    assert first.ok is True
+    assert first.ok is True, json.dumps(first.lanes, indent=1)
 
     snapshot = json.loads(Path(first.mission_dir, "mission.json").read_text())
     reloaded = Mission.from_snapshot(snapshot)
