@@ -18,7 +18,9 @@ claim below lives in `docs/research/` (dated reports with URLs and live-probe re
   Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto`.
   `-n auto` is pytest-xdist (dev group only; the runtime stays stdlib): the suite runs in about
   30 seconds across workers instead of four minutes, and was clean three times in a row when it
-  was adopted on 2026-09-07. Always pass `--basetemp` outside the tree.
+  was adopted on 2026-09-07. Always pass `--basetemp` outside the tree. If a load-sensitive test
+  ever flakes under workers, mark it `@pytest.mark.xdist_group(name="serial")` and run with
+  `--dist loadgroup`; never go back to the serial gate (operator decision 2026-09-07).
 - Conventional commits, one logical unit each, no co-author trailers, no absolute home paths or
   personal details in messages or committed docs.
 - A fleet's word is never evidence. Verify on bytes: diff, gate output, receipts in `~/.conductor`.
