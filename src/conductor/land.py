@@ -325,8 +325,13 @@ def _land(
             already_merged=True,
             ok=True,
         )
-    if git_run(root, "merge-base", "--is-ancestor", head, branch_tip).returncode != 0:
-        raise LandInvalid(f"branch '{branch}' is not a descendant of the checkout's HEAD")
+    # A lane's branch almost never descends from the checkout's HEAD: every
+    # Phase E and F item was launched on one tip and merged onto a later one
+    # (`--no-ff` on a diverged branch is the whole point). The first live
+    # `land` refused F12 for exactly that, so the check is shared history,
+    # not descent: a branch with no merge base was born elsewhere.
+    if git_run(root, "merge-base", head, branch_tip).returncode != 0:
+        raise LandInvalid(f"branch '{branch}' shares no history with the checkout's HEAD")
 
     test_command = gate_command or _mission_test(mission_raw)
     if not test_command:

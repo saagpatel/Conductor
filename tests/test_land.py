@@ -360,3 +360,49 @@ def test_refuses_an_unknown_lane_and_still_writes_a_receipt(repo, home, fake_fle
     assert len(receipts) == 1
     refused = json.loads(receipts[0].read_text())
     assert "refused" in refused
+
+
+def test_a_branch_that_diverged_from_an_older_tip_lands_with_a_merge_commit(
+    repo, home, fake_fleet, monkeypatch, git_out
+):
+    """The first live `land` (F12, 2026-09-07) was refused because the lane's
+    branch was not a descendant of HEAD: it had been launched on 0.52.0 and
+    the checkout had moved to 0.53.0 since. That is every merge this project
+    makes. Shared history is the requirement, not descent."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    (repo / "moved-on.txt").write_text("the checkout moved on\n")
+    subprocess.run(["git", "add", "moved-on.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "chore: a later release"], cwd=repo, check=True
+    )
+    pre_head = git_out(repo, "rev-parse", "HEAD")
+
+    result = land(mission_id, lane, home=home, checkout=str(repo))
+
+    assert result.ok is True and result.already_merged is False
+    head = git_out(repo, "rev-parse", "HEAD")
+    assert head != pre_head
+    parents = git_out(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert len(parents) == 3, parents
+    assert pre_head in parents
+
+
+def test_a_branch_with_no_shared_history_is_refused(
+    repo, home, fake_fleet, monkeypatch, git_out, tmp_path
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    receipt = json.loads((home / "missions" / mission_id / "lanes" / f"{lane}.json").read_text())
+    branch = receipt["branch"]
+    subprocess.run(["git", "checkout", "-q", "--orphan", "elsewhere"], cwd=repo, check=True)
+    subprocess.run(["git", "rm", "-rfq", "."], cwd=repo, check=True)
+    (repo / "root.txt").write_text("unrelated\n")
+    subprocess.run(["git", "add", "root.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "unrelated root"], cwd=repo, check=True)
+    pre_head = git_out(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(LandInvalid, match="shares no history"):
+        land(mission_id, lane, home=home, checkout=str(repo))
+    assert git_out(repo, "rev-parse", "HEAD") == pre_head
+    assert git_out(repo, "rev-parse", branch)

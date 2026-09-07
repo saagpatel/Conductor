@@ -1058,8 +1058,9 @@ changed) when the mission or lane does not exist, the lane has no branch or
 the branch does not exist in the lane's repository, the checkout (default:
 the lane's own repository) is not a git repository, is not on a branch, has
 uncommitted changes, or is mid-merge, the checkout's current branch is the
-branch itself, or the branch's tip is not a descendant of the checkout's
-HEAD. A branch whose tip is already reachable from the checkout's HEAD is
+branch itself, or the branch shares no history with the checkout's HEAD (a
+branch that diverged from an older tip is the ordinary case and lands with a
+merge commit). A branch whose tip is already reachable from the checkout's HEAD is
 not a refusal: it exits 0 and reports `already_merged` without touching the
 tree. It also refuses when it finds itself running inside a lane's own
 environment (`CONDUCTOR_LANE`, set on every dispatched process) -- `land` is
