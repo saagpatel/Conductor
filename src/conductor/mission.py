@@ -60,7 +60,31 @@ from . import forecast as forecast_mod
 from . import notify as notify_mod
 from . import verdicts as verdicts_mod
 from .errors import KINDS, error_kind
-from .fleets import TAINT_SHELL_MODES, VENDORS, DispatchRefused, Spec, model_vendor
+from .fleets import TAINT_SHELL_MODES, DispatchRefused, Spec
+from .graph import (
+    _ANY_BRACES,
+    _LANE_NAME,
+    _STAGE_MODE,
+    _TEMPLATE,
+    STAGES,
+    MissionInvalid,
+    _propagate_taint,
+    _self_judging_findings,
+    _tainted_names,
+    collate_taint_sources,
+    resolve_taint_sources,
+    validate_graph,
+    validate_pause,
+    validate_policy,
+    validate_quorum,
+    validate_self_judging,
+)
+from .graph import (
+    _SELF_JUDGING_VALUES as _SELF_JUDGING_VALUES,
+)
+from .graph import (
+    _template_refs as _template_refs,
+)
 from .prices import finite_positive
 from .runner import (
     Result,
@@ -78,14 +102,6 @@ from .verify import GIT_UNRUN, git_run
 log = logging.getLogger("conductor.mission")
 
 REQUIRE = ("all", "any")
-# A lane's place in a pipeline. "review" lanes are read mode, "build",
-# "fix", and "adversarial" lanes are write mode; a lane may leave stage
-# unset and be none of these. A stage is also what a mission's `policy`
-# restricts by vendor. "adversarial" (E16) is appended, never inserted, so
-# every existing message that joins STAGES keeps its old text as a prefix.
-STAGES = ("build", "review", "fix", "adversarial")
-_STAGE_MODE = {"build": "write", "review": "read", "fix": "write", "adversarial": "write"}
-_LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # F13: distinguishes "the caller passed no schema" (Collate.spec falls back
 # to its own `self.schema`) from "the caller explicitly wants no schema"
@@ -215,8 +231,6 @@ _RESOLVE_KEYS = {
     "instructions",
     "max_chars",
 }
-_SELF_JUDGING_VALUES = ("allow",)
-
 DEFAULT_COLLATE_INSTRUCTIONS = (
     "Compare the lane results above. State where they agree, where they disagree, "
     "and which lane's result is strongest and why. Be concrete and brief."
@@ -244,18 +258,6 @@ GATE_TEST_SURFACE_NOTE = (
 # Total characters of upstream output one rendered prompt may carry. A 2 MB
 # patch pasted into a prompt is a cost bug, not a feature.
 TEMPLATE_MAX_CHARS = 40_000
-
-# The template grammar, closed: a lane's answer or diff, or the mission's
-# own prompt. Anything else between double braces is refused at load.
-_TEMPLATE = re.compile(
-    r"\{\{\s*(?:lanes\.([A-Za-z0-9._-]+)\.(answer|diff|test_touched|verdict|deliverable)"
-    r"|(mission\.prompt))\s*\}\}"
-)
-_ANY_BRACES = re.compile(r"\{\{[^{}]*\}\}")
-
-
-class MissionInvalid(ValueError):
-    """A mission file that cannot be run as written. Raised at load time."""
 
 
 @dataclass
@@ -742,14 +744,12 @@ class Mission:
             # tainted non-sink lane (fed to the collate through `base` rather
             # than a template reference) slip an off-claude collate past load,
             # to fail later as an uncaught DispatchRefused out of run_mission.
-            candidate_pool = self.sinks() if self.collate.candidates else self.lanes
             # E3: an untrusted-output lane is a taint source for a collate the
             # same way a tainted lane is, even though the lane itself is not
             # tainted.
-            tainted_lanes = [
-                lane.name for lane in candidate_pool if lane.tainted or lane.untrusted_output
-            ]
-            collate_tainted = bool(tainted_lanes)
+            collate_sources = collate_taint_sources(self)
+            tainted_lanes = collate_sources.tainted_lanes
+            collate_tainted = collate_sources.tainted
             try:
                 if self.collate.rank:
                     names_for_rank = [lane.name for lane in self.lanes]
@@ -786,7 +786,8 @@ class Mission:
                     ) from exc
                 raise MissionInvalid(f"collate: {exc}") from exc
         if self.resolve is not None:
-            sinks = self.sinks()
+            resolve_sources = resolve_taint_sources(self)
+            sinks = resolve_sources.sinks
             if len(sinks) < 2:
                 raise MissionInvalid(
                     f"resolve needs at least two sink lanes, got {len(sinks)}"
@@ -804,9 +805,7 @@ class Mission:
             # taking every sink here is the conservative check. E3: an
             # untrusted-output sink is a taint source even though the sink
             # itself is not tainted.
-            tainted_sinks = [
-                sink.name for sink in sinks if sink.tainted or sink.untrusted_output
-            ]
+            tainted_sinks = resolve_sources.tainted_sinks
             try:
                 self.resolve.spec(
                     self.cwd, "resolve", taint=bool(tainted_sinks)
@@ -821,204 +820,19 @@ class Mission:
         self._validate_self_judging()
 
     def _validate_self_judging(self) -> None:
-        if self.self_judging is not None and self.self_judging not in _SELF_JUDGING_VALUES:
-            raise MissionInvalid(
-                f"self_judging must be one of {', '.join(_SELF_JUDGING_VALUES)}, "
-                f"got {self.self_judging!r}"
-            )
-        if self.self_judging in _SELF_JUDGING_VALUES:
-            return
-        findings = _self_judging_findings(self)
-        if findings:
-            judge, judged, vendor = findings[0]
-            raise MissionInvalid(
-                f"'{judge}' judges '{judged}', both on vendor '{vendor}'; "
-                "set self_judging: allow to permit this, or route one of them to a "
-                "different vendor"
-            )
+        validate_self_judging(self)
 
     def _validate_policy(self) -> None:
-        """A4: reviewer direction is a policy, not a free choice. Evidence
-        (docs/ROADMAP-2026-09.md A4): Claude reviewing Codex lifted pass rate
-        71.6% -> 89.7%; Codex reviewing Claude dropped it 91.4% -> 82.8%.
-        `policy` restricts which vendors may run a staged lane, per stage."""
-        if self.policy is None:
-            return
-        declared = {lane.stage for lane in self.lanes if lane.stage is not None}
-        for stage, rule in self.policy.items():
-            if stage not in STAGES:
-                raise MissionInvalid(
-                    f"policy: unknown stage {stage!r}; known: {', '.join(STAGES)}"
-                )
-            unknown_vendors = [v for v in rule["vendors"] if v not in VENDORS]
-            if unknown_vendors:
-                raise MissionInvalid(
-                    f"policy for stage '{stage}': unknown vendor {unknown_vendors[0]!r}; "
-                    f"known: {', '.join(VENDORS)}"
-                )
-            if stage not in declared:
-                raise MissionInvalid(f"policy names stage '{stage}' but no lane declares it")
-        for lane in self.lanes:
-            if lane.stage is None or lane.stage not in self.policy:
-                continue
-            allowed = self.policy[lane.stage]["vendors"]
-            for attempt in lane.attempts:
-                vendor = model_vendor(attempt.fleet, attempt.model)
-                if vendor not in allowed:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}' ({attempt.label()}) is on vendor '{vendor}'; "
-                        f"policy allows {', '.join(allowed)} for stage {lane.stage}"
-                    )
+        validate_policy(self)
 
     def _validate_pause(self, names: set[str]) -> None:
-        """C2: `pause.before` names real lanes, and `pause.spend_usd` leaves
-        room under `max_cost_usd` for the operator to actually see the pause
-        before the ledger itself would have refused the next dispatch."""
-        if self.pause is None:
-            return
-        unknown = [name for name in self.pause["before"] if name not in names]
-        if unknown:
-            raise MissionInvalid(f"pause.before names unknown lane '{unknown[0]}'")
-        spend_usd = self.pause["spend_usd"]
-        if spend_usd is not None:
-            if spend_usd <= 0:
-                raise MissionInvalid("pause.spend_usd must be positive")
-            if self.max_cost_usd is not None and spend_usd >= self.max_cost_usd:
-                raise MissionInvalid("pause.spend_usd must be below max_cost_usd")
+        validate_pause(self, names)
 
     def _validate_quorum(self, names: set[str]) -> None:
-        if not isinstance(self.require, dict):
-            return
-        if set(self.require) != {"pass", "of"}:
-            raise MissionInvalid("quorum require must contain exactly 'pass' and 'of'")
-        needed = self.require["pass"]
-        selected = self.require["of"]
-        if isinstance(needed, bool) or not isinstance(needed, int) or needed < 1:
-            raise MissionInvalid("quorum pass must be an integer at least 1")
-        if not isinstance(selected, list) or not all(isinstance(name, str) for name in selected):
-            raise MissionInvalid("quorum of must be a list of lane names")
-        if len(selected) < 2:
-            raise MissionInvalid("quorum of must name at least two lanes")
-        if len(selected) > 3:
-            raise MissionInvalid(
-                "quorum of may name at most three lanes; three judges with a dissent "
-                "slot tally better than five"
-            )
-        if len(set(selected)) != len(selected):
-            raise MissionInvalid("quorum lane names must be unique")
-        unknown = [name for name in selected if name not in names]
-        if unknown:
-            raise MissionInvalid(f"quorum names unknown lane '{unknown[0]}'")
-        if needed > len(selected):
-            raise MissionInvalid("quorum pass cannot exceed the number of lanes in of")
-        if len(selected) == 3 and needed == 3:
-            raise MissionInvalid("quorum of three needs a dissent slot: pass must be at most 2")
-        by_name = {lane.name: lane for lane in self.lanes}
-        for name in selected:
-            if any(attempt.verdict is None for attempt in by_name[name].attempts):
-                raise MissionInvalid(
-                    f"quorum lane '{name}' must have a verdict on every attempt"
-                )
-        vendors = {
-            model_vendor(attempt.fleet, attempt.model)
-            for name in selected
-            for attempt in by_name[name].attempts
-        }
-        if len(vendors) < 2:
-            raise MissionInvalid("quorum lanes must span at least two vendors")
+        validate_quorum(self, names)
 
     def _validate_graph(self, names: set[str]) -> None:
-        """Needs and bases name real lanes, never the lane itself, and form
-        no cycle; every template reference is to a declared need."""
-        by_name = {lane.name: lane for lane in self.lanes}
-        for lane in self.lanes:
-            for need in lane.needs:
-                if need not in names:
-                    raise MissionInvalid(f"lane '{lane.name}' needs unknown lane '{need}'")
-                if need == lane.name:
-                    raise MissionInvalid(f"lane '{lane.name}' needs itself")
-            if lane.base is not None and lane.base not in lane.needs:
-                raise MissionInvalid(f"lane '{lane.name}': base '{lane.base}' must be a need")
-            # E7: a human lane holds no commit and no fleet session -- naming
-            # one as another lane's base or resume is refused here, the same
-            # place an unknown or self-referential base/resume already is.
-            if lane.base is not None and by_name[lane.base].human:
-                raise MissionInvalid(
-                    f"lane '{lane.name}': base '{lane.base}' is a human lane, "
-                    "which holds no commit to build on"
-                )
-            # E10: a plan lane is read mode and never commits -- naming one as
-            # another lane's base or resume is refused here, the same place a
-            # human lane's is, above.
-            if lane.base is not None and by_name[lane.base].plan:
-                raise MissionInvalid(
-                    f"lane '{lane.name}': base '{lane.base}' is a plan lane, "
-                    "which holds no commit to build on"
-                )
-            if lane.resume is not None:
-                if lane.resume not in names:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}' resumes unknown lane '{lane.resume}'"
-                    )
-                if lane.resume == lane.name:
-                    raise MissionInvalid(f"lane '{lane.name}' resumes itself")
-                if lane.resume not in lane.needs and lane.resume != lane.base:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}': resume '{lane.resume}' must be in needs or be base"
-                    )
-                if by_name[lane.resume].human:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}': resume '{lane.resume}' is a human lane, "
-                        "which holds no session to resume"
-                    )
-                if by_name[lane.resume].script:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}': resume '{lane.resume}' is a script lane, "
-                        "which holds no session to resume"
-                    )
-                if by_name[lane.resume].plan:
-                    raise MissionInvalid(
-                        f"lane '{lane.name}': resume '{lane.resume}' is a plan lane, "
-                        "which holds no session to resume"
-                    )
-            for attempt in lane.attempts:
-                for ref_lane, ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
-                    if is_mission:
-                        if not self.prompt:
-                            raise MissionInvalid(
-                                f"lane '{lane.name}' uses {{{{mission.prompt}}}} "
-                                "but the mission sets no prompt"
-                            )
-                    elif ref_lane not in lane.needs:
-                        raise MissionInvalid(
-                            f"lane '{lane.name}' references lanes.{ref_lane}.{ref_field} "
-                            f"but does not list '{ref_lane}' in needs"
-                        )
-                    elif (
-                        ref_field in ("diff", "test_touched", "verdict")
-                        and by_name[ref_lane].human
-                    ):
-                        raise MissionInvalid(
-                            f"lane '{lane.name}' references lanes.{ref_lane}.{ref_field}, but "
-                            f"'{ref_lane}' is a human lane with no {ref_field}"
-                        )
-        # Cycle check: a lane can never wait on something that waits on it.
-        needs = {lane.name: set(lane.needs) for lane in self.lanes}
-        state: dict[str, int] = {}  # 1 = on the current path, 2 = done
-
-        def visit(name: str, path: list[str]) -> None:
-            if state.get(name) == 2:
-                return
-            if state.get(name) == 1:
-                cycle = " -> ".join(path[path.index(name) :] + [name])
-                raise MissionInvalid(f"lanes depend on each other in a cycle: {cycle}")
-            state[name] = 1
-            for need in needs[name]:
-                visit(need, path + [name])
-            state[name] = 2
-
-        for name in needs:
-            visit(name, [])
+        validate_graph(self, names)
 
     def sinks(self) -> list[Lane]:
         """The lanes nothing else depends on: a pipeline's outputs. In a flat
@@ -1237,114 +1051,6 @@ class Mission:
         if json.dumps(mission.to_dict(), sort_keys=True) != json.dumps(raw, sort_keys=True):
             raise MissionInvalid("mission snapshot does not round-trip through validation")
         return mission
-
-
-def _template_refs(text: str, where: str) -> list[tuple[str, str, bool]]:
-    """Every template reference in `text`; anything else between double
-    braces is refused, so a misspelt reference cannot render as `(none)`."""
-    refs: list[tuple[str, str, bool]] = []
-    for raw in _ANY_BRACES.findall(text):
-        m = _TEMPLATE.fullmatch(raw)
-        if m is None:
-            raise MissionInvalid(
-                f"lane '{where}': unknown template {raw}; use {{{{lanes.<name>.answer}}}}, "
-                "{{lanes.<name>.diff}}, {{lanes.<name>.test_touched}}, "
-                "{{lanes.<name>.verdict}}, {{lanes.<name>.deliverable}}, or {{mission.prompt}}"
-            )
-        refs.append((m.group(1) or "", m.group(2) or "", bool(m.group(3))))
-    return refs
-
-
-def _propagate_taint(lanes: list[Lane]) -> None:
-    """D3: mark every lane that inherits taint, over the whole lane graph.
-
-    A lane inherits taint from any lane it references in a template -- every
-    field `_template_refs` parses (`answer`, `diff`, `deliverable`,
-    `verdict`, `test_touched`), on every attempt including the cascade one --
-    and from the lane whose session it `resume`s, whenever that source lane
-    is itself tainted or declares `untrusted_output`.
-
-    A `needs` edge may point forward, so the source may be declared after the
-    consumer; this walk therefore runs to a fixed point over the complete
-    lane list rather than trusting declaration order (which is what a single
-    forward pass inside the build loop did, leaving the same two lanes
-    tainted or not depending on which one was written first). Taint only ever
-    spreads, so every pass either marks a lane and runs again or the graph
-    has settled.
-
-    A human lane is tainted at load with the sentinel `taint_from` value
-    `["human"]`, which names no lane: it is left exactly as `_human_lane`
-    built it, and stays a taint source for everything that reads it.
-    """
-    by_name = {lane.name: lane for lane in lanes}
-    order = {lane.name: index for index, lane in enumerate(lanes)}
-    sources: dict[str, list[str]] = {}
-    for lane in lanes:
-        if lane.human:
-            continue
-        refs: set[str] = set()
-        for attempt in lane.attempts:
-            for ref_lane, _ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
-                if is_mission or ref_lane == lane.name or ref_lane not in by_name:
-                    continue
-                refs.add(ref_lane)
-        if lane.resume is not None and lane.resume in by_name and lane.resume != lane.name:
-            refs.add(lane.resume)
-        sources[lane.name] = sorted(refs, key=lambda name: order[name])
-
-    changed = True
-    while changed:
-        changed = False
-        for lane in lanes:
-            if lane.human:
-                continue
-            taint_from = [
-                name
-                for name in sources[lane.name]
-                if by_name[name].tainted or by_name[name].untrusted_output
-            ]
-            tainted = lane.tainted or bool(taint_from)
-            if taint_from != lane.taint_from or tainted != lane.tainted:
-                lane.taint_from = taint_from
-                lane.tainted = tainted
-                changed = True
-
-
-def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
-    """Every (judge, judged, vendor) pair where a judge could score a lane on
-    its own vendor: a verdict lane or a `stage: review` lane against its
-    `base`, and the collate against any lane it collates over (every lane in
-    the mission).
-
-    "Could" rather than "does": which attempt of a lane ends up final is not
-    known at load time, so a shared vendor on any attempt (fallbacks
-    included) is enough to flag the pair.
-    """
-    by_name = {lane.name: lane for lane in mission.lanes}
-    findings: list[tuple[str, str, str]] = []
-    for lane in mission.lanes:
-        judges = lane.stage == "review" or any(a.verdict is not None for a in lane.attempts)
-        if lane.base is None or not judges:
-            continue
-        judged = by_name.get(lane.base)
-        if judged is None:
-            continue
-        judge_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
-        judged_vendors = {model_vendor(a.fleet, a.model) for a in judged.attempts}
-        for vendor in sorted(judge_vendors & judged_vendors):
-            findings.append((lane.name, lane.base, vendor))
-    if mission.collate is not None:
-        judge_labels = [("collate", mission.collate.fleet, mission.collate.model)] + [
-            (f"collate.judges[{i}]", judge.fleet, judge.model)
-            for i, judge in enumerate(mission.collate.judges)
-        ]
-        for label, fleet, model in judge_labels:
-            judge_vendor = model_vendor(fleet, model)
-            for lane in mission.lanes:
-                lane_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
-                if judge_vendor in lane_vendors:
-                    findings.append((label, lane.name, judge_vendor))
-    return findings
 
 
 def _rank_schema(lane_names: list[str]) -> dict:
@@ -7314,10 +7020,11 @@ def _run_resolve(
         return {"ran": False, "reason": f"{why}; resolve not started"}
     candidates = [lane for lane in lanes if lane.diff_path and Path(lane.diff_path).is_file()]
     # D4: the resolver's own dispatch is tainted the moment any candidate it
-    # actually reads is -- recomputed here from the candidates that produced
+    # actually reads is -- recomputed here, via the same helper
+    # `resolve_taint_sources` uses at load, from the candidates that produced
     # a patch, a subset of the sinks `Mission.validate` already bounded, so
     # this can only ever be narrower than what loaded.
-    tainted = any(lane.tainted or lane.untrusted_output for lane in candidates)
+    tainted = bool(_tainted_names(candidates))
     prompt = _with_prefix(
         mission, _resolve_prompt(mission, candidates, scoped, res, strongest)
     )
