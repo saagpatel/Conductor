@@ -43,6 +43,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | F21 slice 2: approval consumption extracted to approvals.py, D1 and D2 pinned | 0.79.0 | Shape A via the launcher with --opus-review; build landed by conductor land, fix lane salvaged by hand | $16.61 |
 | F21 slice 3: attempt lifecycle extracted to attempts.py, paid-once and never-trust-a-rehearsal pinned | 0.80.0 | Shape A via the launcher with --opus-review, landed by conductor land | $16.05 |
 | F22 non-code artifact acceptance: a deliverable validator run on the before and after bytes, the reproduce gate reads its verdict | 0.81.0 | Shape A via the launcher with --opus-review, landed by conductor land | $13.07 |
+| F22 read live on a document fix lane (validator reproduced, landed by conductor land); prose gate skips fences; the test-only fix lane is a named refusal | 0.82.0 | one fix-stage document mission with two tainted reviewers, landed by conductor land; lead fixes | $2.31 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -79,7 +80,7 @@ today's four mapped missions), one effect inventory shared by `mission.py`
 and `report.py` (shipped 0.77.0 as `spend.effects`, F20), `mission.py` extracted by invariant with
 signatures intact (F21, three slices, one release each: graph policy 0.78.0, approval consumption
 0.79.0, attempt lifecycle 0.80.0), and non-code artifact acceptance with a before/after validator
-(shipped 0.81.0 as F22). All five are closed; nothing from the review remains open.
+(shipped 0.81.0 as F22). All five are closed; nothing from the review remains open. 0.82.0 read F22 live: a fix lane on a document reproduced on its own validator and landed through `conductor land` at $2.31 (`docs/research/2026-09-07-consumer-validator-live.md`), the prose gate learned to skip fenced code after the run showed it forcing a verbatim quote to be rewritten, and the test-only fix lane that F21 slice 2 salvaged by hand became a named refusal.
 
 ## Waves
 
