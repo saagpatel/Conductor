@@ -17,6 +17,7 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
+from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import dispatch
 
 
@@ -332,3 +333,81 @@ def test_every_run_leaves_an_audit_trail(repo, home, fake_fleet):
     saved = json.loads((run_dir / "result.json").read_text())
     assert saved["run_id"] == result.run_id
     assert saved["ok"] == result.ok
+
+
+# --- F3: no gate on a read lane that moved no source bytes -------------------
+
+
+def test_read_lane_with_no_bytes_moved_skips_the_gate(repo, home, fake_fleet):
+    """A gate command that would sink the run (`exit 1`) never runs at all:
+    the bytes comparison taken before either gate shows a no-op, so both are
+    skipped and the receipt says so instead of silently never running."""
+    fake_fleet(["sh", "-c", "echo 'here is my analysis'; exit 0"])
+    result = dispatch(spec_for(repo, mode="read"), home=home, test_command="exit 1")
+    assert result.git_verdict["no_op"] is True
+    assert result.tests is None
+    assert result.gate == {"skipped": "read lane, source unchanged", "command": "exit 1"}
+    assert result.ok is True
+
+
+def test_read_lane_that_moves_a_file_outside_its_deliverable_is_still_gated(
+    repo, home, fake_fleet
+):
+    """The skip is exactly the read-only check's own exemption: a second file
+    beyond the declared deliverable still fails, and the gate still ran."""
+    fake_fleet(
+        ["sh", "-c", "echo out > report.txt; echo extra > other.txt; echo 'analysis done'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}),
+        home=home,
+        test_command="exit 0",
+    )
+    assert result.gate is None
+    assert result.tests is not None
+    assert result.failure() == "read dispatch moved bytes"
+
+
+def test_read_lane_with_an_e1_deliverable_and_a_gate_skips_the_gate(repo, home, fake_fleet):
+    """Moving exactly the declared deliverable is the other shape the skip
+    covers, not just a literal no-op."""
+    fake_fleet(["sh", "-c", "echo out > report.txt; echo 'analysis done'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}),
+        home=home,
+        test_command="exit 1",
+    )
+    assert result.git_verdict["deliverable_only"] is True
+    assert result.tests is None
+    assert result.gate == {"skipped": "read lane, source unchanged", "command": "exit 1"}
+    assert result.ok is True
+
+
+def test_write_lane_with_the_same_gate_still_runs_it(repo, home, fake_fleet):
+    """The skip is read-lane only: a write lane that happens to move no bytes
+    still pays for its gate, exactly as before."""
+    fake_fleet(["sh", "-c", "echo 'nothing changed'; exit 0"])
+    result = dispatch(spec_for(repo, mode="write"), home=home, test_command="exit 1")
+    assert result.gate is None
+    assert result.tests is not None
+    assert result.tests["exit_code"] == 1
+
+
+def test_report_line_says_gate_skipped_for_a_read_lane(repo, home, monkeypatch, tmp_path):
+    def build(spec: Spec) -> list[str]:
+        return ["sh", "-c", "echo 'here is my analysis'; exit 0"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "cwd": str(repo),
+        "prompt": "SPEC",
+        "test": "exit 1",
+        "lanes": [{"name": "reader", "fleet": "claude", "mode": "read", "prompt": "R"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    assert result.ok is True
+
+    report = Path(result.report_path).read_text()
+    section = report.split("## Lane `reader`", 1)[1]
+    assert "gate skipped (read lane)" in section

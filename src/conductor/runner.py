@@ -180,6 +180,12 @@ class Result:
     # spec.prompt (the verdict checklist contract; a mission's collate,
     # resolve, or rank contract, passed in by the caller); empty when none did.
     prompt_versions: dict[str, str] = field(default_factory=dict)
+    # F3: {"skipped": <reason>, "command": <test_command>} when a read lane's
+    # own gate and clean gate were both skipped because the bytes comparison
+    # (run before either gate) showed nothing but the lane's own no-op or its
+    # declared E1 deliverable; None for every other lane, and for a read lane
+    # that moved anything else (still gated, same as today).
+    gate: dict | None = None
 
     @property
     def gate_passed(self) -> bool:
@@ -495,6 +501,28 @@ def _repo_relative(cwd: str, path: str) -> str:
     except ValueError:
         return path
     return (prefix / path).as_posix()
+
+
+def _read_deliverable_only(
+    spec: Spec, before: GitState, after: GitState, verdict: GitVerdict
+) -> bool:
+    """E1's exemption: a read lane may move exactly its declared deliverable
+    and nothing else. Shared by the F3 pre-gate skip decision (evaluated
+    before either gate runs) and the final git verdict the receipt carries
+    (evaluated after), so the two never disagree about what "only the
+    deliverable changed" means."""
+    if not (
+        spec.mode == "read"
+        and spec.deliverable is not None
+        and verdict.checked
+        and not verdict.no_op
+        and before.head == after.head
+        and before.branch == after.branch
+    ):
+        return False
+    changed = changed_entry_paths(before, after)
+    deliverable_repo_path = _repo_relative(spec.cwd, spec.deliverable["path"])
+    return bool(changed) and changed == {deliverable_repo_path}
 
 
 def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
@@ -1925,6 +1953,33 @@ def dispatch(
                 reason="the fleet committed its own work",
             )
 
+        # F3: a read lane's own gate and the clean gate re-check bytes a build
+        # lane already gated. Decided on the bytes comparison taken here, before
+        # either gate runs, never on the final `git_verdict` below (that capture
+        # happens after the gate, and the gate's own scratch files -- pytest
+        # cache, `.pyc`, ... -- must not be mistaken for the lane's own work).
+        # A no-op or a change that is exactly the lane's declared E1 deliverable
+        # (the same exemption the read-only check already applies) skips both;
+        # a read lane that moved anything else is gated exactly as today.
+        read_gate_skip: dict | None = None
+        if (
+            spec.mode == "read"
+            and test_command
+            and not timed_out
+            and error is None
+            and spec.stage != "adversarial"
+        ):
+            pre_gate_after = GitState.capture(spec.cwd)
+            pre_gate_verdict = compare(spec.cwd, before, pre_gate_after)
+            if pre_gate_verdict.checked and (
+                pre_gate_verdict.no_op
+                or _read_deliverable_only(spec, before, pre_gate_after, pre_gate_verdict)
+            ):
+                read_gate_skip = {
+                    "skipped": "read lane, source unchanged",
+                    "command": test_command,
+                }
+
         tests: TestOutcome | None = None
         # E16: an adversarial lane's own gate and the clean gate both fail by
         # construction (its deliverable is a test that fails on its own
@@ -1933,14 +1988,20 @@ def dispatch(
         # commit (`reproduce_blocks_commit`, above, is what actually gates
         # it). test_policy is `allow` on every adversarial attempt (enforced
         # at load), so the clean-gate block below is already skipped too.
-        if test_command and not timed_out and error is None and spec.stage != "adversarial":
+        if (
+            test_command
+            and not timed_out
+            and error is None
+            and spec.stage != "adversarial"
+            and read_gate_skip is None
+        ):
             tests = run_tests(
                 spec.cwd, test_command, timeout=GATE_TIMEOUT, stop=stop_requested, env=env
             )
             if tests.interrupted:
                 interrupted = True
                 error = "interrupted: stop requested during the gate; process group killed"
-        if surface_state is not None and spec.test_policy == "clean":
+        if surface_state is not None and spec.test_policy == "clean" and read_gate_skip is None:
             if not surface_state["touched"]:
                 surface_state["clean_gate"] = {
                     "ran": False,
@@ -2003,29 +2064,15 @@ def dispatch(
 
         after = GitState.capture(spec.cwd)
         git_verdict = compare(spec.cwd, before, after)
-        if (
-            spec.mode == "read"
-            and spec.deliverable is not None
-            and git_verdict.checked
-            and not git_verdict.no_op
-            and before.head == after.head
-            and before.branch == after.branch
-        ):
+        if _read_deliverable_only(spec, before, after, git_verdict):
             # E1: a read lane may move exactly its declared deliverable. Any
             # other change -- a second file, a commit, a branch move -- must
-            # still fail the ordinary read-only check below. `changed` names
-            # are repo-root-relative (git status runs at the toplevel), while
-            # `spec.deliverable["path"]` is cwd-relative; a cwd that is a
-            # subdirectory of the repo (an ordinary, supported shape) needs
-            # the same prefix joined on before the two can compare equal.
-            changed = changed_entry_paths(before, after)
-            deliverable_repo_path = _repo_relative(spec.cwd, spec.deliverable["path"])
-            if changed and changed == {deliverable_repo_path}:
-                git_verdict.deliverable_only = True
-                git_verdict.notes.append(
-                    f"read dispatch moved only its declared deliverable: "
-                    f"{spec.deliverable['path']}"
-                )
+            # still fail the ordinary read-only check below.
+            git_verdict.deliverable_only = True
+            git_verdict.notes.append(
+                f"read dispatch moved only its declared deliverable: "
+                f"{spec.deliverable['path']}"
+            )
         git_verdict.notes.extend(output.notes)
         if resume_note:
             git_verdict.notes.append(resume_note)
@@ -2206,6 +2253,7 @@ def dispatch(
         mission=mission,
         fleet_version=fleet_version,
         prompt_versions=prompt_versions,
+        gate=read_gate_skip,
     )
     if result.spawned:
         statement = _lane_receipt_statement(

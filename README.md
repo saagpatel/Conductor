@@ -167,6 +167,19 @@ gate command must bring its own toolchain (an absolute interpreter path, a
 when the gate ends, on every path; `gc` recognises a leftover
 `<run_id>-clean` tree and keeps it while its run is live.
 
+A `mode: read` lane's own gate and clean gate are skipped outright when a
+bytes comparison taken *before* either would run shows nothing but a no-op or
+exactly the lane's declared deliverable (the same exemption the read-only
+check applies) -- a review lane that moved nothing has nothing for the base
+tree's gate, already run by whatever it is reviewing, to re-check. The
+receipt records `gate: {"skipped": "read lane, source unchanged", "command":
+<the gate>}` and `tests: null`; every verdict that reads a passed gate (a
+mission's `require`, `conductor report`'s `ok` column and `gate_failures`,
+salvage) treats the skip as a pass, and a mission's `report.md` names the
+lane's skip as `gate skipped (read lane)`. A read lane that moves anything
+else is gated exactly as before, and a write lane's gate always runs,
+whether or not it moved bytes.
+
 ## What the live matrix taught
 
 Every row below was found by running the thing, not by reading help output.
