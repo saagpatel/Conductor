@@ -47,7 +47,10 @@ refuted. Below: only where the verification sharpened, narrowed, or extended the
 - **D10.** Real interleaving, sub-millisecond window, one operator launching by hand: not
   reachable today. Matters only if two resumes ever fire together.
 - **D11.** Stop and cancel are already checked in `_pollable_sleep`; only the ledger check is
-  missing on retry. Bounded by the per-dispatch cap.
+  missing on retry. Bounded by the per-dispatch cap. Narrower still, found while fixing it: a
+  lane's own unpriced failure is classified `cap`, not a retryable kind, so the gap is reachable
+  only across lanes (another lane lands unpriced or exhausts the budget during this lane's
+  retry backoff).
 - **D15.** Exposure is exactly a write lane on agy exiting 0 with a cut stream; a read lane
   fails on the empty answer. `tests/test_budget.py:210` pins the current behavior.
 - **D21.** Deliberate (comment in `tests/test_report.py:802`). All nine cap receipts in the
