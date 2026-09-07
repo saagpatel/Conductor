@@ -31,6 +31,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | W8 wall block: occupied, critical path, lead seconds, stretch; W10 notify process group and bounded output; drill pass two | 0.67.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; three scratch-repo dispatches | $0.08 |
 | Evidence map as the build lane's deliverable; W7 precision labels landed via shape a --opus-review | 0.68.0 | Shape A via the launcher with --opus-review, landed by conductor land | $5.45 |
 | W6 price basis and outstanding caps on receipts; W9 export scope declared and the D13 inventory; drill pass three; scrub guard accepts its own redaction | 0.69.0 | Shape A via the launcher with --opus-review, landed by conductor land; lead fix; four scratch-repo dispatches | $17.41 |
+| Ledger in-flight figures live in pause.json and running.json; settings digest check for Claude write lanes; land dry-run flag | 0.70.0 | lead with two Opus subagents in worktrees, merged in series, gated on the merged tree; one scratch-repo dispatch | $0.07 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -51,9 +52,10 @@ full shape (evidence map, Opus reviewer, W8 wall figures) landed W7. W6 and W9 s
 receipts; export scope declared over the D13 inventory), with item 3's third pass: the permission
 denial path fired on a plan-mode read lane, the land and salvage refusals fired post-hoc on W7, and
 a project deny rule was shown to be no boundary for a write lane. Every review weakness is closed
-or carried as a stated limit. Open: writing the ledger's in-flight figures to a live artifact (the
-pause receipt or `running.json`), a settings-file digest check for Claude write lanes, and the
-plan-digest refusal drill, which needs a paused plan lane.
+or carried as a stated limit. Both follow-ons shipped in 0.70.0: the ledger's in-flight figures are
+written to `pause.json` and refreshed in `running.json`, and a Claude write lane that rewrites its
+own `.claude/settings*.json` fails as kind `settings` (drilled live). Open: the plan-digest refusal
+drill, which needs a paused plan lane.
 
 ## Waves
 
