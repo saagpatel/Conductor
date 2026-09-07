@@ -15,14 +15,42 @@ for the collate.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
-from conductor.graph import _tainted_names, resolve_taint_sources
+from conductor.graph import CollateTaintSources, _tainted_names, resolve_taint_sources
 from conductor.mission import MissionInvalid, mission_from_dict
 
 CURSOR_TAINT_REFUSAL = "taint is enforceable on the claude and antigravity fleets only"
+
+# Both the relative spelling (`from .mission`, `import mission`) and the
+# absolute one (`from conductor.mission`, `import conductor.mission`) name
+# the same module; a module-level import of either form reintroduces the
+# cycle graph.py must never have.
+_FORBIDDEN_MISSION_IMPORTS = (
+    "from .mission",
+    "import mission",
+    "from conductor.mission",
+    "import conductor.mission",
+)
+
+
+def _module_level_lines(source: str) -> list[str]:
+    """Every line of `source` outside a top-level `if TYPE_CHECKING:` block."""
+    lines: list[str] = []
+    in_type_checking = False
+    for line in source.splitlines():
+        if line.strip().startswith("if TYPE_CHECKING"):
+            in_type_checking = True
+            continue
+        if in_type_checking and line and not line[0].isspace():
+            in_type_checking = False
+        if in_type_checking:
+            continue
+        lines.append(line)
+    return lines
 
 
 def _template_ref_raw(consumer_fleet: str, *, consumer_first: bool) -> dict:
@@ -146,16 +174,42 @@ def test_d4_resolve_taint_sources_is_empty_with_no_tainted_sink():
 def test_graph_module_does_not_import_mission_at_module_level():
     """The cycle graph.py must never reintroduce: mission.py imports names
     back from graph (item 1), so graph.py must never import mission at
-    module level -- only inside a `TYPE_CHECKING` block, for annotations."""
+    module level -- only inside a `TYPE_CHECKING` block, for annotations.
+    Checks both the relative and the absolute spelling of the import (see
+    `test_the_import_cycle_guard_also_catches_an_absolute_style_import`),
+    so renaming the import from one form to the other cannot slip the cycle
+    back in unnoticed."""
     source = Path(__file__).resolve().parents[1] / "src" / "conductor" / "graph.py"
-    in_type_checking = False
-    for line in source.read_text().splitlines():
-        if line.strip().startswith("if TYPE_CHECKING"):
-            in_type_checking = True
-            continue
-        if in_type_checking and line and not line[0].isspace():
-            in_type_checking = False
-        if in_type_checking:
-            continue
-        assert "from .mission" not in line
-        assert "import mission" not in line
+    for line in _module_level_lines(source.read_text()):
+        for forbidden in _FORBIDDEN_MISSION_IMPORTS:
+            assert forbidden not in line
+
+
+def test_the_import_cycle_guard_also_catches_an_absolute_style_import():
+    """The guard above must reject `import conductor.mission` and
+    `from conductor.mission import ...` exactly as it rejects the relative
+    spelling: both name the same module and reintroduce the same cycle. A
+    check that only looked for the literal substrings `from .mission` and
+    `import mission` would miss `import conductor.mission` (it contains
+    neither substring), so a module-level import of `mission` renamed from
+    relative to absolute would pass unnoticed."""
+    poisoned = (
+        "import re\n\n"
+        "if TYPE_CHECKING:\n"
+        "    from .mission import Lane\n\n"
+        "import conductor.mission\n"
+    )
+    flagged = [
+        line
+        for line in _module_level_lines(poisoned)
+        if any(forbidden in line for forbidden in _FORBIDDEN_MISSION_IMPORTS)
+    ]
+    assert flagged == ["import conductor.mission"]
+
+
+def test_collate_taint_sources_carries_only_what_validate_reads():
+    """`Mission.validate` reads `tainted_lanes` (and the derived `tainted`
+    property) off `collate_taint_sources`'s return value, never the
+    candidate pool itself -- a field nothing reads is dead weight a later
+    edit could mistake for load-bearing."""
+    assert {f.name for f in dataclasses.fields(CollateTaintSources)} == {"tainted_lanes"}

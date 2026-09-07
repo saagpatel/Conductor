@@ -182,15 +182,15 @@ def _tainted_names(candidates: list[Lane] | list[LaneResult]) -> list[str]:
 @dataclass(frozen=True)
 class CollateTaintSources:
     """What `Mission.validate` needs to gate the collate's own dispatch
-    against a tainted candidate. `candidate_pool` is `mission.sinks()` when
-    the collate narrows to ranked sinks (`candidates` non-zero), else every
-    lane in the mission (D2: `_run_collate` hands every lane to
-    `_collate_candidates`, which only narrows to sinks under that same
-    condition); `tainted_lanes` names the taint sources in that pool, in
-    mission order; `tainted` is whether that list is non-empty -- the
-    collate's own dispatch taint flag."""
+    against a tainted candidate. `tainted_lanes` names the taint sources
+    among the collate's candidate pool -- `mission.sinks()` when the collate
+    narrows to ranked sinks (`candidates` non-zero), else every lane in the
+    mission (D2: `_run_collate` hands every lane to `_collate_candidates`,
+    which only narrows to sinks under that same condition) -- in mission
+    order; `tainted` is whether that list is non-empty, the collate's own
+    dispatch taint flag. The candidate pool itself is not carried here:
+    nothing downstream of `validate` reads it, only the names."""
 
-    candidate_pool: list[Lane]
     tainted_lanes: list[str]
 
     @property
@@ -201,9 +201,7 @@ class CollateTaintSources:
 def collate_taint_sources(mission: Mission) -> CollateTaintSources:
     assert mission.collate is not None
     candidate_pool = mission.sinks() if mission.collate.candidates else mission.lanes
-    return CollateTaintSources(
-        candidate_pool=candidate_pool, tainted_lanes=_tainted_names(candidate_pool)
-    )
+    return CollateTaintSources(tainted_lanes=_tainted_names(candidate_pool))
 
 
 @dataclass(frozen=True)
