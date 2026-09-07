@@ -30,6 +30,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F7 conductor land | 0.53.0 | Shape A via the launcher, build green under cap, Grok's two real findings fixed on the resumed thread with dispositions | $7.65 |
 | F12 Claude read lanes under --restricted and --permission-prompts none; deliverable read lanes can write | 0.54.0 | Shape A via the launcher, build green under cap, both reviewers NO_FINDINGS, landed by conductor land | $8.63 |
 | F2 wall clock on the ledger | 0.55.0 | Shape A via the launcher, build green under cap, Grok's three findings all fixed on the resumed thread, landed by conductor land | $15.69 |
+| F8 golden fixtures for the Phase E shapes | 0.56.0 | lead work, four consumer recordings, five scratch missions | $1.58 |
 
 Status 2026-09-07, end of the first Phase F sitting: every build item that survived Group 0
 is shipped (F1, F2, F3, F5, F6, F7, F12, F13; F4 was already on the tree, F14 dropped on its
@@ -40,9 +41,11 @@ Shape A fix that followed it (`docs/research/2026-09-07-consumer-core-guard-fix.
 three commits on a branch of the harness repository, gated green, the operator's to merge);
 F11 ran (`docs/research/2026-09-07-f11-unattended-reaudit.md`: the re-audit unattended, $1.73,
 end event accepted by notification-hub; bridge-db unreachable from the lead's session; a third
-fix mission, $2.08, closed the re-audit's agreed shapes on a second harness branch). F8 fixtures,
-F9 shapes, and the other consumers are not yet run. The last two releases were landed by
-`conductor land`.
+fix mission, $2.08, closed the re-audit's agreed shapes on a second harness branch). F8 ran
+(`docs/research/2026-09-07-f8-golden-fixtures.md`, 0.56.0: nine fixtures, $0.50 on the ledger
+plus about $1.08 the pre-fix replays billed into throwaway homes, five replay defects fixed in
+code). F9 shapes and the other consumers are not yet run. The last two build releases were landed
+by `conductor land`.
 
 ## What the receipts say
 
@@ -196,7 +199,7 @@ item drops and rule 11 stays prose. Modules: new `land.py`, `cli.py`, `worktrees
 None of these is a build. Each is one or more missions whose product is a receipt, and any
 defect a receipt exposes becomes a Phase F fix item sized by rule 2 when it appears.
 
-**F8. Golden fixtures for the Phase E shapes.** The golden suite holds two fixtures, both
+**F8. Golden fixtures for the Phase E shapes.** *Shipped 0.56.0, see the status above.* The golden suite held two fixtures, both
 recorded on C5 (a capped cascade build and a review-and-fix). Every lane kind Phase E added
 (script, human, plan, judge sitting, adversarial, cross-repo, deliverable) is covered by unit
 tests and by no replay, and E10a's review found a plan lane whose deliverable was never recorded
