@@ -18,6 +18,11 @@ standing rejected list in `AGENTS.md` (MCP wrapper, fleet self-commit, atomic bu
 reservation, age-based reclaim, `claude --bare`) stands. Every build item ships through Shape A
 via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead judging on bytes.
 
+## Shipped since this was written
+
+| item | version | shape | cost |
+|---|---|---|---|
+
 ## What the receipts say
 
 The ledger report (`conductor report --since 2026-09-05`, run 2026-09-07) over 130 missions
@@ -211,14 +216,18 @@ launchd fleet is a separate system and stays one). Depends on E9, E12, F10.
 | launchd or cron for F11 | dropped, standing | separately governed system; a plist with home paths cannot be committed here |
 | any shelved fleet | dropped, standing | operator decision 2026-09-04 and 2026-09-06 |
 
-## Operator decisions needed before go
+## Operator decisions, settled 2026-09-07
 
-1. **F6**: the default `ceiling` for an attended launch from the launcher: keep E9's $10 per
-   hour and $25 per day and require `--ceiling none` on a Shape A day, or write `null` bounds by
-   default and require `--ceiling default` for an unattended file. The receipts favor the second
-   (every attended mission since E9 carried `null` by hand) and the E9 decision favors the first.
-2. **F7**: whether conductor gets a `land` command at all.
-3. **F10**: which consumer runs first, and what each may spend.
+1. **F6**: an attended launch from the launcher writes `null` ceiling bounds; `--ceiling
+   default` (E9's $10 per hour and $25 per day) is for a file meant to run unattended. Reason:
+   every attended mission since E9 carried `null` by hand, and the unattended flag is already
+   where the refusals live, so the ceiling follows it.
+2. **F7**: approved. `conductor land` is the lead's hands after the lead has read the diff and two
+   reviewers have covered it; it never runs inside a mission or from a fleet.
+3. **F10**: the cross-vendor core-guard audit runs first, and conductor writes its own ask: an
+   Opus 5 planner lane (E10, `plan: true`) reads the guard and its test in the harness repository
+   and delivers the audit mission file, cap included; conductor dry-runs it and pauses; the lead
+   reads the child and continues. The first planner receipt on real work.
 
 ## Recommended order
 
