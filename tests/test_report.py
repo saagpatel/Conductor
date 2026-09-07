@@ -342,6 +342,14 @@ def test_report_reviewer_precision_counts_an_unparsed_review_verdict_separately(
     assert row.fixed == 0
     assert row.refused == 0
     assert row.unparsed == 1
+    # W7: this mission's fix lane recorded dispositions, but neither one
+    # could land against the unparsed review lane (skipped above) -- its
+    # dispositions did not contribute to google's row, so this mission must
+    # not count toward `missions`. A genuine old-shape receipt (fix lane
+    # present, nothing landed) reads as 0 here rather than failing, the
+    # same requirement spec item 3(c) asks for.
+    assert row.missions == 0
+    assert row.undispositioned == 0
 
 
 def test_report_disposition_naming_an_unknown_lane_is_counted_not_dropped(
@@ -835,6 +843,41 @@ def test_report_reviewer_precision_basis_and_columns_in_json_and_printed(
         "google: fixer agreement over 1 mission(s) with dispositions; 0 review lane(s) not "
         "dispositioned" in printed
     )
+
+
+def test_report_reviewer_precision_heading_labels_fixer_agreement_not_truth(
+    home: Path, monkeypatch, capsys
+):
+    # W7 item 2: the table itself must not read as a truth figure -- the
+    # heading, not just the `basis` line under it, has to say this is
+    # fixer agreement.
+    _write_receipt(
+        home,
+        "20260101T000000Z-m9-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m9",
+    )
+    _write_mission(
+        home,
+        "m9",
+        name="mission-nine",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=1
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    heading = next(line for line in printed.splitlines() if line.startswith("Reviewer precision"))
+    assert "fixer agreement" in heading
 
 
 def test_reviewer_precision_row_defaults_missions_and_undispositioned_to_zero():

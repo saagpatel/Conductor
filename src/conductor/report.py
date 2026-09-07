@@ -871,19 +871,18 @@ def _build_report(
         # parsed and a fix lane that recorded dispositions (even an empty
         # list -- the field's presence is what "with dispositions" means)
         # joins a disposition's named reviewer lane back to its vendor.
-        mission_vendors: set[str] = set()
         for info in review_lanes.values():
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             if info.get("unparsed"):
                 row.unparsed += 1
             else:
                 row.findings += info["findings"]
-            mission_vendors.add(info["vendor"])
-        # W7: this mission's dispositions are part of the selection every
-        # vendor with a review lane here is scored over, whether or not a
-        # disposition below actually names one of that vendor's lanes.
-        for vendor in mission_vendors:
-            precision[vendor].missions += 1
+        # W7: `missions` counts a mission for a vendor only once one of its
+        # dispositions actually lands against that vendor's row below --
+        # not merely for having a review lane on the mission -- so it names
+        # the selection `precision` is actually scored over, never an
+        # inflated one a vendor's own findings had no say in.
+        mission_vendors: set[str] = set()
         for item in _unique_dispositions(name, fix_dispositions, counts=disposition_counts):
             lane_name = item["lane"]
             disposition = item["disposition"]
@@ -903,6 +902,7 @@ def _build_report(
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             setattr(row, disposition, getattr(row, disposition) + 1)
+            mission_vendors.add(info["vendor"])
             if disposition in ("fixed", "refused"):
                 confidence = _matched_confidence(info.get("items"), item.get("index"))
                 if confidence is not None:
@@ -912,6 +912,8 @@ def _build_report(
                         else row.refused_confidences
                     )
                     target.append(confidence)
+        for vendor in mission_vendors:
+            precision[vendor].missions += 1
 
     precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
     # F15 item 3: every fix lane's own `dispositions_malformed` count, summed
@@ -1104,8 +1106,8 @@ def _print_report(rpt: Report) -> None:
         ],
     )
     _print_section(
-        "Reviewer precision (findings fixed vs. refused, over missions with a fix "
-        "lane's dispositions)",
+        "Reviewer precision (fixer agreement -- findings fixed vs. refused, over "
+        "missions with a fix lane's dispositions)",
         (
             "vendor",
             "findings",
