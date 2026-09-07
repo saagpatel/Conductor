@@ -33,6 +33,7 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F8 golden fixtures for the Phase E shapes | 0.56.0 | lead work, four consumer recordings, five scratch missions | $1.58 |
 | F9 Shape B and Shape C receipts; golden source placeholder landed from the Shape B sitting | 0.57.0 | Shape B twice (scratch, then conductor via land), Shape C once, three Opus verifiers | $11.85 |
 | F15 the Shape C findings: six verify, report, and wall-clock defects; F1's dispositions.json deliverable, per-finding confidence, calibration line | 0.58.0 | two Shape A missions via the launcher, both builds green under cap, Grok one real finding each (one fixed by the fix lane, one test-only added by hand), both landed by conductor land | $22.17 |
+| F10 anti-slop consumer over one document; taint hook count corrected to per-file with a per-matcher preflight | 0.59.0 | Sonnet edit lane with untrusted output and an E1 deliverable, Gemini and Opus cold reviews under taint, prose gate, lead applied the reviews by hand | $1.63 |
 
 Status 2026-09-07, end of the first Phase F sitting: every build item that survived Group 0
 is shipped (F1, F2, F3, F5, F6, F7, F12, F13; F4 was already on the tree, F14 dropped on its
@@ -51,8 +52,12 @@ split on the scratch spec and was unanimous and right on the conductor spec, lan
 land`; Shape C's Opus reviewer found six defects still on the tree and three spec gaps the pair
 had passed, now F15). F15 ran (`docs/research/2026-09-07-f15-shape-c-fixes.md`, 0.58.0, $22.17:
 two Shape A missions, the six defects and the three F1 spec gaps all on the tree, Grok one real
-finding per mission, both landed by `conductor land`). The other consumers are not yet run. The
-last five build releases were landed by `conductor land`.
+finding per mission, both landed by `conductor land`). F10's anti-slop consumer ran
+(`docs/research/2026-09-07-consumer-anti-slop.md`, 0.59.0, $1.63: Sonnet edit as an untrusted
+E1 deliverable, Gemini and Opus cold under taint, a prose gate; it found E21's hook-count check
+wrong for every tainted Antigravity lane, fixed and re-proven live). OPERANT-J sitting 2 and the
+HarnessBench live tier are not yet run. The last five build releases were landed by `conductor
+land`.
 
 ## What the receipts say
 
