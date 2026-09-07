@@ -315,56 +315,37 @@ def test_a_child_that_itself_plans_a_grandchild_refuses_the_plan_lane(
     _assert_plan_refused(result, "child would exceed the plan depth limit")
 
 
-def test_a_child_whose_own_dry_run_is_not_ok_refuses_the_plan_lane(repo, tmp_path, monkeypatch):
-    """`_plan_check_child`'s own dry-run-failure branch, pinned directly.
+def test_a_child_whose_own_dry_run_is_not_ok_refuses_the_plan_lane(
+    repo, home, monkeypatch, tmp_path
+):
+    """A dry run never spawns a fleet (`runner.dispatch`'s `if dry_run:`
+    early return), but it still calls `build_argv` to record `argv.json`
+    first -- so a fleet dispatch that cannot even be built crashes that lane
+    during a dry run exactly as it would during a real one (`run_lane`'s
+    broad `except Exception`, mission.py's `run_mission`, catches it and
+    settles `out.ok = False`). That is the only way, through this repo's own
+    fleets, to hand `_plan_check_child` a not-ok dry run without first
+    tripping a load-time refusal (`Mission.validate()`, called by
+    `mission_from_dict`/`load_mission`, already turns an invalid `Spec` into
+    the 'invalid child' refusal above, not this one). This test drives that
+    real path end to end -- a real plan lane, a real child mission, a real
+    dry run -- rather than asserting on a stand-in for what a dry run
+    returns."""
+    child_raw = _child_raw(repo, max_cost_usd=5.0)
 
-    Every dry run the ordinary scheduler can produce sets a lane's `ok` to
-    `True` unconditionally the instant `dry_run` is true (`mission.py`: `if
-    dry_run or (result.ok and result.gate_passed): out.ok = True`), and every
-    refusal a dry run would otherwise hit -- a non-repo cwd, isolation, a
-    pause point -- is itself gated `and not dry_run`. A Spec whose own shape
-    is invalid (an absolute deliverable path, an unknown model, ...) never
-    even reaches that scheduler: `Mission.validate()` -- called by
-    `mission_from_dict`, so by `load_mission` too -- already runs
-    `attempt.spec(...).validate()` over every attempt and turns a
-    `DispatchRefused` into a load-time `MissionInvalid`, which is the
-    'invalid child' refusal above, not this one. No mission this repo's
-    fleets can build reaches a not-ok dry run through the ordinary path, so
-    this pins the branch directly: `_plan_check_child` only ever reads
-    whatever `run_mission(..., dry_run=True)` hands back, and a not-ok one
-    (whatever produces it) is exactly what must fail the plan lane."""
-    import types
+    def pick(spec):
+        if spec.prompt.split()[0] == "CHILDBUILD":
+            raise RuntimeError("simulated fleet failure building the child's own argv")
+        return _write_deliverable_argv(child_raw, cost=0.1)
 
-    import conductor.mission as mission_mod
-
-    child_path = tmp_path / "child.json"
-    child_path.write_text(json.dumps(_child_raw(repo, max_cost_usd=5.0)))
-    parent = mission_from_dict(
-        {"cwd": str(repo), "lanes": [{"name": "noop", "fleet": "claude", "prompt": "NOOP"}]},
-        base_dir=tmp_path,
+    monkeypatch.setattr(runner_mod, "build_argv", pick)
+    mission = mission_from_dict({"cwd": str(repo), "lanes": [_plan_lane()]}, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    _assert_plan_refused(
+        result,
+        "child dry run failed: lane 'childbuild': lane crashed: RuntimeError: "
+        "simulated fleet failure building the child's own argv",
     )
-    # A stand-in for the `MissionResult` a real dry run would return:
-    # `_plan_check_child` and `_first_child_error` only ever read `.ok` and
-    # `.lanes` off it, so a plain namespace pins the contract without having
-    # to fabricate every other required field a real MissionResult carries.
-    fake_dry_result = types.SimpleNamespace(
-        ok=False,
-        lanes=[
-            {
-                "name": "childbuild",
-                "ok": False,
-                "skipped": None,
-                "attempts": [{"failure": "boom", "error": "boom"}],
-            }
-        ],
-    )
-    monkeypatch.setattr(mission_mod, "run_mission", lambda *a, **k: fake_dry_result)
-    plan, message = mission_mod._plan_check_child(
-        parent, str(child_path), ledger=mission_mod.Ledger(None), base=tmp_path
-    )
-    assert message == "child dry run failed: lane 'childbuild': boom"
-    assert plan["refused"] == message
-    assert plan["dry_run_ok"] is False
 
 
 # --- item 4: the answered launch --------------------------------------------
