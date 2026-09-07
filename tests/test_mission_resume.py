@@ -216,6 +216,12 @@ def test_failed_pipeline_resumes_only_the_failed_lane_and_keeps_total_spend(
     report = Path(resumed.report_path).read_text()
     assert "- resumed: attempt 2; kept build, review; rerun fix" in report
     assert "| build | (kept) | True |" in report
+    # F2: an ordinary resume never parked on a pause point, so it adds
+    # nothing to paused_s -- and launched_at is the first run's, not this
+    # resume's own start.
+    assert first.wall is not None and first.wall["paused_s"] == 0.0
+    assert resumed.wall["paused_s"] == 0.0
+    assert resumed.wall["launched_at"] == first.wall["launched_at"]
 
 
 def test_dry_run_receipt_is_rerun_before_a_real_resume(repo, home, monkeypatch, tmp_path):

@@ -332,6 +332,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "lanes": [(lane["name"], lane["ok"]) for lane in data.get("lanes", [])],
                 "cost_usd": round(data.get("cost_usd", 0), 4),
                 "duration_s": round(data.get("duration_s", 0), 1),
+                "wall_s": (data.get("wall") or {}).get("wall_s"),
                 "resumes": len(data.get("resumes") or []),
                 "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),

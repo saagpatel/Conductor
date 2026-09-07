@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -230,6 +231,32 @@ def test_answer_continue_runs_the_parked_lane_without_repaying_finished_ones(
     assert pause_doc["answers"][0]["lane"] == "fix"
     assert pause_doc["answers"][0]["answer"] == "continue"
     assert pause_doc["answers"][0]["answered_at"]
+
+
+def test_paused_s_covers_the_wait_and_launched_at_carries_from_the_first_run(
+    repo, home, monkeypatch, tmp_path
+):
+    """F2: `wall.paused_s` sums the real wait between a park and the resume
+    that answers it, read from `pause.json`'s own `asked_at`/`answered_at`
+    -- and `wall.launched_at` never resets across that same resume."""
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.wall is not None
+    assert first.wall["paused_s"] == 0.0
+
+    sleep_s = 0.2
+    time.sleep(sleep_s)
+
+    resumed = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="continue"
+    )
+    assert resumed.ok is True
+    assert resumed.wall["paused_s"] >= sleep_s
+    assert resumed.wall["launched_at"] == first.wall["launched_at"]
 
 
 def test_answer_stop_dispatches_nothing(repo, home, monkeypatch, tmp_path):
