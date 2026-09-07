@@ -95,11 +95,31 @@ class FleetOutput:
         }
 
 
+def usable_int(value: object) -> int | None:
+    """A token count a fleet actually reported, or None for anything that is
+    not one.
+
+    D9: `json.loads` accepts bare `NaN` and `Infinity`, so a fleet whose
+    usage object carries either reaches `int()` -- which raises, in the one
+    place that records what the run already cost. A bool is not a token
+    count, and neither is a non-integral figure from a token meter, so both
+    are dropped rather than silently coerced.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not (math.isfinite(value) and value.is_integer()):
+        return None
+    return int(value)
+
+
 def _int(d: dict, *keys: str) -> int:
+    """The first key carrying a usable count; 0 when none does -- the same
+    answer this has always given for a usage object that never mentioned the
+    field at all."""
     for k in keys:
-        v = d.get(k)
-        if isinstance(v, (int, float)):
-            return int(v)
+        usable = usable_int(d.get(k))
+        if usable is not None:
+            return usable
     return 0
 
 
@@ -284,8 +304,9 @@ def claude_stream_usage(text: str) -> Usage | None:
     total: dict[str, int] = {}
     for raw in raw_messages:
         for key, value in raw.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                total[key] = total.get(key, 0) + int(value)
+            usable = usable_int(value)
+            if usable is not None:
+                total[key] = total.get(key, 0) + usable
     return usage_from_raw("claude", total)
 
 
@@ -408,8 +429,9 @@ def agy_step_usage(text: str) -> Usage | None:
     total: dict[str, int] = {}
     for raw in per_step.values():
         for key, value in raw.items():
-            if isinstance(value, (int, float)):
-                total[key] = total.get(key, 0) + int(value)
+            usable = usable_int(value)
+            if usable is not None:
+                total[key] = total.get(key, 0) + usable
     return usage_from_raw("antigravity", total)
 
 

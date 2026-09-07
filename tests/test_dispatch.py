@@ -19,6 +19,7 @@ from conductor import runner as runner_mod
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import dispatch
+from conductor.verdicts import Criterion
 
 
 def spec_for(repo: Path, **kw) -> Spec:
@@ -423,3 +424,66 @@ def test_report_line_says_gate_skipped_for_a_read_lane(repo, home, monkeypatch, 
     report = Path(result.report_path).read_text()
     section = report.split("## Lane `reader`", 1)[1]
     assert "gate skipped (read lane)" in section
+
+
+# --- D9/D15: a fleet's own malformed output is a receipt, not a crash --------
+
+
+def test_a_nan_usage_figure_is_dropped_and_the_run_is_still_priced(repo, home, fake_fleet):
+    """D9: `json.loads` accepts a bare `NaN`, so a fleet can hand conductor
+    one in the middle of the only usage object the run will ever produce.
+    Before the guard, `int(nan)` raised after the spend and the run directory
+    was left holding nothing but stdout.log."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"ok",'
+        '"usage":{"input_tokens":NaN,"output_tokens":1000,"cache_read_input_tokens":5}}'
+    )
+    fake_fleet(["sh", "-c", f"printf '%s\\n' '{envelope}'; echo work > new.txt"])
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+
+    assert result.ok is True
+    assert result.usage["input_tokens"] == 0  # the unusable figure, dropped
+    assert result.usage["output_tokens"] == 1000
+    assert result.usage["cache_read_tokens"] == 5
+    assert result.usage["cost_usd"] > 0 and result.usage["cost_basis"] == "estimated"
+    receipt = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert receipt["usage"]["output_tokens"] == 1000
+
+
+def test_a_crash_after_the_spend_is_a_receipt_with_the_cost_so_far(
+    repo, home, fake_fleet, monkeypatch
+):
+    """D9: whatever raises while conductor reads a fleet's output, the run
+    was still paid for. A receipt with the price and the reason is what
+    `spend` and `report` can see; a bare `runs/<id>/stdout.log` is not."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"ok",'
+        '"usage":{"input_tokens":1000000,"output_tokens":0},"total_cost_usd":0.25}'
+    )
+    fake_fleet(["sh", "-c", f"printf '%s\\n' '{envelope}'"])
+
+    def boom(text, criteria):
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(runner_mod, "parse_verdict", boom)
+    result = dispatch(
+        spec_for(repo, mode="read", verdict=[Criterion(id="c1", question="did the thing?")]),
+        home=home,
+    )
+
+    assert result.ok is False
+    assert result.error.startswith("parse failed: TypeError:")
+    assert result.to_dict()["kind"] == "parse"
+    receipt = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert receipt["kind"] == "parse" and receipt["ok"] is False
+    assert "unhashable" in (Path(result.run_dir) / "parse-error.txt").read_text()
+
+
+def test_a_deliverable_schema_that_is_a_json_array_is_a_failed_check(repo, home, fake_fleet):
+    """D9: `_schema_mismatch` reads `required` and `properties` off the
+    schema. A top-level array parses as JSON and then raised on `.get`."""
+    schema = repo / "schema.json"
+    schema.write_text('["required", "properties"]')
+    assert runner_mod._schema_mismatch({"a": 1}, json.loads(schema.read_text())) == (
+        "schema file is not a JSON object"
+    )

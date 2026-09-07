@@ -897,11 +897,18 @@ class Spec:
                 "directory; drop --schema or switch to mode: write"
             )
         try:
-            json.loads(Path(self.schema).read_text())
+            schema = json.loads(Path(self.schema).read_text())
         except OSError as exc:
             raise DispatchRefused(f"schema file unreadable: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise DispatchRefused(f"schema file is not valid JSON: {exc}") from exc
+        # D9: parsing is not enough. Every consumer -- the vendors' own
+        # structured-output flags and `runner._schema_mismatch` alike --
+        # reads a schema as an object with `required` and `properties`; a
+        # top-level array parses fine and then fails as an AttributeError
+        # after the spend.
+        if not isinstance(schema, dict):
+            raise DispatchRefused("schema file must be a JSON object")
 
     def _validate_agent(self) -> None:
         """D3: an inline persona's shape, checked before spawn so a typo in
@@ -961,11 +968,15 @@ class Spec:
             if not isinstance(schema, str) or not schema:
                 raise DispatchRefused("deliverable schema must be a non-empty string")
             try:
-                json.loads(Path(schema).read_text())
+                parsed = json.loads(Path(schema).read_text())
             except OSError as exc:
                 raise DispatchRefused(f"deliverable schema file unreadable: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise DispatchRefused(f"deliverable schema file is not valid JSON: {exc}") from exc
+            # D9: same reason as `_validate_schema` above -- `_schema_mismatch`
+            # reads `required` and `properties` off this file after the run.
+            if not isinstance(parsed, dict):
+                raise DispatchRefused("deliverable schema file must be a JSON object")
 
     def resolved_timeout(self) -> int:
         return self.timeout if self.timeout is not None else DEFAULT_TIMEOUT[self.mode]

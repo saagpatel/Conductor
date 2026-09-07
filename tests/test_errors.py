@@ -247,6 +247,7 @@ def test_kinds_are_exhaustive_over_the_documented_order():
     assert KINDS == (
         "interrupted",
         "cancelled",
+        "parse",
         "cap",
         "breaker",
         "timeout",
@@ -555,7 +556,7 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         "\n## ", 1
     )[0]
     assert (
-        "interrupted, cancelled, cap, breaker, timeout, setup, refused, agent,"
+        "interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent,"
         in section
     )
     assert (

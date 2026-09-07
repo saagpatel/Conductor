@@ -13,8 +13,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from conductor import ports as ports_mod
 from conductor import runner as runner_mod
 from conductor.cli import build_parser, main
@@ -75,7 +73,12 @@ def test_lane_resources_are_released_when_dispatch_raises_mid_run(
 ):
     """Ports (and the include exclude file) must be released on every path,
     per spec item 1 -- including a crash inside dispatch's own bookkeeping,
-    not just the ordinary success and refusal paths."""
+    not just the ordinary success and refusal paths.
+
+    D9: such a crash is no longer an exception out of `dispatch` either. The
+    fleet already ran and was paid, so the receipt is written and the run is
+    failed as `parse`; the release below is what this test has always been
+    about."""
     fake_fleet(["sh", "-c", "echo work > new.txt"])
 
     def boom(cwd, before, after):
@@ -83,12 +86,16 @@ def test_lane_resources_are_released_when_dispatch_raises_mid_run(
 
     monkeypatch.setattr(runner_mod, "compare", boom)
 
-    with pytest.raises(RuntimeError):
-        dispatch(
-            Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", ports=1),
-            home=home,
-        )
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", ports=1),
+        home=home,
+    )
 
+    assert result.ok is False
+    assert result.error == "parse failed: RuntimeError: boom"
+    assert result.to_dict()["kind"] == "parse"
+    assert json.loads((Path(result.run_dir) / "result.json").read_text())["ok"] is False
+    assert (Path(result.run_dir) / "parse-error.txt").read_text().endswith("boom\n")
     assert list((home / "ports").iterdir()) == []
 
 

@@ -91,7 +91,12 @@ That run exited 0 and is still a failure. `ok` means the process succeeded
 **and** bytes moved (for write dispatches) **and** the gate passed **and**
 any requested commit landed; `failure` names which of those did not hold
 (here, `"write dispatch moved no bytes"`), so the caller never has to
-reconstruct the reason from the raw fields. Full stdout, stderr, the exact
+reconstruct the reason from the raw fields. One more failure names itself
+there: `"parse failed: ..."` for a run that was paid for and then
+raised while conductor was reading its output -- the receipt is written
+anyway, with whatever price was recoverable, because a run directory holding
+only `stdout.log` is spend that `conductor spend` and `conductor report`
+cannot see. Full stdout, stderr, the exact
 argv, prompt, and fleet-reported `session_id` are on disk in `run_dir`; the
 caller reads them only if it decides to.
 
@@ -451,7 +456,7 @@ now also classifies as exactly one of a fixed set of kinds, checked in this
 order, first match wins:
 
 ```
-interrupted, cancelled, cap, breaker, timeout, setup, refused, agent, deliverable,
+interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent, deliverable,
 adversarial, rate_limit, transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op,
 read_moved_bytes, no_answer, commit, unknown
 ```
@@ -459,6 +464,10 @@ read_moved_bytes, no_answer, commit, unknown
 (`deliverable` is listed here beside `agent` -- both are conductor's own
 checks, not a fleet's -- but is actually tested for later, after `gate`, to
 match `Result.failure()`'s own order: see "Deliverables" above.)
+
+`parse` is checked that early on purpose: a dispatch that raised while its
+output was being read comes back with no priced usage, which the cap check
+below would otherwise read as a cap it could not enforce.
 
 A cap kill that also timed out is `cap`, not `timeout`; a fleet error that
 also mentions a rate limit is `rate_limit`, not `fleet_error`. `kind` is
