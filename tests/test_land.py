@@ -534,6 +534,19 @@ def test_already_merged_records_the_pinned_tip(repo, home, fake_fleet, git_out, 
     assert again.tip_sha == first.tip_sha == git_out(repo, "rev-parse", "feat/land")
 
 
+def test_already_merged_dry_run_records_the_dry_run_flag(repo, home, fake_fleet, monkeypatch):
+    """A `--dry-run` on a landed lane answered `dry_run: false` on its
+    receipt, because the already-merged shortcut returned before the flag
+    was recorded (third drill pass, 2026-09-07)."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    land(mission_id, lane, home=home, checkout=str(repo))
+
+    again = land(mission_id, lane, home=home, checkout=str(repo), dry_run=True)
+
+    assert again.already_merged is True and again.dry_run is True
+
+
 # --- D19: golden check runs the merged tree's own implementation ---------
 
 

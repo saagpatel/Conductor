@@ -441,6 +441,10 @@ def _land(
             checkout=root,
             branch=branch,
             already_merged=True,
+            # The flag the caller passed, recorded as on every other return:
+            # a `--dry-run --json` on a landed lane used to read `dry_run:
+            # false` (third drill pass, 2026-09-07).
+            dry_run=dry_run,
             ok=True,
             tip_sha=tip_sha,
         )
