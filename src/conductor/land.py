@@ -177,9 +177,14 @@ def _run_checks(
         except attest.AttestInvalid as exc:
             steps.append({"name": "attest", "ok": False, "detail": str(exc)})
             return False, steps, str(worktree)
-        detail = "verified" if attestation["verified"] else json.dumps(attestation)
-        steps.append({"name": "attest", "ok": attestation["verified"], "detail": _tail(detail)})
-        return attestation["verified"], steps, str(worktree)
+        # D7: only a chain that is complete as well as unbroken may land.
+        # `state` is the finer verdict -- `partial` (a valid prefix of the
+        # mission's own recorded chain) and `empty` are refusals here, not
+        # green steps.
+        chain_ok = attestation.get("state") == "verified"
+        detail = "verified" if chain_ok else json.dumps(attestation)
+        steps.append({"name": "attest", "ok": chain_ok, "detail": _tail(detail)})
+        return chain_ok, steps, str(worktree)
     finally:
         git_run(root, "worktree", "remove", "--force", str(worktree), timeout=60)
         shutil.rmtree(parent, ignore_errors=True)

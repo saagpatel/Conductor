@@ -1733,12 +1733,26 @@ conductor attest MISSION_ID
 
 walks `chain.json` in order and verifies every link's signature, that its
 file matches the hash recorded in `chain.json`, that its `previous` field
-matches the prior link's actual file hash, and, for a link with a run, that
-the run's own `attestation.json` still matches that recorded hash and still
-agrees with `result.json` and `diff.patch`. It prints one JSON object naming
-every link's verdict and problems, exits 0 when every link verifies, 1 when
-one does not, and 3 when the mission, its chain, or the signing key does not
-exist.
+matches the prior link's actual file hash, that the signed statement names
+the mission actually being attested and the position it actually sits at,
+and, for a link with a run, that the run's own `attestation.json` still
+matches that recorded hash and still agrees with `result.json` and
+`diff.patch`. It prints one JSON object naming every link's verdict and
+problems, exits 0 when every link verifies, 1 when one does not, and 3 when
+the mission, its chain, or the signing key does not exist.
+
+A valid prefix of a chain is not a complete mission, so the report also
+carries a `state`: `verified`, `partial`, `empty`, `missing`, `malformed`,
+or `failed`. `all([])` is True, so an emptied `links` list and a chain with
+its tail lopped off both used to verify with nothing, or almost nothing,
+checked; the mission's own `result.json` records `chain: {"links", "head"}`,
+and a chain whose length or head disagrees with that record is `partial`,
+with `link_count`, `expected_link_count`, `head` and `expected_head` beside
+it. An empty chain is `empty`. Binding each statement to the requested
+mission closes the other half: a chain.json lifted from another mission used
+to chain cleanly on `previous` alone, and the report took that file's word
+for which mission it described. `verified` is now exactly `state ==
+"verified"`, and `conductor land` refuses anything else.
 
 The key lives at `$CONDUCTOR_HOME/keys/receipt.key`, directory mode 700, file
 mode 600, created on first use and never copied into a receipt. This is
