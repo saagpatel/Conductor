@@ -417,3 +417,116 @@ def test_a_branch_with_no_shared_history_is_refused(
         land(mission_id, lane, home=home, checkout=str(repo))
     assert git_out(repo, "rev-parse", "HEAD") == pre_head
     assert git_out(repo, "rev-parse", branch)
+
+
+# --- D6: the merge is pinned to the receipted sha, in the same repository ---
+
+
+def test_refuses_a_branch_that_moved_since_the_lane_receipted_it(
+    repo, home, fake_fleet, git_out, monkeypatch
+):
+    """D6: `land` merged whatever `refs/heads/<branch>` pointed at when it
+    ran, discarding the sha the lane actually receipted. A branch moved after
+    the run (a rebase, a stray commit, a hand-made reset) would have landed
+    unread work."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    receipted = json.loads(
+        (home / "missions" / mission_id / "lanes" / f"{lane}.json").read_text()
+    )["tip_sha"]
+    subprocess.run(
+        ["git", "branch", "-f", "feat/land", "feat/land^"], cwd=repo, check=True
+    )
+    before = _unchanged(repo, git_out)
+
+    with pytest.raises(LandInvalid, match="the branch moved since the run"):
+        land(mission_id, lane, home=home, checkout=str(repo))
+    assert main(["land", mission_id, "--lane", lane, "--checkout", str(repo)]) == 3
+    assert _unchanged(repo, git_out) == before
+    # The refusal names both shas, so the lead can see which is which.
+    receipts = sorted((home / "missions" / mission_id / "land").glob(f"{lane}-*.json"))
+    refused = json.loads(receipts[-1].read_text())["refused"]
+    assert receipted in refused and git_out(repo, "rev-parse", "feat/land") in refused
+
+
+def test_a_tag_shadowing_the_branch_name_does_not_change_what_is_merged(
+    repo, home, fake_fleet, git_out, monkeypatch
+):
+    """D6: the destination resolved the bare name (`git rev-parse feat/land`),
+    which a tag of the same name shadows. The merge now names the sha the
+    lane's `refs/heads/` tip resolved to, so the tag is inert."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    branch_tip = git_out(repo, "rev-parse", "feat/land")
+    # A tag pointing somewhere else entirely, named exactly like the branch.
+    (repo / "decoy.txt").write_text("not the lane's work\n")
+    subprocess.run(["git", "add", "decoy.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "chore: decoy"], cwd=repo, check=True)
+    decoy = git_out(repo, "rev-parse", "HEAD")
+    subprocess.run(["git", "tag", "feat/land", decoy], cwd=repo, check=True)
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD^"], cwd=repo, check=True)
+
+    result = land(mission_id, lane, home=home, checkout=str(repo))
+
+    assert result.ok is True
+    assert result.tip_sha == branch_tip
+    parents = git_out(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert branch_tip in parents and decoy not in parents
+    assert not (repo / "decoy.txt").is_file()
+    receipt = json.loads(Path(result.receipt_path).read_text())
+    assert receipt["tip_sha"] == branch_tip
+    assert receipt["merge_sha"] == git_out(repo, "rev-parse", "HEAD")
+
+
+def test_refuses_a_checkout_that_is_a_different_repository(
+    repo, home, fake_fleet, git_out, monkeypatch, tmp_path
+):
+    """D6: nothing tied the destination to the lane's repository, so a
+    different repository holding a branch of the same name was a valid
+    destination -- and its own same-named branch is what would have merged."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=other, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=other, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=other, check=True)
+    (other / "seed.txt").write_text("someone else's repository\n")
+    subprocess.run(["git", "add", "-A"], cwd=other, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=other, check=True)
+    subprocess.run(["git", "branch", "feat/land"], cwd=other, check=True)
+    before = _unchanged(other, git_out)
+
+    with pytest.raises(LandInvalid, match="not the same repository"):
+        land(mission_id, lane, home=home, checkout=str(other))
+    assert main(["land", mission_id, "--lane", lane, "--checkout", str(other)]) == 3
+    assert _unchanged(other, git_out) == before
+
+
+def test_already_merged_still_refuses_a_moved_branch(
+    repo, home, fake_fleet, git_out, monkeypatch
+):
+    """D6: the already-merged shortcut returned ok before any identity check
+    ran, so a moved branch read as `already_merged` instead of a refusal."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    land(mission_id, lane, home=home, checkout=str(repo))
+    # The branch moves onto the merge commit: it is still an ancestor of HEAD,
+    # so the shortcut would have answered ok=True.
+    subprocess.run(["git", "branch", "-f", "feat/land", "HEAD"], cwd=repo, check=True)
+    before = _unchanged(repo, git_out)
+
+    with pytest.raises(LandInvalid, match="the branch moved since the run"):
+        land(mission_id, lane, home=home, checkout=str(repo))
+    assert _unchanged(repo, git_out) == before
+
+
+def test_already_merged_records_the_pinned_tip(repo, home, fake_fleet, git_out, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    first = land(mission_id, lane, home=home, checkout=str(repo))
+
+    again = land(mission_id, lane, home=home, checkout=str(repo))
+
+    assert again.already_merged is True and again.ok is True
+    assert again.tip_sha == first.tip_sha == git_out(repo, "rev-parse", "feat/land")
