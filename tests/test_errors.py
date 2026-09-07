@@ -560,10 +560,12 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
         "interrupted, cancelled, parse, cap, breaker, timeout, setup, refused, agent,"
         in section
     )
+    assert "deliverable, taint," in section
     assert (
-        "transport, refusal, fleet_error, exit, gate, gate_test_surface, no_op," in section
+        "settings, adversarial, plan, denied, rate_limit, transport, refusal, fleet_error,"
+        in section
     )
-    assert "read_moved_bytes, no_answer, commit, unknown" in section
+    assert "gate_test_surface, no_op, read_moved_bytes, no_answer, commit, unknown" in section
     assert "cap kill that also timed out is `cap`, not `timeout`" in section
     assert "rate limit is `rate_limit`, not `fleet_error`" in section
     assert "I can't help` or `I cannot help`" in section
@@ -580,3 +582,26 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
     assert "(kind: <kind>)" in section
     assert "docs/ROADMAP-2026-09.md` item C5" in section
     assert "error_handlers" in section
+
+
+def test_readme_error_kinds_code_block_matches_kinds_exactly():
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Structured error kinds", 1)[1]
+    block = section.split("```\n", 1)[1].split("```", 1)[0]
+    listed = tuple(block.replace(",", " ").split())
+    assert listed == KINDS
+
+
+def test_readme_error_kinds_parenthetical_discloses_every_order_divergence():
+    # W11 peer review (Opus): the block above is pinned to `KINDS`' declared
+    # order, not `error_kind`'s check order, and the intro sentence above it
+    # says "checked in this order, first match wins" -- so every kind whose
+    # checked position differs from its declared one needs to be named here,
+    # not just `deliverable`, or the sentence reads as true when it is not.
+    readme = Path(__file__).parents[1] / "README.md"
+    section = readme.read_text().split("### Structured error kinds", 1)[1]
+    parenthetical = " ".join(section.split("```", 2)[2].split())
+    assert "`taint` and `settings` are listed after `deliverable` too" in parenthetical
+    assert "`gate_test_surface` is listed after `gate` but is actually checked first" in (
+        parenthetical
+    )
