@@ -584,6 +584,16 @@ has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted
 on their receipts and artifact paths; beyond commit and named-branch existence,
 their work is not re-verified during resume.
 
+The artifacts themselves are authenticated on their bytes, not just their
+paths. When a lane settles, its receipt records the sha256 of the answer, diff,
+and captured deliverable it left behind, and resume rehashes those files before
+a downstream lane is allowed to read them. A file that no longer hashes to what
+the receipt recorded is not that lane's own output, so the lane is not trusted:
+it reruns, with a note naming the artifact whose bytes differ, and its earlier
+paid attempts stay in the budget as usual. A receipt written before conductor
+recorded digests has none to check, so it is trusted on its paths exactly as
+before and the resume notes that it was trusted on path only.
+
 ### Pipelines: build, then independent review, then fix
 
 Lanes can depend on each other. Three lane fields make a flat fan-out a

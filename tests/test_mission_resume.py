@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import socket
@@ -919,3 +920,208 @@ def test_a_source_lock_mid_publication_is_not_reclaimed(home, tmp_path):
 
     lock.write_text(json.dumps(mission_mod._lock_body(owner, mission_id="m1")))
     assert mission_mod._release_lock(lock, owner) is True
+
+
+# --- W3: resume authenticates artifact bytes, not just artifact paths --------
+
+
+def _digest_mission(repo, tmp_path, *, deliverable: bool = False) -> Mission:
+    """A build lane (answer, diff, optionally a captured deliverable) and a
+    read lane downstream of it, for the artifact-digest checks below."""
+    lane: dict = {
+        "name": "build",
+        "fleet": "claude",
+        "mode": "write",
+        "prompt": "BUILD",
+        "commit": "build",
+    }
+    if deliverable:
+        lane["deliverable"] = {"path": "out.json"}
+    return mission_from_dict(
+        {
+            "cwd": str(repo),
+            "concurrency": 1,
+            "lanes": [
+                lane,
+                {
+                    "name": "read",
+                    "fleet": "claude",
+                    "needs": ["build"],
+                    "prompt": "READ {{lanes.build.answer}}",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+
+def test_untouched_lane_is_kept_and_its_receipt_carries_artifact_digests(
+    repo, home, monkeypatch, tmp_path
+):
+    calls = {"BUILD": 0, "READ": 0}
+
+    def fake_build(spec: Spec) -> list[str]:
+        key = spec.prompt.split()[0]
+        calls[key] += 1
+        action = ":" if key == "READ" else "printf 'v1\\n' > built.txt; printf '1\\n' > out.json"
+        return _command("done", action=action)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = _digest_mission(repo, tmp_path, deliverable=True)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    receipt = json.loads((Path(first.mission_dir) / "lanes" / "build.json").read_text())
+    assert set(receipt["artifact_sha256"]) == {"answer", "diff", "deliverable"}
+    for kind, key in (
+        ("answer", "answer_path"),
+        ("diff", "diff_path"),
+        ("deliverable", "deliverable_path"),
+    ):
+        raw = Path(receipt[key]).read_bytes()
+        assert receipt["artifact_sha256"][kind] == hashlib.sha256(raw).hexdigest()
+
+    resumed = run_mission(_snapshot(first), home=home, resume_dir=Path(first.mission_dir))
+
+    assert resumed.ok is True
+    assert calls == {"BUILD": 1, "READ": 1}
+    assert resumed.resumed_from["kept"] == ["build", "read"]
+    assert resumed.resumed_from["rerun"] == []
+    assert "bytes differ" not in "\n".join(resumed.notes)
+
+
+def test_rewritten_answer_bytes_force_a_rerun_with_a_note(repo, home, monkeypatch, tmp_path):
+    calls = {"BUILD": 0, "READ": 0}
+
+    def fake_build(spec: Spec) -> list[str]:
+        key = spec.prompt.split()[0]
+        calls[key] += 1
+        action = ":" if key == "READ" else "printf 'v1\\n' > built.txt"
+        return _command("done", action=action)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = _digest_mission(repo, tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    answer_path = Path(first.mission_dir) / "answers" / "build.txt"
+    answer_path.write_text("an answer the build lane never wrote\n")
+
+    resumed = run_mission(_snapshot(first), home=home, resume_dir=Path(first.mission_dir))
+
+    assert calls == {"BUILD": 2, "READ": 2}
+    assert resumed.resumed_from["rerun"] == ["build", "read"]
+    assert (
+        "lane 'build': answer bytes differ from the receipt's digest; not trusted"
+        in resumed.notes
+    )
+    # The rerun still owns the first attempt's spend and history.
+    assert resumed.lanes[0]["previous_attempts"][0]["run_id"] == first.lanes[0][
+        "attempts"
+    ][0]["run_id"]
+
+
+def test_swapped_deliverable_bytes_force_a_rerun_with_a_note(repo, home, monkeypatch, tmp_path):
+    calls = {"BUILD": 0, "READ": 0}
+
+    def fake_build(spec: Spec) -> list[str]:
+        key = spec.prompt.split()[0]
+        calls[key] += 1
+        action = ":" if key == "READ" else "printf 'v1\\n' > built.txt; printf '1\\n' > out.json"
+        return _command("done", action=action)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = _digest_mission(repo, tmp_path, deliverable=True)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    kept = Path(first.mission_dir) / "deliverables" / "build-deliverable"
+    assert kept.is_file()
+    kept.write_text("2\n")
+
+    resumed = run_mission(_snapshot(first), home=home, resume_dir=Path(first.mission_dir))
+
+    assert calls == {"BUILD": 2, "READ": 2}
+    assert resumed.resumed_from["rerun"] == ["build", "read"]
+    assert (
+        "lane 'build': deliverable bytes differ from the receipt's digest; not trusted"
+        in resumed.notes
+    )
+
+
+def test_receipt_without_digests_is_trusted_on_path_only(repo, home, monkeypatch, tmp_path):
+    calls = {"BUILD": 0, "READ": 0}
+
+    def fake_build(spec: Spec) -> list[str]:
+        key = spec.prompt.split()[0]
+        calls[key] += 1
+        action = ":" if key == "READ" else "printf 'v1\\n' > built.txt"
+        return _command("done", action=action)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = _digest_mission(repo, tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.ok is True
+
+    # A receipt from a conductor that predates the digests: the field is
+    # simply absent, and the lane is still kept on its paths alone.
+    receipt_path = Path(first.mission_dir) / "lanes" / "build.json"
+    receipt = json.loads(receipt_path.read_text())
+    del receipt["artifact_sha256"]
+    receipt_path.write_text(json.dumps(receipt))
+
+    resumed = run_mission(_snapshot(first), home=home, resume_dir=Path(first.mission_dir))
+
+    assert resumed.ok is True
+    assert calls == {"BUILD": 1, "READ": 1}
+    assert "build" in resumed.resumed_from["kept"]
+    assert (
+        "lane 'build': receipt records no digest for its answer; trusted on path only"
+        in resumed.notes
+    )
+
+
+def test_human_lane_with_rewritten_answer_bytes_is_not_trusted(
+    repo, home, monkeypatch, tmp_path
+):
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "concurrency": 1,
+            "lanes": [
+                {"name": "ask", "fleet": "human", "prompt": "Approve?"},
+                {
+                    "name": "use",
+                    "fleet": "claude",
+                    "needs": ["ask"],
+                    "prompt": "USE {{lanes.ask.answer}}",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    monkeypatch.setattr(runner_mod, "build_argv", lambda spec: _command("used"))
+    parked = run_mission(mission, home=home)
+    assert parked.paused["kind"] == "human"
+
+    answered = run_mission(
+        _snapshot(parked), home=home, resume_dir=Path(parked.mission_dir), answer="ship it"
+    )
+    assert answered.ok is True
+    receipt = json.loads((Path(answered.mission_dir) / "lanes" / "ask.json").read_text())
+    assert set(receipt["artifact_sha256"]) == {"answer"}
+
+    answer_path = Path(answered.mission_dir) / "answers" / "ask.txt"
+    answer_path.write_text("do not ship it\n")
+
+    def refuse(spec: Spec) -> list[str]:
+        raise AssertionError("a rewritten human answer must not be trusted downstream")
+
+    monkeypatch.setattr(runner_mod, "build_argv", refuse)
+    again = run_mission(_snapshot(answered), home=home, resume_dir=Path(answered.mission_dir))
+
+    assert again.ok is False
+    assert again.paused["kind"] == "human" and again.paused["lane"] == "ask"
+    assert (
+        "lane 'ask': answer bytes differ from the receipt's digest; not trusted" in again.notes
+    )
