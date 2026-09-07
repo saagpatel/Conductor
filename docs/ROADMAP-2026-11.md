@@ -31,6 +31,14 @@ via `conductor shape a`, one release per item, caps by rules 2 and 10, the lead 
 | F12 Claude read lanes under --restricted and --permission-prompts none; deliverable read lanes can write | 0.54.0 | Shape A via the launcher, build green under cap, both reviewers NO_FINDINGS, landed by conductor land | $8.63 |
 | F2 wall clock on the ledger | 0.55.0 | Shape A via the launcher, build green under cap, Grok's three findings all fixed on the resumed thread, landed by conductor land | $15.69 |
 
+Status 2026-09-07, end of the first Phase F sitting: every build item that survived Group 0
+is shipped (F1, F2, F3, F5, F6, F7, F12, F13; F4 was already on the tree, F14 dropped on its
+probe), 0.48.0 to 0.55.0, about $68 of fleet spend including the probes and the consumer run,
+in one sitting of about two and a half hours. Of the receipt items, F10's first consumer ran
+(`docs/research/2026-09-07-consumer-core-guard-audit.md`); F8 fixtures, F9 shapes, F11
+unattended, and the other three consumers are not yet run. The last two releases were landed
+by `conductor land`.
+
 ## What the receipts say
 
 The ledger report (`conductor report --since 2026-09-05`, run 2026-09-07) over 130 missions
