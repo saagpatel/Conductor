@@ -1824,10 +1824,12 @@ pause is unconditional.
 whose `path` ends in `.json` or `.toml`, and may not be a `human` or
 `script` lane, tainted, `untrusted_output`, or named as another lane's
 `base` or `resume` -- each refused at load, the lane named. A mission
-carries two load-derived fields no mission file may set directly: `depth`
-(0 unless conductor stamped it as a child) and `parent`
-(`{"mission_id", "lane"}`, or `null`). `mission.PLAN_MAX_DEPTH` (1) bounds
-how deep a plan lane's own child may itself plan a grandchild.
+carries three load-derived fields no mission file may set directly: `depth`
+(0 unless conductor stamped it as a child), `parent`
+(`{"mission_id", "lane"}`, or `null`), and `budget_from_parent` (`false`
+unless the launch clamped this child's own `max_cost_usd` to its parent's
+remaining ledger -- see budget rollup, below). `mission.PLAN_MAX_DEPTH` (1)
+bounds how deep a plan lane's own child may itself plan a grandchild.
 
 When a plan lane's own dispatch settles ok, conductor loads the deliverable
 with `load_mission` (so the child's `source` is the deliverable's own path),
@@ -1861,23 +1863,51 @@ key that disables it, and `pause.before` need not name the lane:
 ```
 
 `conductor mission --resume MISSION_ID --answer continue` launches the child
-as its own mission, synchronously, through `run_mission(child, home=home)`
-in the parent's process -- its own directory, ledger, running lock, and
-receipt chain, never the parent's; the child's snapshot carries its `depth`
-and `parent`. `--answer stop` fails the plan lane as `child launch refused
-by the operator`, and the mission settles as any stopped pause does. When
-the child returns, the plan lane's `plan` block gains `child: {"mission_id",
-"ok", "cost_usd", "paused", "report_path"}`, the parent's `MissionResult`
-and `result.json` gain `children: [<child mission id>, ...]`, the child's
-cost is recorded in the parent's `notes` as `child '<id>' spent $X (not
-rolled into this budget)`, and the lane is ok when the child was ok. A child
-that pauses on its own pause point is left paused; the parent's plan lane
-fails as `child paused: <child id>`, naming it, so the operator resumes the
-child by hand. `--unattended` refuses a mission with a plan lane -- nobody
-is there to answer its pause.
+as its own mission, synchronously, through `run_mission(child, home=home,
+mission_id=<pre-claimed id>)` in the parent's process -- its own directory,
+running lock, and receipt chain, never the parent's; the child's snapshot
+carries its `depth` and `parent`. `--answer stop` fails the plan lane as
+`child launch refused by the operator`, and the mission settles as any
+stopped pause does. `--unattended` refuses a mission with a plan lane --
+nobody is there to answer its pause.
 
-Budget rollup into the parent's ledger, and resuming a parent whose child is
-still mid-run, are not yet defined; that is the second E10 spec.
+**The child's budget is the parent's.** At launch, when the parent has a
+budget, the child's `max_cost_usd` is clamped to `min(child's own, parent's
+ledger.remaining())` and the child's snapshot gets `budget_from_parent:
+true`; a child launched under a budgetless parent runs under its own
+`max_cost_usd`, unclamped. Before the child ever dispatches, the plan
+lane's receipt (`lanes/<name>.json`) is rewritten with `plan.child:
+{"mission_id": <the id the child will run under>, "state": "launched"}` --
+`result.json` is not yet final, so a parent whose process dies mid-child
+leaves a receipt naming it. When the child returns, `plan.child` gains
+`state: "finished"` with the fields it has today (`"mission_id", "ok",
+"cost_usd", "paused", "report_path"`); once the child is genuinely final
+(not still paused), its `cost_usd` and any unpriced dispatches are rolled
+into the parent's ledger through `Ledger.add_child` -- the parent's
+`budget` block, `cost_usd`, and `pause.spend_usd` all see it, `plan.child`
+gains `rolled_up: true`, the parent's `MissionResult` gains
+`children_cost_usd`, and the note in `notes` becomes `child '<id>' spent $X
+(rolled into this budget)`. A still-paused child's spend is noted but not
+yet rolled up (`... (not rolled into this budget; child is paused)`). The
+lane is ok when the child was ok. A child that pauses on its own pause
+point is left paused; the parent's plan lane fails as `child paused: <child
+id>`, naming it, so the operator resumes the child by hand.
+
+**Resuming a parent whose plan lane already named a child** re-derives the
+outcome from the child's own disk state rather than trusting the parent's
+stale receipt: a child whose directory still holds a live running lock
+refuses the resume (`MissionInvalid("child '<id>' is still running")`); a
+child that is paused (its `result.json` has `paused` with no terminal
+answer, or its own `pause.json` is unanswered) refuses the resume too
+(`child '<id>' is paused; resume it first`); a child whose `result.json` is
+final, ok or not, is adopted without dispatching anything -- the plan lane
+reads ok when the child was ok, failed as above when not, the budget rollup
+applied exactly once (`plan.child.rolled_up` guards against a second
+resume double-counting it); a child whose directory or `result.json` has
+gone missing fails the lane as `child '<id>' missing`. Once a child has
+reached that rolled-up, finished state, `_trusted_lane` accepts the plan
+lane's receipt as-is on every later resume, ok or not, rather than
+re-deriving it again.
 
 ## Isolation: a branch is not a worktree
 

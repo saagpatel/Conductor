@@ -291,6 +291,18 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 pause_doc = None
             if isinstance(pause_doc, dict):
                 paused = pause_doc.get("answer") is None
+        # E10 second spec: `parent`/`depth` are load-derived mission.json
+        # fields (never in result.json), so a child's parent id is read off
+        # its own snapshot, present whether or not the mission ever finished.
+        parent_id = None
+        mission_file = path / "mission.json"
+        if mission_file.is_file():
+            try:
+                mission_raw = json.loads(mission_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                mission_raw = None
+            if isinstance(mission_raw, dict) and isinstance(mission_raw.get("parent"), dict):
+                parent_id = mission_raw["parent"].get("mission_id")
         if not result_file.is_file():
             rows.append(
                 {
@@ -299,6 +311,8 @@ def cmd_missions(args: argparse.Namespace) -> int:
                     "resumes": 0,
                     "running": (path / "running.json").is_file(),
                     "paused": paused,
+                    "parent": parent_id,
+                    "children": 0,
                 }
             )
             continue
@@ -329,6 +343,8 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 ],
                 "hotspots": len(collisions["hotspots"]) if collisions else None,
                 "resolve": resolve_status,
+                "parent": parent_id,
+                "children": len(data.get("children") or []),
             }
         )
     print(json.dumps(rows, indent=2))
