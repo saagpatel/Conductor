@@ -6,6 +6,9 @@ verdict: it never changes `ok`, an exit code, or a pause.
 from __future__ import annotations
 
 import json
+import os
+import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -151,6 +154,63 @@ def test_emit_timeout_is_ok_false_and_timed_out(tmp_path):
     assert result["timed_out"] is True
     assert result["exit_code"] is None
     assert "0.2" in result["error"]
+
+
+def test_emit_timeout_kills_the_whole_process_group(tmp_path):
+    # W10 (astra): `subprocess.run`'s timeout kills only the shell, so a
+    # child the notify command spawned kept running after the mission moved
+    # on. The command now leads its own process group, killed whole.
+    pid_file = tmp_path / "child.pid"
+    command = f"sh -c 'echo $$ > {pid_file}; sleep 30' & sleep 30"
+    result = emit(
+        {"command": command, "timeout": 1},
+        {"event": "end", "mission_id": "m"},
+        cwd=str(tmp_path),
+    )
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    child_pid = int(pid_file.read_text().strip())
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, f"child {child_pid} outlived the notify timeout"
+        time.sleep(0.05)
+
+
+def test_emit_failure_error_is_a_bounded_tail_of_a_huge_output(tmp_path):
+    # W10 (astra): `capture_output` read the whole of a command's output
+    # into memory for a 500-character tail. Several megabytes now cost a
+    # bounded read of the file's end, and the reason stays the cap plus its
+    # `exit N: ` prefix.
+    line = "x" * 1023
+    command = (
+        f"echo HEAD-MARKER; yes '{line}' | head -c 4000000; echo TAIL-MARKER; exit 4"
+    )
+    tracemalloc.start()
+    try:
+        result = emit(
+            {"command": command, "timeout": 30},
+            {"event": "end", "mission_id": "m"},
+            cwd=str(tmp_path),
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert result["ok"] is False
+    assert result["exit_code"] == 4
+    assert result["timed_out"] is False
+    assert result["error"].startswith("exit 4: ")
+    # The tail, not the head: 4 MB of output later, the end is what a reason
+    # about a failure needs.
+    assert "TAIL-MARKER" in result["error"]
+    assert "HEAD-MARKER" not in result["error"]
+    assert len(result["error"]) <= 520
+    # And the 4 MB never became a Python string.
+    assert peak < 1_000_000, f"emit held {peak} bytes of a 4 MB output"
 
 
 def test_emit_missing_command_is_ok_false(tmp_path):
