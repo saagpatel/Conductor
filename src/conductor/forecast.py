@@ -8,6 +8,7 @@ reader); nothing here is estimated from tokens.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -142,3 +143,53 @@ def forecast(mission: Mission, home: Path, *, since: datetime | None = None) -> 
             )
         )
     return Forecast(lanes=lanes, warnings=warnings)
+
+
+def apply_caps(raw: dict, fc: Forecast, *, enabled: bool = True) -> list[dict[str, object]]:
+    """F17: raise every warned lane's cap to its p80 rounded up to the next
+    whole dollar, raise the mission budget by the same difference, and record
+    the arithmetic under `raw["caps"]` for every lane that has a cap. With
+    `enabled` false nothing moves and the receipt records the p80 that was
+    declined. Returns one row per lane actually raised, for the launcher to
+    print."""
+    rows = {lane.lane: lane for lane in fc.lanes}
+    raised_rows: list[dict[str, object]] = []
+    caps_block: dict[str, dict[str, object]] = {}
+    for raw_lane in raw.get("lanes") or []:
+        if not isinstance(raw_lane, dict):
+            continue
+        name = str(raw_lane.get("name") or "")
+        cap = raw_lane.get("cap_usd")
+        if cap is None:
+            continue
+        cap = float(cap)
+        row = rows.get(name)
+        p80 = float(row.p80_usd) if row is not None and row.p80_usd is not None else None
+        runs = row.runs if row is not None else 0
+        basis = "rule 2"
+        written = cap
+        if enabled and row is not None and row.warn and row.p80_usd is not None:
+            written = float(math.ceil(row.p80_usd))
+            # F17: `warn` already means the cap is under the p80, but the
+            # ceiling is what decides the figure, so the guard is on the
+            # figure and not on the flag.
+            if written > cap:
+                raw_lane["cap_usd"] = written
+                budget = raw.get("max_cost_usd")
+                if budget is not None:
+                    raw["max_cost_usd"] = round(float(budget) + written - cap, 2)
+                basis = "forecast p80"
+                raised_rows.append(
+                    {"lane": name, "old_usd": cap, "cap_usd": written, "p80_usd": p80, "runs": runs}
+                )
+            else:
+                written = cap
+        caps_block[name] = {
+            "rule_2_usd": cap,
+            "forecast_p80_usd": p80,
+            "forecast_runs": runs,
+            "cap_usd": written,
+            "basis": basis,
+        }
+    raw["caps"] = caps_block
+    return raised_rows

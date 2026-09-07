@@ -180,6 +180,10 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
     "retry",
     "notify",
     "ceiling",
+    # F17: the launcher's cap receipt (rule 2 figure, forecast p80, the cap
+    # written, and which of the two it came from), informational only -- the
+    # scheduler never reads it; the lane's own cap_usd is the live figure.
+    "caps",
 }
 _COLLATE_KEYS = {
     "fleet",

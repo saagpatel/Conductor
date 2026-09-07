@@ -237,10 +237,12 @@ def test_shape_a_prints_the_forecast_line(repo, home, monkeypatch, tmp_path, cap
     spec = _spec(tmp_path)
     out = tmp_path / "m" / "mission.json"
     out.parent.mkdir()
+    # F17: --no-forecast-cap keeps the warning this test is about; without it
+    # the launcher raises the cap and there is nothing left to warn about.
     code = main(
         [
             "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
-            "--items", "3", "--modules", "1", "--out", str(out),
+            "--items", "3", "--modules", "1", "--out", str(out), "--no-forecast-cap",
         ]
     )
     assert code == 0
@@ -260,3 +262,84 @@ def test_readme_documents_cost_forecast():
     assert "never a refusal" in section
     assert '"lanes": [...], "warnings": [...]' in section
     assert "Human and script lanes" in section
+
+
+# --- F17: the launcher raises a warned lane's cap to the forecast p80 --------
+
+
+def _shape_a(repo, tmp_path, out, *extra: str) -> int:
+    spec = _spec(tmp_path)
+    return main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "3", "--modules", "1", "--out", str(out), *extra,
+        ]
+    )
+
+
+def _out(tmp_path: Path) -> Path:
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    return out
+
+
+def test_shape_a_raises_a_warned_cap_to_the_p80_and_the_budget_with_it(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage="build")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    out = _out(tmp_path)
+    assert _shape_a(repo, tmp_path, out) == 0
+    printed = capsys.readouterr().out
+    raw = json.loads(out.read_text())
+    build = next(lane for lane in raw["lanes"] if lane["name"] == "build")
+    assert build["cap_usd"] == 8.0  # the $8.00 p80, rounded up to the whole dollar
+    assert raw["max_cost_usd"] == 15.0 + 4.0  # rule 2's budget plus the same $4.00
+    assert raw["caps"]["build"] == {
+        "rule_2_usd": 4.0,
+        "forecast_p80_usd": 8.0,
+        "forecast_runs": 5,
+        "cap_usd": 8.0,
+        "basis": "forecast p80",
+    }
+    assert "cap raised: build $4.00 -> $8.00 (forecast p80 $8.00, 5 runs)" in printed
+    # The raised mission still loads, caps block and all.
+    assert mission_from_dict(raw, base_dir=out.parent).name == "widget"
+
+
+def test_no_forecast_cap_leaves_the_caps_alone_and_records_the_declined_p80(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage="build")
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    out = _out(tmp_path)
+    assert _shape_a(repo, tmp_path, out, "--no-forecast-cap") == 0
+    printed = capsys.readouterr().out
+    raw = json.loads(out.read_text())
+    build = next(lane for lane in raw["lanes"] if lane["name"] == "build")
+    assert build["cap_usd"] == 4.0
+    assert raw["max_cost_usd"] == 15.0
+    assert raw["caps"]["build"] == {
+        "rule_2_usd": 4.0,
+        "forecast_p80_usd": 8.0,
+        "forecast_runs": 5,
+        "cap_usd": 4.0,
+        "basis": "rule 2",
+    }
+    assert "cap raised:" not in printed
+
+
+def test_a_home_with_no_history_moves_nothing_and_records_a_null_p80(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    out = _out(tmp_path)
+    assert _shape_a(repo, tmp_path, out) == 0
+    printed = capsys.readouterr().out
+    raw = json.loads(out.read_text())
+    assert next(lane for lane in raw["lanes"] if lane["name"] == "build")["cap_usd"] == 4.0
+    assert raw["max_cost_usd"] == 15.0
+    assert {row["basis"] for row in raw["caps"].values()} == {"rule 2"}
+    assert all(row["forecast_p80_usd"] is None for row in raw["caps"].values())
+    assert sorted(raw["caps"]) == ["build", "fix", "review-gemini", "review-grok"]
+    assert "cap raised:" not in printed

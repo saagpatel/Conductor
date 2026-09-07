@@ -74,7 +74,10 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    dollars for any item that touches the scheduler, the runner's wait loop, or resume, plus a dollar
    for every module past the second that the spec touches. A cap sized for a small item cut two
    builders off one lint error and one README phrase from green; a five-item spec spread over four
-   modules (B2) was cut $2 short the same way.
+   modules (B2) was cut $2 short the same way. The launcher now raises the build and fix
+   caps to the forecast p80, rounded up, whenever the E14 forecast warns that this figure
+   sits under it (F17), and raises the mission budget with them, so the hand edit before
+   every launch is gone; `--no-forecast-cap` keeps the old behaviour.
 3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
    The clean gate reruns the original tests against the new source; when the new source refuses a
    shape the old fixtures build, both builders were right and both were rejected. The lead then reads
