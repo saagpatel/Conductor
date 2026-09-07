@@ -10,6 +10,7 @@ in mission.py's `_human_lane`, the scheduler's human-lane park, and
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -386,9 +387,32 @@ def test_answer_text_resumes_and_the_answer_is_fenced_downstream(
         return ["sh", "-c", f"echo '{envelope('used')}'"]
 
     monkeypatch.setattr(runner_mod, "build_argv", fake_use)
-    resumed = run_mission(
-        _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="ship it"
-    )
+
+    # The monkeypatch hazard (F21 slice 2): `_answer_human_pause` moved into
+    # approvals.py, but the `datetime.now(UTC)` call for its `answered_at`
+    # stamp stayed here in mission.py, passed down as a keyword -- exactly
+    # so that a test patching `mission_mod.datetime`, like this one, still
+    # governs it. If that stamp were ever computed inside approvals.py's
+    # own `datetime` instead, this patch would silently stop applying and
+    # the assertion below would fail loudly rather than pass for the wrong
+    # reason.
+    from conductor import mission as mission_mod
+
+    frozen = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    real_datetime = mission_mod.datetime
+    monkeypatch.setattr(mission_mod, "datetime", FrozenDatetime)
+    try:
+        resumed = run_mission(
+            _snapshot(first), home=home, resume_dir=Path(first.mission_dir), answer="ship it"
+        )
+    finally:
+        monkeypatch.setattr(mission_mod, "datetime", real_datetime)
 
     assert resumed.ok is True
     build, ask, use = resumed.lanes
@@ -411,7 +435,7 @@ def test_answer_text_resumes_and_the_answer_is_fenced_downstream(
     assert record["kind"] == "human"
     assert record["lane"] == "ask"
     assert record["answer_length"] == len("ship it")
-    assert record["answered_at"]
+    assert record["answered_at"] == frozen.isoformat()
     # The text itself is on disk once (answers/ask.txt), never a second time.
     assert "ship it" not in json.dumps(pause_doc)
 
