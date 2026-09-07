@@ -257,7 +257,7 @@ def error_kind(result: Result) -> str | None:
     # inventing a second confinement label.
     if error_text.startswith("restricted mode not enforced:"):
         return "taint"
-    # W8: a claude write lane that created, changed, or deleted one of its own
+    # Settings digest (third drill pass, 2026-09-07): a claude write lane that created, changed, or deleted one of its own
     # `.claude/settings*.json` files -- conductor's own digest comparison
     # across the run, never a fleet's word, and its own kind rather than
     # `taint` because it fires on an untainted lane too.

@@ -213,7 +213,7 @@ class Result:
     # read lane with a declared `deliverable` (see `fleets._build_claude`).
     permission_mode: str | None = None
     restricted: bool = False
-    # W8: `{"checked": bool, "modified": [<relative path>]}` -- whether this
+    # Settings digest (third drill pass, 2026-09-07): `{"checked": bool, "modified": [<relative path>]}` -- whether this
     # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
     # before and after the run (a claude write lane, never anything else), and
     # which of them the run created, changed, or deleted. Conductor's own read
@@ -905,7 +905,7 @@ def _sha256_file(path: Path) -> str | None:
         return None
 
 
-# W8: the two files Claude Code reads a project's own permission policy from,
+# Settings digest (third drill pass, 2026-09-07): the two files Claude Code reads a project's own permission policy from,
 # relative to the directory the fleet actually runs in. Both are checked even
 # when neither exists: a lane that creates one is the case that matters.
 CLAUDE_SETTINGS_FILES: tuple[str, ...] = (".claude/settings.json", ".claude/settings.local.json")
@@ -2062,7 +2062,7 @@ def dispatch(
     post_wait = False
     try:
         before = GitState.capture(spec.cwd)
-        # W8: hashed here, beside the bytes baseline and before the spawn, so
+        # Settings digest (third drill pass, 2026-09-07): hashed here, beside the bytes baseline and before the spawn, so
         # a lane that edits its own permission policy mid-run is measured
         # against what it started from. Only a claude write lane: a read lane
         # runs in plan mode, which cannot edit these files, and a denial there
@@ -2327,7 +2327,7 @@ def dispatch(
             if taint_problem is not None and error is None:
                 error = f"taint hooks not enforced: {taint_problem}"
 
-        # W8: re-hashed here, before the deliverable check, the commit, and
+        # Settings digest (third drill pass, 2026-09-07): re-hashed here, before the deliverable check, the commit, and
         # either gate, so a green gate cannot rescue a lane that rewrote the
         # policy it ran under. Live drill 2026-09-07 (third pass,
         # docs/research/2026-09-07-live-drills-fail-closed-checks.md): a write
