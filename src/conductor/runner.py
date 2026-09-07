@@ -213,7 +213,8 @@ class Result:
     # read lane with a declared `deliverable` (see `fleets._build_claude`).
     permission_mode: str | None = None
     restricted: bool = False
-    # Settings digest (third drill pass, 2026-09-07): `{"checked": bool, "modified": [<relative path>]}` -- whether this
+    # Settings digest (third drill pass, 2026-09-07):
+    # `{"checked": bool, "modified": [<relative path>]}` -- whether this
     # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
     # before and after the run (a claude write lane, never anything else), and
     # which of them the run created, changed, or deleted. Conductor's own read
