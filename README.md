@@ -271,7 +271,13 @@ summary and a report path.
   remains of the budget also caps every dispatch it starts (tightening any
   `cap_usd` the lane set), so the overshoot is bounded in dollars, not just
   in dispatches; a dispatch that lands unpriced makes the total unknowable,
-  and an unknowable budget is treated as spent (`budget unverifiable`);
+  and an unknowable budget is treated as spent (`budget unverifiable`); the
+  result's `budget` block also carries `in_flight_dispatches`,
+  `outstanding_cap_usd` (the sum of the caps still running right now, `null`
+  when any of them has no cap), and `worst_case_usd` (`spent_usd +
+  outstanding_cap_usd`) -- a report of possible overshoot while dispatches
+  are still in flight, never subtracted from what a dispatch may still
+  spend (W9);
 - copies each lane's final attempt's answer to `answers/<lane>.txt` and its
   patch (committed, uncommitted, and untracked work against the base) to
   `diffs/<lane>.patch`; if `collate` is set, hands all of them to one
@@ -2532,6 +2538,19 @@ shows as a gap. Override or extend the table without a code change in
 `$CONDUCTOR_HOME/prices.json` (a null entry drops a model; a malformed file
 falls back to defaults rather than stopping a run).
 
+The table itself is dated list price transcribed from local notes
+(`prices.AS_OF`), not a live billing feed, and it can drift out from under
+the vendor's own page between updates. A `cursor-grok-4.6` or
+`composer-2.5` entry in particular does not establish which Cursor variant,
+tier, or long-context billing band actually ran; see the per-model notes in
+`prices.py` before trusting a Cursor figure past a rough order of magnitude.
+An estimated run's own receipt carries the specifics: `usage.price` names
+the table `key` that matched, whether that entry is a table `"default"` or
+an operator `"override"`, and the table's `as_of` date -- so a stale table
+is visible on the run it priced, not only in `prices.json` itself. `price`
+is `null` on a `"reported"` figure (the fleet's own number, not the table's)
+and on an unpriced run.
+
 Token conventions are normalized first: `input_tokens` excludes cache reads
 on every fleet (OpenAI and Google count them inside the input figure and are
 split out), and `output_tokens` includes reasoning (Antigravity's separate
@@ -2720,8 +2739,14 @@ it allows, and the result's `budget` field says which:
 | `cursor` | `post-hoc` | usage arrives once, at the end; the cap is checked then. |
 | `script` | `none` | costs nothing; `cap_usd` is refused at dispatch rather than enforced. |
 
-A watched fleet overshoots by at most one model response plus one two-second
-poll. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
+What "overshoots" means depends on the enforcement kind: `native` reports
+whatever Claude Code itself stopped at, so that figure is the fleet's
+promise, not conductor's; `watcher` (codex, antigravity) can only kill after
+the fact, so it overshoots by at most one model response plus one
+two-second poll; `post-hoc` (cursor) gets its usage once, at the end, so the
+whole run can pass before the cap is even checked, and the mission ledger's
+`outstanding_cap_usd` is the only bound on that while it runs; `none`
+(script) never overshoots, being free. A run over its cap is not `ok` (`failure: "over budget: $3.0000 against
 a $1.0000 cap"`), whether it was killed or merely judged afterwards; work it
 landed is still on its branch. The watcher runs on every codex and
 antigravity dispatch, cap or not, because it is also the only price a run

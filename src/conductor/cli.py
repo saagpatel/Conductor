@@ -695,10 +695,15 @@ def cmd_export(args: argparse.Namespace) -> int:
     if args.check:
         result = export_mod.check(Path(args.check))
         not_verifiable_here: list = []
+        omitted: list = []
         try:
             manifest = json.loads((Path(args.check) / "manifest.json").read_text())
             if isinstance(manifest, dict) and isinstance(manifest.get("not_verifiable_here"), list):
                 not_verifiable_here = manifest["not_verifiable_here"]
+            if isinstance(manifest, dict) and isinstance(manifest.get("scope"), dict):
+                raw_omitted = manifest["scope"].get("omitted")
+                if isinstance(raw_omitted, list):
+                    omitted = raw_omitted
         except (OSError, json.JSONDecodeError):
             pass
         if args.json:
@@ -722,6 +727,10 @@ def cmd_export(args: argparse.Namespace) -> int:
                 print(f"- {problem}")
             if not_verifiable_here:
                 print(f"not verifiable here: {', '.join(not_verifiable_here)}")
+            if omitted:
+                print("omitted:")
+                for sentence in omitted:
+                    print(f"- {sentence}")
         return 0 if result.ok else 1
 
     if not args.mission_id or not args.out:
@@ -739,6 +748,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 3
 
     verified, total = result.attestations_verified_at_export
+    run_id_scope = result.scope.get("run_ids", {})
     if args.json:
         print(
             json.dumps(
@@ -750,6 +760,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     "chain_verified_at_export": result.chain_verified_at_export,
                     "attestations_verified_at_export": [verified, total],
                     "leaks": result.leaks,
+                    "scope": result.scope,
                 },
                 indent=2,
             )
@@ -760,6 +771,13 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"chain at export: {result.chain_state_at_export}")
         print(f"chain verified at export: {result.chain_verified_at_export}")
         print(f"attestations verified at export: {verified}/{total}")
+        print(
+            f"scope: {run_id_scope.get('total', 0)} run(s) "
+            f"({run_id_scope.get('from_lanes', 0)} lanes, "
+            f"{run_id_scope.get('from_chain', 0)} chain, "
+            f"{run_id_scope.get('from_snapshot', 0)} snapshot), "
+            f"{len(result.scope.get('missing_run_dirs', []))} missing run dir(s)"
+        )
     return 0
 
 

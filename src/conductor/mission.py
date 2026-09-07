@@ -2306,6 +2306,15 @@ class Ledger:
     after the run, not a stop). A dispatch that lands unpriced makes the
     total unknowable, and a budget that cannot be accounted for is treated
     as spent: nothing more starts, and the skip says why.
+
+    W9: `start`/`finish` track every in-flight dispatch's own cap so
+    `to_dict()` can report `outstanding_cap_usd` and `worst_case_usd` --
+    what the ledger could still owe if every dispatch running right now
+    finished at its own cap. This is a report of possible overshoot, read
+    beside `spent_usd`, never a reservation: atomically subtracting an
+    in-flight cap from `remaining()` or `blocker()` was proposed and
+    rejected, because two dispatches racing for the same remaining dollar
+    would then each see it as unclaimed and both could be allowed to start.
     """
 
     def __init__(self, max_cost_usd: float | None) -> None:
@@ -2313,6 +2322,7 @@ class Ledger:
         self.spent = 0.0
         self.unpriced = 0  # dispatches that reported no cost at all
         self._lock = threading.Lock()
+        self._in_flight_caps: list[float | None] = []
 
     def blocker(self) -> str | None:
         """Why nothing more may start, or None while spending is allowed."""
@@ -2361,14 +2371,42 @@ class Ledger:
             self.spent += float(cost_usd)
             self.unpriced += int(unpriced_dispatches)
 
+    def start(self, cap_usd: float | None) -> None:
+        """W9: record one more dispatch in flight, at the cap it was given
+        (its own, `remaining()`-tightened, cap -- `None` when it has none).
+        """
+        with self._lock:
+            self._in_flight_caps.append(cap_usd)
+
+    def finish(self, cap_usd: float | None) -> None:
+        """The counterpart to `start`, called in a `finally` so a dispatch
+        that raises still clears its own outstanding cap. `cap_usd` must be
+        the same value `start` was given for this dispatch."""
+        with self._lock:
+            try:
+                self._in_flight_caps.remove(cap_usd)
+            except ValueError:
+                pass
+
     def to_dict(self) -> dict:
         with self._lock:
+            in_flight = list(self._in_flight_caps)
+            if any(cap is None for cap in in_flight):
+                outstanding_cap_usd = None
+            else:
+                outstanding_cap_usd = round(sum(in_flight), 6)
+            worst_case_usd = (
+                None if outstanding_cap_usd is None else round(self.spent + outstanding_cap_usd, 6)
+            )
             return {
                 "max_cost_usd": self.max,
                 "spent_usd": round(self.spent, 6),
                 "exceeded": self.max is not None and self.spent >= self.max,
                 "unverifiable": self.max is not None and self.unpriced > 0,
                 "unpriced_dispatches": self.unpriced,
+                "in_flight_dispatches": len(in_flight),
+                "outstanding_cap_usd": outstanding_cap_usd,
+                "worst_case_usd": worst_case_usd,
             }
 
 
@@ -5136,9 +5174,10 @@ def _execute_mission(
             )
             # E26: this attempt's own repository, or the mission's default.
             attempt_cwd = attempt.effective_cwd(mission.cwd)
+            cap_usd = _tighter(attempt.cap_usd, ledger.remaining())
             spec = attempt.spec(
                 attempt_cwd,
-                cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
+                cap_usd=cap_usd,
                 prompt=prompt,
                 resume=resume_id,
                 stage=lane.stage,
@@ -5154,29 +5193,34 @@ def _execute_mission(
                 base_ref=base_ref,
                 cancel=lane_cancel_events.get(lane.name),
             )
-            if dispatcher is not None:
-                # C7: golden.replay's offline dispatcher, in place of a live
-                # spawn. Same keyword values the live call gets, plus which
-                # lane, which attempt label, and this call's retry index.
-                result = dispatcher(
-                    spec,
-                    lane=lane.name,
-                    attempt=attempt.label(),
-                    retry=retry_index,
-                    **dispatch_kwargs,
-                )
-            else:
-                # E11: recorded on the live receipt so report.py can group by
-                # lane and mission without joining through the mission
-                # snapshot; golden.replay's dispatcher has its own fixed
-                # signature and predates these two fields.
-                result = dispatch(
-                    spec,
-                    lane=lane.name,
-                    mission=mission_id,
-                    inherited_check=inherited_check,
-                    **dispatch_kwargs,
-                )
+            ledger.start(cap_usd)
+            try:
+                if dispatcher is not None:
+                    # C7: golden.replay's offline dispatcher, in place of a
+                    # live spawn. Same keyword values the live call gets,
+                    # plus which lane, which attempt label, and this call's
+                    # retry index.
+                    result = dispatcher(
+                        spec,
+                        lane=lane.name,
+                        attempt=attempt.label(),
+                        retry=retry_index,
+                        **dispatch_kwargs,
+                    )
+                else:
+                    # E11: recorded on the live receipt so report.py can
+                    # group by lane and mission without joining through the
+                    # mission snapshot; golden.replay's dispatcher has its
+                    # own fixed signature and predates these two fields.
+                    result = dispatch(
+                        spec,
+                        lane=lane.name,
+                        mission=mission_id,
+                        inherited_check=inherited_check,
+                        **dispatch_kwargs,
+                    )
+            finally:
+                ledger.finish(cap_usd)
             if resume_note and resume_id is None:
                 result.git_verdict.setdefault("notes", []).append(resume_note)
                 (Path(result.run_dir) / "result.json").write_text(
@@ -6701,16 +6745,19 @@ def _run_collate(
         if col.instructions == DEFAULT_COLLATE_INSTRUCTIONS
         else {}
     )
-    result = _dispatch_aux(
-        dispatcher,
-        col.spec(
-            mission.cwd, prompt, cap_usd=_tighter(col.cap_usd, ledger.remaining()), taint=tainted
-        ),
-        label="collate",
-        home=base,
-        mission_id=mission_id,
-        prompt_versions=used_versions,
-    )
+    cap_usd = _tighter(col.cap_usd, ledger.remaining())
+    ledger.start(cap_usd)
+    try:
+        result = _dispatch_aux(
+            dispatcher,
+            col.spec(mission.cwd, prompt, cap_usd=cap_usd, taint=tainted),
+            label="collate",
+            home=base,
+            mission_id=mission_id,
+            prompt_versions=used_versions,
+        )
+    finally:
+        ledger.finish(cap_usd)
     ledger.add(result)
     summary = result.summary()
     answer_path = None
@@ -6952,20 +6999,25 @@ def _run_rank_collate(
         # collide with judge 1's or each other's.
         suffix = "" if judge_index == 0 else f"-{judge_index - 1}"
         (mission_dir / f"collate-prompt-{label}{suffix}.txt").write_text(prompt)
-        result = _dispatch_aux(
-            dispatcher,
-            judge.spec(
-                mission.cwd,
-                prompt,
-                cap_usd=_tighter(judge.cap_usd, ledger.remaining()),
-                schema=_rank_schema_for(judge.fleet, str(schema_path)),
-                taint=tainted,
-            ),
-            label=f"collate:{judge_index}:{label}",
-            home=base,
-            mission_id=mission_id,
-            prompt_versions={"rank_contract": rank_contract_version},
-        )
+        cap_usd = _tighter(judge.cap_usd, ledger.remaining())
+        ledger.start(cap_usd)
+        try:
+            result = _dispatch_aux(
+                dispatcher,
+                judge.spec(
+                    mission.cwd,
+                    prompt,
+                    cap_usd=cap_usd,
+                    schema=_rank_schema_for(judge.fleet, str(schema_path)),
+                    taint=tainted,
+                ),
+                label=f"collate:{judge_index}:{label}",
+                home=base,
+                mission_id=mission_id,
+                prompt_versions={"rank_contract": rank_contract_version},
+            )
+        finally:
+            ledger.finish(cap_usd)
         ledger.add(result)
         summary = result.summary()
         answer_text = (
@@ -7197,21 +7249,26 @@ def _run_resolve(
         if res.instructions == DEFAULT_RESOLVE_INSTRUCTIONS
         else {}
     )
-    result = _dispatch_aux(
-        dispatcher,
-        res.spec(
-            resolve_cwd,
-            prompt,
-            cap_usd=_tighter(res.cap_usd, ledger.remaining()),
-            taint=tainted,
-        ),
-        label="resolve",
-        home=base,
-        mission_id=mission_id,
-        prompt_versions=used_versions,
-        test_command=mission.test,
-        commit_message=res.commit,
-    )
+    cap_usd = _tighter(res.cap_usd, ledger.remaining())
+    ledger.start(cap_usd)
+    try:
+        result = _dispatch_aux(
+            dispatcher,
+            res.spec(
+                resolve_cwd,
+                prompt,
+                cap_usd=cap_usd,
+                taint=tainted,
+            ),
+            label="resolve",
+            home=base,
+            mission_id=mission_id,
+            prompt_versions=used_versions,
+            test_command=mission.test,
+            commit_message=res.commit,
+        )
+    finally:
+        ledger.finish(cap_usd)
     ledger.add(result)
     summary = result.summary()
     iso = result.isolation or {}

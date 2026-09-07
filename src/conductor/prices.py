@@ -67,6 +67,11 @@ class Price:
     cache_read: float
     cache_write: float
     note: str = ""
+    # W6: "default" for a DEFAULT_PRICES entry, "override" for one the
+    # operator's prices.json supplied -- carried onto every receipt this
+    # entry prices, so a stale or wrong override is visible on the run it
+    # affected rather than only in prices.json itself.
+    source: str = "default"
 
     def cost(
         self,
@@ -84,7 +89,7 @@ class Price:
         return round(per_m / 1_000_000, 6)
 
 
-def _std(input: float, output: float, note: str = "") -> Price:
+def _std(input: float, output: float, note: str = "", source: str = "default") -> Price:
     """The common vendor pattern: cache reads at 10% of input, cache writes at
     125% of input (Anthropic and OpenAI both publish exactly this)."""
     return Price(
@@ -93,6 +98,7 @@ def _std(input: float, output: float, note: str = "") -> Price:
         cache_read=round(input * 0.10, 6),
         cache_write=round(input * 1.25, 6),
         note=note,
+        source=source,
     )
 
 
@@ -196,7 +202,7 @@ def load_prices(override: Path | None = None, errors: list[str] | None = None) -
                     "non-negative; entry ignored",
                 )
                 continue
-            price = _std(inp, out, str(value.get("note", "override")))
+            price = _std(inp, out, str(value.get("note", "override")), source="override")
             if cache_read is not None:
                 price = replace(price, cache_read=float(cache_read))
             if cache_write is not None:
@@ -222,6 +228,20 @@ def lookup(model_id: str, table: dict[str, Price] | None = None) -> tuple[str, P
             if best is None or len(key) > len(best[0]):
                 best = (key, price)
     return best
+
+
+def basis(model_id: str, table: dict[str, Price] | None = None) -> dict | None:
+    """W6: the receipt-worthy explanation of an estimate -- which table key
+    matched `model_id` (same longest-prefix `lookup` `estimate` itself
+    uses), whether that entry is a default or an operator override, the
+    table's own vintage, and the entry's note. `None` for an unpriced model,
+    the same gap `estimate` itself reports as `None` rather than `$0.00`.
+    """
+    hit = lookup(model_id, table)
+    if hit is None:
+        return None
+    key, price = hit
+    return {"key": key, "source": price.source, "as_of": AS_OF, "note": price.note}
 
 
 def estimate(

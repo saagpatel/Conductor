@@ -15,6 +15,7 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.mission import (
+    Ledger,
     MissionInvalid,
     load_mission,
     mission_from_dict,
@@ -363,6 +364,60 @@ def test_a_never_spawned_attempt_does_not_poison_the_budget_or_stop_collate(
     assert result.lanes[1]["attempts"][0]["spawned"] is True
     assert result.collate and result.collate["ok"] is True
     assert result.budget["unverifiable"] is False
+
+
+# --- W9: outstanding caps on the ledger (item 2) ---------------------------
+
+
+def test_ledger_reports_in_flight_caps_and_worst_case_without_reserving_them():
+    ledger = Ledger(max_cost_usd=10.0)
+    ledger.start(2.0)
+    ledger.start(3.0)
+    state = ledger.to_dict()
+    assert state["in_flight_dispatches"] == 2
+    assert state["outstanding_cap_usd"] == 5.0
+    assert state["worst_case_usd"] == 5.0
+    # W9: a report of possible overshoot, never a reservation -- two
+    # dispatches still in flight must not shrink what a third sees as free.
+    assert ledger.remaining() == 10.0
+
+    ledger.finish(2.0)
+    state = ledger.to_dict()
+    assert state["in_flight_dispatches"] == 1
+    assert state["outstanding_cap_usd"] == 3.0
+    assert state["worst_case_usd"] == 3.0
+
+    ledger.finish(3.0)
+    state = ledger.to_dict()
+    assert state["in_flight_dispatches"] == 0
+    assert state["outstanding_cap_usd"] == 0.0
+    assert state["worst_case_usd"] == 0.0
+
+
+def test_ledger_nulls_outstanding_and_worst_case_when_an_in_flight_dispatch_has_no_cap():
+    ledger = Ledger(max_cost_usd=None)
+    ledger.start(1.0)
+    ledger.start(None)  # no cap on this one: the sum is unknowable
+    state = ledger.to_dict()
+    assert state["in_flight_dispatches"] == 2
+    assert state["outstanding_cap_usd"] is None
+    assert state["worst_case_usd"] is None
+    ledger.finish(None)
+    ledger.finish(1.0)
+    assert ledger.to_dict()["outstanding_cap_usd"] == 0.0
+
+
+def test_a_finished_missions_ledger_reads_zero_outstanding_and_worst_case_as_spent(
+    repo, home, monkeypatch, tmp_path
+):
+    """Item 2: on a finished mission all three read 0, 0.0, and spent_usd."""
+    fake_fleets(monkeypatch, {"claude": say("done", cost=0.1)})
+    raw = {"prompt": "x", "cwd": str(repo), "max_cost_usd": 1.0, "lanes": [{"fleet": "claude"}]}
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.budget["in_flight_dispatches"] == 0
+    assert result.budget["outstanding_cap_usd"] == 0.0
+    assert result.budget["worst_case_usd"] == result.budget["spent_usd"]
+    assert result.budget["spent_usd"] == 0.1
 
 
 def test_report_marks_unpriced_attempts_instead_of_rendering_them_as_zero(

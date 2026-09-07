@@ -158,6 +158,30 @@ def test_a_rate_that_is_not_finite_and_non_negative_is_reported_and_not_loaded(t
     assert table["cursor-grok-4.6"].cache_read == 0.0
 
 
+def test_basis_reports_the_matched_key_source_and_date():
+    """W6: the receipt-worthy explanation of an estimate -- same longest-
+    prefix lookup `estimate` itself uses."""
+    hit = prices.basis("claude-sonnet-5-hard", DEFAULT_PRICES)
+    assert hit == {
+        "key": "claude-sonnet-5",
+        "source": "default",
+        "as_of": prices.AS_OF,
+        "note": "",
+    }
+    assert prices.basis("nobody-knows-this", DEFAULT_PRICES) is None
+
+
+def test_basis_reports_override_as_its_own_source(tmp_path: Path):
+    override = tmp_path / "prices.json"
+    override.write_text(json.dumps({"gpt-5.6-terra": {"input": 2.0, "output": 12.0}}))
+    table = load_prices(override)
+    hit = prices.basis("gpt-5.6-terra-high", table)
+    assert hit is not None
+    assert hit["key"] == "gpt-5.6-terra"
+    assert hit["source"] == "override"
+    assert hit["as_of"] == prices.AS_OF
+
+
 def test_finite_helpers_refuse_booleans_and_non_numbers():
     for bad in (True, False, float("nan"), float("inf"), "1.0", None):
         assert prices.finite_positive(bad) is False

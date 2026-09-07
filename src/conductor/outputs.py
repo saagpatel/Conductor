@@ -47,6 +47,12 @@ class Usage:
     # "reported" when the fleet printed a dollar figure, "estimated" when
     # conductor priced the tokens itself, None when neither was possible.
     cost_basis: str | None = None
+    # W6: set alongside cost_basis="estimated", to `prices.basis(model_id)`
+    # -- which table key priced this run, whether that entry is a default or
+    # an operator override, and the table's vintage. None on a "reported"
+    # figure (the fleet's own number, not from the table) and on an unpriced
+    # run.
+    price: dict | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
