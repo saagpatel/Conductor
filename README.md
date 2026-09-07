@@ -2821,7 +2821,27 @@ difference (`lane <name>: replay dispatched attempt <k> but the recording
 has <n>`), answered with a refused result so the mission still completes
 rather than raising; so is a recorded run id with no receipt in the
 fixture (`recorded run <id> has no result.json in the fixture`, the shape
-a pre-F8 fixture with a collate would show). `runner.Result.from_dict` rehydrates a stored
+a pre-F8 fixture with a collate would show).
+
+D18: the replay also compares the **dispatch contract** it was asked for
+against the one the recording actually ran under, before it looks at the
+transcript at all -- `fleet`, the resolved `model` id for the effort,
+`effort`, `mode`, `timeout`, `cap_usd` (from the receipt's `budget`),
+`taint` (and, on a tainted lane, which shell policy ran), and the
+`--restricted` flag a claude read lane would carry. Each field that moved
+is a difference of its own (`run <id>: contract cap_usd: recorded 4.0,
+replayed 2.0`), so a regression in how a lane becomes a `Spec` -- a default
+model, a tightened cap, a flipped mode, a dropped taint declaration -- fails
+`check` even when the recorded transcript still parses identically. A field
+the recording never carried (an older receipt that predates `taint` or
+`restricted`; the requested schema, which no receipt records) is not
+comparable and is reported as a note, listed once per fixture and never
+failing the check. At the end of the replay every recording must have been
+consumed: an unconsumed run id is a difference naming the lane and the run
+ids (`lane <name>: replay dispatched 0 attempt(s) but the recording has 1`),
+unless the replay deliberately did not start that lane -- a pause point, a
+skip, a cancellation -- in which case it is a note, because that decision is
+itself pinned in `expected.json`. `runner.Result.from_dict` rehydrates a stored
 `result.json` back into a `Result`; an unknown field is refused by name, and
 a field missing from an older receipt takes its dataclass default.
 
@@ -2865,15 +2885,17 @@ operator's machine, not the routing), `collate` (`ok`, `rank`,
 `resolve` (`ran`, `ok`, `error`) when the mission had one, and per lane
 and attempt the fields that describe what happened, never a path, a
 duration, a run id, a timestamp, or a dollar amount. `expected.json` pins that projection at
-record time. `golden.check(fixture_dir, *, update=False, cwds=None)` takes
-the same `cwds` as `replay`. `conductor golden check [DIR ...]` replays each fixture (every
+record time. `golden.check(fixture_dir, *, update=False, cwds=None,
+notes=None)` takes the same `cwds` as `replay`; `notes`, when a list is
+passed, collects the replay's own non-fatal notes (a contract field the
+recordings do not carry, a recording a paused lane never consumed). `conductor golden check [DIR ...]` replays each fixture (every
 directory under `tests/golden/` of the current working directory that holds
 a `golden.json`, by default) into a fresh temporary home and a fresh
 temporary git repository, and prints every difference -- the replay's own,
 plus one line per projection field that disagrees with `expected.json` --
 prefixed by the fixture's name; exit 1 if any difference printed, 0 if
-every fixture was clean (version-drift notes, below, print without changing
-the exit code). `--update` is for a deliberate change: it rewrites
+every fixture was clean (the replay's own notes and the version-drift
+notes, below, print without changing the exit code). `--update` is for a deliberate change: it rewrites
 `expected.json` from the replay instead of reporting projection
 differences, so the next `check` is clean once the new behavior is the one
 you meant.

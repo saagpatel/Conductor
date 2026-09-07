@@ -667,8 +667,9 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
         )
     any_diff = False
     for fixture_dir in fixture_dirs:
+        notes: list[str] = []
         try:
-            diffs = golden.check(fixture_dir, update=args.update)
+            diffs = golden.check(fixture_dir, update=args.update, notes=notes)
         except (golden.GoldenError, OSError, ValueError) as exc:
             print(f"{fixture_dir.name}: {exc}")
             any_diff = True
@@ -677,8 +678,11 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
             print(f"{fixture_dir.name}: {line}")
         if diffs:
             any_diff = True
-        # E22: version drift is a note, never a check failure -- printed
-        # alongside the projection diffs but never added to any_diff.
+        # D18/E22: a contract field the recording never carried, and version
+        # drift, are notes -- printed alongside the projection diffs but
+        # never added to any_diff.
+        for line in notes:
+            print(f"{fixture_dir.name}: {line}")
         for line in golden.version_drift(fixture_dir):
             print(f"{fixture_dir.name}: {line}")
     return 1 if any_diff else 0

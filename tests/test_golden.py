@@ -965,3 +965,93 @@ def test_readme_documents_golden_missions():
     assert "conductor golden check" in section
     assert "expected.json" in section and "--update" in section
     assert "dispatcher" in section
+
+
+# --- D18: the requested dispatch contract is compared ----------------------
+
+
+def _smoke_fixture(repo, home, monkeypatch, tmp_path) -> Path:
+    mission_dir = _record_smoke_mission(repo, home, monkeypatch, tmp_path)
+    return golden.record(mission_dir, tmp_path / "fixture", home=home)
+
+
+def _edit_snapshot_attempt(fixture: Path, lane_name: str, **fields) -> None:
+    snapshot = json.loads((fixture / "mission.json").read_text())
+    for lane in snapshot["lanes"]:
+        if lane["name"] == lane_name:
+            lane["attempts"][0].update(fields)
+    (fixture / "mission.json").write_text(json.dumps(snapshot, indent=2))
+
+
+def test_check_reports_a_tightened_cap_the_recording_never_ran(repo, home, monkeypatch, tmp_path):
+    # D18: cap_usd is decided before the fleet spawns, so a mission that
+    # would now dispatch under a different cap has changed the contract even
+    # when the recorded transcript still parses identically.
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    _edit_snapshot_attempt(fixture, "read", cap_usd=0.25)
+    diffs = golden.check(fixture)
+    assert any(
+        "contract cap_usd: recorded None, replayed 0.25" in line for line in diffs
+    ), diffs
+
+
+def test_check_reports_a_changed_model(repo, home, monkeypatch, tmp_path):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    _edit_snapshot_attempt(fixture, "read", model="composer-2.5")
+    diffs = golden.check(fixture)
+    assert any("contract model" in line for line in diffs), diffs
+
+
+def test_check_reports_a_taint_declaration_the_recording_never_carried(
+    repo, home, monkeypatch, tmp_path
+):
+    # The transcript is unchanged either way: taint is a pre-spawn decision,
+    # so only the contract comparison sees it move.
+    fake_fleets(monkeypatch, {"claude": say("ok", 0.01)})
+    raw = {
+        "prompt": "read it",
+        "cwd": str(repo),
+        "lanes": [{"name": "r", "fleet": "claude", "mode": "read"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.ok is True
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    assert golden.check(fixture) == []
+
+    snapshot = json.loads((fixture / "mission.json").read_text())
+    for lane in snapshot["lanes"]:
+        lane["taint"] = True
+        lane["tainted"] = True
+    (fixture / "mission.json").write_text(json.dumps(snapshot, indent=2))
+    diffs = golden.check(fixture)
+    assert any("contract taint: recorded False, replayed True" in line for line in diffs), diffs
+
+
+def test_check_reports_a_recording_the_replay_never_dispatched(repo, home, monkeypatch, tmp_path):
+    # D18: a lane the replay drops entirely leaves its recording unconsumed;
+    # without this the projection simply stops mentioning the lane.
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    snapshot = json.loads((fixture / "mission.json").read_text())
+    snapshot["lanes"] = [lane for lane in snapshot["lanes"] if lane["name"] != "read"]
+    (fixture / "mission.json").write_text(json.dumps(snapshot, indent=2))
+    diffs = golden.check(fixture)
+    assert any(
+        "lane read: replay dispatched 0 attempt(s) but the recording has 1" in line
+        for line in diffs
+    ), diffs
+
+
+def test_a_contract_field_the_recording_lacks_is_a_note_not_a_difference(
+    repo, home, monkeypatch, tmp_path
+):
+    # An old recording that predates a field is not evidence the field
+    # regressed: `check` reports it through `notes`, which never fails.
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    for path in sorted((fixture / "runs").glob("*/result.json")):
+        recorded = json.loads(path.read_text())
+        recorded.pop("restricted", None)
+        recorded.pop("taint", None)
+        path.write_text(json.dumps(recorded, indent=2))
+    notes: list[str] = []
+    assert golden.check(fixture, notes=notes) == []
+    assert any("restricted" in line and "taint" in line for line in notes), notes
