@@ -484,6 +484,11 @@ def test_shape_a_adversarial_flag_adds_the_lane_policy_and_fix_prompt_block(repo
     # message configured, conductor's own commit_work is never invoked, so a
     # reproduced adversarial lane can never land.
     assert adversarial_lane.get("commit")
+    # A clean build is answered by moving no bytes; a write lane that does
+    # that fails unless no_op_ok is set, and under require: all that abort
+    # would skip the fix.
+    assert adversarial_lane["mode"] == "write"
+    assert adversarial_lane["no_op_ok"] is True
     fix_lane = next(lane for lane in raw["lanes"] if lane["name"] == "fix")
     assert fix_lane["base"] == "adversarial"
     assert "adversarial" in fix_lane["needs"] and "build" in fix_lane["needs"]
@@ -495,6 +500,18 @@ def test_shape_a_adversarial_flag_adds_the_lane_policy_and_fix_prompt_block(repo
     shape.write_shape_schemas(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
     assert any(lane.stage == "adversarial" for lane in mission.lanes)
+
+
+def test_shape_a_adversarial_lane_allows_a_clean_no_op(repo, tmp_path):
+    """The correct answer to a clean build is to move no bytes, and a write
+    dispatch that does that fails the lane unless no_op_ok is set. Under
+    require: all that abort would skip the fix."""
+    spec = _spec_file(tmp_path)
+    caps = shape.cap_arithmetic(2, 1, adversarial=True)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps, adversarial=True)
+    adversarial_lane = next(lane for lane in raw["lanes"] if lane["name"] == "adversarial")
+    assert adversarial_lane["mode"] == "write"
+    assert adversarial_lane["no_op_ok"] is True
 
 
 def test_shape_a_without_the_adversarial_flag_is_unchanged(repo, tmp_path):

@@ -111,6 +111,66 @@ def test_a_lane_flag_the_cap_arithmetic_was_not_built_with_is_refused(
         )
 
 
+def test_followon_budget_is_the_mission_budget_minus_the_build_cap():
+    """A salvage follow-on has no build lane, but the grace on grok, fix,
+    and opus is still spend against the same ledger. The old inline sum
+    left that band out of the ceiling."""
+    caps = shape.cap_arithmetic(2, 1)
+    assert caps.followon_budget == round(caps.mission_budget - caps.build_cap, 2)
+    omitted = round(caps.review_caps + caps.fix_cap + shape.USD_MISSION_SLACK, 2)
+    assert caps.followon_budget == round(
+        omitted + caps.graced_lanes * caps.cap_grace_usd, 2
+    )
+    with_opus = shape.cap_arithmetic(2, 1, opus_review=True)
+    assert with_opus.followon_budget == round(
+        with_opus.mission_budget - with_opus.build_cap, 2
+    )
+    assert with_opus.followon_budget == round(
+        caps.followon_budget + with_opus.opus_cap + with_opus.cap_grace_usd, 2
+    )
+
+
+def test_followon_max_cost_uses_the_followon_budget(repo):
+    caps = shape.cap_arithmetic(1, 1)
+    raw = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test="true",
+        caps=caps,
+        name="salvaged",
+    )
+    assert raw["max_cost_usd"] == caps.followon_budget
+    # The old inline sum left grace out of the ceiling.
+    assert raw["max_cost_usd"] != round(
+        caps.review_caps + caps.fix_cap + shape.USD_MISSION_SLACK, 2
+    )
+
+
+def test_followon_refuses_an_opus_flag_the_cap_arithmetic_was_not_built_with(repo):
+    """Emitting review-opus against caps that were not sized for it ships
+    a $4 lane the follow-on budget never counted."""
+    with pytest.raises(shape.ShapeInvalid, match="opus_review"):
+        shape.shape_a_followon(
+            worktree=repo,
+            salvage_sha="abc123",
+            diff="",
+            test="true",
+            caps=shape.cap_arithmetic(1, 1),
+            name="salvaged",
+            opus_review=True,
+        )
+    with pytest.raises(shape.ShapeInvalid, match="opus_review"):
+        shape.shape_a_followon(
+            worktree=repo,
+            salvage_sha="abc123",
+            diff="",
+            test="true",
+            caps=shape.cap_arithmetic(1, 1, opus_review=True),
+            name="salvaged",
+        )
+
+
 def test_disabled_grace_puts_nothing_in_the_mission_budget():
     caps = shape.cap_arithmetic(2, 1, cap_grace_usd=0.0)
     assert caps.graced_lanes == 0
@@ -687,7 +747,7 @@ def test_followon_carries_the_opus_reviewer_when_asked(repo, tmp_path):
     assert raw["policy"]["review"]["vendors"] == ["google", "xai", "anthropic"]
     assert raw["lanes"][3]["needs"] == ["review-gemini", "review-grok", "review-opus"]
     assert "<review_opus>" in raw["lanes"][3]["prompt"]
-    assert raw["max_cost_usd"] == round(1.0 + 1.5 + 4.0 + caps.fix_cap + shape.USD_MISSION_SLACK, 2)
+    assert raw["max_cost_usd"] == caps.followon_budget
     assert "self_judging" not in raw
 
 
