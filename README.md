@@ -1206,7 +1206,8 @@ build cap: $5.00 5 spec items + $2.00 scheduler tax + $2.00 2 modules past the s
 review-gemini cap: $1.00 (reads only; rule 7)
 review-grok cap: $1.50 (reads only; rule 7)
 fix cap: $2.00 fix base + $4.00 4 findings + $2.00 scheduler tax + $1.00 Claude summary = $9.00
-mission budget: lanes $21.50 + $1.50 slack = $23.00
+grace: $0.25 per claude lane and the grok read lane (E24/F5, on top of its own cap; 3 lanes, $0.75 in the mission budget)
+mission budget: lanes $21.50 + $0.75 grace + $1.50 slack = $23.75
 ```
 
 `--items` and `--modules` are hand counts. Conductor has no notion of a spec item or a
@@ -1220,7 +1221,18 @@ every Claude lane the shape declares -- build and fix always, plus `adversarial`
 under `--adversarial` and `review-opus` under `--opus-review` -- whose cap is
 native, and on the review-grok lane, whose cap is post-hoc; `--cap-grace-usd 0`
 disables it. The cap arithmetic prints the band as
-its own line, and it never changes the build, fix, or grok cap themselves.
+its own line, and it never changes the build, fix, or grok cap themselves --
+but the mission budget does carry it, once per graced lane. The band is
+spend against the same ledger (Grok's is post-hoc, so the dollars are
+already gone when it is granted), and leaving it out let five graced lanes
+legally spend $2.50 over the summed caps against $1.50 of slack, so the
+mission ran out before the fix lane after a green build and clean reviews.
+
+The lanes the shape emits and the arithmetic it sizes them against are two
+separate arguments, and `max_cost_usd` comes from the arithmetic alone.
+`shape_a` refuses when they disagree -- `adversarial=True` against caps
+built without it, or the reverse -- rather than writing a mission whose
+budget cannot carry a lane it declares.
 `--adversarial` (E16) adds the adversarial lane beside the two reviewers, moves the
 fix lane's `base` onto it (its `resume` stays
 `build`), adds `adversarial` to the vendor policy and the cap arithmetic, and gives

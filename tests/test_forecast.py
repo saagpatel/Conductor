@@ -294,7 +294,7 @@ def test_shape_a_raises_a_warned_cap_to_the_p80_and_the_budget_with_it(
     raw = json.loads(out.read_text())
     build = next(lane for lane in raw["lanes"] if lane["name"] == "build")
     assert build["cap_usd"] == 8.0  # the $8.00 p80, rounded up to the whole dollar
-    assert raw["max_cost_usd"] == 15.0 + 4.0  # rule 2's budget plus the same $4.00
+    assert raw["max_cost_usd"] == 15.75 + 4.0  # rule 2's budget plus the same $4.00
     assert raw["caps"]["build"] == {
         "rule_2_usd": 4.0,
         "forecast_p80_usd": 8.0,
@@ -318,7 +318,7 @@ def test_no_forecast_cap_leaves_the_caps_alone_and_records_the_declined_p80(
     raw = json.loads(out.read_text())
     build = next(lane for lane in raw["lanes"] if lane["name"] == "build")
     assert build["cap_usd"] == 4.0
-    assert raw["max_cost_usd"] == 15.0
+    assert raw["max_cost_usd"] == 15.75
     assert raw["caps"]["build"] == {
         "rule_2_usd": 4.0,
         "forecast_p80_usd": 8.0,
@@ -338,7 +338,7 @@ def test_a_home_with_no_history_moves_nothing_and_records_a_null_p80(
     printed = capsys.readouterr().out
     raw = json.loads(out.read_text())
     assert next(lane for lane in raw["lanes"] if lane["name"] == "build")["cap_usd"] == 4.0
-    assert raw["max_cost_usd"] == 15.0
+    assert raw["max_cost_usd"] == 15.75
     assert {row["basis"] for row in raw["caps"].values()} == {"rule 2"}
     assert all(row["forecast_p80_usd"] is None for row in raw["caps"].values())
     assert sorted(raw["caps"]) == ["build", "fix", "review-gemini", "review-grok"]

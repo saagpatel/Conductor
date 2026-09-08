@@ -184,6 +184,29 @@ FIX_PROMPT_ADVERSARIAL_BLOCK = (
 # (and before any adversarial block) when `shape_a(opus_review=True)`.
 FIX_PROMPT_OPUS_BLOCK = "<review_opus>\n{{lanes.review-opus.answer}}\n</review_opus>\n\n"
 
+# E23: `FIX_PROMPT` opens by telling the fixer it wrote the change itself,
+# earlier in the same thread, because in `shape_a` it resumes the build
+# lane's session and that is true. A salvage follow-on has no build lane and
+# nothing to resume: the fix lane is a new session looking at a commit the
+# lead made by hand. Telling it otherwise invites it to go looking for
+# context it never had, or to treat the salvage as its own prior work
+# (2026-09-08 review).
+FOLLOWON_FIX_OPENING = (
+    "The spec below is already implemented on the commit this working directory sits at. "
+    "You did not write it and there is no earlier turn in this thread to recall. "
+)
+
+
+def followon_fix_prompt(prompt: str) -> str:
+    """`FIX_PROMPT` (or a variant) with its resumed-thread opening replaced
+    by one that describes a fresh session over a commit."""
+    opening = (
+        "The spec below is already implemented on this branch, by you earlier in this thread. "
+    )
+    if opening not in prompt:  # pragma: no cover - the constant is pinned by a test
+        raise ShapeInvalid("FIX_PROMPT no longer opens the way the follow-on rewrite expects")
+    return prompt.replace(opening, FOLLOWON_FIX_OPENING)
+
 
 def fix_prompt_with_opus(prompt: str) -> str:
     """`FIX_PROMPT` (or a variant of it) rewritten for three reviewers: the
@@ -309,11 +332,31 @@ class CapArithmetic:
         return total
 
     @property
+    def graced_lanes(self) -> int:
+        """How many lanes carry `cap_grace_usd`: build, review-grok and fix
+        always, plus the adversarial and Opus lanes when this shape has
+        them (`shape_a` writes the field onto exactly these)."""
+        if not self.cap_grace_usd:
+            return 0
+        return 3 + int(self.adversarial) + int(self.opus_review)
+
+    @property
     def mission_budget(self) -> float:
+        """Every lane's cap, the grace those lanes may legally draw on top
+        of it, and the slack.
+
+        The grace band used to be left out entirely (2026-09-08 review). It
+        is real spend against the same ledger -- Grok's is post-hoc, so the
+        dollars are already gone when it is granted -- so five graced lanes
+        at the $0.50 ceiling could legally spend $2.50 over the summed caps
+        against $1.50 of slack, and the mission ran out of budget before the
+        fix lane, after a green build and two clean reviews.
+        """
         lanes = self.build_cap + self.review_caps + self.fix_cap
         if self.adversarial:
             lanes += self.adversarial_cap
-        return round(lanes + USD_MISSION_SLACK, 2)
+        grace = self.graced_lanes * self.cap_grace_usd
+        return round(lanes + grace + USD_MISSION_SLACK, 2)
 
     def render(self) -> str:
         def line(label: str, terms: list[tuple[str, float]], total: float) -> str:
@@ -331,15 +374,19 @@ class CapArithmetic:
         if self.adversarial:
             lines.append(line("adversarial cap", self.adversarial_terms, self.adversarial_cap))
         lines.append(line("fix cap", self.fix_terms, self.fix_cap))
+        grace_total = self.graced_lanes * self.cap_grace_usd
         lines.append(
             f"grace: ${self.cap_grace_usd:.2f} per claude lane and the grok read lane "
-            "(E24/F5, on top of its own cap; does not change the caps above)"
+            f"(E24/F5, on top of its own cap; {self.graced_lanes} lanes, "
+            f"${grace_total:.2f} in the mission budget)"
             if self.cap_grace_usd
             else "grace: disabled (E24/F5)"
         )
         lines.append(
-            f"mission budget: lanes ${self.mission_budget - USD_MISSION_SLACK:.2f} "
-            f"+ ${USD_MISSION_SLACK:.2f} slack = ${self.mission_budget:.2f}"
+            f"mission budget: lanes "
+            f"${self.mission_budget - USD_MISSION_SLACK - grace_total:.2f} "
+            f"+ ${grace_total:.2f} grace + ${USD_MISSION_SLACK:.2f} slack "
+            f"= ${self.mission_budget:.2f}"
         )
         return "\n".join(lines)
 
@@ -706,6 +753,22 @@ def shape_a(
         raise ShapeInvalid("--test must name the gate command; a Shape A build has one")
     if ports < 0:
         raise ShapeInvalid("--ports must be zero or more")
+    # The lanes this shape emits and the caps it sizes them against are two
+    # separate arguments, and `max_cost_usd` comes from the caps alone. When
+    # they disagree the mission loads and then runs out of budget partway
+    # through, because the extra lane's cap was never in the total
+    # (2026-09-08 review). The CLI always passes them together; a caller
+    # that does not is refused rather than shipped an under-budgeted
+    # mission.
+    for flag, emitted, sized in (
+        ("adversarial", adversarial, caps.adversarial),
+        ("opus_review", opus_review, caps.opus_review),
+    ):
+        if emitted != sized:
+            raise ShapeInvalid(
+                f"{flag}={emitted} but the cap arithmetic was built with "
+                f"{flag}={sized}: the mission budget would not carry that lane's cap"
+            )
     if deliverable_validator and not deliverable:
         raise ShapeInvalid("--deliverable-validator needs --deliverable")
     if deliverable:
@@ -1040,7 +1103,9 @@ def shape_a_followon(
             "schema": "dispositions.schema.json",
             "commit": False,
         },
-        "prompt": fix_prompt_with_opus(FIX_PROMPT) if opus_review else FIX_PROMPT,
+        "prompt": followon_fix_prompt(
+            fix_prompt_with_opus(FIX_PROMPT) if opus_review else FIX_PROMPT
+        ),
     }
     if caps.cap_grace_usd:
         fix["cap_grace_usd"] = caps.cap_grace_usd
