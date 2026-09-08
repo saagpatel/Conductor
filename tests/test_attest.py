@@ -963,3 +963,53 @@ def test_older_attestation_without_taint_enforcement_still_verifies(repo, home, 
     problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
     assert not any("taint_enforcement" in p or "settings disagrees" in p for p in problems)
 
+
+def test_an_attestation_gap_does_not_fail_a_green_run(repo, home, fake_fleet, monkeypatch):
+    """Signing failed after a green dispatch: the receipt notes the gap and
+    stays ok. Writing that string to `Result.error` used to fail the run."""
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("receipt key never reached 32 bytes")
+
+    monkeypatch.setattr(runner_mod.attest, "receipt_key", boom)
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    assert result.ok is True, result.failure()
+    assert result.error is None
+    assert result.attestation_path is None
+    assert not (Path(result.run_dir) / "attestation.json").exists()
+    assert any("attestation not written:" in n for n in result.git_verdict["notes"])
+    receipt = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert receipt["ok"] is True
+    assert receipt["attestation_path"] is None
+    assert receipt["error"] is None
+
+
+def test_budget_cap_error_names_the_watcher_reading_not_the_run_cost(repo, home, fake_fleet):
+    """The watcher's last poll is up to POLL_S stale; the ledger figure comes
+    from a later parse. The error line must say which reading it is."""
+    step = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1,
+                "state": "DONE",
+                "usage": {"input_tokens": 3_000_000, "output_tokens": 10},
+            },
+        }
+    )
+    fake_fleet(["sh", "-c", f"echo '{step}'; sleep 60"])
+    result = dispatch(
+        spec_for(repo, fleet="antigravity", cap_usd=1.0, timeout=50), home=home
+    )
+    assert result.ok is False and result.timed_out is False
+    assert result.error is not None
+    assert result.error.startswith("budget cap hit: $")
+    assert "observed by the watcher when it pulled the trigger" in result.error
+    assert "estimated against" not in result.error
+
+

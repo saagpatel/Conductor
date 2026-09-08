@@ -9,6 +9,7 @@ own. Leaving it to each vendor makes "did it commit?" a property of the vendor.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -175,3 +176,73 @@ def test_over_budget_undo_restates_the_git_verdict(repo, tmp_path, monkeypatch):
     assert result.git_verdict["commits_added"] == 0
     assert result.git_verdict["dirty_delta"] >= 1
     assert any("over budget" in note for note in result.git_verdict["notes"])
+
+
+def test_a_crash_after_commit_leaves_the_commit_on_the_receipt_and_the_branch(
+    repo, tmp_path, monkeypatch
+):
+    """A crash while conductor reads its own output is not evidence the work
+    is bad. The receipt must name the sha that is on the branch; omitting it
+    is the branch and the receipt disagreeing."""
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", "echo work > hello.txt"],
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("capture crashed")
+
+    monkeypatch.setattr(runner_mod, "_capture_deliverable", boom)
+    result = dispatch(
+        Spec(fleet="codex", prompt="write hello", cwd=str(repo), mode="write"),
+        commit_message="feat: add hello",
+        home=tmp_path / "home",
+    )
+    assert result.ok is False
+    assert result.error.startswith("parse failed: RuntimeError:")
+    assert result.commit is not None
+    assert result.commit["committed"] is True
+    assert result.commit["sha"]
+    assert any("commit landed and was not judged" in n for n in result.git_verdict["notes"])
+    log = subprocess.run(
+        ["git", "log", "-1", "--format=%s"], cwd=repo, capture_output=True, text=True, check=True
+    )
+    assert log.stdout.strip() == "feat: add hello"
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert head == result.commit["sha"]
+
+
+def test_a_crash_before_post_wait_kills_the_fleet_and_writes_a_receipt(
+    repo, tmp_path, monkeypatch
+):
+    """An exception between Popen and post_wait used to release the worktree
+    and propagate with the fleet still running and no result.json."""
+    seen: dict[str, int] = {}
+
+    def boom(proc, *_a, **_k):
+        seen["pid"] = proc.pid
+        raise RuntimeError("poll loop exploded")
+
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", "sleep 60"],
+    )
+    monkeypatch.setattr(runner_mod, "_wait", boom)
+    result = dispatch(
+        Spec(fleet="codex", prompt="x", cwd=str(repo), mode="write"),
+        home=tmp_path / "home",
+    )
+    assert result.ok is False
+    assert result.spawned is True
+    assert result.error.startswith("parse failed: RuntimeError: poll loop exploded")
+    assert (Path(result.run_dir) / "result.json").exists()
+    notes = " ".join(result.git_verdict["notes"])
+    assert "receipt written after the run; the tree was not judged" in notes
+    assert "pid" in seen
+    with pytest.raises(ProcessLookupError):
+        os.kill(seen["pid"], 0)
+
