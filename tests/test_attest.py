@@ -637,8 +637,15 @@ def test_cli_attest_refuses_a_chain_signed_for_another_mission(
     assert out["mission_id"] == target.mission_id
     assert out["state"] == "failed"
     assert out["verified"] is False
+    # W6: the path jail refuses this one step earlier than the signature
+    # check does. The donor's chain.json names link files by absolute path
+    # inside the donor's own mission directory, and the jail root is the
+    # mission the caller asked about, so the lift is refused before any
+    # envelope is read. Either refusal is the same verdict; both are named
+    # here so the test keeps holding whichever fires first.
     assert any(
         f"not '{target.mission_id}'" in problem
+        or "outside the mission directory" in problem
         for row in out["links"]
         for problem in row["problems"]
     )
@@ -741,3 +748,122 @@ def test_a_chain_recording_only_one_of_the_two_completeness_figures_is_not_verif
     out = json.loads(capsys.readouterr().out)
     assert out["verified"] is False
     assert out["state"] == "unrecorded"
+
+
+# --- Items 10, 11, 12 -----------------------------------------------------
+
+
+def test_cli_attest_flags_a_link_path_resolving_outside_mission_directory(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Item 10: a link path in chain.json that resolves outside the mission
+    directory must produce a verification problem, not be followed or crashed on."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = Path(result.mission_dir) / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+
+    outside_file = tmp_path / "outside_link.json"
+    outside_file.write_text(json.dumps({"payloadType": "test", "payload": "", "signatures": []}))
+    chain["links"][0]["path"] = str(outside_file)
+    chain_path.write_text(json.dumps(chain))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    assert out["state"] == "failed"
+    row = out["links"][0]
+    assert row["verified"] is False
+    assert any("outside the mission directory" in p for p in row["problems"])
+
+
+def test_cli_attest_flags_a_lane_disagreeing_with_signed_statement(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Item 10: chain.json's entry.get("lane") must match the signed statement's
+    lane; a mismatch is a verification problem."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = Path(result.mission_dir) / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    assert chain["links"][0]["lane"] == "build"
+    chain["links"][0]["lane"] = "review"
+    chain_path.write_text(json.dumps(chain))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    row = out["links"][0]
+    assert row["verified"] is False
+    assert any(
+        "link is signed for lane 'build', not 'review'" in p
+        for p in row["problems"]
+    )
+
+
+def test_cli_attest_missing_link_cannot_satisfy_subsequent_link_previous(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Item 11: a missing link file leaves actual_sha None, but that must not
+    become previous_sha such that a subsequent link claiming previous: None
+    compares equal and verifies."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _three_lane_mission(repo, home, monkeypatch, tmp_path)
+    chain_path = Path(result.mission_dir) / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+
+    # Delete link 1 file so it is missing
+    link_1_path = Path(chain["links"][1]["path"])
+    link_1_path.unlink()
+
+    # Tamper link 2 statement to claim previous: None
+    link_2_path = Path(chain["links"][2]["path"])
+    key = attest.receipt_key(home)
+    envelope = json.loads(link_2_path.read_text())
+    statement, _ = attest.verify(envelope, key)
+    assert statement is not None
+    statement["previous"] = None
+    new_envelope = attest.sign(statement, key)
+    link_2_path.write_text(json.dumps(new_envelope))
+    chain["links"][2]["sha256"] = attest.file_sha256(link_2_path)
+    chain_path.write_text(json.dumps(chain))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    fix_row = out["links"][2]
+    assert fix_row["verified"] is False
+    assert any("previous does not match the prior link" in p for p in fix_row["problems"])
+
+
+def test_file_sha256_returns_none_for_unreadable_file(tmp_path):
+    """Item 12: an unreadable file returns None from file_sha256 rather than raising OSError."""
+    path = tmp_path / "unreadable.txt"
+    path.write_bytes(b"hello")
+    path.chmod(0o000)
+    try:
+        assert attest.file_sha256(path) is None
+    finally:
+        path.chmod(0o600)
+
+
+def test_cli_attest_handles_unreadable_diff_patch_as_verification_problem(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Item 12: an unreadable diff.patch causes file_sha256 to return None, producing
+    a verification problem instead of an unhandled OSError crash."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    diff_path = home / "runs" / build_run_id / "diff.patch"
+    diff_path.chmod(0o000)
+    try:
+        assert main(["attest", result.mission_id]) == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["verified"] is False
+        build_row = next(row for row in out["links"] if row["lane"] == "build")
+        assert build_row["verified"] is False
+        assert any("diff.patch" in p for p in build_row["problems"])
+    finally:
+        diff_path.chmod(0o600)
+
