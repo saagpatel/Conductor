@@ -122,6 +122,11 @@ def usable_int(value: object) -> int | None:
         return None
     if isinstance(value, float) and not (math.isfinite(value) and value.is_integer()):
         return None
+    if value < 0:
+        # No meter counts backwards, and a negative `cache_read_tokens` is
+        # subtracted from input on the cursor and antigravity paths, which
+        # turns it into extra billed input in the estimate (2026-09-08).
+        return None
     return int(value)
 
 

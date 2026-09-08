@@ -3040,15 +3040,23 @@ def _check_ceiling(mission: Mission, base: Path) -> dict:
     bounds. Raises before a single dispatch, on a launch and a resume alike."""
     per_hour, per_day = _effective_ceiling(mission)
     spend = ceiling_mod.rolling_spend(base)
+
+    def bound(unpriced: int) -> str:
+        # An unpriced receipt in the window means these dollars are a lower
+        # bound, not the window's spend. The ceiling still compares the
+        # figure it has -- saying which figure that is belongs in the message
+        # rather than in the operator's head (2026-09-08 review).
+        return f" (a lower bound: {unpriced} unpriced run(s) in the window)" if unpriced else ""
+
     if per_hour is not None and spend.hour_usd >= per_hour:
         raise MissionInvalid(
             f"spend ceiling: ${spend.hour_usd:.2f} in the last hour is over the "
-            f"${per_hour:.2f} per-hour ceiling"
+            f"${per_hour:.2f} per-hour ceiling{bound(spend.unpriced_hour)}"
         )
     if per_day is not None and spend.day_usd >= per_day:
         raise MissionInvalid(
             f"spend ceiling: ${spend.day_usd:.2f} in the last 24 hours is over the "
-            f"${per_day:.2f} per-day ceiling"
+            f"${per_day:.2f} per-day ceiling{bound(spend.unpriced_day)}"
         )
     return {
         "per_hour_usd": per_hour,
@@ -3288,7 +3296,7 @@ def _keep_cancelled_lanes(
     kept: dict[str, LaneResult],
     rerun: set[str],
     notes: list[str],
-) -> None:
+) -> bool:
     """Settle a cancelled lane when the sink that beat it is being kept.
 
     A lane cancelled by early_cancel has no work of its own to redo: the
@@ -3299,21 +3307,37 @@ def _keep_cancelled_lanes(
     and so is the loser.
 
     This runs after the kept set is complete, because the winner may sit
-    later in `mission.lanes` than the lane it cancelled.
+    later in `mission.lanes` than the lane it cancelled. It also runs inside
+    the dependency cascade's own fixed point and answers in both directions,
+    because that cascade can move the winner into `rerun` after this decided
+    to keep the loser (2026-09-08 review). A cancelled loser is rarely a
+    dependent of its winner -- they are competitors -- so the needs walk
+    alone never revisited it, and a SIGINT resume could leave a sink settled
+    against a winner it was about to pay for again.
+
+    Returns whether it moved anything, so the caller's loop knows to keep
+    going.
     """
+    changed = False
     for lane in mission.lanes:
-        if lane.name not in rerun:
-            continue
         old = previous.get(lane.name)
         if old is None:
             continue
         winner = _cancel_winner(old.skipped)
-        if winner is None or winner not in kept:
+        if winner is None:
             continue
-        old.kept = True
-        kept[lane.name] = old
-        rerun.discard(lane.name)
-        notes.append(f"lane '{lane.name}' stays cancelled: '{winner}' is kept")
+        if lane.name in rerun and winner in kept:
+            old.kept = True
+            kept[lane.name] = old
+            rerun.discard(lane.name)
+            notes.append(f"lane '{lane.name}' stays cancelled: '{winner}' is kept")
+            changed = True
+        elif lane.name in kept and winner in rerun:
+            kept.pop(lane.name).kept = False
+            rerun.add(lane.name)
+            notes.append(f"lane '{lane.name}' runs after all: '{winner}' is being rerun")
+            changed = True
+    return changed
 
 
 def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _ResumePlan:
@@ -3382,13 +3406,15 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         else:
             rerun.add(lane.name)
 
-    _keep_cancelled_lanes(mission, previous, kept, rerun, notes)
-
     # A downstream receipt describes the exact upstream artifacts it read or
     # built on. If one of those inputs must run again, its consumers do too.
+    # Cancelled lanes settle inside the same fixed point rather than once
+    # before it: this walk can move a winner into `rerun` after that decision
+    # was made, and a loser is a competitor of its winner, not a dependent of
+    # it, so the needs walk alone never came back to it (2026-09-08 review).
     changed = True
     while changed:
-        changed = False
+        changed = _keep_cancelled_lanes(mission, previous, kept, rerun, notes)
         for lane in mission.lanes:
             if lane.name in kept and any(need in rerun for need in lane.needs):
                 kept.pop(lane.name)

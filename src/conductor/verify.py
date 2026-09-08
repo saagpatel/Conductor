@@ -105,6 +105,12 @@ class GitState:
     # exemption) can ask which one path changed instead of only whether
     # anything did. Populated only when `content` is True, same as `manifest`.
     signatures: dict[str, str] = field(default_factory=dict)
+    # Whether `git status` actually answered. False means this snapshot's
+    # `dirty_files` and `manifest` say nothing about the tree, so `compare`
+    # reports "not checked" rather than reading two unread statuses as a
+    # matching pair (2026-09-08 review). True for a state built by hand,
+    # which is every test fixture and every caller that predates the field.
+    status_read: bool = True
 
     @classmethod
     def capture(cls, cwd: str, *, content: bool = True) -> GitState:
@@ -115,15 +121,23 @@ class GitState:
         branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
         root = Path(top.stdout.strip())
         status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-        entries = _status_entries(status.stdout) if status.returncode == 0 else []
+        status_read = status.returncode == 0
+        entries = _status_entries(status.stdout) if status_read else []
         signatures = _signatures(root, entries) if content else {}
         return cls(
             is_repo=True,
+            status_read=status_read,
             # An unborn HEAD is not an error here; it just means no commits yet.
             head=head.stdout.strip() if head.returncode == 0 else "",
             branch=branch.stdout.strip() if branch.returncode == 0 else "",
             dirty_files=len(entries),
-            manifest=_manifest(status.stdout, signatures) if content else "",
+            # A `git status` that did not run leaves `stdout` empty, and the
+            # manifest of an empty status is the manifest of a clean tree --
+            # so a hung or failed status on both sides read as "moved no
+            # bytes" and failed the lane for a no-op it never made
+            # (2026-09-08 review). `status_read` is what `compare` reads to
+            # answer "not checked" instead.
+            manifest=_manifest(status.stdout, signatures) if content and status_read else "",
             signatures=signatures,
         )
 
@@ -237,6 +251,16 @@ def compare(cwd: str, before: GitState, after: GitState) -> Verdict:
             checked=False,
             notes=["not a git repository; conductor cannot verify on bytes here"],
         )
+    if not (before.status_read and after.status_read):
+        # An unread status is not a clean tree. Reading it as one made a
+        # hung or failed `git status` on both sides look like a matching
+        # manifest, which is the `no_op` verdict that fails the lane.
+        return Verdict(
+            checked=False,
+            branch_before=before.branch,
+            branch_after=after.branch,
+            notes=["git status could not be read; conductor cannot verify on bytes here"],
+        )
 
     notes: list[str] = []
     commits = 0
@@ -318,7 +342,18 @@ def diff_since(cwd: str, base_sha: str, limit: int = DIFF_LIMIT) -> str:
     tracked = _git(cwd, "diff", base_sha, "--")
     if tracked.returncode == 0:
         parts.append(tracked.stdout)
+    else:
+        # This is the evidence a judge reads. A git that timed out or could
+        # not run returns empty stdout, and an empty diff reads as "the lane
+        # changed nothing" -- a claim conductor did not verify. Say so in the
+        # diff itself, the way the untracked branch below already does
+        # (2026-09-08 review).
+        detail = tracked.stderr.strip() or f"exit {tracked.returncode}"
+        parts.append(f"\n[conductor note: could not diff against {base_sha}: {detail}]\n")
     status = _git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if status.returncode != 0:
+        detail = status.stderr.strip() or f"exit {status.returncode}"
+        parts.append(f"\n[conductor note: could not list untracked files: {detail}]\n")
     for code, path in _status_entries(status.stdout):
         if code == "??":
             # --no-index exits 1 whenever the files differ, which they do.
@@ -427,13 +462,25 @@ def commit_work(cwd: str, message: str, *, exclude: Sequence[str] = ()) -> Commi
             attempted=True,
             reason=f"git commit failed: {done.stderr.strip() or done.stdout.strip()}",
         )
-    sha = _git(cwd, "rev-parse", "HEAD").stdout.strip()
+    # The commit happened; only reading back its sha can still fail, and
+    # `git_run` turns a timeout or an OSError into an empty stdout. Saying
+    # `committed=True, sha=""` with nothing else recorded put a commit on the
+    # receipt that names no commit, which `land` later refuses with "lane has
+    # no tip commit on its receipt" and no way to tell why (2026-09-08).
+    head = _git(cwd, "rev-parse", "HEAD")
+    sha = head.stdout.strip() if head.returncode == 0 else ""
+    reason = (
+        ""
+        if sha
+        else f"committed, but HEAD could not be read: {head.stderr.strip() or 'no output'}"
+    )
     return CommitOutcome(
         attempted=True,
         committed=True,
         sha=sha,
         files=files,
         deletions=deletions,
+        reason=reason,
     )
 
 

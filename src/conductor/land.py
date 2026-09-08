@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import attest, golden
+from .graph import is_lane_name
 from .mission import LaneResult
 from .runner import GATE_TIMEOUT
 from .verify import git_run, run_tests, same_repo
@@ -408,6 +409,10 @@ def _land(
     gate_command: str | None,
     dry_run: bool,
 ) -> LandResult:
+    # The lane name becomes both the receipt this reads and the receipt it
+    # writes, so it is checked before either path is built (2026-09-08).
+    if not is_lane_name(lane):
+        raise LandInvalid(f"'{lane}' is not a lane name")
     mission_dir = home / "missions" / mission_id
     if not mission_dir.is_dir():
         raise LandInvalid(f"mission '{mission_id}' does not exist")

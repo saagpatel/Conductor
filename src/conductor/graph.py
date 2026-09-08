@@ -51,6 +51,19 @@ STAGES = ("build", "review", "fix", "adversarial")
 _STAGE_MODE = {"build": "write", "review": "read", "fix": "write", "adversarial": "write"}
 _LANE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
+
+def is_lane_name(name: object) -> bool:
+    """Whether `name` is a lane name a mission could have declared.
+
+    `Mission.validate` holds this for every lane it loads, but `land` and
+    `salvage` take a lane name from the command line and build paths out of
+    it -- `<mission>/lanes/<lane>.json`, `<mission>/land/<lane>-<stamp>.json`,
+    `salvage/<mission>/<lane>` -- so they check it themselves before it
+    becomes a path (2026-09-08 review). The pattern admits no separator and
+    no `..`, so a name that passes cannot leave the directory it names.
+    """
+    return isinstance(name, str) and _LANE_NAME.fullmatch(name) is not None
+
 _SELF_JUDGING_VALUES = ("allow",)
 
 # The template grammar, closed: a lane's answer or diff, or the mission's

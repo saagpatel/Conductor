@@ -422,10 +422,23 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
 
 
 def _breaker_value(fields: dict, key: str, default: int | None) -> int | None:
-    """Preserve an explicit mission null: it disables instead of defaulting."""
+    """Preserve an explicit mission null: it disables instead of defaulting.
+
+    `int()` alone accepted three shapes a breaker cannot mean (2026-09-08
+    review): `true`, which JSON and TOML both allow and `int` turns into 1 --
+    `stall_timeout: true` then killed a healthy run after one second; a
+    negative, which trips on the first check because the elapsed time is
+    already past it; and a float, silently truncated. Each is refused here,
+    at load, rather than becoming a breaker that fires on a healthy run.
+    """
     if key not in fields or fields[key] is None:
         return None if key in fields else default
-    return int(fields[key])
+    value = fields[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a whole number of seconds or calls, or null")
+    if value < 0:
+        raise ValueError(f"{key} must not be negative; use 0 or null to disable it")
+    return value
 
 
 def _default_lane_name(primary: Attempt, existing: list[Lane]) -> str:

@@ -577,14 +577,20 @@ now also classifies as exactly one of a fixed set of kinds, checked in this
 order, first match wins:
 
 ```
-interrupted, cancelled, parse, cap, breaker, timeout, setup, taint, settings, refused, agent,
-adversarial, plan, denied, reproduce, rate_limit, transport, refusal, fleet_error, exit,
+interrupted, cancelled, parse, setup, taint, settings, refused, agent, adversarial, plan,
+denied, reproduce, cap, breaker, timeout, rate_limit, transport, refusal, fleet_error, exit,
 gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit, unknown
 ```
 
 `parse` is checked that early on purpose: a dispatch that raised while its
 output was being read comes back with no priced usage, which the cap check
-below would otherwise read as a cap it could not enforce.
+below would otherwise read as a cap it could not enforce. Every kind
+conductor decides for itself, from the `error` text it wrote -- `setup`
+through `reproduce` -- is checked ahead of `cap` for the same reason: an
+unpriced run (every cursor lane) cannot be shown to have stayed under its
+cap, so without that order a lane that failed its setup, or was refused
+before it ever spawned, came back as `cap` and sent a
+`fallback: [{"on": ["cap"]}]` chasing a budget that was never the problem.
 
 A cap kill that also timed out is `cap`, not `timeout`; a fleet error that
 also mentions a rate limit is `rate_limit`, not `fleet_error`. `kind` is
@@ -599,7 +605,7 @@ reported error text and status, case-insensitive:
 | Kind | Patterns |
 |---|---|
 | `rate_limit` | `rate limit`, `rate_limit`, `429`, `overloaded`, `529`, `quota`, `resource exhausted`, `too many requests` |
-| `transport` | `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`, `network`, `502`, `503`, `504`, `stream ended without a result event` |
+| `transport` | `ECONNRESET`, `ECONNREFUSED`, `connection refused`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`, `network`, `502`, `503`, `504`, `stream ended without a result event` |
 | `refusal` | Claude's `subtype` starting with `error_` (other than `error_max_budget_usd` and `error_max_turns`) when the text says `refus`, `cannot help`, or `not able to`; on every fleet, the text `I can't help` or `I cannot help` |
 | `agent` | The receipt's own `error` field (never a fleet's), matched on the `agent '` prefix and the ` not applied: ` marker -- D3's own persona assertion, not anything a fleet reported |
 | `adversarial` | The receipt's own `error` field, matched on the `adversarial lane changed source:` prefix -- E16's own check of the diff against an adversarial lane's base, not anything a fleet reported |

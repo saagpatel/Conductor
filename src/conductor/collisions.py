@@ -165,7 +165,14 @@ def _parse_conflicts(stdout: str) -> list[str] | None:
     for line in lines[1:]:
         if line == "":
             break
-        conflicts.append(line)
+        # git quotes a path with non-ASCII or special characters the same way
+        # in `merge-tree --name-only` as in a `diff --git` header, and
+        # `touched_files` already unquotes the latter. Leaving these quoted
+        # meant a conflicting path and the hotspot naming the same file never
+        # matched each other (2026-09-08 review).
+        conflicts.append(
+            _unquote(line) if line.startswith('"') and line.endswith('"') else line
+        )
     return conflicts
 
 
@@ -199,6 +206,15 @@ def merge_conflicts(cwd: str, tips: dict[str, str], *, timeout: int = 60) -> dic
             conflicts = _parse_conflicts(proc.stdout)
             if conflicts is None:
                 entry["error"] = proc.stderr.strip() or "git merge-tree failed"
+            elif not conflicts:
+                # Exit 1 is git saying the merge conflicts. A run that says so
+                # and then names no file is not a clean merge, and recording
+                # it as `conflicts: []` made it read as exactly that
+                # (2026-09-08 review).
+                entry["error"] = (
+                    proc.stderr.strip()
+                    or "git merge-tree reported a conflict but named no files"
+                )
             else:
                 entry["conflicts"] = conflicts
         else:
