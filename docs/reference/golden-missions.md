@@ -8,7 +8,7 @@ A change to routing, a template, or `outputs.parse` used to be testable only
 by paying for a live mission. A golden fixture is a recorded transcript of a
 past real mission, replayed offline through the same parser, scheduler, and
 templating that ran it the first time. Evidence
-(`docs/ROADMAP-2026-09.md` item C7): "Recorded transcripts of past real
+(`docs/archive/roadmaps-closed.md` item C7): "Recorded transcripts of past real
 missions replayed through the parser, scheduler, and templating offline, so
 a routing or template change is testable without spending on live vendors."
 

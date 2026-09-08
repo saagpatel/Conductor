@@ -1027,7 +1027,7 @@ def test_recorded_human_lane_deliverable_replays_as_answered(repo, home, monkeyp
 
 def test_readme_documents_golden_missions():
     section = doc_section("## Golden missions")
-    assert "docs/ROADMAP-2026-09.md" in section and "item C7" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item C7" in section
     assert "<home>" in section and "<cwd>" in section and "<user>" in section
     assert "TOKEN" in section and "SECRET" in section and "KEY" in section and "PASSWORD" in section
     assert "Bearer <redacted>" in section

@@ -64,7 +64,7 @@ attacker without the key could break. What it buys is narrower and still
 real — a receipt cannot be edited after the fact by anything that does not
 hold the key.
 
-Evidence (`docs/ROADMAP-2026-09.md` item A5): "Bernstein's signed replay
+Evidence (`docs/archive/roadmaps-closed.md` item A5): "Bernstein's signed replay
 receipts, the IETF signed action receipts draft
 ([draft-marques-asqav-compliance-receipts](https://datatracker.ietf.org/doc/html/draft-marques-asqav-compliance-receipts-08))."
 

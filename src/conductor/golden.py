@@ -12,7 +12,7 @@ network call. `check` compares a fresh replay's `projection` against the
 fixture's own `expected.json`, pinning what a routing or template change is
 allowed to move.
 
-Evidence (`docs/ROADMAP-2026-09.md` item C7): "Recorded transcripts of past
+Evidence (`docs/archive/roadmaps-closed.md` item C7): "Recorded transcripts of past
 real missions replayed through the parser, scheduler, and templating
 offline, so a routing or template change is testable without spending on
 live vendors."

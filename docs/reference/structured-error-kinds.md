@@ -84,5 +84,5 @@ kind seen across every lane's attempts, empty when nothing failed; when it
 is non-empty `report.md` shows one line, `Errors: <kind> x<n>, ...`, and
 each attempt's own line in its lane section carries `(kind: <kind>)` beside
 its error text. This was the audit's own top capability ask
-(`docs/ROADMAP-2026-09.md` item C5; OpenAI Agents SDK `error_handlers`).
+(`docs/archive/roadmaps-closed.md` item C5; OpenAI Agents SDK `error_handlers`).
 

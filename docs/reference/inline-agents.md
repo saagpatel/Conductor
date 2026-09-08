@@ -60,7 +60,7 @@ signed `attestation.json` statement carries the same dict. `report.md`'s
 lane table gains an `agent` column (the name, or empty) and `conductor runs`
 rows carry `"agent": <name or null>`.
 
-Evidence (`docs/ROADMAP-2026-09.md` item D3): `claude --agents '<json>'` and
+Evidence (`docs/archive/roadmaps-closed.md` item D3): `claude --agents '<json>'` and
 `agy --agent` let a lane define its reviewer or fixer persona at dispatch
 time with nothing on the operator's disk.
 

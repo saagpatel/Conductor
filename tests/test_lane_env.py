@@ -550,7 +550,7 @@ def test_readme_documents_per_lane_setup_teardown_and_ports():
     assert "info/exclude" in compact
     assert "lane_env.included" in compact
     assert ".worktreeinclude" in compact and ".cursor/worktrees.json" in compact
-    assert "docs/ROADMAP-2026-09.md" in compact and "item C4" in compact
+    assert "docs/archive/roadmaps-closed.md" in compact and "item C4" in compact
     assert "--ports" in compact
     assert "--setup" in compact
     assert "--teardown" in compact

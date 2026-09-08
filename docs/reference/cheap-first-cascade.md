@@ -57,5 +57,5 @@ first cut cost 31% at 0.91 micro-F1 in one benchmark
 ([UCCI](https://arxiv.org/pdf/2605.18796)), and conductor's own cheap lanes
 have found real defects for $0.03 — but a fixed ladder can be worse than
 routing on some code tasks ([Is Escalation Worth
-It](https://arxiv.org/pdf/2605.06350)); see `docs/ROADMAP-2026-09.md` item B3.
+It](https://arxiv.org/pdf/2605.06350)); see `docs/archive/roadmaps-closed.md` item B3.
 

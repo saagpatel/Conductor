@@ -853,7 +853,7 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
     assert "A dry run never retries." in section
     assert "Errors: <kind> x<n>, ..." in section
     assert "(kind: <kind>)" in section
-    assert "docs/ROADMAP-2026-09.md` item C5" in section
+    assert "docs/archive/roadmaps-closed.md` item C5" in section
     assert "error_handlers" in section
 
 

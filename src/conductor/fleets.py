@@ -1122,7 +1122,7 @@ def _build_claude(spec: Spec, model: str) -> list[str]:
         # first user message, so every lane's request begins with identical
         # bytes -- what a prompt cache needs to hit. Evidence: moving dynamic
         # content after the static prefix took one production hit rate from
-        # 7% to 84% (docs/ROADMAP-2026-09.md item B2).
+        # 7% to 84% (docs/archive/roadmaps-closed.md item B2).
         "--system-prompt-snapshot",
         "on",
         "--exclude-dynamic-system-prompt-sections",

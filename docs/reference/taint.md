@@ -169,7 +169,7 @@ already embed the same schema as prompt text and their parsers fall back to
 extracting embedded JSON, so conductor just drops the redundant flag for
 that one fleet instead of losing the mechanism.
 
-Evidence (`docs/ROADMAP-2026-09.md` item D2): CVSS 9.4 prompt injection
+Evidence (`docs/archive/roadmaps-closed.md` item D2): CVSS 9.4 prompt injection
 through repo comments across Claude, Gemini, and Copilot CI agents (CSA,
 April 2026). E21's Antigravity mechanism and its failure modes are
 live-probed in `docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`;

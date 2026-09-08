@@ -238,7 +238,7 @@ def test_readme_documents_cache_friendly_prompts():
     assert "--system-prompt-snapshot on" in section
     assert "--exclude-dynamic-system-prompt-sections" in section
     assert "Don't Break the Cache" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item B2" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item B2" in section
     assert "operator hooks injecting per-lane context made a $0.05 reply cost $0.24" in section
     assert "prefix_file" in section
     assert "prefix must not contain template references" in section

@@ -607,7 +607,7 @@ def escalation_attempts(attempts: list[dict]) -> list[dict]:
 
 def _escalation_summary(mission: Mission, lane_results: list[LaneResult]) -> dict | None:
     """B3: the mission-wide escalation rate and dollars, logged beside the
-    cap (docs/ROADMAP-2026-09.md item B3)."""
+    cap (docs/archive/roadmaps-closed.md item B3)."""
     if mission.cascade is None:
         return None
     names = {lane.name for lane in _cascade_target_lanes(mission)}

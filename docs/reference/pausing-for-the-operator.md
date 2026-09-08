@@ -74,6 +74,6 @@ never pauses and writes no `pause.json`; a dry-run resume needs no answer and
 records nothing. `conductor missions` shows `"paused": true` while
 `pause.json`'s `answer` is null, `false` once it is answered.
 
-Evidence (`docs/ROADMAP-2026-09.md` item C2): LangGraph `interrupt()`,
+Evidence (`docs/archive/roadmaps-closed.md` item C2): LangGraph `interrupt()`,
 Microsoft request/response events.
 

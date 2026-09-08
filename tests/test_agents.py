@@ -489,4 +489,4 @@ def test_readme_documents_inline_agents():
     assert "Edit`, `Write`, `NotebookEdit`, or `Bash`" in section
     assert "agent '<name>' not applied: no init event" in section
     assert '"applied": true | false | null' in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item D3" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item D3" in section

@@ -431,7 +431,7 @@ def test_readme_documents_the_cascade_and_its_escalation_block():
     assert "Cascade: <cheap_ok> of" in section
     assert "cut cost 31% at 0.91 micro-F1" in section and "UCCI" in section
     assert "Is Escalation Worth" in section and "arxiv.org/pdf/2605.06350" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item B3" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item B3" in section
 
 
 def test_escalation_counts_only_lanes_the_cascade_actually_reached(tmp_path):

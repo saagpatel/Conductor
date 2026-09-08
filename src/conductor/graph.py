@@ -342,7 +342,7 @@ def validate_graph(mission: Mission, names: set[str]) -> None:
 
 def validate_policy(mission: Mission) -> None:
     """A4: reviewer direction is a policy, not a free choice. Evidence
-    (docs/ROADMAP-2026-09.md A4): Claude reviewing Codex lifted pass rate
+    (docs/archive/roadmaps-closed.md A4): Claude reviewing Codex lifted pass rate
     71.6% -> 89.7%; Codex reviewing Claude dropped it 91.4% -> 82.8%.
     `policy` restricts which vendors may run a staged lane, per stage."""
     if mission.policy is None:

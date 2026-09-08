@@ -606,7 +606,7 @@ def test_readme_documents_early_cancel_ranking_and_candidates():
     assert "ok before not" in section
     assert "exit code of 0 before nonzero before none" in section
     assert "Generative Verifiers" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item B5" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item B5" in section
     assert '"candidates": <int>' in section
     assert "at least 2 or refused at load" in section
     assert "omitted by ranking" in section

@@ -27,7 +27,7 @@ allowed vendor; the first one that is not is refused by name: `lane
 it is not a wash which vendor reviews which: in one controlled study,
 Claude reviewing Codex lifted pass rate 71.6% → 89.7%, while Codex reviewing
 Claude dropped it 91.4% → 82.8% ([arXiv 2607.21656](https://arxiv.org/abs/2607.21656);
-see `docs/ROADMAP-2026-09.md` item A4). A `policy` entry naming an unknown
+see `docs/archive/roadmaps-closed.md` item A4). A `policy` entry naming an unknown
 stage, an unknown vendor id, or a stage no lane declares is refused at load,
 so a typo cannot silently allow everything.
 

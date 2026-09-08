@@ -94,7 +94,7 @@ machines and directories). Neither flag changes what the model is asked,
 only what gets cached. Evidence: moving dynamic content after the static
 prefix took one production hit rate from 7% to 84% for a 59 to 70% cost cut
 ([Don't Break the Cache](https://arxiv.org/pdf/2601.06007); see
-`docs/ROADMAP-2026-09.md` item B2). We already saw the reverse: operator
+`docs/archive/roadmaps-closed.md` item B2). We already saw the reverse: operator
 hooks injecting per-lane context made a $0.05 reply cost $0.24.
 
 A mission may also set a top-level `"prefix"` or `"prefix_file"` (mutually

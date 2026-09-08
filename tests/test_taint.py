@@ -615,7 +615,7 @@ def test_readme_documents_taint():
     assert "taint hooks modified during the run" in section
     assert '"taint": true|false' in section
     assert "tainted: came from outside the operator's trust" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item D2" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item D2" in section
     assert "CVSS 9.4" in section
     # Review finding (Grok, E21): after lifting taint for antigravity, a
     # collate over a tainted sink is refused off claude AND antigravity, not

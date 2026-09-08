@@ -543,7 +543,7 @@ def test_readme_documents_lane_stages_policy_and_reproduce_before_fix():
     assert "policy allows" in section
     assert "71.6%" in section and "89.7%" in section
     assert "91.4%" in section and "82.8%" in section
-    assert "docs/ROADMAP-2026-09.md" in section
+    assert "docs/archive/roadmaps-closed.md" in section
     assert "a stage no lane declares" in section
     assert "fix without a reproducing check: no test-surface change" in section
     assert (

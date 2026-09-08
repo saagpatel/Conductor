@@ -3,7 +3,7 @@ show up long before a human notices -- in the diffs conductor already holds.
 `touched_files` and `overlap` read those diffs; `merge_conflicts` asks git
 itself whether two lanes' committed tips would actually clash.
 
-Evidence (docs/ROADMAP-2026-09.md item D1): a 27.7% conflict rate across
+Evidence (docs/archive/roadmaps-closed.md item D1): a 27.7% conflict rate across
 107k simulated agentic merges (AgenticFlict); Cursor's own agent swarm
 accumulating 70k conflicts, 7,771 of them on one file.
 """

@@ -192,7 +192,7 @@ before a larger one (no patch ranks last); lower `cost_usd` before higher;
 mission order as the final tie-break. Bytes and gate results come before any
 model judgment because a judge is the expensive, fallible step and a broken
 gate or an empty diff is settled evidence, not something worth a model's
-opinion (Generative Verifiers, `docs/ROADMAP-2026-09.md` item B5,
+opinion (Generative Verifiers, `docs/archive/roadmaps-closed.md` item B5,
 <https://arxiv.org/abs/2408.15240>). The result carries `ranking: [{"lane",
 "rank", "ok", "verdict", "test_touched", "gate_exit", "patch_bytes",
 "cost_usd"}, ...]`, and `report.md` shows it as a `## Ranking` table. A
@@ -213,7 +213,7 @@ dispatched sink lanes just uses what there is.
 Nothing so far looks at where two sink lanes touch the same ground. Two
 builds that both edit `mission.py` are judged on prose and patches like any
 other pair, and the operator finds the conflict at merge time. Evidence
-(`docs/ROADMAP-2026-09.md` item D1): a 27.7% conflict rate across 107k
+(`docs/archive/roadmaps-closed.md` item D1): a 27.7% conflict rate across 107k
 simulated agentic merges
 ([AgenticFlict](https://arxiv.org/pdf/2604.03551)), and Cursor's own agent
 swarm accumulating 70k conflicts, 7,771 of them on one file

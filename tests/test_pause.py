@@ -454,7 +454,7 @@ def test_readme_documents_the_pause_primitive():
     assert "conductor mission --resume MISSION_ID --answer continue" in section
     assert "conductor mission --resume MISSION_ID --answer stop" in section
     assert "exits **4**" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item C2" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item C2" in section
     assert "LangGraph `interrupt()`" in section and "Microsoft request/response events" in section
 
 

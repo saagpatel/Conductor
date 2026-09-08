@@ -696,7 +696,7 @@ def test_readme_documents_signed_lane_receipts():
     assert "conductor attest MISSION_ID" in section
     assert "$CONDUCTOR_HOME/keys/receipt.key" in section
     assert "mode 700" in section and "mode 600" in section
-    assert "docs/ROADMAP-2026-09.md" in section and "item A5" in section
+    assert "docs/archive/roadmaps-closed.md" in section and "item A5" in section
     assert "draft-marques-asqav-compliance-receipts" in section
 
 

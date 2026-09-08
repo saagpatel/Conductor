@@ -36,7 +36,7 @@ A worktree isolates files, not ports, sockets, scratch databases, or
 gitignored config, so two lanes each starting a dev server on the same port,
 or each needing a gitignored `.env`, collide or fail. Claude Code answers
 this with `.worktreeinclude`, Cursor with `.cursor/worktrees.json`, Emdash
-with injected port variables (`docs/ROADMAP-2026-09.md` item C4); conductor's
+with injected port variables (`docs/archive/roadmaps-closed.md` item C4); conductor's
 own answer is `ports`, `setup`, `teardown`, and `include` on `Spec` and on
 every lane.
 
