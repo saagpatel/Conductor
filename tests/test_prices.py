@@ -8,9 +8,11 @@ claude fleet alone spent.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 from conductor import prices
+from conductor.cli import main
 from conductor.prices import DEFAULT_PRICES, Price, estimate, load_prices, lookup
 
 
@@ -87,10 +89,20 @@ def test_override_file_replaces_adds_and_removes(tmp_path: Path):
             }
         )
     )
-    table = load_prices(override)
+    table = load_prices(override, today=date(2026, 9, 8))
     assert table["gpt-5.6-sol"].input == 4.0
-    assert table["gpt-5.6-sol"].cache_read == 0.4  # derived when not given
+    # Unmentioned fields keep the default entry, including cache rates that
+    # are not 10%/125% of input and the long-context tier.
+    assert table["gpt-5.6-sol"].cache_read == DEFAULT_PRICES["gpt-5.6-sol"].cache_read
+    assert table["gpt-5.6-sol"].cache_write == DEFAULT_PRICES["gpt-5.6-sol"].cache_write
+    assert table["gpt-5.6-sol"].long_context_tokens == 272_000
+    assert table["gpt-5.6-sol"].long_context is not None
+    assert table["gpt-5.6-sol"].long_context.input == 8.00
+    assert table["gpt-5.6-sol"].note == "promo"
+    assert table["gpt-5.6-sol"].as_of == "2026-09-08"
     assert table["brand-new-model"].output == 2.0
+    assert table["brand-new-model"].cache_read == 0.1  # _std; no default entry
+    assert table["brand-new-model"].long_context is None
     assert "composer-2.5" not in table
     assert "gpt-5.6-terra" in table  # untouched defaults survive
 
@@ -101,11 +113,11 @@ def test_a_broken_override_file_falls_back_to_defaults_and_says_so(tmp_path: Pat
     override = tmp_path / "prices.json"
     override.write_text("{not json")
     errors: list[str] = []
-    assert load_prices(override, errors) == DEFAULT_PRICES
+    assert load_prices(override, errors, today=date(2026, 9, 8)) == DEFAULT_PRICES
     assert len(errors) == 1 and "not JSON" in errors[0]
     override.write_text(json.dumps({"gpt-5.6-terra": {"input": "lots"}, "x": 5}))
     errors.clear()
-    table = load_prices(override, errors)
+    table = load_prices(override, errors, today=date(2026, 9, 8))
     assert table["gpt-5.6-terra"] == DEFAULT_PRICES["gpt-5.6-terra"]
     assert len(errors) == 2
     assert any("gpt-5.6-terra" in e for e in errors) and any("'x'" in e for e in errors)
@@ -144,7 +156,7 @@ def test_a_rate_that_is_not_finite_and_non_negative_is_reported_and_not_loaded(t
         }"""
     )
     errors: list[str] = []
-    table = load_prices(override, errors)
+    table = load_prices(override, errors, today=date(2026, 9, 8))
 
     assert len(errors) == 4
     assert all("must be finite and non-negative" in message for message in errors)
@@ -174,12 +186,12 @@ def test_basis_reports_the_matched_key_source_and_date():
 def test_basis_reports_override_as_its_own_source(tmp_path: Path):
     override = tmp_path / "prices.json"
     override.write_text(json.dumps({"gpt-5.6-terra": {"input": 2.0, "output": 12.0}}))
-    table = load_prices(override)
+    table = load_prices(override, today=date(2026, 9, 8))
     hit = prices.basis("gpt-5.6-terra-high", table)
     assert hit is not None
     assert hit["key"] == "gpt-5.6-terra"
     assert hit["source"] == "override"
-    assert hit["as_of"] == prices.AS_OF
+    assert hit["as_of"] == "2026-09-08"
 
 
 def test_finite_helpers_refuse_booleans_and_non_numbers():
@@ -261,4 +273,142 @@ def test_gpt56_long_context_tier_derives_cache_rates_and_sets_threshold():
         assert price.long_context.cache_read == round(expected_long_in * 0.10, 6)
         assert price.long_context.cache_write == round(expected_long_in * 1.25, 6)
         assert price.long_context.note == ">272K prompt-token rate"
+
+
+def test_an_override_keeps_unmentioned_fields_including_the_long_context_tier(tmp_path: Path):
+    """Rebuilding through _std dropped Grok's 200K doubling and rewrote its
+    cache rates to 10%/125% of the new input. An operator who only touches
+    input and output must keep everything they did not mention."""
+    override = tmp_path / "prices.json"
+    override.write_text(json.dumps({"cursor-grok-4.6": {"input": 3.0, "output": 9.0}}))
+    grok = load_prices(override)["cursor-grok-4.6"]
+    assert grok.input == 3.0
+    assert grok.output == 9.0
+    assert grok.cache_read == 0.50
+    assert grok.cache_write == 0.0
+    assert grok.long_context_tokens == 200_000
+    assert grok.long_context is not None
+    assert grok.long_context.input == 4.00
+    assert grok.long_context.output == 12.00
+    assert grok.long_context.cache_read == 1.00
+    assert grok.tier(300_000) is grok.long_context
+
+
+def test_an_override_can_set_the_long_context_tier(tmp_path: Path):
+    override = tmp_path / "prices.json"
+    override.write_text(
+        json.dumps(
+            {
+                "cursor-grok-4.6": {
+                    "input": 3.0,
+                    "output": 9.0,
+                    "long_context_tokens": 250_000,
+                    "long_context": {"input": 6.0, "output": 18.0},
+                }
+            }
+        )
+    )
+    grok = load_prices(override)["cursor-grok-4.6"]
+    assert grok.long_context_tokens == 250_000
+    assert grok.long_context is not None
+    assert grok.long_context.input == 6.0
+    assert grok.long_context.output == 18.0
+    # Nested cache rates the override omitted keep the default nested values.
+    assert grok.long_context.cache_read == 1.00
+    assert grok.long_context.cache_write == 0.0
+    assert grok.tier(200_000) is grok
+    assert grok.tier(250_001) is grok.long_context
+
+
+def test_a_malformed_long_context_tier_keeps_the_default_and_says_so(tmp_path: Path):
+    override = tmp_path / "prices.json"
+    override.write_text(
+        json.dumps(
+            {
+                "cursor-grok-4.6": {
+                    "input": 3.0,
+                    "output": 9.0,
+                    "long_context_tokens": -1,
+                    "long_context": {"input": 6.0, "output": 18.0},
+                }
+            }
+        )
+    )
+    errors: list[str] = []
+    table = load_prices(override, errors, today=date(2026, 9, 8))
+    grok = table["cursor-grok-4.6"]
+    assert grok.input == 3.0
+    assert grok.long_context_tokens == 200_000
+    assert grok.long_context is not None
+    assert grok.long_context.input == 4.00
+    assert len(errors) == 1
+    assert "long_context_tokens" in errors[0]
+    assert "default tier kept" in errors[0]
+
+
+def test_conductor_prices_prints_the_long_context_tier(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    assert main(["prices"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    grok = out["usd_per_million_tokens"]["cursor-grok-4.6"]
+    assert grok["long_context_tokens"] == 200_000
+    assert grok["long_context"]["input"] == 4.0
+    assert grok["long_context"]["output"] == 12.0
+    sonnet = out["usd_per_million_tokens"]["claude-sonnet-5"]
+    assert "long_context" not in sonnet
+    assert "long_context_tokens" not in sonnet
+
+
+def test_each_entry_carries_its_own_as_of_and_basis_reports_it():
+    assert prices.AS_OF == "2026-09-03"
+    assert DEFAULT_PRICES["claude-sonnet-5"].as_of == prices.AS_OF
+    assert DEFAULT_PRICES["composer-2.5"].as_of == "2026-09-07"
+    for key in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        assert DEFAULT_PRICES[key].as_of == "2026-09-08"
+        assert DEFAULT_PRICES[key].long_context is not None
+        assert DEFAULT_PRICES[key].long_context.as_of == "2026-09-08"
+    assert prices.basis("composer-2.5", DEFAULT_PRICES)["as_of"] == "2026-09-07"
+    assert prices.basis("claude-sonnet-5", DEFAULT_PRICES)["as_of"] == prices.AS_OF
+
+
+def test_an_expired_price_warns_but_keeps_the_shipped_rate(tmp_path: Path):
+    assert DEFAULT_PRICES["gemini-3.8-flash"].expires == "2026-12-31"
+    assert DEFAULT_PRICES["gemini-3.7-flash"].expires == "2026-12-31"
+    assert DEFAULT_PRICES["gpt-5.6-sol"].expires == "2026-11-21"
+    assert DEFAULT_PRICES["claude-sonnet-5"].expires is None
+
+    missing = tmp_path / "prices.json"
+    still_valid: list[str] = []
+    table = load_prices(missing, still_valid, today=date(2026, 11, 21))
+    assert table["gpt-5.6-sol"].input == 4.00
+    assert table["gemini-3.8-flash"].input == 0.75
+    assert still_valid == []
+    hit = prices.basis("gpt-5.6-sol", table, today=date(2026, 11, 21))
+    assert hit is not None
+    assert hit["expires"] == "2026-11-21"
+    assert "expired" not in hit
+
+    expired: list[str] = []
+    table = load_prices(missing, expired, today=date(2027, 1, 2))
+    assert table["gemini-3.8-flash"].input == 0.75
+    assert table["gemini-3.7-flash"].output == 3.75
+    assert table["gpt-5.6-sol"].input == 4.00
+    assert len(expired) == 3
+    assert all("still using the shipped rate" in message for message in expired)
+    assert any("gemini-3.8-flash" in message for message in expired)
+    assert any("gemini-3.7-flash" in message for message in expired)
+    assert any("gpt-5.6-sol" in message for message in expired)
+    gemini = prices.basis("gemini-3.8-flash", table, today=date(2027, 1, 2))
+    assert gemini is not None
+    assert gemini["expires"] == "2026-12-31"
+    assert "expired" in gemini["expired"]
+    sol = prices.basis("gpt-5.6-sol", table, today=date(2027, 1, 2))
+    assert sol is not None
+    assert sol["expired"].startswith("gpt-5.6-sol:")
+    # An unexpired entry on the same day is silent.
+    terra = prices.basis("gpt-5.6-terra", table, today=date(2027, 1, 2))
+    assert terra is not None
+    assert "expired" not in terra
+    assert "expires" not in terra
+
 

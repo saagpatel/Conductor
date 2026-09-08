@@ -263,7 +263,7 @@ def test_tokens_without_dollars_are_priced_from_the_table(repo, home, fake_fleet
     # W6: the receipt names which table entry, from which source, priced it.
     assert result.usage["price"]["key"] == "composer-2.5"
     assert result.usage["price"]["source"] == "default"
-    assert result.usage["price"]["as_of"] == prices_mod.AS_OF
+    assert result.usage["price"]["as_of"] == prices_mod.DEFAULT_PRICES["composer-2.5"].as_of
 
 
 def test_an_estimate_from_an_override_priced_model_says_so_on_the_receipt(
