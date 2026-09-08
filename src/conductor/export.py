@@ -517,8 +517,9 @@ def check(bundle_dir: str | Path) -> CheckResult:
     the bundle: every listed file's digest and size, that no unlisted file
     is present, and the receipt chain's linkage (index order, each link's
     file hash against the manifest, each `previous` against the prior
-    link's recorded hash, and each link's run id against a matching
-    `runs/<run id>/attestation.json`). Never reads or verifies a
+    link's recorded hash, each link's run id against a matching
+    `runs/<run id>/attestation.json`, and each link statement's own
+    `mission_id` against the manifest's). Never reads or verifies a
     signature -- that needs the exporting machine's key, which never
     travels with the bundle (see `manifest.json`'s own `note`)."""
     bundle_dir = Path(bundle_dir)
@@ -545,6 +546,10 @@ def check(bundle_dir: str | Path) -> CheckResult:
     if not isinstance(files_meta, dict):
         problems.append("manifest.json 'files' field is malformed")
         files_meta = {}
+
+    manifest_mission_id = manifest.get("mission_id")
+    if not isinstance(manifest_mission_id, str):
+        manifest_mission_id = None
 
     files_checked = 0
     for relpath, meta in sorted(files_meta.items()):
@@ -630,6 +635,24 @@ def check(bundle_dir: str | Path) -> CheckResult:
         links_checked += 1
         if statement.get("previous") != previous_sha:
             problems.append(f"{link_relpath}: previous does not match the prior link")
+        # D7 bound a chain to its mission, and `attest.verify_chain_links`
+        # refuses a link whose statement names another one. This check path
+        # decoded the same statement and read only `previous`, `run_id`, and
+        # `attestation_sha256`, so a chain from a different mission verified
+        # clean against its own manifest (probed 2026-09-08: rewriting only
+        # `manifest.json`'s `mission_id` left `check()` ok with two links).
+        # The manifest's `mission_id` is the only identity a remote reader
+        # has, and the cross-check costs one comparison.
+        statement_mission = statement.get("mission_id")
+        if (
+            manifest_mission_id is not None
+            and isinstance(statement_mission, str)
+            and statement_mission != manifest_mission_id
+        ):
+            problems.append(
+                f"{link_relpath}: statement names mission "
+                f"'{statement_mission}', the manifest names '{manifest_mission_id}'"
+            )
         run_id = statement.get("run_id")
         if isinstance(run_id, str):
             attestation_relpath = f"runs/{run_id}/attestation.json"

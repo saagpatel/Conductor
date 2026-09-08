@@ -631,3 +631,52 @@ def test_cli_export_check_prints_omissions_when_present_and_still_passes_without
     assert main(["export", "--check", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "omitted:" not in printed
+
+
+def test_a_chain_with_no_recorded_expectation_is_unrecorded_not_verified(
+    repo, home, monkeypatch, tmp_path
+):
+    """`evaluate_chain` skipped the completeness check whenever `result.json`
+    recorded no chain, and then still answered `verified`. A hard kill
+    (AGENTS.md rule 8's session restart, a crash) leaves `receipts/chain.json`
+    with N links and no `result.json`, so a truncated chain read as whole:
+    `land` merges on `state == "verified"` and an export bundle stamps it for
+    a remote reader. Probed 2026-09-08 by truncating a two-link chain to one
+    and deleting result.json. Every link still verifies, so this is not
+    `failed`; nothing was compared, so it is not `verified` either."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    mission_dir = home / "missions" / result.mission_id
+    chain_path = mission_dir / "receipts" / "chain.json"
+    chain = json.loads(chain_path.read_text())
+    chain["links"] = chain["links"][:1]
+    chain_path.write_text(json.dumps(chain))
+    (mission_dir / "result.json").unlink()
+
+    export_result = export.export(home, result.mission_id, tmp_path / "bundle")
+
+    assert export_result.chain_state_at_export == "unrecorded"
+    assert export_result.chain_verified_at_export is False
+
+
+def test_check_refuses_a_chain_whose_statement_names_another_mission(
+    repo, home, monkeypatch, tmp_path
+):
+    """`attest.verify_chain_links` binds a chain to its mission (D7); this
+    check path decoded the same statement and read only `previous`, `run_id`,
+    and `attestation_sha256`. Rewriting only `manifest.json`'s `mission_id`
+    left `check()` ok, so a bundle whose receipts came from another mission
+    verified clean against the one identity a remote reader has to go on
+    (probed 2026-09-08)."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    out = tmp_path / "bundle"
+    export.export(home, result.mission_id, out)
+    assert export.check(out).ok is True
+
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["mission_id"] = "20260101T000000Z-some-other-mission"
+    manifest_path.write_text(json.dumps(manifest))
+
+    checked = export.check(out)
+    assert checked.ok is False
+    assert any("names mission" in problem for problem in checked.problems)

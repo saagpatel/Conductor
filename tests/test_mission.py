@@ -769,3 +769,34 @@ def test_a_mission_cap_that_can_never_fire_is_refused():
         "lanes": [{"name": "a", "fleet": "claude", "prompt": "p"}],
     }
     mission_from_dict(ok, base_dir=Path(".")).validate()
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.5])
+def test_ledger_refuses_a_cost_that_is_not_finite_and_non_negative(bad):
+    """`Ledger.add` added any int or float it was handed. A NaN made `spent`
+    NaN, and every `spent >= max` comparison after that is False; a negative
+    figure shrank `spent` and bought more dispatches. Either way the mission
+    budget was off with no warning line, while `spend._number` already
+    refused these same values when reading the receipts back, so the live
+    guardrail was the looser of the two (2026-09-08 review). The dispatch is
+    counted unpriced instead, which is the state it is actually in."""
+
+    class _Fake:
+        usage = {"cost_usd": bad}
+        spawned = True
+        interrupted = False
+        cancelled = False
+
+    ledger = Ledger(max_cost_usd=5.0)
+    ledger.add(_Fake())
+    state = ledger.to_dict()
+    assert state["spent_usd"] == 0.0
+    assert state["unpriced_dispatches"] == 1
+    assert ledger.remaining() == 5.0
+
+    # A real figure still lands.
+    class _Good(_Fake):
+        usage = {"cost_usd": 2.0}
+
+    ledger.add(_Good())
+    assert ledger.to_dict()["spent_usd"] == 2.0

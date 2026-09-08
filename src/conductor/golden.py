@@ -82,7 +82,35 @@ _ENV_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"Bearer\s+\S+")
-_TOKEN_PREFIX_RE = re.compile(r"(?:sk-|xai-|ghp_|AIza)[A-Za-z0-9_-]{16,}")
+_TOKEN_PREFIX_RE = re.compile(
+    # 2026-09-08 review: `github_pat_`, `gho_`, `glpat-`, `hf_`, `AKIA`, and
+    # Anthropic's `sk-ant-` all shipped verbatim through an export bundle
+    # that `scrub_guard` then declared clean.
+    r"(?:sk-ant-|sk-|xai-|ghp_|gho_|ghu_|ghs_|github_pat_|glpat-|hf_|AKIA|AIza)"
+    r"[A-Za-z0-9_-]{16,}"
+)
+# NOT covered, deliberately, and recorded here so it stays a known gap: a
+# secret written as a mapping (`"token": "..."` in JSON, `api_token: ...` in
+# YAML) inside a plain-text artifact. A rule for that shape was written and
+# withdrawn on 2026-09-08: a recorded transcript is full of ordinary source
+# where `key:` and `secret:` are a dict literal or a type annotation, so the
+# rule redacted golden fixtures and its guard side failed four committed
+# ones. Bundle `.json` files are already covered by `_scrub_json_value`,
+# which redacts by key name; the gap is `answer.txt`, `prompt.txt`,
+# `diff.patch`, and the logs under `--logs`. Closing it needs a value-shape
+# test (entropy, or a vendor prefix) rather than a name test.
+# `--api-key VALUE`, `--token=VALUE`: the shape a command line uses.
+_FLAG_SECRET_RE = re.compile(
+    r"(--[A-Za-z0-9-]*(?:" + "|".join(_SECRET_KEY_WORDS) + r")[A-Za-z0-9-]*)([=\s]+)(\S{8,})",
+    re.IGNORECASE,
+)
+# Credentials in a URL's userinfo: `https://user:password@host`.
+_URL_CRED_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@")
+# A pasted private key. The body is redacted whole rather than line by line.
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
 _NONCE_RE = re.compile(r"\[[0-9a-f]{6}\]")
 _BASE64_RUN_RE = re.compile(r"[A-Za-z0-9+/=]{64,}")
 _TOKEN_FIELDS = (
@@ -102,8 +130,13 @@ class GoldenError(ValueError):
 # --- scrubbing ---------------------------------------------------------
 
 
+
+
 def _redact_secrets(text: str) -> str:
+    text = _PRIVATE_KEY_RE.sub("<redacted private key>", text)
     text = _ENV_SECRET_RE.sub(lambda m: f"{m.group(1)}=<redacted>", text)
+    text = _FLAG_SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _URL_CRED_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:<redacted>@", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)
     text = _TOKEN_PREFIX_RE.sub("<redacted>", text)
     return text
@@ -202,6 +235,15 @@ def _pattern_hits(text: str, patterns: list[tuple[str, str]]) -> list[str]:
         hits.append("bearer token")
     if _TOKEN_PREFIX_RE.search(text):
         hits.append("prefixed token")
+    # Every shape `_redact_secrets` rewrites needs its guard side too, or a
+    # bundle still passes with the secret in it. Same `<redacted>` exemption
+    # as the env case above: the scrubber's own output must not be a hit.
+    if any(not m.group(3).startswith("<redacted") for m in _FLAG_SECRET_RE.finditer(text)):
+        hits.append("secret flag")
+    if any(not m.group(3).startswith("<redacted") for m in _URL_CRED_RE.finditer(text)):
+        hits.append("url credentials")
+    if _PRIVATE_KEY_RE.search(text):
+        hits.append("private key")
     return hits
 
 

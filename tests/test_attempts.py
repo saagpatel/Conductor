@@ -366,3 +366,46 @@ def test_the_import_cycle_guard_catches_the_absolute_spelling():
     visitor = _MissionImportVisitor()
     visitor.visit(ast.parse(poisoned, filename="poisoned.py"))
     assert len(visitor.violations) == 1
+
+
+def test_trusted_lane_keeps_a_lane_cancelled_before_it_ever_spawned(
+    repo, home, monkeypatch, tmp_path
+):
+    """A cancelled sink is a settled outcome of a mission that succeeded, so
+    resume keeps it rather than repeating the cancellation. The check matched
+    only the `"cancelled:"` spelling, but `mission._cancelled_before_spawn`
+    writes `"cancelled before spawn: ..."` for the lane that was cut before
+    any process started. That lane -- the only one that cost nothing at all --
+    was therefore the one resume refused to keep, so it was re-dispatched and
+    paid for, the reverse of what the cancel section describes (2026-09-08
+    review). Both spellings are settled; neither is unfinished work.
+    """
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", f"printf '%s\\n' {shlex.quote(_ok_envelope(0.1))}"],
+    )
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "lanes": [{"name": "a", "fleet": "claude"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    mission_dir = Path(result.mission_dir)
+    lane = mission.lanes[0]
+    receipt = LaneResult.from_dict(json.loads((mission_dir / "lanes" / "a.json").read_text()))
+
+    mid_run = replace(receipt)
+    mid_run.skipped = "cancelled: lane b already passed"
+    assert _trusted_lane(mission, mission_dir, lane, mid_run, prior_ok=True) is True
+
+    pre_spawn = replace(receipt)
+    pre_spawn.skipped = "cancelled before spawn: lane b already passed"
+    assert _trusted_lane(mission, mission_dir, lane, pre_spawn, prior_ok=True) is True
+
+    # A skip that is not a cancellation is still unfinished work.
+    other = replace(receipt)
+    other.skipped = "paused: pause.before not answered; not started"
+    assert _trusted_lane(mission, mission_dir, lane, other, prior_ok=True) is False

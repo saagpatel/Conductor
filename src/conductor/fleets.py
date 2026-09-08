@@ -140,6 +140,23 @@ TAINT_AGY_DENIED_TOOLS: tuple[str, ...] = (
     "browser_scroll",  # drives the browser, network-connected context
     "browser_scroll_dom",  # drives the browser, network-connected context
     "browser_select_option",  # drives the browser, network-connected context
+    # The same init event also names four browser tools that do not carry the
+    # `browser_` prefix, so both the enumeration above and the
+    # `startswith("browser_")` net in `runner._uncovered_agy_tools` walked
+    # straight past them, and the coverage test filtered on the same prefix
+    # and could not fail (2026-09-08 review). Matched by substring now.
+    "click_browser_pixel",  # drives the browser, network-connected context
+    "list_browser_pages",  # enumerates whatever the browser has open
+    "capture_browser_screenshot",  # reads whatever the browser last loaded
+    "capture_browser_console_logs",  # reads the network-connected page's console
+    # A notebook kernel is a second code-execution surface next to the shell:
+    # a cell may import urllib and reach the network whether or not
+    # `run_command` is denied. Denied for the same reason `run_command` is.
+    "notebook_execution",
+    # Feeds stdin to a process `run_command` started. Under the opt-in
+    # `taint_shell: allow` the prefix list only inspects the command line, so
+    # an allowed interactive process could be driven past it through here.
+    "send_command_input",
     "browser_subagent",  # a subagent inherits the tainted context without inheriting this deny list
     "invoke_subagent",  # same risk as browser_subagent, for a non-browser subagent
     "define_subagent",  # defines a subagent that would not carry this deny list
@@ -231,7 +248,13 @@ def _shell_denied(command_line):
 def _reserved_strings(value, found):
     if isinstance(value, str):
         parts = value.replace("\\\\", "/").split("/")
-        if RESERVED_DIR in parts:
+        # Case-folded: this machine's APFS volume is case-insensitive by
+        # default, so ".AGENTS/conductor-taint.py" opens the very file this
+        # check exists to protect while a case-sensitive comparison waves it
+        # through. The post-run digest check would still catch bytes left
+        # changed, but not a lane that edits the deny script, uses what it
+        # unlocked, and writes the original bytes back (2026-09-08 review).
+        if any(part.lower() == RESERVED_DIR.lower() for part in parts):
             found.append(value)
     elif isinstance(value, dict):
         for item in value.values():

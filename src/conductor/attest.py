@@ -286,7 +286,17 @@ def attest_mission(home: Path, mission_id: str) -> dict:
     }
 
 
-CHAIN_STATES = ("verified", "partial", "empty", "missing", "malformed", "failed")
+CHAIN_STATES = (
+    "verified",
+    # Every link verifies but `result.json` recorded no chain to compare
+    # against, so completeness was never checked. Never `verified`.
+    "unrecorded",
+    "partial",
+    "empty",
+    "missing",
+    "malformed",
+    "failed",
+)
 
 
 def recorded_chain(mission_dir: Path) -> dict | None:
@@ -380,6 +390,19 @@ def evaluate_chain(
         problems.append("chain head does not match the head recorded in result.json")
     if problems:
         return outcome("partial", rows, head)
+    if expected_links is None and expected_head is None:
+        # Every link verifies, but nothing said how many links there should
+        # have been, so a chain with its tail lopped off is indistinguishable
+        # from a whole one. Reporting `verified` here claimed a completeness
+        # check that never ran: `land.py` merges on `state == "verified"` and
+        # an export bundle stamps it for a remote reader. Reachable for real
+        # -- a SIGINT still writes `result.json`, but a hard kill (AGENTS.md
+        # rule 8's session restart, a crash) leaves `receipts/chain.json`
+        # with N links and no `result.json` at all, which is exactly the case
+        # D7 and D8 were written for (probed 2026-09-08: truncate the chain,
+        # delete result.json, and a two-link mission verified on one link).
+        problems.append("result.json records no chain; completeness was not checked")
+        return outcome("unrecorded", rows, head)
     return outcome("verified", rows, head)
 
 

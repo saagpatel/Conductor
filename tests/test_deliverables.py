@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -1086,3 +1087,48 @@ def test_commit_false_deliverable_stays_in_a_non_isolated_checkout(repo, home, f
     assert result.ok is True, result.failure()
     assert (repo / "record.json").read_text().strip() == "receipt"
     assert not any("removed from the worktree" in n for n in result.git_verdict["notes"])
+
+
+# --- 2026-09-08 cold review: the deliverable surface after the Astra baseline ---
+
+
+def test_an_array_schema_of_primitives_is_checked_as_primitives():
+    """`type: array` with an `items` of `{"type": "string"}` recursed into
+    `_schema_mismatch`, which had no primitive branch and fell through to the
+    object check, so every list of strings or numbers came back as
+    "item 0: top level is not a JSON object" and no such deliverable could
+    pass. 0.84.0 made array schemas check each item; this is the item check
+    itself."""
+    strings = {"type": "array", "items": {"type": "string"}}
+    assert runner_mod._schema_mismatch(["a", "b"], strings) is None
+    assert runner_mod._schema_mismatch(["a", 2], strings) == "item 1: value must be of type string"
+
+    numbers = {"type": "array", "items": {"type": "number"}}
+    assert runner_mod._schema_mismatch([1, 2.5], numbers) is None
+    assert runner_mod._schema_mismatch([1, "x"], numbers) == "item 1: value must be of type number"
+
+    # The object path is unchanged.
+    objects = {"type": "array", "items": {"type": "object", "required": ["k"]}}
+    assert runner_mod._schema_mismatch([{"k": 1}], objects) is None
+    assert runner_mod._schema_mismatch([{}], objects) == "item 0: missing required property 'k'"
+
+
+def test_a_validator_path_with_a_space_is_shell_quoted():
+    """The validator runs under `shell=True`. An unquoted `{path}` holding a
+    space split across arguments, which fails the validator for a reason that
+    has nothing to do with the bytes; `_validator_ran_and_failed` counts any
+    non-zero exit as evidence the base was broken, so the shell error could
+    manufacture a `reproduced` verdict. W2 was this same defect in the taint
+    hook command."""
+    command = runner_mod._validator_command("check {path}", "docs/a b.md")
+    assert command == "check 'docs/a b.md'"
+
+    hostile = runner_mod._validator_command("check {path}", "a'; touch pwned; '.md")
+    assert "touch pwned" in hostile
+    assert hostile.startswith("check '")
+    # Quoted, so the shell sees one word and no second command.
+    assert shlex.split(hostile) == ["check", "a'; touch pwned; '.md"]
+
+
+def test_a_validator_command_without_the_placeholder_is_unchanged():
+    assert runner_mod._validator_command("make lint", "docs/a.md") == "make lint"

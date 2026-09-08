@@ -245,6 +245,44 @@ def test_a_genuine_cap_kill_is_still_cap_even_with_a_breaker_dict_present():
     assert error_kind(result) == "cap"
 
 
+def test_an_unpriced_run_killed_by_its_timeout_is_timeout_not_cap():
+    """A fleet that prices post-hoc (cursor) leaves `budget["unpriced"]` set
+    on any run whose cost could not be read, and `capped()` took that alone
+    as a cap verdict. A Grok read lane killed at its 600s timeout therefore
+    came back kind `cap`, naming a dollar limit that had nothing to do with
+    why the run ended (observed live 2026-09-08, twice). Conductor watched
+    the timeout itself, so the timeout is the cause on the receipt."""
+    result = _result(
+        timed_out=True,
+        budget={"unpriced": True, "cap_usd": 1.5, "observed_usd": None},
+        error="timed out after 600s; process group killed",
+    )
+    assert result.ok is False
+    assert error_kind(result) == "timeout"
+
+
+def test_an_unpriced_run_killed_by_a_breaker_is_breaker_not_cap():
+    """Same reasoning one step over: a tool-budget kill on an unpriced run
+    is the breaker's, not the cap's."""
+    result = _result(
+        breaker={"tripped": "tool budget hit: 91 tool calls"},
+        budget={"unpriced": True, "cap_usd": 2.5, "observed_usd": None},
+        error="tool budget hit: 91 tool calls; process group killed",
+    )
+    assert error_kind(result) == "breaker"
+
+
+def test_an_unpriced_run_that_ended_on_its_own_is_still_cap():
+    """The narrowing must not lose the case it was built for: an unpriced
+    run that conductor did not kill cannot be shown to have stayed under its
+    cap, and `cap` remains the honest reading."""
+    result = _result(
+        budget={"unpriced": True, "cap_usd": 1.5, "observed_usd": None},
+        error="usage could not be priced",
+    )
+    assert error_kind(result) == "cap"
+
+
 def test_kinds_are_exhaustive_over_the_documented_order():
     assert KINDS == (
         "interrupted",

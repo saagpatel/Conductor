@@ -36,6 +36,7 @@ import calendar
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1421,8 +1422,15 @@ def _parse_ceiling(raw_ceiling: object) -> dict | None:
             continue
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise MissionInvalid(f"ceiling.{key} must be a number or null")
-        if value <= 0:
-            raise MissionInvalid(f"ceiling.{key} must be positive")
+        # `not (isfinite and > 0)`, not `value <= 0`: NaN and Infinity both
+        # answer False to every comparison, so they walked through a `<= 0`
+        # guard and loaded as the ceiling, and `_check_ceiling`'s own
+        # `hour_usd >= per_hour` is then never true either. The rolling-spend
+        # guardrail an unattended run leans on was off with no warning line.
+        # D14 refused exactly this for `cap_usd` and `max_cost_usd`
+        # (`fleets.py:820`); the ceiling was left behind (2026-09-08 review).
+        if not (math.isfinite(float(value)) and value > 0):
+            raise MissionInvalid(f"ceiling.{key} must be a positive, finite number")
         parsed[key] = float(value)
     return parsed
 
@@ -1685,6 +1693,18 @@ class Ledger:
 
     def add(self, result: Result) -> None:
         cost = (result.usage or {}).get("cost_usd")
+        # A cost that is not a finite, non-negative number is not evidence
+        # about the budget, and adding it destroys the running total: `spent`
+        # becomes NaN and every `spent >= max` comparison after it is False,
+        # or a negative figure shrinks `spent` and buys more dispatches. Both
+        # turn the mission budget off silently. `spend._number` already
+        # refuses these same values when it reads the receipts back, so the
+        # live guardrail was the looser of the two (2026-09-08 review).
+        # Counted as unpriced instead, which is the state it actually is.
+        if isinstance(cost, bool) or not isinstance(cost, int | float):
+            cost = None
+        elif not (math.isfinite(float(cost)) and cost >= 0):
+            cost = None
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)

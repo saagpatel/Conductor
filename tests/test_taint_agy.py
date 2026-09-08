@@ -205,6 +205,28 @@ def test_hook_denies_an_edit_tool_naming_the_policy_directory(hook_script, tool)
     assert ".agents" in out["reason"]
 
 
+@pytest.mark.parametrize("spelling", [".AGENTS", ".Agents", ".aGeNtS"])
+def test_hook_denies_an_edit_tool_naming_the_policy_directory_in_any_case(
+    hook_script, spelling
+):
+    """The comparison was case-sensitive while this machine's APFS volume is
+    case-insensitive by default, so `.AGENTS/conductor-taint.py` opened the
+    very file the check protects and was allowed. The digest check would
+    still catch bytes left changed; it would not catch a lane that edits the
+    deny script, uses what it unlocked, and writes the original bytes back
+    before exit (2026-09-08 review)."""
+    out = _run_hook(
+        hook_script,
+        {
+            "toolCall": {
+                "name": "write_to_file",
+                "args": {"TargetFile": f"{spelling}/conductor-taint.py"},
+            }
+        },
+    )
+    assert out["decision"] == "deny"
+
+
 def test_hook_allows_an_edit_tool_elsewhere_in_the_worktree(hook_script):
     out = _run_hook(
         hook_script,
@@ -277,10 +299,34 @@ def test_denied_tools_cover_every_browser_tool_in_a_recorded_agy_stream():
         / "stdout.jsonl"
     )
     tools = json.loads(fixture.read_text().splitlines()[0])["init"]["tools"]
-    browser_tools = [name for name in tools if name.startswith("browser_")]
-    assert browser_tools, "fixture must actually list browser_* tools, or this test proves nothing"
+    # Matched by substring, not by prefix. The prefix spelling was this test's
+    # own defect: the fixture names `click_browser_pixel`, `list_browser_pages`,
+    # `capture_browser_screenshot`, and `capture_browser_console_logs`, none of
+    # which start with `browser_`, so the filter removed exactly the four tools
+    # that were undenied and the assertion could not fail (2026-09-08 review).
+    browser_tools = [name for name in tools if "browser" in name]
+    assert browser_tools, "fixture must actually list browser tools, or this test proves nothing"
     missing = sorted(set(browser_tools) - set(TAINT_AGY_DENIED_TOOLS))
     assert missing == []
+
+
+def test_denied_tools_cover_every_code_execution_tool_in_a_recorded_agy_stream():
+    """The shell is denied by default as the code-execution boundary, but the
+    same recorded init event names a notebook kernel, which runs arbitrary
+    code and can reach the network on its own, and a tool that feeds stdin to
+    a process the shell started (2026-09-08 review)."""
+    fixture = (
+        Path(__file__).parent
+        / "golden"
+        / "c5-review-fix"
+        / "runs"
+        / "20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor"
+        / "stdout.jsonl"
+    )
+    tools = json.loads(fixture.read_text().splitlines()[0])["init"]["tools"]
+    execution = [name for name in tools if "notebook_execution" in name or "command_input" in name]
+    assert execution, "fixture must list the execution tools, or this test proves nothing"
+    assert sorted(set(execution) - set(TAINT_AGY_DENIED_TOOLS)) == []
 
 
 def test_taint_hook_files_script_is_valid_python():
