@@ -576,6 +576,26 @@ def _cascade_label(cascade: dict) -> str:
     return f"{fleet}/{model}" if model else str(fleet)
 
 
+def escalation_attempts(attempts: list[dict]) -> list[dict]:
+    """The attempt summaries that represent an escalation past the lane's
+    first declared attempt.
+
+    `dispatch_one` appends one summary per dispatch, and a transient retry is
+    a dispatch: a lane whose cheap attempt failed once on a rate limit and
+    then succeeded on its own retry has two summaries and never escalated.
+    Counting `attempts[1:]` read that as an escalation, which is the rate
+    AGENTS.md rule B3 quotes (2026-09-08 review).
+
+    `retry_of` is the only sound mark. The `attempt` label is fleet/model,
+    and the c5-build-cascade-capped fixture is a real mission whose cascade
+    and primary are the same fleet and model at different efforts: two
+    genuinely different declared attempts sharing one label. A summary
+    written before `retry_of` existed carries neither, and reads as an
+    escalation exactly as it does today.
+    """
+    return [entry for entry in attempts[1:] if entry.get("retry_of") is None]
+
+
 def _escalation_summary(mission: Mission, lane_results: list[LaneResult]) -> dict | None:
     """B3: the mission-wide escalation rate and dollars, logged beside the
     cap (docs/ROADMAP-2026-09.md item B3)."""
@@ -588,7 +608,9 @@ def _escalation_summary(mission: Mission, lane_results: list[LaneResult]) -> dic
     escalated = sum(1 for lr in targeted if lr.escalated)
     cascade_usd = sum(lr.attempts[0].get("cost_usd") or 0.0 for lr in targeted if lr.attempts)
     escalated_usd = sum(
-        sum(a.get("cost_usd") or 0.0 for a in lr.attempts[1:]) for lr in targeted if lr.escalated
+        sum(a.get("cost_usd") or 0.0 for a in escalation_attempts(lr.attempts))
+        for lr in targeted
+        if lr.escalated
     )
     return {
         "lanes": lanes_n,
