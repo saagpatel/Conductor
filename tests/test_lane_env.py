@@ -19,6 +19,7 @@ from conductor.cli import build_parser, main
 from conductor.fleets import Spec
 from conductor.mission import mission_from_dict
 from conductor.runner import dispatch
+from docs import doc_section
 
 # --- ports -------------------------------------------------------------
 
@@ -532,10 +533,7 @@ def test_cli_lane_env_flags_parse_and_reach_the_spec_on_a_dry_run(repo, home, mo
 
 
 def test_readme_documents_per_lane_setup_teardown_and_ports():
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    section = readme.split("### Per-lane setup, teardown, and ports", 1)[1].split(
-        "### Garbage collection", 1
-    )[0]
+    section = doc_section("### Per-lane setup, teardown, and ports")
     compact = " ".join(section.split())
 
     assert "CONDUCTOR_PORT_1" in compact and "CONDUCTOR_PORTS" in compact

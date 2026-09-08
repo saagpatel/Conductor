@@ -22,6 +22,7 @@ from conductor.mission import (
     run_mission,
 )
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def _line(value: dict) -> str:
@@ -598,10 +599,7 @@ def test_collate_candidates_drops_a_sink_lane_that_early_cancel_skipped(
 
 
 def test_readme_documents_early_cancel_ranking_and_candidates():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "#### Early cancel, mechanical ranking, and best-of-n", 1
-    )[1].split("\n## ", 1)[0]
+    section = doc_section("#### Early cancel, mechanical ranking, and best-of-n")
     assert "early_cancel needs require: any" in section
     assert "cancelled: lane <name> already passed" in section
     assert 'early_cancel: {"winner": "<lane>", "cancelled":' in section

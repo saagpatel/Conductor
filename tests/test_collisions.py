@@ -27,6 +27,7 @@ from conductor.mission import (
 )
 from conductor.report import _scan_missions
 from conductor.spend import summarize
+from docs import doc_section
 
 
 def antigravity_envelope(text: str) -> list[str]:
@@ -645,10 +646,7 @@ def test_an_untainted_resolve_dispatches_untainted(repo, home, monkeypatch, tmp_
 
 
 def test_readme_documents_collisions_and_resolve():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "#### Conflict-aware collate: collisions and a resolver lane", 1
-    )[1].split("\n### ", 1)[0]
+    section = doc_section("#### Conflict-aware collate: collisions and a resolver lane")
     assert "27.7% conflict rate across 107k" in section
     assert "git merge-tree --write-tree --name-only" in section
     assert '"hotspots": <count or null>' in section

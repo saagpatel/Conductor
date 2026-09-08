@@ -14,6 +14,7 @@ from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.fleets import Spec, build_argv
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from docs import doc_section
 
 
 def envelope(answer: str, *, cache_read: int = 0, cache_write: int = 0, cost: float = 0.1) -> str:
@@ -232,8 +233,7 @@ def test_conductor_spend_reports_the_cache_write_column(home, monkeypatch, capsy
 
 
 def test_readme_documents_cache_friendly_prompts():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("#### Cache-friendly prompts", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("#### Cache-friendly prompts")
     section = " ".join(section.split())  # the README wraps at 80 columns
     assert "--system-prompt-snapshot on" in section
     assert "--exclude-dynamic-system-prompt-sections" in section
@@ -246,8 +246,7 @@ def test_readme_documents_cache_friendly_prompts():
 
 
 def test_readme_documents_cache_accounting():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Cache accounting", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("### Cache accounting")
     section = " ".join(section.split())  # the README wraps at 80 columns
     assert "cache_write_tokens" in section
     assert '"input_tokens", "cache_read_tokens"' in section

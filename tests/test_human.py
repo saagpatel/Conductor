@@ -18,6 +18,7 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from docs import doc_section
 
 
 def envelope(answer: str, cost: float | None = None) -> str:
@@ -623,8 +624,7 @@ def test_cli_answer_file_resumes_a_human_lane(repo, home, monkeypatch, tmp_path,
 
 
 def test_readme_documents_human_lanes():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Human lanes", 1)[1].split("\n#### ", 1)[0]
+    section = doc_section("### Human lanes")
     section = " ".join(section.split())
     assert '"fleet": "human"' in section
     assert "taint_from` records `human`" in section

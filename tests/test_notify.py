@@ -16,6 +16,7 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.notify import emit
+from docs import doc_section
 
 
 def envelope(answer: str, cost: float | None = None) -> str:
@@ -423,8 +424,7 @@ def test_dry_run_emits_nothing(repo, home, monkeypatch, tmp_path):
 
 
 def test_readme_documents_notifications():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("#### Notifications", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("#### Notifications")
     compact = " ".join(section.split())
     assert '"events": ["pause", "end", "breaker"]' in compact
     assert "CONDUCTOR_EVENT" in compact and "CONDUCTOR_MISSION" in compact

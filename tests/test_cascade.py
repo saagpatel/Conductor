@@ -15,6 +15,7 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from docs import doc_section
 
 
 def envelope(answer: str, cost: float) -> str:
@@ -421,8 +422,7 @@ def test_a_resume_keeps_the_escalated_flag_on_the_kept_lane(repo, home, monkeypa
 
 
 def test_readme_documents_the_cascade_and_its_escalation_block():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Cheap-first cascade", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("### Cheap-first cascade")
     assert '"cascade": false' in section
     assert "applies to every lane whose `stage` is `build`" in section
     assert "every write lane" in section

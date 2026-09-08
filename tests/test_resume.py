@@ -13,6 +13,7 @@ from conductor.cli import build_parser, main
 from conductor.fleets import DispatchRefused, Spec, build_argv
 from conductor.mission import MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def test_resume_argv_is_exact_for_every_fleet():
@@ -407,8 +408,7 @@ def test_lane_resume_does_not_copy_into_fallback_attempts(tmp_path):
 
 
 def test_readme_documents_the_thread_reuse_contract():
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    section = readme.split("#### Thread reuse", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("#### Thread reuse")
 
     assert '"base": "build"' in section
     assert '"needs": ["review"]' in section
@@ -416,5 +416,5 @@ def test_readme_documents_the_thread_reuse_contract():
     assert "same fleet" in section
     assert "fleet returned the requested id" in section
     assert "Antigravity" in section and "--conversation MISSING" in section
-    assert "--resume SESSION_ID" in readme
-    assert "session_id" in readme
+    assert "--resume SESSION_ID" in doc_section("Commands")
+    assert "session_id" in doc_section("What a result looks like")

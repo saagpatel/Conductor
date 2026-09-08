@@ -31,6 +31,7 @@ from conductor.verdicts import (
     render_verdict,
     valid_disposition_entry,
 )
+from docs import doc_section
 
 CRITERIA = parse_checklist(
     [
@@ -408,8 +409,7 @@ def review_lane(name: str, fleet: str = "codex") -> dict:
 
 
 def test_readme_three_reviewer_example_is_valid_json():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Structured review and a 2-of-3 quorum", 1)[1]
+    section = doc_section("### Structured review and a 2-of-3 quorum")
     example = section.split("```json\n", 1)[1].split("\n```", 1)[0]
     parsed = json.loads(example)
     assert parsed["require"] == {

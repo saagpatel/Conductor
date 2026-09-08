@@ -25,6 +25,7 @@ from conductor.errors import KINDS, _own_check_kind, capped, error_kind
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import Result, dispatch
+from docs import doc_section
 
 
 @pytest.fixture(autouse=True)
@@ -832,10 +833,7 @@ def test_conductor_runs_recomputes_kind_for_a_pre_c5_receipt(repo, home, monkeyp
 
 
 def test_readme_documents_error_kinds_fallback_on_and_retry():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Structured error kinds", 1)[1].split(
-        "\n## ", 1
-    )[0]
+    section = doc_section("### Structured error kinds")
     # The list itself is pinned against `KINDS` by
     # `test_readme_error_kinds_code_block_matches_kinds_exactly`, which reads
     # the block rather than a second hand-copy of it. Three literal copies
@@ -860,8 +858,7 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
 
 
 def test_readme_error_kinds_code_block_matches_kinds_exactly():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Structured error kinds", 1)[1]
+    section = doc_section("### Structured error kinds")
     block = section.split("```\n", 1)[1].split("```", 1)[0]
     listed = tuple(block.replace(",", " ").split())
     assert listed == KINDS
