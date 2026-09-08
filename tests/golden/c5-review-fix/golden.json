@@ -1,7 +1,7 @@
 {
   "conductor_version": "0.22.0",
   "files": {
-    "expected.json": "eb7d1acb876d972155773514b483d7c8f7428fc7d7453b19d5ebacf6d95fab72",
+    "expected.json": "3ef24ccb8fd6381ecccd41e31e2971888ab5e8367d2649fa97e047029eedb368",
     "lanes/fix.json": "ece4e77e23eb943aa072374933208fe701ce5fd2d6a94703314b0cb9c1eef195",
     "lanes/review-gemini.json": "91110b04ef23adb1469cd4be35a03cec3ebed7ba12d9d05f557b67017838c469",
     "lanes/review-grok.json": "4ee3fb746250418969682260718b4b84469fe57051600894919a350e5905bb30",
@@ -10,11 +10,11 @@
     "result.json": "46bf1d5ec7ead0b18095dbf3508b0050da15adb5cb3248fb834c3d2320d903ee",
     "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/answer.txt": "eb8bef82d2eafed4fbbda67d6495a9ba59a1234e65da8fd99cfd0b25e8a39c33",
     "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/prompt.txt": "778f38525fe8cffd838aff30fe4b3f9020a0fba504726f3e27beb4cf61b56fc4",
-    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/result.json": "104da4d9caaebf86da5a38727c03a7c924d407ead4fdcd695a72f8bf405a10d6",
+    "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/result.json": "f66efa5c4aa9473305921ff9073ce16488cd7deb7273380979d6942c735a8fe0",
     "runs/20260905T182328Z-antigravity-you-are-one-lane-of-a-conductor/stdout.jsonl": "1152e735cd26ab523cef35b88704222a3c346f454fe23b557beff18adc50858d",
     "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/answer.txt": "beee59605b8ea94d0d87c9cb59b76a6ec6b684602fba8f7b232f581aca942bf9",
     "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/prompt.txt": "6bdf7ab333c94d38b3b19936b77abba49b77313e81dee96b0e2c418a2ce0de46",
-    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/result.json": "c95421c0cb56ac6e7d399cf091574ac1803e63c46a0dfea051fcbf6558c4c579",
+    "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/result.json": "9323c9e29229aa6ea51e567bf0bb9661c954667a628166050e099a371c9a7a1a",
     "runs/20260905T182328Z-cursor-you-are-one-lane-of-a-conductor/stdout.jsonl": "80dcfc831ef33eba86a8888f12fcbdb6eef08ce263264a492ea915d5d19d1a62",
     "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/answer.txt": "664f697f715070296cb29a9912465ae8101dbb3835c0ed5ca224e65321059a82",
     "runs/20260905T183039Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "b7d3afaf521f23c783f133464a14ce912e2b12443fd143c442ab80d01da93a01",

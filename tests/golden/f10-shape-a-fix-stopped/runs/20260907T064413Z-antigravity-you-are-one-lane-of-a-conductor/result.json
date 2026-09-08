@@ -72,14 +72,14 @@
   "deliverable": null,
   "commit": null,
   "usage": {
-    "input_tokens": 0,
+    "input_tokens": 59539,
     "output_tokens": 29810,
     "cache_read_tokens": 89855,
     "cache_write_tokens": 0,
     "thinking_tokens": 13996,
     "cost_usd": 0.118527,
     "cost_basis": "estimated",
-    "total_tokens": 119665
+    "total_tokens": 179204
   },
   "budget": {
     "cap_usd": 1.0,

@@ -1,5 +1,5 @@
 {
-  "cache_hit_rate": 0.973,
+  "cache_hit_rate": 0.904,
   "early_cancel": null,
   "errors": {},
   "escalation": null,
@@ -50,7 +50,7 @@
           "effort": "standard",
           "failure": null,
           "fleet": "antigravity",
-          "input_tokens": 0,
+          "input_tokens": 59539,
           "kind": null,
           "mode": "read",
           "model": "gemini-3.7-flash-medium",
@@ -62,7 +62,7 @@
           "retry": null,
           "retry_of": null,
           "session_id": "bf9f090f-facb-4192-84e3-e8c5f57cb902",
-          "tokens": 119665,
+          "tokens": 179204,
           "tool_calls": 8
         }
       ],
@@ -89,7 +89,7 @@
           "effort": "standard",
           "failure": null,
           "fleet": "cursor",
-          "input_tokens": 6853,
+          "input_tokens": 237253,
           "kind": null,
           "mode": "read",
           "model": "cursor-grok-4.6-medium",
@@ -101,7 +101,7 @@
           "retry": null,
           "retry_of": null,
           "session_id": "714abc29-fce3-4985-a58a-f42b903c125a",
-          "tokens": 254970,
+          "tokens": 485370,
           "tool_calls": 27
         }
       ],
