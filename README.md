@@ -1487,7 +1487,11 @@ shares no history with the checkout's HEAD (a branch that diverged from an
 older tip is the ordinary case and lands with a merge commit). A pinned tip
 already reachable from the checkout's HEAD is not a refusal: once every
 identity check above has passed, it exits 0 and reports `already_merged`
-without touching the tree. It also refuses when it finds itself running inside a lane's own
+without touching the tree. The one exception is a merge an earlier `land`
+of the same lane made and could not undo -- a receipt with `ok: false` and
+`reset: false` whose `merge_sha` is still reachable from HEAD. The branch
+then holds a merge that never passed gate, golden, or attest, so the
+shortcut refuses rather than reporting a green landing over it. It also refuses when it finds itself running inside a lane's own
 environment (`CONDUCTOR_LANE`, set on every dispatched process) -- `land` is
 the lead's own act, never a fleet's, and no mission or lane spec can make it
 run one.
