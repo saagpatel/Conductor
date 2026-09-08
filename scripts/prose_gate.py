@@ -60,7 +60,19 @@ def problems(text: str) -> list[str]:
             if re.search(r"\b" + re.escape(word.strip()) + r"\b", lowered):
                 out.append(f"line {number}: filler {word.strip()!r}")
     header_cells: int | None = None
+    fenced = False
     for number, line in enumerate(lines, start=1):
+        # The same fence tracking the loop above does. Without it a fenced
+        # block whose lines start with `|` (a shell pipeline, an ASCII
+        # diagram, a quoted table from a tool's own output) is read as a
+        # markdown table and its rows counted, which the module docstring
+        # already promises not to do.
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            header_cells = None
+            continue
+        if fenced:
+            continue
         if not line.startswith("|"):
             header_cells = None
             continue
