@@ -46,6 +46,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | F22 read live on a document fix lane (validator reproduced, landed by conductor land); prose gate skips fences; the test-only fix lane is a named refusal | 0.82.0 | one fix-stage document mission with two tainted reviewers, landed by conductor land; lead fixes | $2.31 |
 | gc identifies a repository by its git common dir; a lane worktree named in a receipt is planned once | 0.83.0 | lead fix | $0 |
 | F22 on a data deliverable: accepted and rejected read live; array schemas; a failed deliverable check undoes the commit | 0.84.0 | four scratch-repo dispatches; lead fixes | $0.30 |
+| F23 shape a --deliverable and --deliverable-validator: a document or data spec through the build, review, fix shape | 0.85.0 | lead build, dry-run launch on a research document | $0 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
@@ -82,7 +83,7 @@ today's four mapped missions), one effect inventory shared by `mission.py`
 and `report.py` (shipped 0.77.0 as `spend.effects`, F20), `mission.py` extracted by invariant with
 signatures intact (F21, three slices, one release each: graph policy 0.78.0, approval consumption
 0.79.0, attempt lifecycle 0.80.0), and non-code artifact acceptance with a before/after validator
-(shipped 0.81.0 as F22). All five are closed; nothing from the review remains open. 0.82.0 read F22 live: a fix lane on a document reproduced on its own validator and landed through `conductor land` at $2.31 (`docs/research/2026-09-07-consumer-validator-live.md`), the prose gate learned to skip fenced code after the run showed it forcing a verbatim quote to be rewritten, and the test-only fix lane that F21 slice 2 salvaged by hand became a named refusal. 0.83.0 fixed gc planning a repository once per lane worktree the receipts named, found when the cleanup after 0.82.0 exited 1 on a clean apply. 0.84.0 ran F22 on a data deliverable for $0.30: `accepted` and `rejected` read live beside `reproduced`, and the first dispatch found that array schemas were unpassable and that a failed deliverable check left the commit on the branch, both fixed.
+(shipped 0.81.0 as F22). All five are closed; nothing from the review remains open. 0.82.0 read F22 live: a fix lane on a document reproduced on its own validator and landed through `conductor land` at $2.31 (`docs/research/2026-09-07-consumer-validator-live.md`), the prose gate learned to skip fenced code after the run showed it forcing a verbatim quote to be rewritten, and the test-only fix lane that F21 slice 2 salvaged by hand became a named refusal. 0.83.0 fixed gc planning a repository once per lane worktree the receipts named, found when the cleanup after 0.82.0 exited 1 on a clean apply. 0.84.0 ran F22 on a data deliverable for $0.30: `accepted` and `rejected` read live beside `reproduced`, and the first dispatch found that array schemas were unpassable and that a failed deliverable check left the commit on the branch, both fixed. 0.85.0 gave a document or data spec a route through the shape: `shape a --deliverable` with the validator, the review-applying lane as a build lane, dispositions read from any lane that declares them.
 
 ## Waves
 
