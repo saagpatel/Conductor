@@ -84,6 +84,104 @@ def test_model_vendor_covers_every_fleet_model_and_the_default():
 # --- a judge never scores its own vendor --------------------------------------
 
 
+def test_review_lane_without_base_refuses_when_its_prompt_templates_a_same_vendor_lane(
+    tmp_path,
+):
+    """A `stage: review` lane with no `base` still judges whatever it reads
+    through `{{lanes.X.answer}}` (and the other template fields). Skipping
+    `base is None` left that pair unchecked."""
+    raw = {
+        "prompt": "x",
+        "lanes": [
+            {"name": "build", "fleet": "claude", "model": "opus", "mode": "write"},
+            {
+                "name": "review",
+                "fleet": "claude",
+                "model": "sonnet",
+                "stage": "review",
+                "mode": "read",
+                "needs": ["build"],
+                "prompt": "Look at {{lanes.build.answer}}",
+            },
+        ],
+    }
+    with pytest.raises(MissionInvalid, match=r"'review'.*'build'.*anthropic"):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_review_lane_without_base_reaches_into_a_fallback_prompt_template(tmp_path):
+    """Every attempt, cascade included, is a judging surface: a fallback
+    prompt that templates a same-vendor lane is the same refusal."""
+    raw = {
+        "prompt": "x",
+        "lanes": [
+            {"name": "build", "fleet": "claude", "model": "opus", "mode": "write"},
+            {
+                "name": "review",
+                "fleet": "codex",
+                "model": "sol",
+                "stage": "review",
+                "mode": "read",
+                "needs": ["build"],
+                "prompt": "R",
+                "fallback": [
+                    {
+                        "fleet": "claude",
+                        "model": "sonnet",
+                        "mode": "read",
+                        "prompt": "see {{lanes.build.answer}}",
+                    }
+                ],
+            },
+        ],
+    }
+    with pytest.raises(MissionInvalid, match=r"'review'.*'build'.*anthropic"):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_review_lane_without_base_self_judging_allow_lifts_the_template_refusal(
+    tmp_path,
+):
+    raw = {
+        "prompt": "x",
+        "self_judging": "allow",
+        "lanes": [
+            {"name": "build", "fleet": "claude", "model": "opus", "mode": "write"},
+            {
+                "name": "review",
+                "fleet": "claude",
+                "model": "sonnet",
+                "stage": "review",
+                "mode": "read",
+                "needs": ["build"],
+                "prompt": "Look at {{lanes.build.answer}}",
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert mission.self_judging == "allow"
+
+
+def test_a_non_review_lane_that_templates_another_lane_is_not_a_judge(tmp_path):
+    """A lane that is neither `stage: review` nor a verdict lane may still
+    read another lane's output; that is not self-judging."""
+    raw = {
+        "prompt": "x",
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write"},
+            {
+                "name": "b",
+                "fleet": "claude",
+                "needs": ["a"],
+                "prompt": "read {{lanes.a.answer}}",
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert mission.lanes[1].stage is None
+    assert all(attempt.verdict is None for attempt in mission.lanes[1].attempts)
+
+
 def test_verdict_lane_refuses_to_judge_its_bases_vendor(tmp_path):
     raw = {
         "prompt": "x",
@@ -352,4 +450,20 @@ def test_rank_answer_accepts_an_object_wrapped_in_prose():
     assert _parse_rank_answer(text, ["a", "b"], True, None) == ("a", "a has the test", None, None)
     assert _parse_rank_answer("no object here", ["a", "b"], True, None)[2] == (
         "answer contains no valid JSON object"
+    )
+
+
+def test_parse_rank_answer_refuses_two_different_ranking_objects():
+    from conductor.mission import _parse_rank_answer
+
+    text = (
+        '{"strongest": "a", "reason": "a has the test"}\n\n'
+        "For example:\n"
+        '{"strongest": "b", "reason": "b is cheaper"}\n'
+    )
+    strongest, reason, invalid, scores = _parse_rank_answer(text, ["a", "b"], True, None)
+    assert strongest is None and reason is None and scores is None
+    assert invalid == (
+        "the answer carries 2 different ranking objects; "
+        "conductor cannot tell which is the judgment"
     )
