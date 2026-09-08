@@ -500,6 +500,51 @@ def test_a_cancelled_lane_is_reopened_when_the_cascade_reruns_its_winner(
     assert _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, notes) is False
 
 
+def test_a_cancelled_lane_is_not_kept_when_its_own_upstream_must_rerun(tmp_path, repo):
+    """The winner-is-kept rule and the needs walk fought: keep_cancelled
+    moved a cancelled lane into kept because its winner was kept, the walk
+    moved it back because a need was in rerun, and the next round claimed it
+    again. Notes grew without bound and resume never returned the running
+    lock. A cancelled lane whose own upstream must rerun is not settled, so
+    the winner-is-kept rule must not claim it.
+    """
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "cwd": str(repo),
+            "mode": "read",
+            "lanes": [
+                {"name": "up", "fleet": "claude"},
+                {"name": "loser", "fleet": "claude", "needs": ["up"]},
+                {"name": "winner", "fleet": "claude"},
+            ],
+        },
+        base_dir=tmp_path,
+    )
+    cancelled = LaneResult(
+        name="loser", ok=False, skipped="cancelled: lane winner already passed"
+    )
+    kept: dict[str, LaneResult] = {"winner": LaneResult(name="winner", ok=True)}
+    rerun = {"loser", "up"}
+    notes: list[str] = []
+
+    assert (
+        _keep_cancelled_lanes(mission, {"loser": cancelled}, kept, rerun, notes) is False
+    )
+    assert "loser" in rerun and "loser" not in kept
+    assert notes == []
+
+    # And the winner-is-kept rule still claims a cancelled lane with no
+    # unsettled upstream, which is the case the existing resume-plan test
+    # drives through `_build_resume_plan`.
+    rerun = {"loser"}
+    kept = {"winner": LaneResult(name="winner", ok=True), "up": LaneResult(name="up", ok=True)}
+    notes = []
+    assert _keep_cancelled_lanes(mission, {"loser": cancelled}, kept, rerun, notes) is True
+    assert "loser" in kept and "loser" not in rerun
+    assert notes == ["lane 'loser' stays cancelled: 'winner' is kept"]
+
+
 def test_the_resume_plan_settles_cancelled_lanes_inside_the_cascade(
     repo, home, monkeypatch, tmp_path
 ):

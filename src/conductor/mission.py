@@ -3245,17 +3245,30 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
     ) and isinstance(answer, str)
 
 
-def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
+def _resolve_is_trusted(
+    mission: Mission, prior_result: dict | None, *, notes: list[str] | None = None
+) -> bool:
     """D1 (cross-vendor review): whether a prior `resolve` outcome may be kept
     as-is rather than re-dispatched. Only called once no sink lane reran, so
     the collisions the resolver saw cannot have changed; still refuses to
     keep a run that failed (retried on resume like any other failed write)
-    or whose committed tip has since vanished."""
+    or whose committed tip has since vanished.
+
+    `ran: False` is settled only for `reason: "no hotspots"` -- there was
+    genuinely nothing to dispatch. A dry run and a ledger blocker write the
+    same `ran: False` shape and still have the work to do. Git returning
+    `GIT_UNRUN` is not a vanished tip: `_git_answer` covers that distinction,
+    the same way `_trusted_lane` does.
+    """
     resolve = (prior_result or {}).get("resolve")
     if not isinstance(resolve, dict):
         return False
     if not resolve.get("ran"):
-        return True  # nothing was dispatched; there is nothing to redo
+        # Only "no hotspots" is genuinely settled. The other two producers
+        # (`{"ran": False, "reason": "dry run"}` and a ledger blocker
+        # `"...; resolve not started"`) still have the work to do; trusting
+        # them kept an unexecuted resolver forever on resume.
+        return resolve.get("reason") == "no hotspots"
     if resolve.get("ok") is not True:
         return False
     tip = resolve.get("tip")
@@ -3264,8 +3277,10 @@ def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
         # enforced single by `Mission.validate`), never the mission's own
         # cwd when the two differ.
         resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
-        commit = git_run(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
-        if commit.returncode != 0:
+        commit = _git_answer(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
+        if commit is None:
+            _note_git_unrun(notes, "resolve", "tip commit")
+        elif commit.returncode != 0:
             return False
     return True
 
@@ -3307,6 +3322,13 @@ def _keep_cancelled_lanes(
     had settled. If the winner is being rerun, the decision is open again
     and so is the loser.
 
+    A cancelled lane whose own upstream is in `rerun` is not settled even
+    when its winner is kept: the dependency walk would immediately move it
+    back out, this would claim it again, and the fixed point never
+    terminated (notes grew without bound, resume held the running lock).
+    The winner-is-kept rule therefore does not claim a cancelled lane that
+    still has a need in `rerun`.
+
     This runs after the kept set is complete, because the winner may sit
     later in `mission.lanes` than the lane it cancelled. It also runs inside
     the dependency cascade's own fixed point and answers in both directions,
@@ -3327,7 +3349,11 @@ def _keep_cancelled_lanes(
         winner = _cancel_winner(old.skipped)
         if winner is None:
             continue
-        if lane.name in rerun and winner in kept:
+        if (
+            lane.name in rerun
+            and winner in kept
+            and not any(need in rerun for need in lane.needs)
+        ):
             old.kept = True
             kept[lane.name] = old
             rerun.discard(lane.name)
@@ -3433,7 +3459,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     if mission.resolve:
         resolve = (
             "kept"
-            if not rerun and _resolve_is_trusted(mission, prior_result)
+            if not rerun and _resolve_is_trusted(mission, prior_result, notes=notes)
             else "rerun"
         )
     spent, unpriced = _run_receipt_spend(base, previous, prior_result)
@@ -3977,7 +4003,10 @@ def _execute_mission(
                 summary["error"] = cancel_reason
                 summary["failure"] = cancel_reason
             summary["unpriced"] = (
-                result.spawned and not result.interrupted and summary.get("cost_usd") is None
+                result.spawned
+                and not result.interrupted
+                and not result.cancelled
+                and summary.get("cost_usd") is None
             )
             # E6: a script attempt is priced at zero and verified, never
             # unpriced (result.budget carries "free": true; its cost_usd is

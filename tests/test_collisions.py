@@ -18,7 +18,13 @@ from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.collisions import merge_conflicts, overlap, touched_files
 from conductor.fleets import Spec
-from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from conductor.mission import (
+    Mission,
+    MissionInvalid,
+    _resolve_is_trusted,
+    mission_from_dict,
+    run_mission,
+)
 from conductor.report import _scan_missions
 from conductor.spend import summarize
 
@@ -462,6 +468,63 @@ def test_resolve_is_kept_on_resume_when_nothing_reran(repo, home, monkeypatch, t
 
     assert calls["cursor"] == 1  # not re-dispatched
     assert resumed.resolve == first.resolve
+
+
+def test_resolve_is_trusted_only_when_ran_false_means_no_hotspots(repo, tmp_path):
+    """`ran: False` is settled for `no hotspots` and nothing else. A dry run
+    and a ledger blocker write the same shape; trusting either kept an
+    unexecuted resolver forever on resume, collisions still unresolved."""
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+
+    assert (
+        _resolve_is_trusted(mission, {"resolve": {"ran": False, "reason": "no hotspots"}})
+        is True
+    )
+    assert (
+        _resolve_is_trusted(mission, {"resolve": {"ran": False, "reason": "dry run"}})
+        is False
+    )
+    blocked = {
+        "resolve": {
+            "ran": False,
+            "reason": "budget exhausted: $1.0000 of $1.0000; resolve not started",
+        }
+    }
+    assert _resolve_is_trusted(mission, blocked) is False
+
+
+def test_resolve_is_trusted_when_git_cannot_run_to_confirm_its_tip(
+    repo, tmp_path, monkeypatch
+):
+    """`GIT_UNRUN` is not a vanished tip. `_trusted_lane` already uses
+    `_git_answer` for this; `_resolve_is_trusted` used `returncode != 0` and
+    threw a successful resolve away under load."""
+    from conductor import mission as mission_mod
+    from conductor.verify import GIT_UNRUN
+
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+    prior = {"resolve": {"ran": True, "ok": True, "tip": "deadbeef"}}
+    notes: list[str] = []
+
+    def git_refused(_cwd, *args, **kwargs):
+        return subprocess.CompletedProcess(["git", *args], GIT_UNRUN, "", "EAGAIN")
+
+    monkeypatch.setattr(mission_mod, "git_run", git_refused)
+    assert _resolve_is_trusted(mission, prior, notes=notes) is True
+    assert any("git could not run" in note for note in notes)
+
+
+def test_resolve_is_not_trusted_when_its_committed_tip_is_gone(repo, tmp_path, monkeypatch):
+    from conductor import mission as mission_mod
+
+    mission = mission_from_dict(RESOLVE_HOTSPOT | {"cwd": str(repo)}, base_dir=tmp_path)
+    prior = {"resolve": {"ran": True, "ok": True, "tip": "deadbeef"}}
+
+    def git_says_no(_cwd, *args, **kwargs):
+        return subprocess.CompletedProcess(["git", *args], 1, "", "missing")
+
+    monkeypatch.setattr(mission_mod, "git_run", git_says_no)
+    assert _resolve_is_trusted(mission, prior) is False
 
 
 def test_mission_tokens_include_the_resolvers_tokens(repo, home, monkeypatch, tmp_path):
