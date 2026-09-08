@@ -48,6 +48,14 @@ KINDS: tuple[str, ...] = (
     "plan",
     "denied",
     "reproduce",
+    "resume",
+    # `gate_test_surface` and `gate` sit with the other own-checks (before
+    # `cap`) because `_own_check_kind` now matches the prefixes conductor
+    # writes for them. An unpriced run otherwise falls to `capped` and
+    # names a test-surface or clean-gate failure `cap`. First appearance
+    # of each `return` is what `KINDS` order is: first match wins.
+    "gate_test_surface",
+    "gate",
     "cap",
     "breaker",
     "timeout",
@@ -56,8 +64,6 @@ KINDS: tuple[str, ...] = (
     "refusal",
     "fleet_error",
     "exit",
-    "gate_test_surface",
-    "gate",
     "deliverable",
     "no_op",
     "read_moved_bytes",
@@ -154,6 +160,13 @@ def capped(result: Result) -> bool:
     budget = result.budget or {}
     if not budget:
         return False
+    if not result.spawned:
+        # A dispatch that never started spent nothing. `Budget.settle` still
+        # flags it `unpriced` because `Popen` raised before any figure could
+        # arrive, and the unpriced branch below would then read that as over
+        # the cap. `_own_check_kind` already names it `refused`; `over_cap`
+        # must not contradict it.
+        return False
     if budget.get("unpriced"):
         # An unpriced run cannot be shown to have stayed under its cap, so
         # `cap` is the safe reading -- unless conductor already watched
@@ -167,6 +180,14 @@ def capped(result: Result) -> bool:
         return False
     if result.fleet_status == "error_max_budget_usd":
         return True
+    if result.timed_out:
+        # A timeout is not a cap. `settle`'s third limb (cost > ceiling)
+        # still sets `exceeded` on a timed-out run that merely finished
+        # over the line; that is the clock, not a cap kill. A watcher cap
+        # kill and a timeout are mutually exclusive in `_wait`, so this
+        # cannot swallow one. A native stop already returned above, even
+        # if the clock also fired.
+        return False
     cap_usd = budget.get("cap_usd")
     grace_usd = budget.get("grace_usd")
     observed = budget.get("observed_usd")
@@ -244,8 +265,10 @@ def _own_check_kind(result: Result) -> str | None:
     """The kind for a failure conductor itself decided, from the `error`
     text it wrote: a setup command, a taint or settings verdict, a refusal
     before the paid turn ever spawned, a persona or adversarial or plan or
-    permission check, or the reproduce gate. None when the receipt carries
-    no such prefix.
+    permission check, the reproduce gate, a resume-id mismatch, a
+    checklist that would not parse, a forbid-policy test-surface change,
+    or a clean gate that never ran. None when the receipt carries no such
+    prefix.
 
     Split out and asked BEFORE `capped` (2026-09-08 review), for D9's own
     reason: an unpriced run -- every cursor lane -- cannot be shown to have
@@ -307,6 +330,27 @@ def _own_check_kind(result: Result) -> str | None:
         "reproduce gate passed on the base:"
     ):
         return "reproduce"
+    # Conductor's own parse of a checklist answer (not `no_answer`: there
+    # was an answer, and runner skips this prefix when a read lane produced
+    # none). Same class as `parse failed:` -- the structured output could
+    # not be read -- so the existing `parse` kind, not a new one.
+    if error_text.startswith("verdict invalid:"):
+        return "parse"
+    # Conductor's own comparison of the session id it asked for against
+    # the one the stream carried. The run spawned, so `refused` would lie;
+    # the stream parsed, so `parse` would lie.
+    if error_text.startswith("resume failed:"):
+        return "resume"
+    # Forbid-policy test-surface change: the same kind `_gate_test_surface_failed`
+    # already returns from the structured fields, asked here so an unpriced
+    # run does not fall to `capped` first.
+    if error_text.startswith("test surface changed under policy forbid:"):
+        return "gate_test_surface"
+    # The clean-gate transplant never ran the gate command (`infra_error`).
+    # `gate_test_surface` would lie (that kind excludes infra_error); the
+    # field-based path already names this `gate`, and the prefix must agree.
+    if error_text.startswith("clean gate could not run:"):
+        return "gate"
     return None
 
 

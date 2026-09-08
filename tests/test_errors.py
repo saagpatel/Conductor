@@ -97,7 +97,11 @@ def test_ok_result_has_no_kind():
         ("cap: budget unpriced", dict(budget={"unpriced": True}), "cap"),
         (
             "cap kill that also timed out is cap, not timeout",
-            dict(budget={"exceeded": True, "cap_usd": 1.0}, timed_out=True),
+            dict(
+                budget={"exceeded": True, "cap_usd": 1.0},
+                timed_out=True,
+                fleet_status="error_max_budget_usd",
+            ),
             "cap",
         ),
         (
@@ -201,7 +205,7 @@ def test_ok_result_has_no_kind():
             dict(
                 mode="write",
                 exit_code=0,
-                error="verdict invalid: schema mismatch",
+                error="unclassified conductor prose that matches no prefix",
                 git_verdict={},
             ),
             "unknown",
@@ -323,6 +327,95 @@ def test_an_unpriced_run_that_ended_on_its_own_is_still_cap():
     assert error_kind(result) == "cap"
 
 
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("verdict invalid: schema mismatch", "parse"),
+        ("resume failed: fleet reported session abc, requested wanted", "resume"),
+        ("clean gate could not run: git worktree add failed: boom", "gate"),
+        (
+            "test surface changed under policy forbid: tests/test_foo.py",
+            "gate_test_surface",
+        ),
+    ],
+)
+def test_own_check_prefixes_are_not_cap_on_an_unpriced_run(error, expected):
+    """Four prefixes conductor writes on the receipt were missing from
+    `_own_check_kind`, so an unpriced (cursor) run fell to `capped` and
+    named a parse, resume, clean-gate, or forbid-policy failure `cap`."""
+    result = _result(
+        budget={"unpriced": True, "cap_usd": 1.5, "observed_usd": None},
+        error=error,
+    )
+    assert result.ok is False
+    assert _own_check_kind(result) == expected
+    assert error_kind(result) == expected
+
+
+def test_a_priced_run_with_those_prefixes_is_not_unknown():
+    """The same four fell through to `unknown` on a priced run, which is
+    the other half of the missing-prefix trap."""
+    for error, expected in (
+        ("verdict invalid: schema mismatch", "parse"),
+        ("resume failed: fleet reported session abc, requested wanted", "resume"),
+        ("clean gate could not run: git worktree add failed: boom", "gate"),
+        (
+            "test surface changed under policy forbid: tests/test_foo.py",
+            "gate_test_surface",
+        ),
+    ):
+        result = _result(error=error)
+        assert error_kind(result) == expected, error
+
+
+def test_a_run_that_never_spawned_is_not_over_its_cap():
+    """`Budget.settle` flags a never-started dispatch `unpriced` (no figure
+    arrived), and the unpriced branch of `capped` then returned True.
+    Kind is already `refused`; `over_cap` must not contradict it."""
+    result = _result(
+        spawned=False,
+        error="cannot spawn cursor-agent: [Errno 2] No such file or directory",
+        budget={"unpriced": True, "cap_usd": 1.5, "observed_usd": None, "exceeded": False},
+    )
+    assert error_kind(result) == "refused"
+    assert capped(result) is False
+    assert result.summary()["over_cap"] is False
+
+
+def test_a_timeout_that_finished_over_the_ceiling_is_timeout_not_cap():
+    """`settle`'s cost>ceiling limb sets `exceeded` on a timed-out run whose
+    final priced figure sits over the cap. That is the clock, not a cap
+    kill: `_wait` makes a watcher kill and a timeout mutually exclusive,
+    and there is no native `error_max_budget_usd` stop either."""
+    result = _result(
+        timed_out=True,
+        timeout=600,
+        budget={
+            "exceeded": True,
+            "unpriced": False,
+            "cap_usd": 1.0,
+            "observed_usd": 2.5,
+        },
+        error="timed out after 600s; process group killed",
+    )
+    assert capped(result) is False
+    assert error_kind(result) == "timeout"
+
+
+def test_a_native_budget_stop_that_also_timed_out_is_still_cap():
+    """The timeout exclusion must not swallow a genuine native stop that
+    also hit the wall clock: `fleet_status` is independent evidence."""
+    result = _result(
+        timed_out=True,
+        timeout=600,
+        fleet_status="error_max_budget_usd",
+        budget={"exceeded": True, "cap_usd": 1.0, "observed_usd": 2.5},
+        error="Reached maximum budget ($1.00)",
+    )
+    assert capped(result) is True
+    assert error_kind(result) == "cap"
+
+
 def test_kinds_are_exhaustive_over_the_documented_order():
     assert KINDS == (
         "interrupted",
@@ -337,6 +430,9 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "plan",
         "denied",
         "reproduce",
+        "resume",
+        "gate_test_surface",
+        "gate",
         "cap",
         "breaker",
         "timeout",
@@ -345,8 +441,6 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "refusal",
         "fleet_error",
         "exit",
-        "gate_test_surface",
-        "gate",
         "deliverable",
         "no_op",
         "read_moved_bytes",
@@ -399,6 +493,9 @@ _KIND_OVERRIDES: dict[str, dict] = {
     "plan": dict(error="plan: child mission depth exceeded"),
     "denied": dict(error="permission denied: Bash(rm -rf)"),
     "reproduce": dict(error="fix without a reproducing check: no test-surface change"),
+    "resume": dict(
+        error="resume failed: fleet reported session abc, requested wanted"
+    ),
     "rate_limit": dict(fleet_error="Rate limit exceeded, please retry"),
     "transport": dict(fleet_error="ECONNRESET while streaming the response"),
     "refusal": dict(
@@ -435,7 +532,7 @@ _KIND_OVERRIDES: dict[str, dict] = {
     ),
     "unknown": dict(
         mode="write",
-        error="verdict invalid: schema mismatch",
+        error="unclassified conductor prose that matches no prefix",
         git_verdict={},
     ),
 }
