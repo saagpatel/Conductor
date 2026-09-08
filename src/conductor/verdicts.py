@@ -2,8 +2,9 @@
 
 Review prose is useful to a person but cannot be tallied by a mission. A
 checklist makes the judgment a typed edge: conductor owns the schema, checks
-the fleet's answer itself, and computes pass or fail from the individual
-criteria instead of trusting the model's headline.
+the fleet's answer itself, and treats the headline fail-closed: a reported
+pass cannot override a failed criterion, and a reported fail cannot become
+a pass.
 """
 
 from __future__ import annotations
@@ -281,6 +282,20 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
             return _invalid_verdict(
                 f"criterion {criterion_id!r} evidence must be a non-empty string", criteria, raw
             )
+        # The contract reserves this literal for ok: false. parse_verdict
+        # never opens the diff, so it cannot confirm a citation is true,
+        # but it can refuse the one string the prompt already named as not
+        # a pass. A shape check on "file:line or a hunk" is not applied:
+        # a real citation is often prose ("line 280 of verdicts.py") and
+        # this project has thrown out parsers that rejected a correct
+        # answer. Invalid, not a computed fail: the answer broke the
+        # contract rather than judging the criterion.
+        if item["ok"] and item["evidence"].strip() == "no evidence":
+            return _invalid_verdict(
+                f"criterion {criterion_id!r} ok: true evidence cannot be 'no evidence'",
+                criteria,
+                raw,
+            )
         seen.add(criterion_id)
         items.append({"id": criterion_id, "ok": item["ok"], "evidence": item["evidence"]})
 
@@ -298,8 +313,8 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
     by_id = {item["id"]: item for item in items}
     items = [by_id[criterion_id] for criterion_id in expected_ids]
 
-    passed = all(item["ok"] for item in items)
-    computed = "pass" if passed else "fail"
+    criteria_ok = all(item["ok"] for item in items)
+    computed = "pass" if criteria_ok else "fail"
     summary = raw["summary"]
     if reordered:
         note = "criteria arrived out of checklist order; normalized"
@@ -307,6 +322,10 @@ def parse_verdict(text: str, criteria: list[Criterion]) -> Verdict:
     if raw["verdict"] != computed:
         note = f"model reported {raw['verdict']}; computed {computed} from the criteria"
         summary = f"{summary} [conductor note: {note}]" if summary else note
+    # A reported fail is the model's only channel for something the
+    # checklist did not ask; it cannot become a pass. A reported pass
+    # still cannot override a failed criterion (computed is already fail).
+    passed = criteria_ok and raw["verdict"] == "pass"
     return Verdict(
         passed=passed,
         reported=raw["verdict"],
