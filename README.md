@@ -2818,7 +2818,10 @@ three; `conductor report` joins it back to its mission snapshot under
 The report has seven sections, in this order:
 
 - **Vendor and stage**: runs, ok count, cost, unpriced runs, mean and
-  median duration, cache (`cache_read_tokens` over the sum of
+  median duration (over the runs whose receipt carried a finite,
+  non-negative `duration_s`; `--json` also carries `unknown_durations`, the
+  runs in the group that did not and are out of both figures rather than
+  averaged in as zero-second runs), cache (`cache_read_tokens` over the sum of
   `input_tokens`, `cache_read_tokens` and `cache_write_tokens`, summed per
   group, as a percentage -- blank when that sum is zero),
   cap misses (`kind == "cap"`), gate failures (`kind == "gate"`), and mean
@@ -2827,7 +2830,9 @@ The report has seven sections, in this order:
   stage for a dispatch outside a staged pipeline).
 - **Error kinds**: count and cost per `errors.error_kind`.
 - **Reviewer finding rate**: among `stage: review` dispatches that wrote an
-  answer, `verdicts.review_verdict` parses the LAST non-empty line (a
+  answer and were not interrupted or cancelled (a run conductor itself
+  stopped can leave a partial `answer.txt`, and scoring it reads a stop as a
+  completed sitting), `verdicts.review_verdict` parses the LAST non-empty line (a
   trailing code fence is skipped first): exactly `NO_FINDINGS` counts as
   zero findings, `FINDINGS: N` counts as `N`, and anything else is
   `unparsed`, its own column -- a reviewer that narrates before its verdict
@@ -2885,26 +2890,21 @@ The report has seven sections, in this order:
   from the copy the runner captured after the gates and only when the
   runner recorded that copy as parsed and ok (blank on a mission that
   predates the map, never 0 for unknown), and `usd_per_item` is the
-  mission's whole cost over `items` when a merge happened. One line under
+  mission's whole cost over `items` when a merge happened. `unpriced` is
+  how many of the mission's runs spawned and came back with no price:
+  `cost_usd` is then a lower bound, not the mission's cost, so
+  `usd_per_item` is blank rather than a figure divided out of one. It is
+  blank for the same reason under `--since`/`--until`, which bound the runs
+  that reach the row while `merged` and `items` are read from the mission's
+  whole life. One line under
   the table sums it: how many missions merged and what they cost, and,
   over the subset with an evidence map, the cost per landed item. A
   merged mission without a map is in the first pair of figures and out of
-  the division, so it neither inflates nor deflates the rate. `--json`
-  carries the same three columns per mission -- the `merged` column is
+  the division, so it neither inflates nor deflates the rate; a mission
+  whose own cost is a lower bound is out of it on the same grounds.
+  `--json` carries the same four columns per mission -- the `merged` column is
   emitted under its field name `landed_ok`, beside the `landed` count the
   table's own line sums.
-- **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
-  vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
-  and fix stages, the runs killed at their cap). D21: a cap loss is
-  reported in three cohorts -- `gate passed`, `gate failed`, `gate not run`
-  -- beside the stage's `total`, because a receipt's `gate_passed` is also
-  True when no gate ran at all (`runner._gate_passed` reads "nothing to
-  fail" as not-failed, which is right for `ok` and wrong here). A run the
-  watcher kills at its cap never reaches its gate -- `runner.dispatch` gates
-  only when the run had no error -- so it now lands in `gate not run`
-  instead of reading as a green run lost at the cap, which is the case rule
-  10's dollar was written for. A stage with no Claude run at all reads
-  `n/a`, never `0`, so a missing stage is never mistaken for a clean one.
 - **Wall clock**: one row per mission ever recorded, from that mission's own
   `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
   "paused_s", "gate_s", "lanes_s", "idle_s", "occupied_s",
@@ -2945,6 +2945,18 @@ The report has seven sections, in this order:
   blank, never skipped or read as `0`.
   `report.md` carries the same figures as one line under the mission
   header, and `conductor missions` carries `wall_s`.
+- **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
+  vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
+  and fix stages, the runs killed at their cap). D21: a cap loss is
+  reported in three cohorts -- `gate passed`, `gate failed`, `gate not run`
+  -- beside the stage's `total`, because a receipt's `gate_passed` is also
+  True when no gate ran at all (`runner._gate_passed` reads "nothing to
+  fail" as not-failed, which is right for `ok` and wrong here). A run the
+  watcher kills at its cap never reaches its gate -- `runner.dispatch` gates
+  only when the run had no error -- so it now lands in `gate not run`
+  instead of reading as a green run lost at the cap, which is the case rule
+  10's dollar was written for. A stage with no Claude run at all reads
+  `n/a`, never `0`, so a missing stage is never mistaken for a clean one.
 
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`

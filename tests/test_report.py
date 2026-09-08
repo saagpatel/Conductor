@@ -1275,6 +1275,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "unpriced_runs",
         "mean_duration_s",
         "median_duration_s",
+        "unknown_durations",
         "cache_pct",
         "cap_misses",
         "gate_failures",
@@ -1836,10 +1837,11 @@ def test_report_prints_landed_columns_and_summary_line(home: Path, monkeypatch, 
         "landed",
         "merged",
         "items",
+        "unpriced",
         "usd_per_item",
     ]
     row = next(line for line in out.splitlines() if "20260101T000000Z-m-p" in line)
-    assert row.split()[-3:] == ["1", "2", "2.50"]
+    assert row.split()[-4:] == ["1", "2", "0", "2.50"]
     assert (
         "Landed: 1 mission(s), $5.00; 1 with an evidence map naming 2 item(s): "
         "$2.50 per landed item" in out
