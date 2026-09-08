@@ -19,8 +19,14 @@ from conductor import shape
 from conductor.budget import Budget
 from conductor.cli import main
 from conductor.fleets import CAP_GRACE_CEILING_USD, DispatchRefused, Spec, build_argv
-from conductor.mission import MissionInvalid, mission_from_dict, run_mission
-from conductor.runner import dispatch
+from conductor.mission import (
+    Ledger,
+    MissionInvalid,
+    _fit_cap_to_remaining,
+    mission_from_dict,
+    run_mission,
+)
+from conductor.runner import Result, dispatch
 
 
 def envelope(answer: str, cost: float | None = None) -> str:
@@ -213,6 +219,199 @@ def test_to_dict_omits_grace_fields_when_no_grace_was_set():
     b2 = Budget(cap_usd=1.0, enforcement="native", grace_usd=0.25)
     b2.settle(1.1, killed=False, fleet_status="success")
     assert b2.to_dict()["grace_used"] == pytest.approx(0.10)
+
+
+def test_capped_uses_settle_ceiling_so_a_breaker_inside_the_band_is_not_cap():
+    """No test in this file or test_errors.py covered `capped()` with a
+    grace band: `exceeded` is true for any kill, and `observed > cap_usd`
+    then named the run `cap` while `grace_used` recorded the band absorbing
+    the same dollars."""
+    from conductor.errors import capped, error_kind
+    from conductor.runner import Result
+
+    result = Result(
+        run_id="r1",
+        fleet="claude",
+        model="m",
+        effort="standard",
+        mode="read",
+        cwd="/tmp/repo",
+        timeout=60,
+        exit_code=0,
+        timed_out=False,
+        duration_s=1.0,
+        run_dir="/tmp/r1",
+        stdout_path="/tmp/r1/stdout.log",
+        stderr_path="/tmp/r1/stderr.log",
+        tail="",
+        spawned=True,
+        answer_path="/tmp/r1/answer.txt",
+        git_verdict={"checked": True, "no_op": True},
+        breaker={"tripped": "looping: x repeated 6 times"},
+        budget={
+            "exceeded": True,
+            "cap_usd": 1.0,
+            "grace_usd": 0.25,
+            "observed_usd": 1.10,
+            "grace_used": 0.10,
+        },
+        error="looping: x; killed",
+    )
+    assert capped(result) is False
+    assert error_kind(result) == "breaker"
+
+
+def test_settle_never_clears_an_exceeded_verdict_on_a_weaker_second_call():
+    """A native stop or breaker kill settles exceeded=True; the crash
+    receipt then called settle again with killed=False and no fleet_status,
+    which flipped the verdict while the commit was already undone."""
+    b = Budget(cap_usd=1.0, enforcement="native", grace_usd=0.25)
+    b.settle(0.90, killed=True, fleet_status=None)
+    assert b.exceeded is True
+    b.settle(0.90, killed=False, fleet_status=None)
+    assert b.exceeded is True
+    assert b.observed_usd == 0.90
+    assert b.unpriced is False
+
+
+def test_settle_never_discards_a_priced_figure_for_unpriced():
+    b = Budget(cap_usd=1.0, enforcement="native")
+    b.settle(0.50, killed=False, fleet_status="success")
+    b.settle(None, killed=False, fleet_status=None)
+    assert b.unpriced is False
+    assert b.observed_usd == 0.50
+
+
+def test_fit_cap_keeps_grace_when_remaining_covers_the_ceiling():
+    assert _fit_cap_to_remaining(1.0, 0.25, 10.0) == (1.0, 0.25)
+    assert _fit_cap_to_remaining(1.0, 0.25, None) == (1.0, 0.25)
+
+
+def test_fit_cap_drops_grace_when_remaining_is_the_last_dollars():
+    assert _fit_cap_to_remaining(1.0, 0.25, 0.25) == (0.25, None)
+    assert _fit_cap_to_remaining(1.0, 0.25, 1.0) == (1.0, None)
+
+
+def test_fit_cap_shrinks_grace_when_remaining_covers_cap_but_not_the_band():
+    cap, grace = _fit_cap_to_remaining(1.0, 0.25, 1.10)
+    assert cap == 1.0
+    assert grace == pytest.approx(0.10)
+
+
+def _ok_result(repo: Path, spec: Spec) -> Result:
+    run_dir = Path(spec.cwd).parent / "fake-run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "answer.txt").write_text("done\n")
+    return Result(
+        run_id="fake-run",
+        fleet=spec.fleet,
+        model=spec.model or "claude-sonnet-5",
+        effort=spec.effort,
+        mode=spec.mode,
+        cwd=str(repo),
+        timeout=600,
+        exit_code=0,
+        timed_out=False,
+        duration_s=0.1,
+        run_dir=str(run_dir),
+        stdout_path="",
+        stderr_path="",
+        answer_path=str(run_dir / "answer.txt"),
+        tail="ok",
+        spawned=True,
+        git_verdict={"checked": False, "no_op": False},
+        usage={"cost_usd": 0.01, "cost_basis": "reported"},
+    )
+
+
+def test_last_dollars_tightening_does_not_keep_full_grace_on_top(
+    repo, home, tmp_path, monkeypatch
+):
+    """A cap squeezed to remaining $0.25 must not still carry a $0.25 grace
+    band: the ceiling has to fit inside remaining, and the ledger records
+    that ceiling, not the un-graced cap."""
+    seen: dict = {}
+    captured: list[float | None] = []
+    original_start = Ledger.start
+
+    def spy(self: Ledger, cap_usd: float | None) -> None:
+        captured.append(cap_usd)
+        original_start(self, cap_usd)
+
+    monkeypatch.setattr(Ledger, "start", spy)
+
+    def dispatcher(spec, **_kwargs):
+        seen["cap_usd"] = spec.cap_usd
+        seen["cap_grace_usd"] = spec.cap_grace_usd
+        return _ok_result(repo, spec)
+
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "max_cost_usd": 0.25,
+        "lanes": [
+            {
+                "fleet": "claude",
+                "mode": "read",
+                "isolate": False,
+                "cap_usd": 1.0,
+                "cap_grace_usd": 0.25,
+            }
+        ],
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dispatcher=dispatcher
+    )
+    assert result.lanes[0]["ok"] is True, result.lanes[0]
+    assert seen["cap_usd"] == 0.25
+    assert seen["cap_grace_usd"] is None
+    assert captured == [0.25]
+
+
+def test_ordinary_remaining_keeps_grace_and_the_ledger_records_the_ceiling(
+    repo, home, tmp_path, monkeypatch
+):
+    """When remaining comfortably covers cap+grace, the band stays, and
+    outstanding_cap_usd is the ceiling the lane can actually reach."""
+    seen: dict = {}
+    captured: list[float | None] = []
+    original_start = Ledger.start
+
+    def spy(self: Ledger, cap_usd: float | None) -> None:
+        captured.append(cap_usd)
+        original_start(self, cap_usd)
+
+    monkeypatch.setattr(Ledger, "start", spy)
+
+    def dispatcher(spec, **_kwargs):
+        seen["cap_usd"] = spec.cap_usd
+        seen["cap_grace_usd"] = spec.cap_grace_usd
+        lock = next((home / "missions").glob("*/running.json"))
+        seen["outstanding"] = json.loads(lock.read_text())["budget"]["outstanding_cap_usd"]
+        return _ok_result(repo, spec)
+
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "max_cost_usd": 10.0,
+        "lanes": [
+            {
+                "fleet": "claude",
+                "mode": "read",
+                "isolate": False,
+                "cap_usd": 1.0,
+                "cap_grace_usd": 0.25,
+            }
+        ],
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dispatcher=dispatcher
+    )
+    assert result.lanes[0]["ok"] is True, result.lanes[0]
+    assert seen["cap_usd"] == 1.0
+    assert seen["cap_grace_usd"] == 0.25
+    assert captured == [1.25]
+    assert seen["outstanding"] == 1.25
 
 
 # --- a cursor read run through dispatch: the post-hoc verdict widens too ---
