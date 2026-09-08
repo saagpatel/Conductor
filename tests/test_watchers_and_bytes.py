@@ -9,6 +9,7 @@ fix.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -383,3 +384,43 @@ def test_a_cut_short_stream_is_not_committed(tmp_path: Path):
     gate = source.split("commit: CommitOutcome | None = None", 1)[1].split("\n        ):", 1)[0]
     assert "not output.error" in gate
     assert "output.status != INCOMPLETE" in gate
+
+
+def _head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_a_self_commit_does_not_survive_a_run_that_failed_before_the_gate(
+    repo, home, fake_fleet
+):
+    """The commit gate stopped conductor from committing a failed run's work,
+    but the self-commit adoption right after it ran unconditionally, so a
+    fleet that committed its own bytes and then exited non-zero landed them
+    anyway. The undo blocks below it do not catch this: `_gate_passed` reads
+    a gate that never ran as nothing to fail, so the receipt said the run
+    failed while carrying a real committed sha, and `worktrees.release` keeps
+    the branch. Same class as the D15 truncated-stream case.
+    """
+    from conductor.fleets import Spec
+    from conductor.runner import dispatch
+
+    head_before = _head(repo)
+    fake_fleet(
+        ["sh", "-c", "echo work > new.txt && git add -A && git commit -qm 'agent work' && exit 1"]
+    )
+
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write"),
+        home=home,
+        commit_message="feat: x",
+    )
+
+    assert result.ok is False
+    assert result.failure() == "exit code 1"
+    assert result.commit["committed"] is False
+    assert "the run failed before the gate" in result.commit["reason"]
+    # The branch is back where it started; the work is still in the tree.
+    assert _head(repo) == head_before
+    assert (repo / "new.txt").read_text() == "work\n"

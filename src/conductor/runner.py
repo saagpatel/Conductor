@@ -2814,9 +2814,8 @@ def dispatch(
         # Commit before the Git verdict is taken, so it describes the state
         # the caller is actually left with.
         commit: CommitOutcome | None = None
-        if (
-            commit_message
-            and not forbid_touched
+        commit_allowed = (
+            not forbid_touched
             and not timed_out
             and error is None
             and exit_code == 0
@@ -2829,7 +2828,8 @@ def dispatch(
             # committed under a receipt that says the run failed -- the
             # branch and the verdict disagreeing about the same run.
             and output.status != INCOMPLETE
-        ):
+        )
+        if commit_message and commit_allowed:
             # F15 mission 2 item 3: a deliverable declared `commit: false` is
             # a receipt, not source -- excluded from the harness's own
             # commit (it is still checked on the filesystem and copied to
@@ -2852,6 +2852,20 @@ def dispatch(
                 sha=self_commit,
                 reason="the fleet committed its own work",
             )
+            if not commit_allowed:
+                # 2026-09-08 review: the guard above stopped conductor from
+                # committing a failed run's work, but the adoption right
+                # here ran unconditionally, so a fleet that committed its
+                # own bytes and then timed out, exited non-zero, or cut its
+                # stream short landed them anyway. The undo blocks below do
+                # not catch it either: `_gate_passed` reads a gate that
+                # never ran as nothing to fail, so a failure caught before
+                # the gate left a `committed: true` sha on a receipt that
+                # says the run failed -- and `worktrees.release` keeps the
+                # branch, so land and salvage read those bytes as landed.
+                commit = uncommit(
+                    spec.cwd, commit, before.head, why="the run failed before the gate"
+                )
 
         # F3: a read lane's own gate and the clean gate re-check bytes a build
         # lane already gated. Decided on the bytes comparison taken here, before

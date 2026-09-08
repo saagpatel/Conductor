@@ -484,25 +484,33 @@ def commit_work(cwd: str, message: str, *, exclude: Sequence[str] = ()) -> Commi
     )
 
 
-def uncommit(cwd: str, outcome: CommitOutcome, base_sha: str) -> CommitOutcome:
+def uncommit(
+    cwd: str, outcome: CommitOutcome, base_sha: str, *, why: str = "gate failed"
+) -> CommitOutcome:
     """Take a commit back off the branch, leaving its changes staged.
 
     A branch must never carry a commit that failed its gate: the receipt
     says not ok, but a clean-looking commit outlives the receipt. The work
     itself is kept in the tree (and so in a kept worktree) for whoever wants
     to look.
+
+    `why` opens the reason line. It defaults to the gate, which is what
+    every caller here was until a run that failed BEFORE the gate needed
+    taking back too (2026-09-08 review): a receipt that says "gate failed"
+    about a gate that never ran is the same kind of lie the undo exists to
+    prevent.
     """
     if not base_sha:
-        return replace(outcome, reason="gate failed; commit kept: no base to reset to")
+        return replace(outcome, reason=f"{why}; commit kept: no base to reset to")
     undo = _git(cwd, "reset", "--soft", base_sha)
     if undo.returncode != 0:
-        return replace(outcome, reason=f"gate failed; could not undo commit: {undo.stderr.strip()}")
+        return replace(outcome, reason=f"{why}; could not undo commit: {undo.stderr.strip()}")
     return CommitOutcome(
         attempted=True,
         committed=False,
         files=outcome.files,
         deletions=outcome.deletions,
-        reason=f"gate failed; commit {outcome.sha[:8]} undone, work left staged in the tree",
+        reason=f"{why}; commit {outcome.sha[:8]} undone, work left staged in the tree",
     )
 
 
