@@ -135,6 +135,51 @@ def test_wait_polls_the_stop_flag(monkeypatch):
     assert code != 0
 
 
+def test_wait_after_kill_is_bounded(monkeypatch):
+    """The final proc.wait() after _kill_live_group had no timeout and could
+    hang the runner forever if the child never exited."""
+    proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    waits: list[float | None] = []
+    real_wait = subprocess.Popen.wait
+
+    def tracked_wait(self, timeout=None):
+        waits.append(timeout)
+        if timeout is None:
+            raise AssertionError("unbounded proc.wait() after kill")
+        return real_wait(self, timeout=timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", tracked_wait)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.05)
+    try:
+        _code, timed_out, over_cap, interrupted, breaker = runner_mod._wait(
+            proc, 0.01, None, None
+        )
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            real_wait(proc, timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+    assert timed_out and not over_cap and not interrupted
+    assert breaker is None
+    assert waits
+    assert waits[-1] == runner_mod.KILL_WAIT_S
+
+
+def test_reap_killed_returns_when_wait_times_out():
+    class _Hang:
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="mock", timeout=timeout)
+
+    started = time.monotonic()
+    runner_mod._reap_killed(_Hang(), timeout=0.01)
+    assert time.monotonic() - started < 1
+
+
 def test_run_tests_registers_and_unregisters_its_process_group(repo, monkeypatch):
     events: list[tuple[str, int]] = []
     real_kill = runner_mod._kill_live_group

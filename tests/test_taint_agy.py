@@ -14,6 +14,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -410,6 +412,8 @@ def _agy_argv(
     marker: Path | None = None,
     tamper: str | None = None,
     answer: str = "ok",
+    snapshot_hooks: Path | None = None,
+    commit_new_file: bool = False,
 ) -> list[str]:
     """A fake `agy` that writes `agy.log` and its stream from inside the
     subprocess -- it needs $CONDUCTOR_RUN_ID, set by dispatch() only once the
@@ -419,6 +423,14 @@ def _agy_argv(
     home_q = shlex.quote(str(home))
     run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
     parts = [f"mkdir -p {run_dir}"]
+    if snapshot_hooks is not None:
+        dest_q = shlex.quote(str(snapshot_hooks))
+        rel_q = shlex.quote(TAINT_AGY_HOOKS_REL)
+        parts.append(f'cp "$CONDUCTOR_WORKTREE"/{rel_q} {dest_q}')
+    if commit_new_file:
+        parts.append('echo work > "$CONDUCTOR_WORKTREE"/new.txt')
+        parts.append('git -C "$CONDUCTOR_WORKTREE" add -A')
+        parts.append('git -C "$CONDUCTOR_WORKTREE" commit -qm work')
     if tamper is not None:
         # W1: the lane rewrites its own deny script mid-run. The hook files
         # live in the writable worktree and are re-read on every tool call.
@@ -1061,3 +1073,103 @@ def test_the_real_hooks_preflight_argv_is_the_probed_shape(tmp_path):
         str(tmp_path),
     ]
     assert "--model" not in argv and "--json-schema" not in argv
+
+
+def test_setup_cannot_leave_tampered_taint_hooks_for_the_paid_turn(
+    repo, home, fake_fleet, tmp_path
+):
+    """Include and setup both run after the first `/hooks` preflight. A
+    setup that overwrites `.agents/hooks.json` must not be the bytes the
+    paid turn sees: conductor rewrites, then re-hashes with `_sha256_file`,
+    before spawn."""
+    snapshot = tmp_path / "hooks-at-spawn.json"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS, "list_dir"],
+            extra_lines=[],
+            snapshot_hooks=snapshot,
+        )
+    )
+    result = dispatch(
+        spec(cwd=str(repo), setup="printf TAMPERED > .agents/hooks.json"),
+        home=home,
+        isolate=True,
+    )
+    assert result.ok is True, result.failure()
+    assert result.spawned is True
+    assert snapshot.exists()
+    body = snapshot.read_text()
+    assert "TAMPERED" not in body
+    assert json.loads(body)["hooks"]["PreToolUse"]
+
+
+def test_taint_agy_preflight_kills_grandchildren_on_stop(tmp_path, monkeypatch):
+    """`_taint_agy_preflight` used `subprocess.run(timeout=30)` with no
+    process group, so a stop request could not killpg its grandchildren."""
+    clear_stop = runner_mod.clear_stop
+    request_stop = runner_mod.request_stop
+    clear_stop()
+    marker = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(
+        runner_mod,
+        "build_agy_hooks_argv",
+        lambda cwd: [
+            "sh",
+            "-c",
+            f"sh -c 'echo $$ > {shlex.quote(str(marker))}; sleep 60' & wait",
+        ],
+    )
+    monkeypatch.setattr(runner_mod, "GATE_POLL_S", 0.2)
+    threading.Timer(0.4, request_stop).start()
+    started = time.monotonic()
+    try:
+        _receipt, problem = runner_mod._taint_agy_preflight(str(tmp_path), tmp_path)
+        elapsed = time.monotonic() - started
+        assert elapsed < 5
+        assert problem is not None and problem.startswith("interrupted:")
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        pid = int(marker.read_text().strip())
+        time.sleep(0.3)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        clear_stop()
+
+
+def test_tracked_taint_hook_files_are_not_committed_onto_the_lane_branch(
+    repo, home, fake_fleet, git_out
+):
+    """`core.excludesFile` only hides untracked paths. A repo that already
+    tracked `.agents/hooks.json` would otherwise have conductor's deny hooks
+    staged by `git add -A` onto the lane branch."""
+    original_hooks = "{}\n"
+    original_script = "# original\n"
+    agents = repo / ".agents"
+    agents.mkdir()
+    (agents / "hooks.json").write_text(original_hooks)
+    (agents / "conductor-taint.py").write_text(original_script)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "track existing hooks"], cwd=repo, check=True)
+
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS, "list_dir"],
+            extra_lines=[],
+            commit_new_file=True,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo), mode="write"), home=home, isolate=True)
+    assert result.ok is True, result.failure()
+    branch = result.isolation["branch"]
+    hooks_on_branch = git_out(repo, "show", f"{branch}:.agents/hooks.json")
+    script_on_branch = git_out(repo, "show", f"{branch}:.agents/conductor-taint.py")
+    assert "PreToolUse" not in hooks_on_branch
+    assert hooks_on_branch == original_hooks.strip()
+    assert script_on_branch == original_script.strip()
+    assert "new.txt" in git_out(repo, "ls-tree", "-r", "--name-only", branch)

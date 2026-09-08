@@ -888,6 +888,25 @@ def _compare_contract(
         _compare(differences, run_id, key, recorded[key], requested[key], kind="contract")
 
 
+def _jail_run_id(base_dir: Path, run_id: str) -> Path:
+    """Ensure run_id is a valid run directory name that does not escape base_dir."""
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or Path(run_id).name != run_id
+        or run_id in {".", ".."}
+    ):
+        raise GoldenError(f"run_id {run_id!r} escapes recordings directory {base_dir}")
+    try:
+        base_resolved = base_dir.resolve()
+        target = (base_dir / run_id).resolve()
+    except (ValueError, OSError) as exc:
+        raise GoldenError(f"invalid run_id {run_id!r}: {exc}") from exc
+    if not target.is_relative_to(base_resolved) or target == base_resolved:
+        raise GoldenError(f"run_id {run_id!r} escapes recordings directory {base_dir}")
+    return target
+
+
 def _lane_recordings(fixture_dir: Path) -> dict[str, list[tuple[str, str]]]:
     """Per lane, the recorded (run_id, fleet) pairs in order: previous
     attempts (from an earlier resume), then this run's own attempts."""
@@ -896,18 +915,39 @@ def _lane_recordings(fixture_dir: Path) -> dict[str, list[tuple[str, str]]]:
     if not lanes_dir.is_dir():
         return out
     for lane_file in sorted(lanes_dir.glob("*.json")):
-        data = json.loads(lane_file.read_text())
+        try:
+            data = json.loads(lane_file.read_text())
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise GoldenError(f"{lane_file}: corrupt lane JSON: {exc}") from exc
+        if not isinstance(data, dict) or "name" not in data or not isinstance(data["name"], str):
+            raise GoldenError(f"{lane_file}: missing or invalid 'name'")
         rows: list[tuple[str, str]] = []
         for key in ("previous_attempts", "attempts"):
-            for attempt in data.get(key) or []:
+            attempts = data.get(key)
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
                 run_id = attempt.get("run_id")
                 if isinstance(run_id, str):
+                    _jail_run_id(fixture_dir / "runs", run_id)
                     rows.append((run_id, attempt.get("fleet") or ""))
         out[data["name"]] = rows
     result_path = fixture_dir / "result.json"
-    result_raw = json.loads(result_path.read_text()) if result_path.is_file() else None
+    if result_path.is_file():
+        try:
+            result_raw = json.loads(result_path.read_text())
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise GoldenError(f"{result_path}: corrupt result JSON: {exc}") from exc
+        if not isinstance(result_raw, dict):
+            raise GoldenError(f"{result_path}: corrupt result JSON: expected object")
+    else:
+        result_raw = None
     for label, run_id, fleet in _aux_recordings(result_raw):
-        out.setdefault(label, []).append((run_id, fleet))
+        if isinstance(run_id, str):
+            _jail_run_id(fixture_dir / "runs", run_id)
+            out.setdefault(label, []).append((run_id, fleet))
     return out
 
 
@@ -960,7 +1000,13 @@ def replay(
     # way, so a `cwd` that is not already resolved (macOS's /tmp -> /private
     # /tmp, for one) would make every snapshot fail to round-trip.
     cwd = str(Path(cwd).resolve())
-    raw_mission_text = (fixture_dir / "mission.json").read_text()
+    mission_path = fixture_dir / "mission.json"
+    if not mission_path.is_file():
+        raise GoldenError(f"{mission_path}: no mission.json")
+    try:
+        raw_mission_text = mission_path.read_text()
+    except OSError as exc:
+        raise GoldenError(f"{mission_path}: {exc}") from exc
     mission_text = raw_mission_text.replace("<cwd>", cwd)
     extra_cwds = _resolve_extra_cwds(raw_mission_text, home, cwds)
     for placeholder, real in extra_cwds.items():
@@ -969,7 +1015,14 @@ def replay(
     # `retry`/`on`, ...) predates that field in its own mission.json; without
     # backfilling here, every such fixture would stop replaying the moment
     # `Mission.from_snapshot`'s exact key match tightens around a new field.
-    mission = Mission.from_snapshot(_backfill_snapshot(json.loads(mission_text)))
+    try:
+        raw_snapshot = json.loads(mission_text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GoldenError(f"{mission_path}: corrupt mission JSON: {exc}") from exc
+    try:
+        mission = Mission.from_snapshot(_backfill_snapshot(raw_snapshot))
+    except (KeyError, ValueError, TypeError) as exc:
+        raise GoldenError(f"{mission_path}: invalid mission snapshot: {exc}") from exc
 
     user_home = str(home / "_replay_user_home")
 
@@ -1050,13 +1103,13 @@ def replay(
                 f"replay dispatched attempt {k + 1} but the recording has {len(recordings)}"
             )
         run_id, fleet = recordings[k]
-        src = fixture_dir / "runs" / run_id
+        src = _jail_run_id(fixture_dir / "runs", run_id)
         if not (src / "result.json").is_file():
             # F8: a fixture recorded before collate, judge, and resolve runs
             # were copied names their run ids in result.json but holds no
             # receipt for them -- a difference to report, never a crash.
             return unrecorded(f"recorded run {run_id} has no result.json in the fixture")
-        dst = Path(home) / "runs" / run_id
+        dst = _jail_run_id(Path(home) / "runs", run_id)
         dst.mkdir(parents=True, exist_ok=True)
         recorded_stdout = ""
         for name in RUN_FILES:
@@ -1071,9 +1124,14 @@ def replay(
             if name == "stdout.log":
                 recorded_stdout = text
 
-        recorded_result = (
-            json.loads((dst / "result.json").read_text()) if (dst / "result.json").is_file() else {}
-        )
+        recorded_result_path = dst / "result.json"
+        if recorded_result_path.is_file():
+            try:
+                recorded_result = json.loads(recorded_result_path.read_text())
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise GoldenError(f"{recorded_result_path}: corrupt result JSON: {exc}") from exc
+        else:
+            recorded_result = {}
         recorded_answer = (dst / "answer.txt").read_text() if (dst / "answer.txt").is_file() else ""
         # D18: what this build asked for, against what the recording was
         # actually dispatched with. Compared before the parser fields so a
@@ -1138,7 +1196,13 @@ def replay(
         return Result.from_dict({**recorded_result, **overrides})
 
     result_path = fixture_dir / "result.json"
-    recorded_result = json.loads(result_path.read_text()) if result_path.is_file() else {}
+    if result_path.is_file():
+        try:
+            recorded_result = json.loads(result_path.read_text())
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise GoldenError(f"{result_path}: corrupt result JSON: {exc}") from exc
+    else:
+        recorded_result = {}
     mission_result = run_mission(
         mission,
         home=home,
@@ -1407,7 +1471,12 @@ def version_drift(fixture_dir: str | Path) -> list[str]:
     manifest_path = Path(fixture_dir) / "golden.json"
     if not manifest_path.is_file():
         return []
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GoldenError(f"{manifest_path}: corrupt golden JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise GoldenError(f"{manifest_path}: corrupt golden JSON: expected object")
     lines: list[str] = []
     recorded_fleets = manifest.get("fleet_versions")
     if not recorded_fleets:
@@ -1435,7 +1504,7 @@ def _prompt_sha256_from_recording(fixture_dir: Path, run_id: str) -> str | None:
     """E17: an attempt's `prompt_sha256`, recomputed from its own recorded
     `prompt.txt` -- never from the live replay, so a legacy fixture that
     predates this field gets the value it actually ran with, not today's."""
-    path = fixture_dir / "runs" / run_id / "prompt.txt"
+    path = _jail_run_id(fixture_dir / "runs", run_id) / "prompt.txt"
     if not path.is_file():
         return None
     return hashlib.sha256(_strip_nonce(scrub_text(path.read_text(), [])).encode()).hexdigest()
@@ -1449,6 +1518,8 @@ def _backfill_prompt_sha256(fixture_dir: Path, expected: dict) -> dict:
     fixture on record the first time this ships."""
     lane_recordings = _lane_recordings(fixture_dir)
     for lane in expected.get("lanes") or []:
+        if not isinstance(lane, dict):
+            continue
         recordings = lane_recordings.get(lane.get("name"), [])
         for index, attempt in enumerate(lane.get("attempts") or []):
             if not isinstance(attempt, dict) or "prompt_sha256" in attempt:
@@ -1489,6 +1560,14 @@ def check(
     if update:
         expected_path.write_text(json.dumps(replayed.projection, indent=2, sort_keys=True))
         return list(replayed.differences)
-    expected = json.loads(expected_path.read_text()) if expected_path.is_file() else {}
+    if expected_path.is_file():
+        try:
+            expected = json.loads(expected_path.read_text())
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise GoldenError(f"{expected_path}: corrupt expected JSON: {exc}") from exc
+        if not isinstance(expected, dict):
+            raise GoldenError(f"{expected_path}: corrupt expected JSON: expected object")
+    else:
+        expected = {}
     expected = _backfill_prompt_sha256(fixture_dir, expected)
     return list(replayed.differences) + _diff_projection(expected, replayed.projection)

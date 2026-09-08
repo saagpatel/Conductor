@@ -82,6 +82,10 @@ from .verify import (
 TAIL_LINES = 20
 GATE_TIMEOUT = 900
 SETUP_TIMEOUT = 600
+# Reap a SIGKILL'd child. An unbounded `proc.wait()` after `_kill_live_group`
+# hangs the runner if the process never exits (D-state, a pid the group
+# did not cover).
+KILL_WAIT_S = 5
 
 
 def _slug(text: str, limit: int = 32, default: str = "run") -> str:
@@ -666,6 +670,21 @@ def copy_no_follow(src: Path, dst: Path) -> None:
         os.close(fd)
 
 
+def copy_tree_no_follow(src: Path, dst: Path) -> None:
+    """Copy a directory tree without following any symlink, file or
+    directory. Each regular file is copied through `copy_no_follow`; a
+    symlink anywhere in the tree raises OSError the same way."""
+    dst.mkdir(parents=True, exist_ok=True)
+    with os.scandir(src) as entries:
+        for entry in entries:
+            child_src = Path(entry.path)
+            child_dst = dst / entry.name
+            if entry.is_dir(follow_symlinks=False):
+                copy_tree_no_follow(child_src, child_dst)
+            else:
+                copy_no_follow(child_src, child_dst)
+
+
 DELIVERABLE_CHANGED = "deliverable changed after the gate ran"
 
 
@@ -922,7 +941,7 @@ def _run_validator_command(
                     break
         finally:
             _kill_live_group(proc.pid)
-            proc.wait()
+            _reap_killed(proc)
         if timed_out:
             return {
                 "exit_code": None,
@@ -1221,6 +1240,13 @@ def _write_taint_agy_hooks(
     every tool call, so "what conductor wrote" and "what agy ran" are two
     different claims; `_taint_agy_enforcement` re-hashes after the run and
     fails it if they differ.
+
+    A path the repo already tracked cannot be kept off the lane branch by
+    `core.excludesFile` -- gitignore does not untrack -- so those files are
+    marked `--skip-worktree` here. `git add -A` then leaves HEAD's bytes
+    alone; `_restore_tracked_taint_hooks` puts those bytes back on disk
+    after the after-the-run digest check, so a fresh-index `git add -A`
+    (the clean gate) cannot pick conductor's deny files up either.
     """
     hook_files = taint_hook_files(cwd, taint_shell=taint_shell)
     repo_root = Path(iso.worktree).resolve()
@@ -1235,11 +1261,27 @@ def _write_taint_agy_hooks(
         dest = cwd_root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
-        written.append((prefix / rel_path).as_posix())
+        worktree_rel = (prefix / rel_path).as_posix()
+        written.append(worktree_rel)
         digest = _sha256_file(dest)
         if digest is not None:
             digests[rel_path] = digest
+        tracked = git_run(iso.worktree, "ls-files", "--error-unmatch", "--", worktree_rel)
+        if tracked.returncode == 0:
+            git_run(iso.worktree, "update-index", "--skip-worktree", "--", worktree_rel)
     return written, digests
+
+
+def _restore_tracked_taint_hooks(worktree: str, paths: list[str]) -> None:
+    """Put HEAD's bytes back for any taint hook file the repo already
+    tracked, and clear `--skip-worktree`, so a later `git add -A` cannot
+    commit conductor's deny hooks onto the lane branch."""
+    for rel in paths:
+        tracked = git_run(worktree, "ls-files", "--error-unmatch", "--", rel)
+        if tracked.returncode != 0:
+            continue
+        git_run(worktree, "update-index", "--no-skip-worktree", "--", rel)
+        git_run(worktree, "checkout", "HEAD", "--", rel)
 
 
 def _uncovered_agy_tools(tools: list[str]) -> list[str]:
@@ -1316,24 +1358,48 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
     still classifies it as `taint`).
     """
     argv = build_agy_hooks_argv(cwd)
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=_TAINT_AGY_PREFLIGHT_TIMEOUT_S,
-        )
-        stdout_text = proc.stdout
-    except subprocess.TimeoutExpired as exc:
-        stdout_text = exc.output if isinstance(exc.output, str) else ""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            detail = f"hooks preflight could not spawn: {exc}"
+            return {"ok": False, "loaded": [], "detail": detail}, detail
+        _register_live_group(proc.pid)
+        try:
+            deadline = time.monotonic() + _TAINT_AGY_PREFLIGHT_TIMEOUT_S
+            timed_out = interrupted = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    proc.wait(timeout=min(GATE_POLL_S, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop_requested():
+                    interrupted = True
+                    break
+        finally:
+            _kill_live_group(proc.pid)
+            proc.wait()
+        out.seek(0)
+        stdout_text = out.read()
+    if timed_out:
         if stdout_text:
             (run_dir / "hooks-preflight.json").write_text(stdout_text)
         detail = f"hooks preflight timed out after {_TAINT_AGY_PREFLIGHT_TIMEOUT_S}s"
         return {"ok": False, "loaded": [], "detail": detail}, detail
-    except OSError as exc:
-        detail = f"hooks preflight could not spawn: {exc}"
+    if interrupted:
+        detail = "interrupted: stop requested during hooks preflight; process group killed"
         return {"ok": False, "loaded": [], "detail": detail}, detail
     (run_dir / "hooks-preflight.json").write_text(stdout_text)
     hooks = _parse_agy_hooks_result(stdout_text)
@@ -2037,10 +2103,10 @@ def _apply_include(
         source = Path(iso.repo) / rel
         dest = Path(iso.worktree) / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, dest, dirs_exist_ok=True)
+        if source.is_symlink() or not source.is_dir():
+            copy_no_follow(source, dest)
         else:
-            shutil.copy2(source, dest)
+            copy_tree_no_follow(source, dest)
         included.append(rel)
     return included, notes, exclude_file
 
@@ -2209,38 +2275,55 @@ def dispatch(
     iso: worktrees.Isolation | None = None
     taint_hook_paths: list[str] = []
     taint_hook_digests: dict[str, str] = {}
-    if isolate and not dry_run:
-        iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
-        if iso.active:
-            # A cwd inside the repo stays the same subdirectory inside the
-            # worktree; the fleet was pointed at that directory for a reason.
-            spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
-            if tainted_agy:
-                taint_hook_paths, taint_hook_digests = _write_taint_agy_hooks(
-                    spec.cwd, iso, taint_shell=spec.taint_shell
+    # Isolation is created before include/ports/setup, which used to sit
+    # outside the only cleanup wrappers. Init the resources those wrappers
+    # release so a BaseException in this gap still drops the worktree.
+    claimed_ports: list[int] = []
+    include_exclude_file: Path | None = None
+
+    def _release_lane_resources() -> None:
+        ports_mod.release(base, claimed_ports)
+        if include_exclude_file is not None:
+            include_exclude_file.unlink(missing_ok=True)
+        if iso is not None:
+            worktrees.release(iso)
+
+    try:
+        if isolate and not dry_run:
+            iso = worktrees.create(spec.cwd, run_id, base / "worktrees", base_ref=base_ref)
+            if iso.active:
+                # A cwd inside the repo stays the same subdirectory inside the
+                # worktree; the fleet was pointed at that directory for a reason.
+                spec = _replace(spec, cwd=worktrees.mirror_path(spec.cwd, iso))
+                if tainted_agy:
+                    taint_hook_paths, taint_hook_digests = _write_taint_agy_hooks(
+                        spec.cwd, iso, taint_shell=spec.taint_shell
+                    )
+            elif spec.mode == "write" or base_ref is not None or tainted_agy:
+                # The caller asked for a private tree and cannot have one. For a
+                # write, running in the shared checkout instead is the collision
+                # isolation exists to prevent, so it is refused before spawn. A
+                # read dispatch changes nothing and may proceed in place -- unless
+                # it is a tainted antigravity dispatch, which has nowhere else to
+                # put its deny hook files.
+                result = _refused_result(
+                    run_id,
+                    spec,
+                    model_id,
+                    timeout,
+                    run_dir,
+                    iso,
+                    f"isolation failed: {iso.reason}",
+                    lane=lane,
+                    mission=mission,
+                    fleet_version=fleet_version,
+                    prompt_versions=prompt_versions,
                 )
-        elif spec.mode == "write" or base_ref is not None or tainted_agy:
-            # The caller asked for a private tree and cannot have one. For a
-            # write, running in the shared checkout instead is the collision
-            # isolation exists to prevent, so it is refused before spawn. A
-            # read dispatch changes nothing and may proceed in place -- unless
-            # it is a tainted antigravity dispatch, which has nowhere else to
-            # put its deny hook files.
-            result = _refused_result(
-                run_id,
-                spec,
-                model_id,
-                timeout,
-                run_dir,
-                iso,
-                f"isolation failed: {iso.reason}",
-                lane=lane,
-                mission=mission,
-                fleet_version=fleet_version,
-                prompt_versions=prompt_versions,
-            )
-            (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
-            return result
+                (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+                return result
+    except BaseException:
+        _release_lane_resources()
+        raise
 
     # The fleet writes its final answer where the caller asked, or beside the
     # run if it did not ask. Codex is the only fleet that takes this as a flag.
@@ -2318,10 +2401,8 @@ def dispatch(
     # run before `before` is captured, so a fixture setup writes (a seeded
     # scratch DB, an installed dependency) become part of the baseline
     # instead of misread as the fleet's own work.
-    claimed_ports: list[int] = []
     included_paths: list[str] = []
     lane_notes: list[str] = []
-    include_exclude_file: Path | None = None
     setup_outcome: TestOutcome | None = None
     lane_env_used = bool(spec.ports or spec.setup or spec.teardown or spec.include)
 
@@ -2362,60 +2443,98 @@ def dispatch(
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
+    def _bail_preflight(problem: str) -> Result:
+        if problem.startswith("interrupted:"):
+            return _bail(problem)
+        return _bail(f"taint hooks not enforced: {problem}")
+
     # F13: the free `/hooks` query, before any port/setup/paid-turn spend --
     # the deny hook `_write_taint_agy_hooks` wrote above must already show up
     # enabled, or this dispatch is refused now rather than after a run that
     # would fail the same way a dollar later (`_taint_agy_enforcement` below
-    # is the second, after-the-run source of the same evidence).
+    # is the second, after-the-run source of the same evidence). Include and
+    # setup still run after this, so the last write is re-checked (and the
+    # files rewritten) just before the paid spawn.
     taint_preflight: dict | None = None
-    if tainted_agy:
-        taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
-        if preflight_problem is not None:
-            return _bail(f"taint hooks not enforced: {preflight_problem}")
+    try:
+        if tainted_agy:
+            taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
+            if preflight_problem is not None:
+                return _bail_preflight(preflight_problem)
 
-    if spec.include or taint_hook_paths:
-        if iso is not None and iso.active:
-            try:
-                included_paths, notes, include_exclude_file = _apply_include(
-                    spec, iso, base, run_id, extra_excludes=taint_hook_paths
+        if spec.include or taint_hook_paths:
+            if iso is not None and iso.active:
+                try:
+                    included_paths, notes, include_exclude_file = _apply_include(
+                        spec, iso, base, run_id, extra_excludes=taint_hook_paths
+                    )
+                    lane_notes.extend(notes)
+                except (DispatchRefused, OSError) as exc:
+                    return _bail(str(exc))
+            elif spec.include:
+                lane_notes.append("include ignored: dispatch is not isolated")
+
+        if spec.ports:
+            claimed_ports, port_error = ports_mod.claim(spec.ports, base, run_id)
+            if port_error is not None:
+                return _bail(port_error)
+
+        worktree_env = iso.worktree if (iso is not None and iso.active) else spec.cwd
+        env = dict(os.environ)
+        env["CONDUCTOR_RUN_ID"] = run_id
+        env["CONDUCTOR_WORKTREE"] = worktree_env
+        # F7: every dispatched process, fleet and gate alike, carries this so
+        # `land.py` can refuse to run inside a lane's own environment -- land is
+        # the lead's hands, never a fleet's, and this is what proves the caller
+        # is not one.
+        env["CONDUCTOR_LANE"] = "1"
+        for index, port in enumerate(claimed_ports, start=1):
+            env[f"CONDUCTOR_PORT_{index}"] = str(port)
+        if claimed_ports:
+            env["CONDUCTOR_PORTS"] = ",".join(str(port) for port in claimed_ports)
+
+        if spec.setup:
+            setup_outcome = run_tests(
+                spec.cwd, spec.setup, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
+            )
+            if not setup_outcome.passed:
+                if setup_outcome.timed_out:
+                    return _bail("setup timed out")
+                if setup_outcome.interrupted:
+                    return _bail(
+                        "interrupted: stop requested during setup; process group killed"
+                    )
+                return _bail(f"setup failed: exit {setup_outcome.exit_code}")
+
+        # Include and setup both mutate the worktree after the first preflight.
+        # Rewrite the deny files so conductor's bytes are the last write, then
+        # re-hash with `_sha256_file` (the same read-back
+        # `_taint_agy_enforcement` uses after the run) and re-query `/hooks`
+        # before any paid spawn.
+        if tainted_agy and taint_hook_digests:
+            if spec.include or spec.setup:
+                if iso is None or not iso.active:
+                    return _bail("taint hooks not enforced: isolation lost before spawn")
+                taint_hook_paths, taint_hook_digests = _write_taint_agy_hooks(
+                    spec.cwd, iso, taint_shell=spec.taint_shell
                 )
-                lane_notes.extend(notes)
-            except DispatchRefused as exc:
-                return _bail(str(exc))
-        elif spec.include:
-            lane_notes.append("include ignored: dispatch is not isolated")
-
-    if spec.ports:
-        claimed_ports, port_error = ports_mod.claim(spec.ports, base, run_id)
-        if port_error is not None:
-            return _bail(port_error)
-
-    worktree_env = iso.worktree if (iso is not None and iso.active) else spec.cwd
-    env = dict(os.environ)
-    env["CONDUCTOR_RUN_ID"] = run_id
-    env["CONDUCTOR_WORKTREE"] = worktree_env
-    # F7: every dispatched process, fleet and gate alike, carries this so
-    # `land.py` can refuse to run inside a lane's own environment -- land is
-    # the lead's hands, never a fleet's, and this is what proves the caller
-    # is not one.
-    env["CONDUCTOR_LANE"] = "1"
-    for index, port in enumerate(claimed_ports, start=1):
-        env[f"CONDUCTOR_PORT_{index}"] = str(port)
-    if claimed_ports:
-        env["CONDUCTOR_PORTS"] = ",".join(str(port) for port in claimed_ports)
-
-    if spec.setup:
-        setup_outcome = run_tests(
-            spec.cwd, spec.setup, timeout=SETUP_TIMEOUT, stop=stop_requested, env=env
-        )
-        if not setup_outcome.passed:
-            if setup_outcome.timed_out:
-                return _bail("setup timed out")
-            if setup_outcome.interrupted:
+            modified = [
+                rel
+                for rel, digest in sorted(taint_hook_digests.items())
+                if _sha256_file(Path(spec.cwd) / rel) != digest
+            ]
+            if modified:
                 return _bail(
-                    "interrupted: stop requested during setup; process group killed"
+                    "taint hooks not enforced: taint hooks modified before spawn: "
+                    + ", ".join(modified)
                 )
-            return _bail(f"setup failed: exit {setup_outcome.exit_code}")
+            if spec.include or spec.setup:
+                taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
+                if preflight_problem is not None:
+                    return _bail_preflight(preflight_problem)
+    except BaseException:
+        _release_lane_resources()
+        raise
 
     # D9: flipped the moment the fleet's own process is over and the paid
     # bytes are on disk. Everything after that point -- parsing the envelope,
@@ -2696,6 +2815,8 @@ def dispatch(
             taint_enforcement["preflight"] = taint_preflight
             if taint_problem is not None and error is None:
                 error = f"taint hooks not enforced: {taint_problem}"
+            if iso is not None and iso.active:
+                _restore_tracked_taint_hooks(iso.worktree, taint_hook_paths)
 
         # Settings digest (third drill pass, 2026-09-07):
         # re-hashed here, before the deliverable check, the commit, and
@@ -3077,9 +3198,15 @@ def dispatch(
                 # and still left the commit standing (2026-09-08 review).
                 # Restate the descriptive counts from the tree the undo
                 # leaves, the same way the teardown drift branch below does.
-                commit = uncommit(spec.cwd, commit, before.head)
+                commit = uncommit(
+                    spec.cwd, commit, before.head, why=DELIVERABLE_CHANGED
+                )
                 git_verdict.notes.append(commit.reason)
-                restated = compare(spec.cwd, before, GitState.capture(spec.cwd))
+                # `_commit_bounds` reads `after.head` when the commit did not
+                # survive, and `after` was captured before this undo, so the
+                # tree the undo leaves is the one the receipt must describe.
+                after = GitState.capture(spec.cwd)
+                restated = compare(spec.cwd, before, after)
                 git_verdict.commits_added = restated.commits_added
                 git_verdict.files_changed = restated.files_changed
                 git_verdict.dirty_delta = restated.dirty_delta
@@ -3148,6 +3275,9 @@ def dispatch(
             if commit and commit.committed and (settled["exceeded"] or settled["unpriced"]):
                 why = "over budget" if settled["exceeded"] else "cap unenforced"
                 commit = uncommit(spec.cwd, commit, before.head, why=why)
+                # Same reason as the deliverable undo above: `after` predates
+                # this uncommit, and `_commit_bounds` reads its head.
+                after = GitState.capture(spec.cwd)
 
         # Teardown runs after the gate and the commit decision, ok or not: the
         # work is already judged, so its own outcome is a note, never a reason
@@ -3202,6 +3332,22 @@ def dispatch(
                     deliverable_state.pop("sha256", None)
                     if error is None:
                         error = f"{DELIVERABLE_CHANGED}: {path}"
+                    if commit and commit.committed:
+                        # `_capture_deliverable`'s own DELIVERABLE_CHANGED
+                        # path uncommits; teardown rewriting the same file
+                        # must agree, or the receipt says the run failed
+                        # while `commit.committed` stays true.
+                        commit = uncommit(
+                            spec.cwd, commit, before.head, why=DELIVERABLE_CHANGED
+                        )
+                        git_verdict.notes.append(commit.reason)
+                        after = GitState.capture(spec.cwd)
+                        restated = compare(spec.cwd, before, after)
+                        git_verdict.commits_added = restated.commits_added
+                        git_verdict.files_changed = restated.files_changed
+                        git_verdict.dirty_delta = restated.dirty_delta
+                        git_verdict.branch_after = restated.branch_after
+                        git_verdict.branch_moved = restated.branch_moved
     except Exception as exc:  # noqa: BLE001 - D9 boundary, re-raised below
         ports_mod.release(base, claimed_ports)
         if include_exclude_file is not None:
@@ -3240,14 +3386,42 @@ def dispatch(
             fleet_version=fleet_version,
             prompt_versions=prompt_versions,
         )
-    except BaseException:
+    except BaseException as exc:
         ports_mod.release(base, claimed_ports)
         if include_exclude_file is not None:
             include_exclude_file.unlink(missing_ok=True)
         if iso is not None:
             worktrees.release(iso)
+        if post_wait:
+            # Paid: the Exception path already receipts via `_parse_failure_result`.
+            # KeyboardInterrupt / SystemExit must too, then still propagate.
+            # Guarded, because this is the last-resort receipt: a failure to
+            # write it must not replace the interrupt that got us here.
+            try:
+                _parse_failure_result(
+                    exc,
+                    run_id=run_id,
+                    spec=spec,
+                    model_id=model_id,
+                    timeout=timeout,
+                    run_dir=run_dir,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    exit_code=exit_code,
+                    timed_out=timed_out,
+                    duration=duration,
+                    watcher=watcher,
+                    budget=budget,
+                    iso=iso,
+                    lane_env=_lane_env(),
+                    lane=lane,
+                    mission=mission,
+                    fleet_version=fleet_version,
+                    prompt_versions=prompt_versions,
+                )
+            except Exception:  # noqa: BLE001 - the interrupt is what matters
+                pass
         raise
-
 
     ports_mod.release(base, claimed_ports)
     if include_exclude_file is not None:
@@ -3535,8 +3709,21 @@ def _wait(
         breaker_reason = breaker.check(final=True)
     beat()
     _kill_live_group(proc.pid)
-    proc.wait()
+    _reap_killed(proc)
     return proc.returncode, timed_out, over_cap, interrupted, breaker_reason
+
+
+def _reap_killed(proc: subprocess.Popen, *, timeout: float = KILL_WAIT_S) -> None:
+    """Reap a process `_kill_live_group` already SIGKILL'd.
+
+    An unbounded `proc.wait()` hangs the runner if the child never exits.
+    A timeout leaves `returncode` None, which the receipt already treats as
+    no clean exit.
+    """
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def claim_dir(parent: Path, name: str) -> tuple[str, Path]:

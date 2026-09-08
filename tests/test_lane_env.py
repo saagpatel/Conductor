@@ -374,6 +374,50 @@ def test_include_without_isolation_is_a_note(repo, home, fake_fleet):
     )
 
 
+def test_include_refuses_a_symlink_that_points_outside_the_checkout(
+    repo, home, fake_fleet, tmp_path
+):
+    """`shutil.copy2` follows a symlink; `copy_no_follow` exists because that
+    once pulled bytes from outside the worktree. The OSError is folded into
+    `_bail` so the dispatch is refused rather than crashing."""
+    outside = tmp_path / "outside-secret"
+    outside.write_text("OUTSIDE\n")
+    (repo / "leak").symlink_to(outside)
+    fake_fleet(["sh", "-c", "echo x > x.txt"])
+    result = dispatch(
+        Spec(fleet="claude", prompt="inc", cwd=str(repo), mode="write", include=["leak"]),
+        isolate=True,
+        home=home,
+    )
+    assert result.ok is False
+    assert result.spawned is False
+    worktree = (result.isolation or {}).get("worktree")
+    if worktree:
+        dest = Path(worktree) / "leak"
+        assert not dest.is_file() or dest.read_text() != "OUTSIDE\n"
+
+
+def test_include_refuses_a_symlink_inside_an_included_directory(
+    repo, home, fake_fleet, tmp_path
+):
+    """`shutil.copytree` follows directory entries the same way `copy2`
+    follows a file."""
+    outside = tmp_path / "outside-secret"
+    outside.write_text("OUTSIDE\n")
+    fixtures = repo / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "ok.txt").write_text("ok\n")
+    (fixtures / "leak").symlink_to(outside)
+    fake_fleet(["sh", "-c", "echo x > x.txt"])
+    result = dispatch(
+        Spec(fleet="claude", prompt="inc", cwd=str(repo), mode="write", include=["fixtures"]),
+        isolate=True,
+        home=home,
+    )
+    assert result.ok is False
+    assert result.spawned is False
+
+
 # --- missions and the CLI -------------------------------------------------
 
 
