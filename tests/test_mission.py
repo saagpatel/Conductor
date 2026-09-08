@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -856,3 +857,309 @@ def test_ledger_refuses_a_cost_that_is_not_finite_and_non_negative(bad):
 
     ledger.add(_Good())
     assert ledger.to_dict()["spent_usd"] == 2.0
+
+
+def _ok_result(
+    repo: Path,
+    home: Path,
+    *,
+    run_id: str,
+    fleet: str = "claude",
+    cost: float | None = 0.1,
+) -> Result:
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    answer = run_dir / "answer.txt"
+    answer.write_text("ok\n")
+    return Result(
+        run_id=run_id,
+        fleet=fleet,
+        model="claude-sonnet-5" if fleet == "claude" else "grok-4.6",
+        effort="default",
+        mode="read",
+        cwd=str(repo),
+        timeout=600,
+        exit_code=0,
+        timed_out=False,
+        duration_s=0.1,
+        run_dir=str(run_dir),
+        stdout_path="",
+        stderr_path="",
+        answer_path=str(answer),
+        tail="ok",
+        spawned=True,
+        git_verdict={"checked": False, "no_op": False},
+        usage=None if cost is None else {"cost_usd": cost},
+    )
+
+
+def test_early_cancel_does_not_name_a_lane_that_already_finished_ok(
+    repo, home, monkeypatch, tmp_path
+):
+    """wait(FIRST_COMPLETED) returns every already-done future. Firing
+    cancel before the rest of that batch is settled used to list a
+    finished-ok sibling as cancelled while lanes[name] said it passed."""
+    gate = threading.Barrier(2)
+
+    def dispatcher(spec, **kwargs):
+        name = kwargs["lane"]
+        out = _ok_result(repo, home, run_id=f"fake-{name}", fleet=spec.fleet)
+        gate.wait(timeout=5)
+        return out
+
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "require": "any",
+        "early_cancel": True,
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "read", "isolate": False, "prompt": "A"},
+            {"name": "b", "fleet": "claude", "mode": "read", "isolate": False, "prompt": "B"},
+        ],
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dispatcher=dispatcher
+    )
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    assert by_name["a"]["ok"] is True and by_name["a"]["skipped"] is None
+    assert by_name["b"]["ok"] is True and by_name["b"]["skipped"] is None
+    cancelled = (result.early_cancel or {}).get("cancelled") or []
+    assert "a" not in cancelled and "b" not in cancelled
+    ranked = {row["lane"] for row in result.ranking}
+    assert ranked == {"a", "b"}
+
+
+def test_ledger_add_seed_and_add_child_publish_the_spend():
+    """add/seed/add_child moved spent without publishing, so running.json's
+    last word after a dispatch was 'cap gone, spend not yet counted'."""
+    published: list[dict] = []
+    ledger = Ledger(max_cost_usd=10.0)
+    ledger.set_observer(published.append)
+    ledger.start(2.0)
+    assert published[-1]["spent_usd"] == 0.0
+    assert published[-1]["in_flight_dispatches"] == 1
+
+    class _Priced:
+        usage = {"cost_usd": 0.4}
+        spawned = True
+        interrupted = False
+        cancelled = False
+
+    ledger.add(_Priced())
+    assert published[-1]["spent_usd"] == 0.4
+    assert published[-1]["in_flight_dispatches"] == 1
+    assert ledger.remaining() == 9.6
+    ledger.finish(2.0)
+    assert published[-1]["spent_usd"] == 0.4
+    assert published[-1]["in_flight_dispatches"] == 0
+
+    ledger.seed(1.25, 0)
+    assert published[-1]["spent_usd"] == 1.25
+    ledger.add_child(0.5, 0)
+    assert published[-1]["spent_usd"] == 1.75
+
+
+def test_a_finished_dispatch_is_counted_before_its_cap_clears(
+    repo, home, monkeypatch, tmp_path
+):
+    """dispatch_one used to finish() then add(), so remaining() and the
+    live lock understated by that lane's entire cost until the next
+    start/finish -- and after the last dispatch, forever."""
+    published: list[dict] = []
+    original = Ledger.set_observer
+
+    def spy(self: Ledger, observer) -> None:
+        def wrapped(budget: dict) -> None:
+            published.append(dict(budget))
+            if observer is not None:
+                observer(budget)
+
+        original(self, wrapped)
+
+    monkeypatch.setattr(Ledger, "set_observer", spy)
+    fake_fleets(monkeypatch, {"claude": say("done", cost=0.1)})
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "max_cost_usd": 1.0,
+        "lanes": [{"fleet": "claude", "mode": "read", "isolate": False, "cap_usd": 0.5}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    assert result.budget["spent_usd"] == 0.1
+    saw_in_flight = False
+    for snap in published:
+        if snap["in_flight_dispatches"] >= 1:
+            saw_in_flight = True
+        if saw_in_flight and snap["in_flight_dispatches"] == 0:
+            assert snap["spent_usd"] == 0.1, snap
+    assert saw_in_flight
+    assert published[-1]["spent_usd"] == 0.1
+    assert published[-1]["in_flight_dispatches"] == 0
+
+
+def test_cancelled_run_receipt_error_matches_the_attempt_and_skip_reason(
+    repo, home, monkeypatch, tmp_path
+):
+    """One run, one cancel reason: the run receipt used dispatch()'s
+    generic default while the attempt and skip line named the winner."""
+
+    def build(spec):
+        if spec.fleet == "codex":
+            return ["sh", "-c", "sleep 60"]
+        return say("ok", cost=0.1)
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "require": "any",
+        "early_cancel": True,
+        "lanes": [
+            {"name": "fast", "fleet": "claude", "mode": "read", "isolate": False, "prompt": "FAST"},
+            {
+                "name": "slow",
+                "fleet": "codex",
+                "mode": "read",
+                "isolate": False,
+                "prompt": "SLOW",
+                "timeout": 30,
+            },
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    slow = {lane["name"]: lane for lane in result.lanes}["slow"]
+    reason = "cancelled: lane fast already passed"
+    assert slow["skipped"] == reason
+    assert slow["attempts"][-1]["error"] == reason
+    receipt = json.loads(
+        (home / "runs" / slow["attempts"][-1]["run_id"] / "result.json").read_text()
+    )
+    assert receipt["error"] == reason
+
+
+def test_interrupted_retry_backoff_run_receipt_kind_matches_the_attempt(
+    repo, home, monkeypatch, tmp_path
+):
+    """An interrupted backoff used to rewrite the attempt's kind but leave
+    the run receipt as rate_limit/transport, so the histogram and the
+    run named two endings for one run."""
+    runner_mod.clear_stop()
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: [
+            "sh",
+            "-c",
+            "printf '%s\\n' "
+            "'{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,"
+            "\"result\":\"\",\"error\":\"ECONNRESET while streaming\"}'; exit 1",
+        ],
+    )
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "retry": {"kinds": ["transport"], "attempts": 3, "backoff_s": 5},
+        "lanes": [{"fleet": "claude"}],
+    }
+    try:
+        threading.Timer(1.0, runner_mod.request_stop).start()
+        result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    finally:
+        runner_mod.clear_stop()
+    attempt = result.lanes[0]["attempts"][-1]
+    receipt = json.loads((home / "runs" / attempt["run_id"] / "result.json").read_text())
+    assert attempt["kind"] == receipt["kind"] == "interrupted"
+    assert attempt["error"] == receipt["error"]
+    assert result.errors == {"interrupted": 1}
+
+
+def test_ledger_a_cancelled_unpriced_run_is_unknown_not_free_or_unverifiable():
+    class _Cancelled:
+        usage = None
+        spawned = True
+        interrupted = False
+        cancelled = True
+
+    ledger = Ledger(max_cost_usd=5.0)
+    ledger.add(_Cancelled())
+    state = ledger.to_dict()
+    assert state["spent_usd"] == 0.0
+    assert state["unpriced_dispatches"] == 0
+    assert state["unverifiable"] is False
+    assert state["unknown_cost_dispatches"] == 1
+    assert ledger.blocker() is None
+    assert ledger.remaining() == 5.0
+
+
+def test_a_cancelled_post_hoc_lane_does_not_report_its_spend_as_zero(
+    repo, home, monkeypatch, tmp_path
+):
+    """Cursor leaks nothing mid-run; a cancel preempts the post-hoc
+    estimate. The receipt must not claim that billed run was free."""
+
+    def dispatcher(spec, **kwargs):
+        cancel = kwargs.get("cancel")
+        name = kwargs["lane"]
+        if spec.fleet == "cursor":
+            if cancel is not None:
+                assert cancel.wait(timeout=5), "winner never cancelled the cursor lane"
+            run_dir = home / "runs" / f"fake-{name}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            return Result(
+                run_id=f"fake-{name}",
+                fleet="cursor",
+                model="grok-4.6",
+                effort="default",
+                mode="read",
+                cwd=str(repo),
+                timeout=600,
+                exit_code=None,
+                timed_out=False,
+                duration_s=0.2,
+                run_dir=str(run_dir),
+                stdout_path="",
+                stderr_path="",
+                tail="",
+                spawned=True,
+                cancelled=True,
+                error="cancelled: lane fast already passed",
+                git_verdict={"checked": False, "no_op": False},
+                usage=None,
+                budget={
+                    "cap_usd": 2.0,
+                    "enforcement": "post-hoc",
+                    "exceeded": False,
+                    "unpriced": True,
+                    "free": False,
+                },
+            )
+        return _ok_result(repo, home, run_id=f"fake-{name}", fleet="claude", cost=0.1)
+
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "require": "any",
+        "early_cancel": True,
+        "max_cost_usd": 5.0,
+        "lanes": [
+            {"name": "fast", "fleet": "claude", "mode": "read", "isolate": False, "prompt": "FAST"},
+            {"name": "slow", "fleet": "cursor", "mode": "read", "isolate": False, "prompt": "SLOW"},
+        ],
+    }
+    result = run_mission(
+        mission_from_dict(raw, base_dir=tmp_path), home=home, dispatcher=dispatcher
+    )
+    slow = {lane["name"]: lane for lane in result.lanes}["slow"]
+    attempt = slow["attempts"][-1]
+    assert attempt["cancelled"] is True
+    assert attempt.get("cost_usd") is None
+    assert attempt["unpriced"] is False
+    assert attempt["cost_unknown"] is True
+    assert slow["unpriced_attempts"] == 0
+    assert result.budget["unpriced_dispatches"] == 0
+    assert result.budget["unverifiable"] is False
+    assert result.budget["unknown_cost_dispatches"] == 1
+    assert result.budget["spent_usd"] == 0.1
+    assert result.lanes[0]["ok"] is True

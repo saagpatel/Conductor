@@ -1703,24 +1703,29 @@ class Ledger:
     Those figures are only interesting while something is in flight, and the
     finished mission's `budget` block is written when nothing is, so the
     ledger also publishes `to_dict()` to an optional observer after every
-    start and finish (`set_observer`). A mission points it at its own
-    `running.json` lock, and writes the same document into `pause.json`
-    whenever it parks, so a reader has two live places to look during a run.
+    start, finish, add, seed, and add_child (`set_observer`). A mission
+    points it at its own `running.json` lock, and writes the same document
+    into `pause.json` whenever it parks, so a reader has two live places to
+    look during a run.
     """
 
     def __init__(self, max_cost_usd: float | None) -> None:
         self.max = max_cost_usd
         self.spent = 0.0
         self.unpriced = 0  # dispatches that reported no cost at all
+        # Spawned, cancelled, and never priced: not $0 and not `unpriced`
+        # (which trips `blocker()`). See `add`.
+        self.unknown_cost = 0
         self._lock = threading.Lock()
         self._in_flight_caps: list[float | None] = []
-        # An optional sink for `to_dict()`, called after every `start` and
-        # every `finish`, so the in-flight figures have somewhere live to
-        # land while dispatches are still running rather than only reaching
-        # the finished mission's own `budget` block. `_execute_mission`
-        # points it at this run's `running.json` lock; a ledger built
-        # without one (every direct construction in the tests) publishes
-        # nowhere and behaves exactly as it did before.
+        # An optional sink for `to_dict()`, called after every `start`,
+        # `finish`, `add`, `seed`, and `add_child`, so the in-flight figures
+        # and the spend have somewhere live to land while dispatches are
+        # still running rather than only reaching the finished mission's
+        # own `budget` block. `_execute_mission` points it at this run's
+        # `running.json` lock; a ledger built without one (every direct
+        # construction in the tests) publishes nowhere and behaves exactly
+        # as it did before.
         self._observer: Callable[[dict], None] | None = None
 
     def blocker(self) -> str | None:
@@ -1759,16 +1764,29 @@ class Ledger:
             if cost is not None:
                 self.spent += float(cost)
             elif result.spawned and not result.interrupted and not result.cancelled:
-                # A run conductor stopped or cancelled (before or after spawn)
-                # and could not price is not evidence about the budget; it
-                # cannot have spent past what its own cap allowed before then.
                 self.unpriced += 1
+            elif result.spawned and result.cancelled:
+                # The previous rule treated a cancelled unpriced run as
+                # "not evidence" because it "cannot have spent past what
+                # its own cap allowed before then". That bounds the
+                # figure; it does not supply one. For a post-hoc fleet
+                # (cursor) the figure never arrives at all: Watcher.poll
+                # is always None, and a cancel preempts the one estimate
+                # the fleet would have emitted at the end. Counting it
+                # as unpriced would make blocker() refuse every later
+                # lane (and a resume as budget unverifiable). Counting
+                # it as $0 claims the vendor billed nothing. Track it as
+                # unknown instead: spent and unpriced stay put, the
+                # receipt says we do not know.
+                self.unknown_cost += 1
+        self._publish()
 
     def seed(self, spent_usd: float, unpriced_dispatches: int) -> None:
         """Start a resumed mission from spend already present on disk."""
         with self._lock:
             self.spent = float(spent_usd)
             self.unpriced = int(unpriced_dispatches)
+        self._publish()
 
     def add_child(self, cost_usd: float, unpriced_dispatches: int) -> None:
         """E10 second spec: roll a launched plan child's own spend into this
@@ -1787,12 +1805,13 @@ class Ledger:
             else:
                 self.spent += rolled
             self.unpriced += int(unpriced_dispatches)
+        self._publish()
 
     def set_observer(self, observer: Callable[[dict], None] | None) -> None:
         """Point the ledger at somewhere to publish `to_dict()` after every
-        start and finish. Set once, before the first dispatch; the observer
-        runs on whichever lane thread moved the ledger, so it must be cheap
-        and must not raise."""
+        start, finish, add, seed, and add_child. Set once, before the first
+        dispatch; the observer runs on whichever lane thread moved the
+        ledger, so it must be cheap and must not raise."""
         self._observer = observer
 
     def _publish(self) -> None:
@@ -1838,6 +1857,7 @@ class Ledger:
                 "exceeded": self.max is not None and self.spent >= self.max,
                 "unverifiable": self.max is not None and self.unpriced > 0,
                 "unpriced_dispatches": self.unpriced,
+                "unknown_cost_dispatches": self.unknown_cost,
                 "in_flight_dispatches": len(in_flight),
                 "outstanding_cap_usd": outstanding_cap_usd,
                 "worst_case_usd": worst_case_usd,
@@ -3928,6 +3948,28 @@ def _execute_mission(
                     inherited_check = lane.base
         resume_failed = False
 
+        class _LiveCancelReason:
+            """cancel_reason dispatch() interpolates at cancel time.
+
+            Built before the winner is known (the spec is already built).
+            `_fire_early_cancel` writes cancel_reasons[lane] before setting
+            the event, so by the time dispatch() formats this, the winner
+            is there. If it is not -- a cancel that raced the write, or a
+            test that set the event by hand -- the receipt keeps
+            dispatch()'s generic default.
+            """
+
+            def __init__(self, lane_name: str, reasons: dict[str, str]) -> None:
+                self._lane_name = lane_name
+                self._reasons = reasons
+
+            def __str__(self) -> str:
+                full = self._reasons.get(
+                    self._lane_name, "cancelled: another lane already passed"
+                )
+                prefix = "cancelled: "
+                return full[len(prefix) :] if full.startswith(prefix) else full
+
         def dispatch_one(
             attempt: Attempt,
             *,
@@ -3987,6 +4029,7 @@ def _execute_mission(
             else:
                 ledger_cap_usd = cap_usd + (grace_usd or 0.0)
             ledger.start(ledger_cap_usd)
+            result: Result | None = None
             try:
                 if dispatcher is not None:
                     # C7: golden.replay's offline dispatcher, in place of a
@@ -4010,16 +4053,35 @@ def _execute_mission(
                         lane=lane.name,
                         mission=mission_id,
                         inherited_check=inherited_check,
+                        # Resolved when dispatch() interpolates it (the
+                        # event is already set, so `_fire_early_cancel`
+                        # has written the winner), not when this spec
+                        # was built. A string here would freeze
+                        # "another lane already passed" before the
+                        # winner exists; if the lookup still misses,
+                        # the receipt keeps that generic default.
+                        # Golden.replay's dispatcher has a fixed
+                        # signature and does not take this keyword.
+                        cancel_reason=_LiveCancelReason(lane.name, cancel_reasons),
                         **dispatch_kwargs,
                     )
+                if resume_note and resume_id is None:
+                    result.git_verdict.setdefault("notes", []).append(resume_note)
+                    (Path(result.run_dir) / "result.json").write_text(
+                        json.dumps(result.to_dict(), indent=2)
+                    )
             finally:
+                # Count this dispatch's spend before clearing its outstanding
+                # cap so remaining() never sees a window where the dollars
+                # are in neither spent nor outstanding (another lane's
+                # retry could otherwise fit its cap to money this dispatch
+                # has already spent), and so the live lock's last word
+                # includes the spend. add/finish each publish outside their
+                # own lock; do not fold the in-flight cap into remaining().
+                if result is not None:
+                    ledger.add(result)
                 ledger.finish(ledger_cap_usd)
-            if resume_note and resume_id is None:
-                result.git_verdict.setdefault("notes", []).append(resume_note)
-                (Path(result.run_dir) / "result.json").write_text(
-                    json.dumps(result.to_dict(), indent=2)
-                )
-            ledger.add(result)
+            assert result is not None
             if lane.plan and not dry_run and result.ok:
                 # E10: the deliverable this attempt just produced is a
                 # mission conductor may launch on the operator's word --
@@ -4068,10 +4130,10 @@ def _execute_mission(
                 # silently never ran.
                 summary["note"] = "gate skipped (read lane)"
             if result.cancelled:
-                # dispatch()'s own receipt only knows the generic default
-                # reason; the mission knows which lane actually won, so the
-                # attempt's error must say the same thing report.md's
-                # "Skipped:" line says, not a different cancel string.
+                # dispatch() is told the winner via cancel_reason (see
+                # _LiveCancelReason). A dispatcher that ignores that
+                # keyword still lands the generic default on the run
+                # receipt; the attempt's error must match skipped.
                 cancel_reason = cancel_reasons.get(
                     lane.name, "cancelled: another lane already passed"
                 )
@@ -4083,13 +4145,24 @@ def _execute_mission(
                 and not result.cancelled
                 and summary.get("cost_usd") is None
             )
+            # Same third state Ledger.add records as unknown_cost: a
+            # cancelled run with no figure is not unpriced (blocker /
+            # resume unverifiable) and not $0. Only present when true
+            # so existing attempt receipts do not grow a new key.
+            if (
+                result.spawned
+                and result.cancelled
+                and summary.get("cost_usd") is None
+            ):
+                summary["cost_unknown"] = True
             # E6: a script attempt is priced at zero and verified, never
             # unpriced (result.budget carries "free": true; its cost_usd is
             # 0.0, so the line above already reads False here on its own).
             summary["free"] = bool((result.budget or {}).get("free"))
             out.attempts.append(summary)
             out.kinds.append(kind)
-            out.cost_usd += float(summary.get("cost_usd") or 0.0)
+            if summary.get("cost_usd") is not None:
+                out.cost_usd += float(summary["cost_usd"])
             if summary["unpriced"]:
                 out.unpriced_attempts += 1
             out.tokens += int(summary.get("tokens") or 0)
@@ -4206,10 +4279,15 @@ def _execute_mission(
                     retry_index=retries_done,
                 )
             if ended_backoff is not None:
-                # The backoff itself was cut short by a stop or a cancel; the
-                # last dispatched attempt's own kind is stale evidence once
-                # that happens, so the receipt says what actually ended it,
-                # the same way an interrupted or cancelled dispatch would.
+                # The backoff itself was cut short by a stop or a cancel.
+                # Overwriting the attempt is deliberate: the *lane* ended
+                # here, and the error histogram (read against AGENTS.md's
+                # retry notes) is counted from lane.kinds. The dispatch's
+                # own receipt still names the kind that ended that spawn
+                # (rate_limit, transport, ...) unless we rewrite it, so
+                # one run would have two endings. Align the run receipt
+                # with the attempt so they agree; the dispatch's fleet
+                # error stays on the receipt.
                 last_summary = out.attempts[-1]
                 text = (
                     "interrupted: stop requested during retry backoff; not retried"
@@ -4221,6 +4299,21 @@ def _execute_mission(
                 last_summary["failure"] = text
                 out.kinds[-1] = ended_backoff
                 out.skipped = text
+                receipt_path = Path(result.run_dir) / "result.json"
+                try:
+                    receipt = json.loads(receipt_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    receipt = None
+                if isinstance(receipt, dict):
+                    receipt["error"] = text
+                    if ended_backoff == "interrupted":
+                        receipt["interrupted"] = True
+                        receipt["cancelled"] = False
+                    else:
+                        receipt["cancelled"] = True
+                        receipt["interrupted"] = False
+                    receipt["kind"] = ended_backoff
+                    receipt_path.write_text(json.dumps(receipt, indent=2))
                 break
             if refused_retry is not None:
                 # D11: the retry never spawned. The failed attempt's own
@@ -4481,8 +4574,9 @@ def _execute_mission(
     idle_since: float | None = time.monotonic()
 
     def _fire_early_cancel(winner: str) -> None:
-        """The moment one sink passes: cancel every other lane, running or
-        not yet started, and let the scheduler start nothing new."""
+        """The moment one sink passes: cancel every other lane that has
+        not already finished, running or not yet started, and let the
+        scheduler start nothing new."""
         if cancel_state["winner"] is not None:
             return
         cancel_state["winner"] = winner
@@ -4491,7 +4585,19 @@ def _execute_mission(
             pending.remove(lane)
             cancel_state["cancelled"].append(lane.name)
             settle(fresh_lane_result(lane, skipped=reason))
-        for lane in running.values():
+        # Skip futures that are already done(). wait(FIRST_COMPLETED)
+        # returns every completed future, and the drain pops them one at
+        # a time; firing cancel in the middle of that batch would
+        # otherwise list a lane that already finished ok as cancelled
+        # while lanes[name] said it passed. Firing only after the whole
+        # batch has settled would also skip those, but would delay
+        # setting the losers' events by however long settle() takes for
+        # each already-done sibling -- a still-running post-hoc lane
+        # would keep spending for that drain. Pending lanes are still
+        # settled above, immediately.
+        for future, lane in list(running.items()):
+            if future.done():
+                continue
             cancel_reasons[lane.name] = reason
             cancel_state["cancelled"].append(lane.name)
             event = lane_cancel_events.get(lane.name)
@@ -4622,17 +4728,32 @@ def _execute_mission(
             if not running:
                 break
             finished, _ = wait(running, return_when=FIRST_COMPLETED)
-            for future in finished:
-                dispatched_lane = running.pop(future)
+            # Drain every future that is already done, not just this
+            # wait()'s set. FIRST_COMPLETED returns every completed
+            # future, but a sibling can also finish between that return
+            # and the first settle. Fire cancel only after this drain,
+            # so a lane that already finished is settled as itself
+            # rather than listed as cancelled. Cost: still-running
+            # losers' events are set after settle() of each already-done
+            # sibling (receipt writes), not after the first ok sink.
+            pending_done = {future for future in running if future.done()}
+            pending_done.update(finished)
+            winner: str | None = None
+            while pending_done:
+                future = pending_done.pop()
+                dispatched_lane = running.pop(future, None)
+                if dispatched_lane is None:
+                    continue
                 result = future.result()
                 settle(result)
                 if (
                     mission.early_cancel
+                    and winner is None
                     and cancel_state["winner"] is None
                     and result.name in sink_names
                     and result.ok
                 ):
-                    _fire_early_cancel(result.name)
+                    winner = result.name
                 if (
                     pause_info is None
                     and dispatched_lane.plan
@@ -4645,6 +4766,9 @@ def _execute_mission(
                     # pass, in the same place a `pause.before` lane's own
                     # park is decided.
                     pause_info = _plan_pause_info(result.name, result.plan)
+                pending_done.update(f for f in running if f.done())
+            if winner is not None:
+                _fire_early_cancel(winner)
             if not running and idle_since is None:
                 idle_since = time.monotonic()
 
