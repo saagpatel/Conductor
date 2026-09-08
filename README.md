@@ -3012,6 +3012,40 @@ or `2 fixed, 1 refused`. A mission recorded before this shipped carries
 neither key on its lane receipts; they load as `None` and the report skips
 it the same way it skips any other lane with nothing to compute from.
 
+### Reprice
+
+A parser convention change leaves every receipt already on disk under the old
+convention, so `conductor spend`, `conductor report`, the rolling ceiling, and
+`forecast.py` then read a mix of two conventions. That happened on 2026-09-08
+when `usage_from_raw` stopped subtracting `cache_read` from `input_tokens` for
+cursor and antigravity: fixing the parser did not fix the ledger.
+
+`conductor reprice` walks `$CONDUCTOR_HOME/runs` and, for every run directory
+that has both `stdout.log` and `result.json`, re-parses the stored stdout with
+the current `outputs.parse`, compares that to the receipt's stored `usage`, and
+reports or rewrites the difference. `--dry-run` is the default. `--apply`
+rewrites, but only after archiving every `result.json` in the corpus to a
+timestamped `runs-receipts.backup-<UTC>.tgz` beside the runs directory.
+`--json` emits the same summary as a machine-readable object. Exit 0 whether
+or not anything moved; nothing found is a correct and expected result.
+
+Two refusals, which are the point of the command:
+
+1. A `cost_basis: "reported"` cost is never recomputed. The vendor printed a
+   dollar figure; that figure is evidence. Token counters on such a receipt may
+   be corrected; `cost_usd` may not.
+2. A receipt whose token counters did not move is not touched at all, even when
+   `prices.estimate` now returns a different figure. Re-price what the parser
+   changed; never let a price-table revision walk backwards through stored
+   history.
+
+When it writes, it rewrites only the `usage` token counters,
+`usage.total_tokens`, and -- where `cost_basis == "estimated"` --
+`usage.cost_usd` and `usage.price`. Verdicts, `ok`, commit state, `cost_basis`,
+and every other field are left as found. A receipt whose stdout re-parses to no
+usage, a receipt with no `usage` object, and a `dry_run` receipt are skipped
+and counted, not zeroed.
+
 ### Per-dispatch caps
 
 `--cap-usd` (or `cap_usd` in a mission) bounds one dispatch in dollars, the
