@@ -94,6 +94,9 @@ from .attempts import (
     _attempt,
     _attempt_fields,
     _cascade_label,
+    _collate_bytes_match,
+    _collate_named_run_ids,
+    _collate_receipts_exist,
     _default_lane_name,
     _escalation_summary,
     _parse_cascade,
@@ -576,6 +579,14 @@ class Mission:
         seen: set[str] = set()
         # E26: a branch name only collides with itself within the same
         # repository -- two lanes landing in different cwds may share a name.
+        # `cwd` is inherited, so a fallback or cascade attempt may name a
+        # different repository than the primary; the claim is per repository
+        # every attempt of the lane can touch, not attempts[0] alone.
+        # Newly refused: two lanes with the same `branch` whose attempt-cwd
+        # sets intersect (primaries in different repos, fallbacks in one).
+        # Still allowed: the same branch in two repositories when no attempt
+        # of either lane can land in the other's. No existing test builds
+        # a fallback with its own `cwd`.
         branches: dict[str, set[str]] = {}
         for lane in self.lanes:
             if not _LANE_NAME.fullmatch(lane.name):
@@ -590,10 +601,11 @@ class Mission:
                     raise MissionInvalid(
                         f"lane '{lane.name}': branch must be a name outside conductor/"
                     )
-                claimed = branches.setdefault(lane.attempts[0].effective_cwd(self.cwd), set())
-                if lane.branch in claimed:
-                    raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
-                claimed.add(lane.branch)
+                for cwd in self._attempt_cwds(lane):
+                    claimed = branches.setdefault(cwd, set())
+                    if lane.branch in claimed:
+                        raise MissionInvalid(f"two lanes claim branch '{lane.branch}'")
+                    claimed.add(lane.branch)
                 if lane.tainted:
                     raise MissionInvalid(
                         f"lane '{lane.name}': a tainted lane never holds a deliverable "
@@ -712,7 +724,7 @@ class Mission:
                 raise MissionInvalid(
                     f"resolve needs at least two sink lanes, got {len(sinks)}"
                 )
-            sink_cwds = {sink.attempts[0].effective_cwd(self.cwd) for sink in sinks}
+            sink_cwds = {cwd for sink in sinks for cwd in self._attempt_cwds(sink)}
             if len(sink_cwds) > 1:
                 raise MissionInvalid(
                     "resolve: sink lanes span more than one cwd; "
@@ -759,6 +771,29 @@ class Mission:
         mission every lane is one."""
         needed = {need for lane in self.lanes for need in lane.needs}
         return [lane for lane in self.lanes if lane.name not in needed]
+
+    def _attempt_cwds(self, lane: Lane) -> set[str]:
+        """Every repository this lane's attempts may dispatch in (E26).
+
+        `cwd` is in `_INHERITED`, so a fallback or cascade attempt may name
+        a different repository than the primary. An invariant about which
+        repositories a mission can touch has to consider every one.
+        """
+        return {attempt.effective_cwd(self.cwd) for attempt in lane.attempts}
+
+    def _resolve_repository(self) -> str:
+        """The one repository a resolve block may touch.
+
+        `validate` refuses a resolve whose sink attempts span more than one
+        cwd, so this is a singleton on any mission that loaded. Keying on
+        `attempts[0]` would dispatch the resolver in a repository a sink
+        that fell back never touched.
+        """
+        sinks = self.sinks()
+        cwds = {cwd for sink in sinks for cwd in self._attempt_cwds(sink)}
+        if len(cwds) == 1:
+            return next(iter(cwds))
+        return sinks[0].attempts[0].effective_cwd(self.cwd)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -2531,16 +2566,20 @@ def _lead_seconds(
 
 def _critical_path_seconds(lane_results: list[LaneResult], base: Path) -> float | None:
     """W8: the longest path through the lane dependency graph, weighting each
-    lane by its final attempt's `duration_s` plus that run receipt's gate
+    lane by every attempt it ever dispatched -- `previous_attempts` and
+    `attempts` -- each attempt's `duration_s` plus that run receipt's gate
     seconds.
 
     This is the floor on the mission's elapsed time: no amount of
-    concurrency makes a mission finish faster than its longest chain. Edges
+    concurrency makes a mission finish faster than its longest chain, and
+    work a resume redid is still work that elapsed time contains. Edges
     are the lane graph conductor already schedules on -- a lane's `needs`,
     which validation guarantees already contains its `base` and its `resume`
     source (`Mission.validate` refuses a `base` outside `needs` and a
     `resume` that is neither in `needs` nor the `base`), so `needs` plus
-    `base` is the complete edge set.
+    `base` is the complete edge set. Same whole-life walk as
+    `_occupied_seconds` and `_gate_seconds`: a resume that moved a paid
+    attempt under `previous_attempts` does not shorten the path.
 
     Auxiliary dispatches are outside this graph and are never on the path:
     collate and resolve run after the lanes settle, are not lanes, and carry
@@ -2552,18 +2591,25 @@ def _critical_path_seconds(lane_results: list[LaneResult], base: Path) -> float 
     length of any path through it unknown."""
     weights: dict[str, float] = {}
     for lane in lane_results:
-        final = lane.attempts[-1] if lane.attempts else None
-        if final is None:
+        history = [*lane.previous_attempts, *lane.attempts]
+        if not history:
             weights[lane.name] = 0.0
             continue
-        duration = _numeric(final.get("duration_s"))
-        run_id = final.get("run_id")
-        if duration is None or not isinstance(run_id, str):
-            return None
-        gate = _run_gate_seconds(run_id, base)
-        if gate is None:
-            return None
-        weights[lane.name] = duration + gate
+        weight = 0.0
+        seen: set[str] = set()
+        for attempt in history:
+            run_id = attempt.get("run_id")
+            duration = _numeric(attempt.get("duration_s"))
+            if duration is None or not isinstance(run_id, str):
+                return None
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            gate = _run_gate_seconds(run_id, base)
+            if gate is None:
+                return None
+            weight += duration + gate
+        weights[lane.name] = weight
     edges = {
         lane.name: [
             name
@@ -3298,12 +3344,15 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
         for judge in collate.get("judges") or []:
             if not isinstance(judge, dict) or not two_run_ids(judge.get("orders")):
                 return False
-        return isinstance(collate.get("strongest"), str) and bool(collate["strongest"])
+        if not (isinstance(collate.get("strongest"), str) and bool(collate["strongest"])):
+            return False
+        return _collate_receipts_exist(mission_dir, _collate_named_run_ids(collate))
     answer = collate.get("answer_path")
-    return _artifact_matches(
-        answer if isinstance(answer, str) else None,
-        mission_dir / "collated.txt",
-    ) and isinstance(answer, str)
+    if not isinstance(answer, str):
+        return False
+    if not _artifact_matches(answer, mission_dir / "collated.txt"):
+        return False
+    return _collate_bytes_match(mission_dir, collate)
 
 
 def _resolve_is_trusted(
@@ -3335,9 +3384,10 @@ def _resolve_is_trusted(
     tip = resolve.get("tip")
     if tip:
         # E19: the resolver committed in the sinks' own repository (E26,
-        # enforced single by `Mission.validate`), never the mission's own
-        # cwd when the two differ.
-        resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
+        # enforced single by `Mission.validate` over every sink attempt,
+        # not attempts[0] alone), never the mission's own cwd when the
+        # two differ.
+        resolve_cwd = mission._resolve_repository()
         commit = _git_answer(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
         if commit is None:
             _note_git_unrun(notes, "resolve", "tip commit")
@@ -6035,13 +6085,14 @@ def _run_resolve(
     order.
 
     E19: `Mission.validate` already refuses a `resolve` block whose sinks
-    span more than one cwd, so exactly one repository is ever in play here;
-    the resolver dispatches, is gated, and is checked for a leftover tip
-    (`_resolve_is_trusted`) in that repository, never the mission's own cwd
-    when the two differ."""
+    span more than one cwd across every attempt, so exactly one repository
+    is ever in play here; the resolver dispatches, is gated, and is checked
+    for a leftover tip (`_resolve_is_trusted`) in that repository, never
+    the mission's own cwd when the two differ, and never the primary's cwd
+    when a sink fell back into another."""
     res = mission.resolve
     assert res is not None
-    resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
+    resolve_cwd = mission._resolve_repository()
     scoped = _collisions_for_cwd(collisions, resolve_cwd)
     if not scoped or not scoped.get("hotspots"):
         return {"ran": False, "reason": "no hotspots"}

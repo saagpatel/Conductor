@@ -16,7 +16,7 @@ import pytest
 from conductor import golden
 from conductor import runner as runner_mod
 from conductor.fleets import Spec
-from conductor.mission import Mission, mission_from_dict, run_mission
+from conductor.mission import Mission, _collate_is_trusted, mission_from_dict, run_mission
 
 
 def make_repo(path: Path) -> Path:
@@ -563,3 +563,51 @@ def test_scrub_guard_finds_a_leaked_second_repository_path_exactly_as_the_first(
     )
     assert any("repo a" in f and "(base64)" in f for f in findings)
     assert any("repo b" in f and "(base64)" in f for f in findings)
+
+
+# --- collate keep-rules match a lane's class of evidence ---------------------
+
+
+def test_a_non_rank_collate_is_not_trusted_when_collated_txt_was_rewritten(home: Path):
+    """Path identity alone kept a rewritten collated.txt. A lane requires
+    a digest match; the collate run's own answer is that digest."""
+    mission_dir = home / "missions" / "20260101T000000Z-m"
+    mission_dir.mkdir(parents=True)
+    collated = mission_dir / "collated.txt"
+    collated.write_text("rewritten in place\n")
+    run_id = "20260101T000000Z-collate"
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    answer = run_dir / "answer.txt"
+    answer.write_text("original collate\n")
+    (run_dir / "result.json").write_text(
+        json.dumps({"run_id": run_id, "answer_path": str(answer), "ok": True})
+    )
+    prior = {"collate": {"ok": True, "run_id": run_id, "answer_path": str(collated)}}
+    assert _collate_is_trusted(mission_dir, prior) is False
+    collated.write_text("original collate\n")
+    assert _collate_is_trusted(mission_dir, prior) is True
+
+
+def test_a_rank_collate_is_not_trusted_when_a_judge_run_was_gc_d(home: Path):
+    """Two run_ids and a strongest string used to keep a rank collate
+    whose judge directory was already gone."""
+    mission_dir = home / "missions" / "20260101T000000Z-m"
+    mission_dir.mkdir(parents=True)
+    ids = ("j1-fwd", "j1-rev", "j2-fwd", "j2-rev")
+    for run_id in ids:
+        run_dir = home / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text(json.dumps({"run_id": run_id, "ok": True}))
+    complete = {
+        "collate": {
+            "ok": True,
+            "rank": True,
+            "strongest": "a",
+            "orders": [{"run_id": "j1-fwd"}, {"run_id": "j1-rev"}],
+            "judges": [{"orders": [{"run_id": "j2-fwd"}, {"run_id": "j2-rev"}]}],
+        }
+    }
+    assert _collate_is_trusted(mission_dir, complete) is True
+    (home / "runs" / "j2-rev" / "result.json").unlink()
+    assert _collate_is_trusted(mission_dir, complete) is False

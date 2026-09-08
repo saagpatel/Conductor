@@ -191,6 +191,12 @@ def _scan_missions(
     on this mission recorded one) -- the join `_build_report`'s reviewer
     precision table needs between a disposition's named reviewer lane and
     that lane's vendor, without a second pass over the same file.
+
+    A parked mission (`paused` without an `answer`) and an interrupted
+    mission are unfinished: `ok` is None (neither passed nor failed, the
+    same blank `_cell` prints `n/a` for) and `unfinished` is True. gc and
+    the CLI already treat a pause without an answer as not finished;
+    interrupted is the same question (gc protects its runs as still live).
     """
     join: dict[str, tuple[str, str | None, str | None]] = {}
     meta: dict[str, dict[str, object]] = {}
@@ -222,8 +228,10 @@ def _scan_missions(
         landed_ok = sum(1 for path in land_files if _land_merged(path))
         review_lanes: dict[str, dict[str, object]] = {}
         fix_dispositions: list[object] | None = None
+        unfinished = _mission_unfinished(raw)
         meta[mission] = {
-            "ok": ok if isinstance(ok, bool) else None,
+            "ok": None if unfinished else (ok if isinstance(ok, bool) else None),
+            "unfinished": unfinished,
             "lanes": len(lane_list),
             "salvaged": salvaged,
             "landed": landed,
@@ -292,6 +300,22 @@ def _scan_missions(
                     fix_dispositions = (fix_dispositions or []) + lane_raw["dispositions"]
                     meta[mission]["fix_dispositions"] = fix_dispositions
     return join, meta
+
+
+def _mission_unfinished(raw: dict) -> bool:
+    """A parked or interrupted mission has not finished.
+
+    `run_mission` always writes `result.json` with `ok=False` when it parks
+    (`paused` without an `answer`) or is interrupted. Presence of that file
+    is not finishedness: gc and the CLI exit 4 already treat a pause without
+    an answer as not done. Interrupted is the same question -- gc protects
+    those runs as still live -- so the report does not print either as a
+    finished failed sitting.
+    """
+    paused = raw.get("paused")
+    if isinstance(paused, dict) and "answer" not in paused:
+        return True
+    return raw.get("interrupted") is True
 
 
 def _land_merged(path: Path) -> bool:
@@ -675,6 +699,10 @@ class MissionRow:
     # `landed_ok` and `items` are read from the mission's own directory, over
     # its whole life, so dividing a windowed cost by them is not a rate.
     windowed: bool = False
+    # True when the mission is parked (`paused` without an `answer`) or
+    # interrupted: neither passed nor failed, so `ok` is None and the
+    # vendor/stage totals do not treat its runs as a finished sitting.
+    unfinished: bool = False
 
     def usd_per_item(self) -> Decimal | None:
         """The mission's whole cost over the items it landed: AGENTS.md
@@ -684,7 +712,7 @@ class MissionRow:
         an unknown is reported as unknown, never divided."""
         if not self.landed_ok or not self.items:
             return None
-        if self.unpriced_runs or self.windowed:
+        if self.unpriced_runs or self.windowed or self.unfinished:
             return None
         return self.cost_usd / self.items
 
@@ -702,6 +730,7 @@ class MissionRow:
             "items": self.items,
             "unpriced_runs": self.unpriced_runs,
             "windowed": self.windowed,
+            "unfinished": self.unfinished,
             "usd_per_item": _money(per_item) if per_item is not None else None,
         }
 
@@ -984,7 +1013,29 @@ def _build_report(
     reviewer: dict[str, ReviewerFindingRow] = {}
     missions: dict[str, MissionRow] = {}
 
+    def _unfinished_run(run: Run) -> bool:
+        return (
+            run.mission is not None
+            and mission_meta.get(run.mission, {}).get("unfinished") is True
+        )
+
     for run in rows:
+        if run.mission is not None:
+            mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
+            if run.cost_usd is not None:
+                mission_row.cost_usd += run.cost_usd
+            elif not run.dry_run:
+                # A dry run spent nothing and is not unpriced. Anything else
+                # without a price leaves this mission's cost a lower bound,
+                # and `usd_per_item` refuses to divide a lower bound.
+                mission_row.unpriced_runs += 1
+            if run.kind == "cap":
+                mission_row.capped = True
+        if _unfinished_run(run):
+            # Parked or interrupted: still a missions-table row (ok n/a),
+            # but not a finished sitting in vendor/stage, error kinds, or
+            # reviewer rate.
+            continue
         vendor = _vendor(run.fleet, run.model)
         key = (vendor, run.stage)
         vendor_stage.setdefault(key, VendorStageRow(vendor=vendor, stage=run.stage)).add(run)
@@ -1014,18 +1065,6 @@ def _build_report(
                 if verdict["findings"]:
                     row.with_findings += 1
 
-        if run.mission is not None:
-            mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
-            if run.cost_usd is not None:
-                mission_row.cost_usd += run.cost_usd
-            elif not run.dry_run:
-                # A dry run spent nothing and is not unpriced. Anything else
-                # without a price leaves this mission's cost a lower bound,
-                # and `usd_per_item` refuses to divide a lower bound.
-                mission_row.unpriced_runs += 1
-            if run.kind == "cap":
-                mission_row.capped = True
-
     precision: dict[str, ReviewerPrecisionRow] = {}
     # F15 item 3: a disposition naming a lane that is not a review lane on
     # its own mission (typo, or a lane that never ran as `stage: review`) is
@@ -1046,6 +1085,7 @@ def _build_report(
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
+        mission_row.unfinished = meta.get("unfinished") is True
         mission_row.lanes = meta.get("lanes", 0) if isinstance(meta.get("lanes"), int) else 0
         mission_row.salvaged = (
             meta.get("salvaged", 0) if isinstance(meta.get("salvaged"), int) else 0
@@ -1058,6 +1098,8 @@ def _build_report(
         known = isinstance(items, int) and not isinstance(items, bool)
         mission_row.items = items if known else None
         mission_row.windowed = windowed
+        if mission_row.unfinished:
+            continue
 
         review_lanes = meta.get("review_lanes")
         review_lanes = review_lanes if isinstance(review_lanes, dict) else {}
@@ -1168,6 +1210,7 @@ def _build_report(
         meta.get("fix_dispositions_malformed", 0)
         for name, meta in mission_meta.items()
         if isinstance(meta.get("fix_dispositions_malformed"), int)
+        and not meta.get("unfinished")
         and (not windowed or name in missions)
     )
 
@@ -1179,7 +1222,7 @@ def _build_report(
     mission_rows = sorted(missions.values(), key=lambda r: (-r.cost_usd, r.mission))
     landed = LandedRow()
     for row in mission_rows:
-        if not row.landed_ok:
+        if not row.landed_ok or row.unfinished:
             continue
         landed.missions += 1
         landed.cost_usd += row.cost_usd
@@ -1220,7 +1263,11 @@ def _build_report(
     # not `claude` is not claimed.
     grace: dict[str, object] = {}
     for stage in ("build", "fix"):
-        matches = [r for r in rows if r.fleet == "claude" and r.stage == stage]
+        matches = [
+            r
+            for r in rows
+            if r.fleet == "claude" and r.stage == stage and not _unfinished_run(r)
+        ]
         if not matches:
             cap_losses[stage] = "n/a"
         else:

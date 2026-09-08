@@ -219,6 +219,67 @@ def test_the_same_branch_name_is_still_refused_twice_in_one_repository(repo_a, r
         mission_from_dict(raw, base_dir=tmp_path)
 
 
+def test_the_same_branch_on_fallbacks_into_one_repository_is_refused(repo_a, repo_b, tmp_path):
+    """Primaries in different repos used to pass load; the fallback that
+    actually lands shares the other's repository and the same branch, and
+    the loser failed at rename after its dispatch was paid for."""
+    raw = {
+        "prompt": "SPEC",
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "codex",
+                "mode": "write",
+                "prompt": "A",
+                "cwd": str(repo_a),
+                "branch": "feat/shared",
+                "fallback": [{"fleet": "claude", "cwd": str(repo_b)}],
+            },
+            {
+                "name": "b",
+                "fleet": "cursor",
+                "mode": "write",
+                "prompt": "B",
+                "cwd": str(repo_b),
+                "branch": "feat/shared",
+            },
+        ],
+    }
+    with pytest.raises(MissionInvalid, match="two lanes claim branch"):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_the_same_branch_is_still_allowed_when_fallbacks_stay_in_their_own_repos(
+    repo_a, repo_b, tmp_path
+):
+    """A fallback that inherits its primary's cwd does not newly collide."""
+    raw = {
+        "prompt": "SPEC",
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "codex",
+                "prompt": "A",
+                "cwd": str(repo_a),
+                "branch": "feat/shared",
+                "fallback": [{"fleet": "claude"}],
+            },
+            {
+                "name": "b",
+                "fleet": "cursor",
+                "prompt": "B",
+                "cwd": str(repo_b),
+                "branch": "feat/shared",
+                "fallback": [{"fleet": "antigravity"}],
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    assert len(mission.lanes[0].attempts) == 2
+    assert mission.lanes[0].attempts[1].effective_cwd(mission.cwd) == str(repo_a.resolve())
+    assert mission.lanes[1].attempts[1].effective_cwd(mission.cwd) == str(repo_b.resolve())
+
+
 def test_check_branches_refuses_an_existing_branch_in_the_lanes_own_repository(
     repo_a, repo_b, home, tmp_path
 ):
@@ -256,6 +317,36 @@ def test_resolve_is_refused_at_load_when_sinks_span_more_than_one_cwd(repo_a, re
                 "mode": "write",
                 "prompt": "B",
                 "cwd": str(repo_b),
+                "commit": "feat: b",
+            },
+        ],
+        "resolve": {"fleet": "cursor", "commit": "merge: reconcile"},
+    }
+    with pytest.raises(MissionInvalid, match="resolver never crosses repositories"):
+        mission_from_dict(raw, base_dir=tmp_path)
+
+
+def test_resolve_is_refused_when_a_sink_fallback_names_another_cwd(repo_a, repo_b, tmp_path):
+    """Primaries in one repo used to pass; a fallback into another would
+    have its patch pasted into a resolver dispatched where it never ran."""
+    raw = {
+        "prompt": "SPEC",
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "codex",
+                "mode": "write",
+                "prompt": "A",
+                "cwd": str(repo_a),
+                "commit": "feat: a",
+                "fallback": [{"fleet": "claude", "cwd": str(repo_b)}],
+            },
+            {
+                "name": "b",
+                "fleet": "cursor",
+                "mode": "write",
+                "prompt": "B",
+                "cwd": str(repo_a),
                 "commit": "feat: b",
             },
         ],

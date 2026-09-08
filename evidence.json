@@ -1,0 +1,63 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": [
+        "src/conductor/mission.py",
+        "tests/test_lane_cwd.py"
+      ],
+      "tests": [
+        "tests/test_lane_cwd.py::test_the_same_branch_on_fallbacks_into_one_repository_is_refused",
+        "tests/test_lane_cwd.py::test_the_same_branch_is_still_allowed_when_fallbacks_stay_in_their_own_repos",
+        "tests/test_lane_cwd.py::test_resolve_is_refused_when_a_sink_fallback_names_another_cwd"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11c",
+      "note": "Branch collision and resolve cwd invariants walk every attempt's effective_cwd, not attempts[0]. Newly refused: same branch whose attempt-cwd sets intersect, and resolve whose sink attempts span more than one cwd. No existing test built a fallback with its own cwd."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": [
+        "src/conductor/mission.py",
+        "tests/test_wall_clock.py"
+      ],
+      "tests": [
+        "tests/test_wall_clock.py::test_critical_path_s_counts_previous_attempts_after_a_resume_rerun"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11c",
+      "note": "critical_path_s now sums previous_attempts and attempts, matching the wall-block whole-life comment. The function docstring that said 'final attempt' was the wrong piece of prose."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": [
+        "src/conductor/attempts.py",
+        "src/conductor/mission.py",
+        "tests/test_cross_repo.py"
+      ],
+      "tests": [
+        "tests/test_cross_repo.py::test_a_non_rank_collate_is_not_trusted_when_collated_txt_was_rewritten",
+        "tests/test_cross_repo.py::test_a_rank_collate_is_not_trusted_when_a_judge_run_was_gc_d"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11c",
+      "note": "Closed: non-rank collate digest vs the run's answer, and rank collate requiring live run receipts. Left: GIT_UNRUN still trusts as recorded, because _trusted_lane shares that hole and closing only the auxiliary half would disagree the other way."
+    },
+    {
+      "item": 4,
+      "status": "built",
+      "files": [
+        "src/conductor/report.py",
+        "tests/test_report.py",
+        "tests/test_report_unknowns.py"
+      ],
+      "tests": [
+        "tests/test_report_unknowns.py::test_a_parked_mission_is_neither_ok_nor_failed_and_is_out_of_vendor_totals",
+        "tests/test_report_unknowns.py::test_an_interrupted_mission_is_neither_ok_nor_failed",
+        "tests/test_report_unknowns.py::test_a_pause_that_already_has_an_answer_is_a_finished_sitting"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11c",
+      "note": "Parked (paused without answer) and interrupted missions print ok as n/a, emit ok=null and unfinished=true, and are left out of vendor/stage totals. A pause that already has an answer remains a finished failure."
+    }
+  ]
+}

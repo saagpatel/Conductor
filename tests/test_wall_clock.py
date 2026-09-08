@@ -327,3 +327,21 @@ def test_a_real_mission_carries_occupied_critical_path_and_lead(repo, home, monk
     # identity holds to within one rounding step, not to the bit.
     expected = max(0.0, wall["wall_s"] - wall["occupied_s"] - wall["paused_s"])
     assert abs(wall["lead_s"] - expected) <= 0.15
+
+
+def test_critical_path_s_counts_previous_attempts_after_a_resume_rerun(home):
+    """A resume that reran a lane moves the first paid attempt under
+    `previous_attempts`; the path is this mission's whole life, so that
+    work still lengthens the chain. Weighting only `attempts[-1]` forgot
+    it, and `lead_s` (from the whole-life figures) then disagreed."""
+    lanes = [
+        _lane("build", "20260101T000000Z-build", 100.0),
+        mission_mod.LaneResult(
+            name="review",
+            ok=True,
+            needs=["build"],
+            previous_attempts=[{"run_id": "20260101T001000Z-review-1", "duration_s": 40.0}],
+            attempts=[{"run_id": "20260101T002000Z-review-2", "duration_s": 30.0}],
+        ),
+    ]
+    assert mission_mod._critical_path_seconds(lanes, home) == 170.0

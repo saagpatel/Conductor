@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from test_report import MERGED, _landed_mission, _write_receipt
+from test_report import MERGED, _landed_mission, _write_mission, _write_receipt
 
 from conductor.report import report
 
@@ -279,3 +279,135 @@ def test_a_windowed_report_reports_no_per_item_figure(home: Path):
     assert whole_row.to_dict()["windowed"] is False
     assert whole_row.to_dict()["usd_per_item"] == "2.00"
     assert windowed.landed.to_dict()["usd_per_item"] is None
+
+
+def test_a_parked_mission_is_neither_ok_nor_failed_and_is_out_of_vendor_totals(home: Path):
+    """`run_mission` writes ok=False when it parks; gc and the CLI still
+    say the sitting is waiting. The report used to print a failed row and
+    mix pre-pause runs into vendor/stage as if it had ended. ok is n/a
+    (the same blank as any figure it declines to state); unfinished is
+    the windowed-style flag that explains why."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-done",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-done",
+        cost=2.0,
+    )
+    _write_mission(
+        home,
+        "m-done",
+        name="done",
+        ok=True,
+        lanes=[
+            {
+                "name": "build",
+                "stage": "build",
+                "attempts": [{"run_id": "20260101T000000Z-done"}],
+            }
+        ],
+    )
+    _write_receipt(
+        home,
+        "20260101T000000Z-park",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-park",
+        cost=5.0,
+    )
+    _write_mission(
+        home,
+        "m-park",
+        name="parked",
+        ok=False,
+        lanes=[
+            {
+                "name": "build",
+                "stage": "build",
+                "attempts": [{"run_id": "20260101T000000Z-park"}],
+            }
+        ],
+        paused={"kind": "before", "lane": "build", "question": "continue?"},
+    )
+    rpt = report(home)
+    park = next(r for r in rpt.missions if r.mission == "m-park")
+    done = next(r for r in rpt.missions if r.mission == "m-done")
+    assert park.ok is None
+    assert park.unfinished is True
+    assert park.to_dict()["ok"] is None
+    assert park.to_dict()["unfinished"] is True
+    assert park.cost_usd == 5
+    assert done.ok is True
+    assert done.unfinished is False
+    row = next(r for r in rpt.vendor_stage if r.stage == "build")
+    assert row.runs == 1
+    assert row.cost_usd == 2
+
+
+def test_an_interrupted_mission_is_neither_ok_nor_failed(home: Path):
+    """Interrupted is the same question as parked: gc treats the mission
+    as still live. The report does not print it as a finished failure."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-int",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-int-mission",
+        cost=3.0,
+    )
+    _write_mission(
+        home,
+        "m-int-mission",
+        name="interrupted",
+        ok=False,
+        lanes=[
+            {
+                "name": "build",
+                "stage": "build",
+                "attempts": [{"run_id": "20260101T000000Z-int"}],
+            }
+        ],
+        interrupted=True,
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.missions if r.mission == "m-int-mission")
+    assert row.ok is None
+    assert row.unfinished is True
+    assert rpt.vendor_stage == []
+
+
+def test_a_pause_that_already_has_an_answer_is_a_finished_sitting(home: Path):
+    """The operator already answered (stop). That sitting ended; ok stays
+    the receipt's False, and the run belongs in vendor/stage."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-stop",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-stop",
+        cost=1.0,
+    )
+    _write_mission(
+        home,
+        "m-stop",
+        name="stopped",
+        ok=False,
+        lanes=[
+            {
+                "name": "build",
+                "stage": "build",
+                "attempts": [{"run_id": "20260101T000000Z-stop"}],
+            }
+        ],
+        paused={"kind": "before", "lane": "build", "question": "continue?", "answer": "stop"},
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.missions if r.mission == "m-stop")
+    assert row.ok is False
+    assert row.unfinished is False
+    assert rpt.vendor_stage[0].runs == 1
