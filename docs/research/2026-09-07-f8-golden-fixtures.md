@@ -1,6 +1,6 @@
 # F8: golden fixtures for the Phase E shapes
 
-Date: 2026-09-07. Release 0.56.0. Roadmap item F8 (`docs/ROADMAP-2026-11.md`).
+Date: 2026-09-07. Release 0.56.0. Roadmap item F8 (`docs/archive/roadmaps-closed.md`, Phase F).
 
 ## What was asked
 
