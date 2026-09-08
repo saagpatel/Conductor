@@ -156,7 +156,9 @@ ADVERSARIAL_PROMPT = (
     "1-10. Omit pure style and naming. Change nothing else: no source, no fix, just the test."
     + ADVERSARIAL_GATE_RUN
     + " If nothing meets that bar, change nothing and reply exactly: NO_FINDINGS. Either "
-    "answer is complete. Do not commit; the harness commits."
+    "answer is complete. Put the entire answer in this reply -- what the test proves, or "
+    "NO_FINDINGS; the reply is the only thing the next agent receives. Do not commit; the "
+    "harness commits."
 )
 
 FIX_PROMPT = (
@@ -180,7 +182,8 @@ FIX_PROMPT = (
     "fix; wording for one that only asked for a comment or message change. Write "
     "dispositions.json even when you reply NO_CHANGES -- one entry per item either reviewer "
     "numbered (already, refused, or wording); an empty dispositions array is only correct "
-    "when both reviews said NO_FINDINGS. Keep existing call signatures working."
+    "when there are no items to disposition, not merely when both reviews said "
+    "NO_FINDINGS. Keep existing call signatures working."
     + FIX_GATE_RUN
     + " Do not commit; the harness commits."
 )
@@ -199,8 +202,8 @@ DISPOSITIONS_SCHEMA: dict = {
                 "One entry per item either reviewer numbered: "
                 '{"lane": "review-gemini" or "review-grok", "index": <the item number>, '
                 '"disposition": "fixed", "refused", "already", or "wording", '
-                '"reason": <why>}. An empty array is only correct when both reviews said '
-                "NO_FINDINGS."
+                '"reason": <why>}. An empty array is only correct when there are no items '
+                "to disposition, not merely when both reviews said NO_FINDINGS."
             ),
         }
     },
@@ -233,9 +236,8 @@ def _three_reviewer_wording(text: str) -> str:
 # the adversarial lane writes at most one test, so there is one item, not a
 # numbered review list.
 ADVERSARIAL_DISPOSITION_NOTE = (
-    " An adversarial-only finding (the reviews said NO_FINDINGS; the adversarial "
-    'lane wrote a failing test) is one entry with lane "adversarial" and index 1: '
-    "that lane writes at most one test, so there is one item."
+    " When the adversarial lane wrote a test, that finding is one entry with lane "
+    '"adversarial" and index 1 (that lane writes at most one test, so there is one item).'
 )
 
 
@@ -792,15 +794,31 @@ DELIVERABLE_VALIDATOR_SENTENCE = (
 )
 
 DELIVERABLE_REVIEW_NOTE = (
-    "The build's deliverable is the file `{path}`{validator_clause}. What a machine can "
-    "check is checked; whether the file still says what the spec asked, and nothing the "
-    "spec did not ask, is your question. "
+    "The build's deliverable is the file `{path}`{validator_clause}. {attention}"
+)
+
+DELIVERABLE_REVIEW_CHECKED = (
+    "What a machine can check is checked; whether the file still says what the spec "
+    "asked, and nothing the spec did not ask, is your question. "
+)
+
+DELIVERABLE_REVIEW_UNCHECKED = (
+    "No machine check ran on it; the whole file is your question. "
 )
 
 DELIVERABLE_FIX_SENTENCES = (
     "For each reported item, edit `{path}` to address it and nothing else; the deliverable "
     "is a file, not code, so there is no test to write and this lane runs as a build "
     "lane, not under the reproduce gate. {validator_sentence}"
+)
+
+# True on the fix lane: `shape_a` sets that lane's deliverable to
+# dispositions.json with no `validator` key, so `runner._check_deliverable_validator`
+# runs nothing. `DELIVERABLE_VALIDATOR_SENTENCE` stays on the build lane, where
+# conductor does run the command.
+DELIVERABLE_FIX_VALIDATOR_SENTENCE = (
+    "Run `{validator}` on the file yourself before you finish; conductor does not "
+    "run that command on this lane. "
 )
 
 
@@ -826,18 +844,33 @@ def write_shape_schemas(
     ), write_evidence_schema(base_dir)
 
 
+_CHANGE_END = "</change>\n\n"
+_GEMINI_TRANSITION = "Based on the information above: "
+
+
+def _insert_after_change(prompt: str, insertion: str) -> str:
+    """Insert `insertion` immediately after the `<change>` block.
+
+    Every Shape A review prompt has this marker, then either Gemini's
+    'Based on the information above:' bridge or REVIEW_TAIL. Inserting
+    here puts a note before the transition when the prompt has one, and
+    before the tail when it does not, so the composed text is one
+    paragraph. A missing marker is an AssertionError, not a silent no-op.
+    """
+    assert _CHANGE_END in prompt, "review prompt has no </change> block to hang a note on"
+    rewritten = prompt.replace(_CHANGE_END, _CHANGE_END + insertion, 1)
+    assert insertion in rewritten
+    if _GEMINI_TRANSITION in rewritten:
+        assert rewritten.index(insertion) < rewritten.index(_GEMINI_TRANSITION)
+    return rewritten
+
+
 def review_prompt_with_evidence(prompt: str) -> str:
     """A Shape A review prompt with the build's evidence map after its
     `<change>` block and the note on how to read it ahead of the review
     tail. Only `shape_a` uses this: the salvage follow-on has no build lane
     and so no map."""
-    change_end = "</change>\n\n"
-    assert change_end in prompt
-    return prompt.replace(change_end, change_end + EVIDENCE_BLOCK, 1).replace(
-        "Report anything that could cause incorrect behavior",
-        EVIDENCE_REVIEW_NOTE + "Report anything that could cause incorrect behavior",
-        1,
-    )
+    return _insert_after_change(prompt, EVIDENCE_BLOCK + EVIDENCE_REVIEW_NOTE)
 
 
 def validator_for_prompt(validator: str, path: str) -> str:
@@ -853,13 +886,16 @@ def review_prompt_with_deliverable(prompt: str, path: str, validator: str) -> st
     evidence block, since the build lane declared the file instead of a
     map."""
     shown = validator_for_prompt(validator, path) if validator else ""
-    clause = f", and conductor's validator `{shown}` passed on it" if shown else ""
-    note = DELIVERABLE_REVIEW_NOTE.format(path=path, validator_clause=clause)
-    return prompt.replace(
-        "Report anything that could cause incorrect behavior",
-        note + "Report anything that could cause incorrect behavior",
-        1,
+    if shown:
+        clause = f", and conductor's validator `{shown}` passed on it"
+        attention = DELIVERABLE_REVIEW_CHECKED
+    else:
+        clause = ""
+        attention = DELIVERABLE_REVIEW_UNCHECKED
+    note = DELIVERABLE_REVIEW_NOTE.format(
+        path=path, validator_clause=clause, attention=attention
     )
+    return _insert_after_change(prompt, note)
 
 
 def fix_prompt_for_deliverable(prompt: str, path: str, validator: str) -> str:
@@ -877,7 +913,7 @@ def fix_prompt_for_deliverable(prompt: str, path: str, validator: str) -> str:
     )
     assert old in prompt
     shown = validator_for_prompt(validator, path) if validator else ""
-    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=shown) if shown else ""
+    sentence = DELIVERABLE_FIX_VALIDATOR_SENTENCE.format(validator=shown) if shown else ""
     rewritten = prompt.replace(
         old, DELIVERABLE_FIX_SENTENCES.format(path=path, validator_sentence=sentence), 1
     )
@@ -971,9 +1007,10 @@ def _prefix(repo: Path, about: str | None) -> str:
         "bytes: the diff, the gate, the receipts. Read before you write; cite file and line "
         "for anything you report. You are operating autonomously: nobody is watching in real "
         "time and nobody can answer a question mid-task, so a question blocks the work; make "
-        "the routine call, state it in one line, and keep going. Keep changes and tests to "
-        "what the task asks for: no unrequested fixes, no surplus test files. Before ending, "
-        "check your last paragraph: if it is a plan or a promise, do that work now."
+        "the routine call, state it in one line, and keep going. Keep any changes and tests "
+        "to what the prompt below asks for: no unrequested fixes, no surplus test files. "
+        "Before ending, if the prompt below asked you to write, check your last paragraph: "
+        "if it is a plan or a promise, do that work now."
     )
 
 
