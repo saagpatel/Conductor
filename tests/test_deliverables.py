@@ -935,6 +935,53 @@ def test_a_teardown_that_rewrites_the_deliverable_fails_the_run(repo, home, fake
     assert not (Path(result.run_dir) / "deliverable").exists()
 
 
+def test_a_teardown_that_rewrites_the_deliverable_takes_the_commit_back(
+    repo, home, fake_fleet, git_out
+):
+    """Teardown rewriting the deliverable used to set error + cleanup_required
+    while leaving commit.committed true. `_capture_deliverable`'s own
+    DELIVERABLE_CHANGED path uncommits; teardown must agree."""
+    base = git_out(repo, "rev-parse", "HEAD")
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+    result = dispatch(
+        spec_for(
+            repo,
+            mode="write",
+            deliverable={"path": "report.txt"},
+            teardown="echo tampered > report.txt",
+        ),
+        home=home,
+        commit_message="feat: report",
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.cleanup_required is True
+    assert result.commit["committed"] is False
+    assert git_out(repo, "rev-parse", "HEAD") == base
+    assert "deliverable changed after the gate ran" in result.commit["reason"]
+
+
+def test_an_uncommit_after_the_judged_capture_receipts_the_surviving_tip(
+    repo, home, fake_fleet, git_out
+):
+    """`after = GitState.capture` runs before `_capture_deliverable`. A later
+    uncommit must not leave the undone sha as tip_commit."""
+    base = git_out(repo, "rev-parse", "HEAD")
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}),
+        home=home,
+        commit_message="feat: report",
+        test_command="echo tampered > report.txt",
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.commit["committed"] is False
+    assert git_out(repo, "rev-parse", "HEAD") == base
+    assert result.tip_commit == base
+    assert result.base_commit == base
+
+
 # --- {{lanes.<name>.deliverable}} template (item 2) --------------------------
 
 
