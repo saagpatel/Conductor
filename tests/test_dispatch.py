@@ -505,6 +505,52 @@ def test_a_crash_after_the_spend_is_a_receipt_with_the_cost_so_far(
     assert "unhashable" in (Path(result.run_dir) / "parse-error.txt").read_text()
 
 
+def test_a_keyboardinterrupt_after_the_spend_still_writes_a_receipt(
+    repo, home, fake_fleet, monkeypatch
+):
+    """BaseException after a paid run used to release the worktree and
+    re-raise with no receipt. The spend must still be on disk, then the
+    interrupt still propagates."""
+    fake_fleet(["sh", "-c", "echo work > new.txt"])
+
+    def boom(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_mod, "parse_output", boom)
+    with pytest.raises(KeyboardInterrupt):
+        dispatch(spec_for(repo, mode="write"), home=home)
+
+    runs = list((home / "runs").iterdir())
+    assert len(runs) == 1
+    receipt = json.loads((runs[0] / "result.json").read_text())
+    assert receipt["ok"] is False
+    assert receipt["error"].startswith("parse failed: KeyboardInterrupt")
+    assert "KeyboardInterrupt" in (runs[0] / "parse-error.txt").read_text()
+
+
+def test_a_keyboardinterrupt_during_setup_releases_the_worktree(
+    repo, home, fake_fleet, monkeypatch
+):
+    """Isolation used to be created before the only cleanup wrappers, so a
+    KeyboardInterrupt during setup leaked the worktree."""
+    fake_fleet(["sh", "-c", "echo spawned > spawned.txt"])
+
+    def boom(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner_mod, "run_tests", boom)
+    with pytest.raises(KeyboardInterrupt):
+        dispatch(
+            spec_for(repo, mode="write", setup="true"),
+            home=home,
+            isolate=True,
+        )
+
+    leftover = list((home / "worktrees").iterdir()) if (home / "worktrees").exists() else []
+    assert leftover == []
+    assert not (repo / "spawned.txt").exists()
+
+
 def test_a_deliverable_schema_that_is_a_json_array_is_a_failed_check(repo, home, fake_fleet):
     """D9: `_schema_mismatch` reads `required` and `properties` off the
     schema. A top-level array parses as JSON and then raised on `.get`."""
