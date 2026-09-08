@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from . import attest, prices, worktrees
 from . import ports as ports_mod
 from .breakers import Breaker
 from .budget import POLL_S, Budget, Watcher
-from .errors import PARSE_FAILURE_PREFIX, error_kind
+from .errors import PARSE_FAILURE_PREFIX, capped, error_kind
 from .fleets import (
     FLEETS,
     TAINT_AGY_DENIED_TOOLS,
@@ -426,7 +427,14 @@ class Result:
             "cache_read_tokens": (self.usage or {}).get("cache_read_tokens"),
             "cache_write_tokens": (self.usage or {}).get("cache_write_tokens"),
             "cap_usd": (self.budget or {}).get("cap_usd"),
-            "over_cap": bool((self.budget or {}).get("exceeded")),
+            # `budget["exceeded"]` is set for any kill the watcher saw, a
+            # breaker trip included, so reading it straight put `over_cap:
+            # true` on runs that never approached their cap: a lane killed
+            # at 91 tool calls reported over_cap against a $2.50 cap it had
+            # spent $0.48 of (2026-09-08). `error_kind` was taught this
+            # distinction once already; the receipt field it is derived from
+            # was left behind, so both now read the same `capped()`.
+            "over_cap": capped(self),
             "grace_used": (self.budget or {}).get("grace_used"),
             "tool_calls": (self.breaker or {}).get("tool_calls", 0),
             "breaker": (self.breaker or {}).get("tripped"),
@@ -537,6 +545,17 @@ def _schema_mismatch(data: object, schema: dict) -> str | None:
             detail = _schema_mismatch(element, items)
             if detail is not None:
                 return f"item {index}: {detail}"
+        return None
+    declared = schema.get("type")
+    if isinstance(declared, str) and declared != "object":
+        # A schema that declares a primitive is checked as that primitive.
+        # The array branch above recurses with `items`, and an `items` of
+        # `{"type": "string"}` used to fall through to the object check
+        # below, so every list of strings or numbers came back as
+        # "item 0: top level is not a JSON object" (2026-09-08 review).
+        checker = _SCHEMA_TYPE_CHECKS.get(declared)
+        if checker is not None and not checker(data):
+            return f"value must be of type {declared}"
         return None
     if not isinstance(data, dict):
         return "top level is not a JSON object"
@@ -831,8 +850,17 @@ def _validator_command(command: str, path: str) -> str:
     """F22: the literal `{path}` in a declared `deliverable.validator`,
     replaced with the bytes' actual location -- the deliverable's
     repo-relative path for the after run, a temporary file's absolute path
-    for the before run. A command without `{path}` is unchanged."""
-    return command.replace("{path}", path)
+    for the before run. A command without `{path}` is unchanged.
+
+    The substituted value is shell-quoted: the command runs under
+    `shell=True`, so a path holding a space, a quote, or a metacharacter
+    would otherwise be split across arguments or read as syntax. That fails
+    the validator for a reason that has nothing to do with the bytes, and
+    `_validator_ran_and_failed` counts any non-zero exit as evidence the
+    base was broken, so an unquoted path could manufacture a `reproduced`
+    verdict out of a shell error (W2 was this same defect in the taint hook
+    command; 2026-09-08 review)."""
+    return command.replace("{path}", shlex.quote(path))
 
 
 def _validator_passed(run: dict | None) -> bool:
@@ -1724,7 +1752,15 @@ def _reproduce_receipt(
     deliverable_only = False
     if spec.deliverable and before.head:
         changed = changed_paths_since(spec.cwd, before.head)
-        deliverable_only = changed == [str(spec.deliverable["path"])]
+        # `changed_paths_since` names paths from the repository toplevel
+        # (git diff and git status both do), while the deliverable is
+        # declared relative to the lane's cwd. `_read_deliverable_only`
+        # already bridges that with `_repo_relative`; this comparison did
+        # not, so a lane whose cwd is a subdirectory of the repository never
+        # matched and every document fix lane there fell through to the
+        # transplant path and failed with "changed no tests" (2026-09-08
+        # review).
+        deliverable_only = changed == [_repo_relative(spec.cwd, str(spec.deliverable["path"]))]
     # F22: checked ahead of the F19 skip below, which the same
     # `deliverable_only` condition would otherwise read as "nothing to
     # reproduce" whether or not a declared validator already spoke. A fix
@@ -2894,8 +2930,12 @@ def dispatch(
             # E1's check counts as a gate too: a missing, empty, unparsable,
             # or schema-failing deliverable sank `ok` but left the commit on
             # the branch (found live 2026-09-07, a schema mismatch with a
-            # committed sha on the same receipt), while a validator
-            # `rejected` had withheld it through `error` all along.
+            # committed sha on the same receipt). A validator `rejected`
+            # arrives here the same way: it sinks `ok` in
+            # `_check_deliverable_validator` and returns no `error`, so this
+            # branch, not `error`, is what keeps its commit off the branch.
+            # (An earlier comment here claimed `error` withheld it; it does
+            # not, and the 2026-09-08 review was right to call that out.)
             commit = uncommit(spec.cwd, commit, before.head)
 
         if forbid_touched:
@@ -2968,8 +3008,24 @@ def dispatch(
         deliverable_path, deliverable_change = _capture_deliverable(
             spec.cwd, deliverable_state, deliverable_sha, run_dir
         )
-        if deliverable_change is not None and error is None:
-            error = deliverable_change
+        if deliverable_change is not None:
+            if error is None:
+                error = deliverable_change
+            if commit and commit.committed:
+                # Every other way this dispatch can fail takes its commit
+                # back off the branch. This one runs after those checks, so
+                # a gate command that rewrote the deliverable failed the run
+                # and still left the commit standing (2026-09-08 review).
+                # Restate the descriptive counts from the tree the undo
+                # leaves, the same way the teardown drift branch below does.
+                commit = uncommit(spec.cwd, commit, before.head)
+                git_verdict.notes.append(commit.reason)
+                restated = compare(spec.cwd, before, GitState.capture(spec.cwd))
+                git_verdict.commits_added = restated.commits_added
+                git_verdict.files_changed = restated.files_changed
+                git_verdict.dirty_delta = restated.dirty_delta
+                git_verdict.branch_after = restated.branch_after
+                git_verdict.branch_moved = restated.branch_moved
 
         diff_path: str | None = None
         if git_verdict.checked and not git_verdict.no_op and before.head:
@@ -3058,14 +3114,22 @@ def dispatch(
                 git_verdict.dirty_delta = restated.dirty_delta
                 git_verdict.branch_after = restated.branch_after
                 git_verdict.branch_moved = restated.branch_moved
-                if deliverable_path is not None and deliverable_state is not None:
-                    path = deliverable_state["path"]
-                    if _deliverable_sha256(spec.cwd, path) != deliverable_sha:
-                        Path(deliverable_path).unlink(missing_ok=True)
-                        deliverable_path = None
-                        deliverable_state.pop("sha256", None)
-                        if error is None:
-                            error = f"{DELIVERABLE_CHANGED}: {path}"
+            # Outside the drift branch on purpose. `_teardown_drift` reads
+            # git's own status, so a deliverable that git does not track and
+            # `.gitignore` excludes never shows up as drift; nesting this
+            # check inside it meant teardown could rewrite exactly that
+            # deliverable and the captured bytes would silently stop
+            # describing the file left behind (2026-09-08 review). The sha
+            # comparison is conductor's own and needs no help from git.
+            if deliverable_path is not None and deliverable_state is not None:
+                path = deliverable_state["path"]
+                if _deliverable_sha256(spec.cwd, path) != deliverable_sha:
+                    cleanup_required = True
+                    Path(deliverable_path).unlink(missing_ok=True)
+                    deliverable_path = None
+                    deliverable_state.pop("sha256", None)
+                    if error is None:
+                        error = f"{DELIVERABLE_CHANGED}: {path}"
     except Exception as exc:  # noqa: BLE001 - D9 boundary, re-raised below
         ports_mod.release(base, claimed_ports)
         if include_exclude_file is not None:

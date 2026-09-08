@@ -125,7 +125,7 @@ def _is_refusal(fleet: str, text: str, status: str | None) -> bool:
     )
 
 
-def _capped(result: Result) -> bool:
+def capped(result: Result) -> bool:
     """True only for a genuine cap verdict, not merely a shared `killed` flag.
 
     `budget.settle()` (budget.py) sets `exceeded=True` for *any* kill the
@@ -140,7 +140,14 @@ def _capped(result: Result) -> bool:
     if not budget:
         return False
     if budget.get("unpriced"):
-        return True
+        # An unpriced run cannot be shown to have stayed under its cap, so
+        # `cap` is the safe reading -- unless conductor already watched
+        # something else end the run. A timeout kill and a breaker trip are
+        # both its own observations, and naming either one `cap` puts the
+        # wrong cause on the receipt: a Grok read lane killed at its 600s
+        # timeout came back kind `cap` purely because Cursor prices
+        # post-hoc (2026-09-08). Same reasoning D9 applies to `parse`.
+        return not (result.timed_out or (result.breaker or {}).get("tripped"))
     if not budget.get("exceeded"):
         return False
     if result.fleet_status == "error_max_budget_usd":
@@ -225,12 +232,12 @@ def error_kind(result: Result) -> str | None:
     if result.cancelled:
         return "cancelled"
     # D9: checked ahead of the cap because a run whose output could not be
-    # read comes back with no priced usage, which `_capped` reads as an
+    # read comes back with no priced usage, which `capped` reads as an
     # unenforced cap. What actually ended this run is the parse, and the
     # receipt exists only because conductor wrote it after the fact.
     if (result.error or "").startswith(PARSE_FAILURE_PREFIX):
         return "parse"
-    if _capped(result):
+    if capped(result):
         return "cap"
     if (result.breaker or {}).get("tripped"):
         return "breaker"
