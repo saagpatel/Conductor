@@ -117,6 +117,11 @@ def test_a_land_over_an_ungated_merge_an_earlier_land_left_is_refused(
         land(mission_id, lane, home=home, checkout=str(repo))
 
     assert merge_sha[:12] in str(caught.value)
+    # This path has a failed receipt to quote, so the message says what the
+    # receipt says. The no-receipt path (an interrupt during the gate, or a
+    # merge made by hand) gets the other sentence; see
+    # `test_an_interrupt_during_the_gate_does_not_green_the_next_land`.
+    assert "failed its checks" in str(caught.value)
     # The refusal is receipted like every other one.
     assert "ungated merge" in _land_receipt(home, mission_id, lane)["refused"]
 
@@ -192,6 +197,10 @@ def test_an_interrupt_during_the_gate_does_not_green_the_next_land(
     with pytest.raises(LandInvalid, match="ungated merge") as caught:
         land(mission_id, lane, home=home, checkout=str(repo))
     assert git_out(repo, "rev-parse", "HEAD")[:12] in str(caught.value)
+    # No receipt exists, so nothing "failed its checks": saying it did would
+    # be a claim conductor cannot support from anything on disk.
+    assert "no completed land receipt covers it" in str(caught.value)
+    assert "failed its checks" not in str(caught.value)
 
 
 @pytest.mark.parametrize("lane", ["../escape", "a/b", "..", "", "-leading-dash"])

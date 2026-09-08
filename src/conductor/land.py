@@ -195,8 +195,37 @@ def _ungated_merge(
     if failed_merge is not None:
         return failed_merge
     if not gated:
+        # No receipt at all, so nothing here "failed its checks": the land
+        # died between the merge and the receipt, or the merge was made by
+        # hand. Same verdict, different sentence -- see `_ungated_reason`.
         return head or git_run(root, "rev-parse", "HEAD").stdout.strip() or None
     return None
+
+
+def _ungated_reason(home: Path, mission_id: str, lane: str, sha: str) -> str:
+    """What to tell the operator about an ungated merge already in HEAD.
+
+    Two ways to get here and they are not the same story. A land that ran,
+    failed a check, and could not reset says so on its own receipt. A land
+    that died before writing any receipt -- or a merge nobody made through
+    conductor at all -- leaves no receipt to quote, and claiming it "failed
+    its checks" would be a receipt conductor cannot support.
+    """
+    land_dir = home / "missions" / mission_id / "land"
+    for path in _lane_receipt_paths(land_dir, lane):
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, dict) and raw.get("ok") is False and raw.get("merge_sha") == sha:
+            return (
+                f"an earlier land of lane '{lane}' failed its checks and left merge "
+                f"{sha[:12]} in the checkout"
+            )
+    return (
+        f"lane '{lane}' is already merged at {sha[:12]}, but no completed land "
+        "receipt covers it: its gate never finished, or it was merged by hand"
+    )
 
 
 def _mission_test(mission_raw: dict) -> str | None:
@@ -556,9 +585,8 @@ def _land(
         ungated = _ungated_merge(home, mission_id, lane, root, head=head)
         if ungated is not None:
             raise LandInvalid(
-                f"an earlier land of lane '{lane}' failed its checks and left merge "
-                f"{ungated[:12]} in the checkout: this branch holds an ungated merge, "
-                "so undo it by hand before landing again"
+                f"{_ungated_reason(home, mission_id, lane, ungated)}: this branch "
+                "holds an ungated merge, so undo it by hand before landing again"
             )
         return LandResult(
             mission=mission_id,
