@@ -266,10 +266,8 @@ def test_a_trailing_non_verdict_object_does_not_displace_the_verdict():
     metadata or usage blob printed after the judgment was parsed as the
     judgment. The last VERDICT-SHAPED object wins now.
 
-    A trailing object that is itself verdict-shaped -- a filled-in example
-    pasted under the real answer -- is still read as the answer, and cannot be
-    told apart from one by shape alone. That one is an open question for the
-    operator, not something to guess at here.
+    A trailing object that is itself verdict-shaped and DIFFERENT is refused
+    outright; see the two tests below.
     """
     from conductor.verdicts import Criterion, parse_verdict
 
@@ -286,6 +284,59 @@ def test_a_trailing_non_verdict_object_does_not_displace_the_verdict():
     assert verdict.passed is False
     assert verdict.invalid is None
     assert verdict.summary == "a is broken"
+
+
+def test_two_differing_verdict_objects_are_refused_rather_than_picked_between():
+    """A model that answers and then pastes a filled-in example writes two
+    verdict-shaped objects. Neither "first wins" nor "last wins" is a rule,
+    only a coin flip, so conductor refuses and says why."""
+    from conductor.verdicts import Criterion, parse_verdict
+
+    criteria = [Criterion("a", "Is a satisfied?")]
+    answer = (
+        '{"verdict":"fail","criteria":[{"id":"a","ok":false,"evidence":"x.py:1"}],'
+        '"summary":"a is broken"}\n\n'
+        "For reference, a passing answer looks like:\n"
+        '{"verdict":"pass","criteria":[{"id":"a","ok":true,"evidence":"x.py:1"}],'
+        '"summary":"all good"}\n'
+    )
+
+    verdict = parse_verdict(answer, criteria)
+
+    assert verdict.invalid == (
+        "the answer carries 2 different verdict objects; "
+        "conductor cannot tell which is the judgment"
+    )
+    assert verdict.passed is False
+
+
+def test_an_answer_that_repeats_one_identical_verdict_object_still_parses():
+    """The refusal is about disagreement, not repetition: a model that echoes
+    its own answer verbatim has said one thing, and a paid judgment is not
+    thrown away for it."""
+    from conductor.verdicts import Criterion, parse_verdict
+
+    criteria = [Criterion("a", "Is a satisfied?")]
+    one = (
+        '{"verdict":"pass","criteria":[{"id":"a","ok":true,"evidence":"x.py:1"}],'
+        '"summary":"a holds"}'
+    )
+    answer = f"Here is my verdict:\n{one}\n\nRestating it:\n{one}\n"
+
+    verdict = parse_verdict(answer, criteria)
+
+    assert verdict.invalid is None
+    assert verdict.passed is True
+    assert verdict.summary == "a holds"
+
+
+def test_the_checklist_contract_forbids_a_second_copy_of_the_answer():
+    """The refusal above only helps if the prompt asked for one object."""
+    from conductor.verdicts import Criterion, checklist_contract
+
+    contract = checklist_contract([Criterion("a", "Is a satisfied?")])
+
+    assert "no second copy of the object" in contract
 
 
 def test_an_answer_whose_only_object_is_malformed_is_still_reported_malformed():
