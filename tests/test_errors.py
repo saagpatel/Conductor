@@ -21,7 +21,7 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.cli import main
-from conductor.errors import KINDS, _own_check_kind, error_kind
+from conductor.errors import KINDS, _own_check_kind, capped, error_kind
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import Result, dispatch
@@ -242,6 +242,46 @@ def test_a_genuine_cap_kill_is_still_cap_even_with_a_breaker_dict_present():
         budget={"exceeded": True, "cap_usd": 1.0, "observed_usd": 5.0},
         error="over budget ($5.00 > $1.00); process group killed",
     )
+    assert error_kind(result) == "cap"
+
+
+def test_a_breaker_kill_inside_the_grace_band_is_breaker_not_cap():
+    """`capped()` must use the same ceiling `Budget.settle` does. Spend
+    inside the grace band is not over budget, so a breaker kill there is
+    `breaker` -- `exceeded` is true for any kill, and comparing against
+    `cap_usd` alone used to name it `cap` before the no-breaker fallback
+    could run."""
+    result = _result(
+        breaker={"tripped": "stalled: no output for 2s"},
+        budget={
+            "exceeded": True,
+            "cap_usd": 1.0,
+            "grace_usd": 0.25,
+            "observed_usd": 1.10,
+            "grace_used": 0.10,
+        },
+        error="stalled: no output for 2s; process group killed",
+    )
+    assert capped(result) is False
+    assert error_kind(result) == "breaker"
+
+
+def test_a_spend_past_the_grace_ceiling_is_still_cap_even_with_a_breaker():
+    """The grace-band comparison must not swallow a real over-ceiling cap
+    kill: observed past cap+grace still wins over breaker, matching
+    `test_a_genuine_cap_kill_is_still_cap_even_with_a_breaker_dict_present`."""
+    result = _result(
+        breaker={"tripped": "stalled: no output for 2s"},
+        budget={
+            "exceeded": True,
+            "cap_usd": 1.0,
+            "grace_usd": 0.25,
+            "observed_usd": 2.0,
+            "grace_used": 0.25,
+        },
+        error="over budget ($2.00 > $1.25); process group killed",
+    )
+    assert capped(result) is True
     assert error_kind(result) == "cap"
 
 

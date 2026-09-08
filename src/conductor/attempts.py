@@ -62,6 +62,10 @@ from .verify import GIT_UNRUN
 if TYPE_CHECKING:
     from .mission import Lane, LaneResult, Mission
 
+# Sentinel so Attempt.spec(cap_grace_usd=None) can clear the band (the last-
+# dollars tightening) rather than meaning "use the attempt's own grace".
+_NOT_GIVEN = object()
+
 # Fields an attempt may set, in the order they cascade mission -> lane -> attempt.
 _INHERITED = (
     "fleet",
@@ -179,12 +183,15 @@ class Attempt:
         resume: str | None = None,
         stage: str | None = None,
         taint: bool = False,
+        cap_grace_usd: float | None | object = _NOT_GIVEN,
     ) -> Spec:
         """The dispatch; `cap_usd` overrides the attempt's own (the mission
-        ledger passes what it has left), `prompt` the rendered template,
-        `stage` the lane's pipeline stage (item 4's reproduce gate reads it
-        off the Spec, not the mission), and `taint` the lane's computed
-        (not this attempt's own) taint state (D2).
+        ledger passes what it has left), `cap_grace_usd` the attempt's own
+        band (pass `None` to drop it when remaining cannot cover cap plus
+        grace), `prompt` the rendered template, `stage` the lane's pipeline
+        stage (item 4's reproduce gate reads it off the Spec, not the
+        mission), and `taint` the lane's computed (not this attempt's own)
+        taint state (D2).
 
         E6: a script attempt has no stream for a breaker to read and no
         tool surface for taint to deny, and never carries a dollar cap (a
@@ -194,6 +201,7 @@ class Attempt:
         to whatever the caller happened to pass in.
         """
         script = self.fleet == "script"
+        grace = self.cap_grace_usd if cap_grace_usd is _NOT_GIVEN else cap_grace_usd
         return Spec(
             fleet=self.fleet,
             prompt=self.prompt if prompt is None else prompt,
@@ -210,7 +218,7 @@ class Attempt:
             verdict=self.verdict,
             resume=resume,
             cap_usd=None if script else (self.cap_usd if cap_usd is None else cap_usd),
-            cap_grace_usd=self.cap_grace_usd,
+            cap_grace_usd=None if script else grace,
             test_policy=self.test_policy,
             test_surface=self.test_surface,
             stage=stage,
@@ -898,17 +906,66 @@ def _salvage_previous_lane(lane: Lane, raw: dict) -> LaneResult:
         return mission_mod.LaneResult(name=lane.name, ok=False, previous_attempts=attempts)
 
 
+def _run_receipts_for_lane(
+    base: Path, mission_id: str, lane_name: str
+) -> list[tuple[str, dict]]:
+    """Run receipts on disk that name this mission and lane.
+
+    The lane receipt is written only when a lane ends, so a hard-killed
+    mission can leave `runs/<id>/result.json` with no `lanes/<name>.json`.
+    Those runs are the authority for spend; dry-run receipts are skipped
+    (they spawned nothing).
+    """
+    from . import mission as mission_mod
+
+    runs_dir = base / "runs"
+    if not runs_dir.is_dir():
+        return []
+    found: list[tuple[str, dict]] = []
+    for child in sorted(runs_dir.iterdir(), key=lambda path: path.name):
+        if not child.is_dir():
+            continue
+        receipt = mission_mod._json_object(child / "result.json")
+        if receipt is None or receipt.get("dry_run") is True:
+            continue
+        if receipt.get("mission") == mission_id and receipt.get("lane") == lane_name:
+            run_id = receipt.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                run_id = child.name
+            found.append((run_id, receipt))
+    return found
+
+
 def _read_previous_lanes(
-    mission_dir: Path, mission: Mission
+    mission_dir: Path, mission: Mission, *, base: Path | None = None
 ) -> tuple[dict[str, LaneResult], list[str], int]:
     from . import mission as mission_mod
 
     previous: dict[str, LaneResult] = {}
     notes: list[str] = []
     accounting_unknown = 0
+    mission_id = mission_dir.name
     for lane in mission.lanes:
         raw = mission_mod._json_object(mission_dir / "lanes" / f"{lane.name}.json")
         if raw is None:
+            # Absence of a lane receipt is not itself unverifiable: the lane
+            # may never have started. It is only a gap when a run on disk
+            # says this lane already spent.
+            if base is None:
+                continue
+            recovered = _run_receipts_for_lane(base, mission_id, lane.name)
+            if not recovered:
+                continue
+            run_ids = list(dict.fromkeys(run_id for run_id, _receipt in recovered))
+            previous[lane.name] = mission_mod.LaneResult(
+                name=lane.name,
+                ok=False,
+                attempts=[{"run_id": run_id} for run_id in run_ids],
+            )
+            notes.append(
+                f"lane '{lane.name}': no lane receipt; recovered {len(run_ids)} "
+                f"run(s) from disk for spend"
+            )
             continue
         try:
             previous[lane.name] = mission_mod.LaneResult.from_dict(raw)

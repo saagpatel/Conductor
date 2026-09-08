@@ -52,7 +52,14 @@ from .fleets import (
     taint_disallowed_tools,
     taint_hook_files,
 )
-from .outputs import INCOMPLETE, FleetOutput, agy_init_event, claude_init_event, json_line
+from .outputs import (
+    INCOMPLETE,
+    FleetOutput,
+    Usage,
+    agy_init_event,
+    claude_init_event,
+    json_line,
+)
 from .outputs import parse as parse_output
 from .paths import conductor_home
 from .surface import Surface, missing_surface, test_surface
@@ -2541,6 +2548,7 @@ def dispatch(
     # checking the deliverable, settling the budget -- is conductor reading a
     # fleet's output, and a crash there must still leave a receipt.
     post_wait = False
+    usage: Usage | None = None
     try:
         before = GitState.capture(spec.cwd)
         # Settings digest (third drill pass, 2026-09-07):
@@ -2705,7 +2713,11 @@ def dispatch(
 
         # The fleet's own envelope first: a fleet that says it failed (on any
         # exit code) must not have its work committed as if it had succeeded.
+        # Usage is priced here, before teardown and the rest of the
+        # post-wait work, so a crash in those still has the fleet's own
+        # figure to put on the receipt.
         output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+        usage = _priced_usage(output.usage, watcher, model_id)
         resumed: dict | None = None
         resume_note: str | None = None
         if spec.resume is not None:
@@ -3230,24 +3242,6 @@ def dispatch(
             answer_file.write_text(answer)
             answer_path = str(answer_file)
 
-        usage = output.usage
-        if usage is None and watcher is not None:
-            # The stream ended without a final figure (conductor killed the run,
-            # or the fleet crashed); the watcher's last reading is the only
-            # price this run will get.
-            usage = watcher.poll()
-        if usage is not None and usage.cost_usd is None:
-            estimated = prices.estimate(
-                model_id,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_write_tokens=usage.cache_write_tokens,
-            )
-            if estimated is not None:
-                usage.cost_usd = estimated
-                usage.cost_basis = "estimated"
-                usage.price = prices.basis(model_id)
         usage_dict = usage.to_dict() if usage is not None else None
         if budget is not None:
             budget.settle(
@@ -3378,6 +3372,7 @@ def dispatch(
             timed_out=timed_out,
             duration=duration,
             watcher=watcher,
+            usage=usage,
             budget=budget,
             iso=iso,
             lane_env=_lane_env(),
@@ -3411,6 +3406,7 @@ def dispatch(
                     timed_out=timed_out,
                     duration=duration,
                     watcher=watcher,
+                    usage=usage,
                     budget=budget,
                     iso=iso,
                     lane_env=_lane_env(),
@@ -3795,6 +3791,35 @@ def _refused_result(
     )
 
 
+def _priced_usage(
+    usage: Usage | None, watcher: Watcher | None, model_id: str
+) -> Usage | None:
+    """The price a receipt will carry: the fleet's own figure, else the
+    watcher's last reading, else an estimate from tokens.
+
+    Same order as the successful path, so a crash receipt names the same
+    dollars the successful receipt would have. The watcher is only consulted
+    when the fleet reported no usage object at all -- an existing object
+    with tokens but no dollars is estimated from those tokens, never
+    replaced by a watcher estimate.
+    """
+    if usage is None and watcher is not None:
+        usage = watcher.poll()
+    if usage is not None and usage.cost_usd is None:
+        estimated = prices.estimate(
+            model_id,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
+        if estimated is not None:
+            usage.cost_usd = estimated
+            usage.cost_basis = "estimated"
+            usage.price = prices.basis(model_id)
+    return usage
+
+
 def _parse_failure_result(
     exc: BaseException,
     *,
@@ -3816,17 +3841,19 @@ def _parse_failure_result(
     mission: str | None,
     fleet_version: str | None,
     prompt_versions: dict[str, str] | None,
+    usage: Usage | None = None,
 ) -> Result:
     """D9: a receipt for a run that was paid for and then failed while its
     own output was being read.
 
-    The price is whatever is still recoverable: the watcher's last reading,
-    priced from the table when the fleet reported no figure. When there is
-    none, the receipt says so in as many words rather than reading as free --
-    a missing price is a gap in the ledger, never $0.00 (prices.estimate).
-    The full traceback goes to `parse-error.txt` beside the transcript; the
-    one-line reason goes on the receipt, where `errors.error_kind` reads it
-    as `parse`.
+    The price is whatever is still recoverable: the already-parsed usage
+    first (the fleet's own reported cost, or tokens waiting to be
+    estimated), then the watcher's last reading, then an estimate from
+    tokens. When there is none, the receipt says so in as many words rather
+    than reading as free -- a missing price is a gap in the ledger, never
+    $0.00 (prices.estimate). The full traceback goes to `parse-error.txt`
+    beside the transcript; the one-line reason goes on the receipt, where
+    `errors.error_kind` reads it as `parse`.
     """
     error = f"{PARSE_FAILURE_PREFIX}{type(exc).__name__}: {exc}"
     try:
@@ -3835,19 +3862,7 @@ def _parse_failure_result(
         )
     except OSError:
         pass
-    usage = watcher.poll() if watcher is not None else None
-    if usage is not None and usage.cost_usd is None:
-        estimated = prices.estimate(
-            model_id,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-        )
-        if estimated is not None:
-            usage.cost_usd = estimated
-            usage.cost_basis = "estimated"
-            usage.price = prices.basis(model_id)
+    usage = _priced_usage(usage, watcher, model_id)
     notes = [error, "receipt written after the run; the tree was not judged"]
     if usage is None or usage.cost_usd is None:
         notes.append("no priced usage was recovered before the failure; this run is unpriced")

@@ -143,8 +143,13 @@ def capped(result: Result) -> bool:
     breaker_reason is not None` in runner.py) -- so `budget["exceeded"]` alone
     cannot tell a real cap kill from a breaker kill that happened to run
     under a cap. A kill is only `cap` here when there is independent evidence
-    of it: the native budget flag, an observed spend over the cap, or no
-    breaker trip at all to blame it on instead.
+    of it: the native budget flag, an observed spend over the same
+    ceiling `settle` used (`cap_usd + grace_usd` when a grace band was
+    set, else `cap_usd`), or no breaker trip at all to blame it on instead.
+    Comparing against `cap_usd` alone named a breaker kill `cap` whenever
+    the spend sat inside the grace band -- `exceeded` is true for any kill,
+    `observed > cap_usd` then fired, and the fallback this function exists
+    for was never reached.
     """
     budget = result.budget or {}
     if not budget:
@@ -163,8 +168,14 @@ def capped(result: Result) -> bool:
     if result.fleet_status == "error_max_budget_usd":
         return True
     cap_usd = budget.get("cap_usd")
+    grace_usd = budget.get("grace_usd")
     observed = budget.get("observed_usd")
-    if cap_usd is not None and observed is not None and observed > cap_usd:
+    ceiling = (
+        cap_usd
+        if grace_usd is None or cap_usd is None
+        else cap_usd + grace_usd
+    )
+    if ceiling is not None and observed is not None and observed > ceiling:
         return True
     return not (result.breaker or {}).get("tripped")
 

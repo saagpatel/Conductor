@@ -122,7 +122,21 @@ class Budget:
         not failed. The native stop (`error_max_budget_usd`) already fires at
         that same combined figure (fleets.build_argv folds grace into the
         one flag Claude Code takes), so it still means over budget here.
+
+        A budget that has already been settled is not re-settled into a
+        weaker verdict: `exceeded` once True stays True, and a priced
+        observed figure is not discarded for `unpriced`. The crash receipt
+        (`runner._parse_failure_result`) otherwise called settle a second
+        time with `killed=False` and `fleet_status=None`, which flipped a
+        native-stop or breaker-kill `exceeded` back to False after the
+        commit had already been undone for exceeding.
         """
+        already = getattr(self, "_settled", False)
+        prev_exceeded = self.exceeded
+        prev_unpriced = self.unpriced
+        prev_observed = self.observed_usd
+        prev_grace_used = self.grace_used
+
         self.observed_usd = cost_usd
         self.unpriced = cost_usd is None and not killed and not interrupted
         ceiling = (
@@ -139,6 +153,18 @@ class Budget:
             self.grace_used = None
         else:
             self.grace_used = min(max(0.0, cost_usd - self.cap_usd), self.grace_usd)
+
+        if already:
+            # Never clear a verdict a previous settle established.
+            self.exceeded = self.exceeded or prev_exceeded
+            if prev_observed is not None:
+                if self.observed_usd is None:
+                    self.observed_usd = prev_observed
+                    self.grace_used = prev_grace_used
+                self.unpriced = False
+            else:
+                self.unpriced = self.unpriced or prev_unpriced
+        self._settled = True
 
 
 def codex_sessions_dir() -> Path:
