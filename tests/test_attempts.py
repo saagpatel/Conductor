@@ -13,7 +13,15 @@ from pathlib import Path
 from conductor import attempts as attempts_mod
 from conductor import mission as mission_mod
 from conductor import runner as runner_mod
-from conductor.mission import LaneResult, Mission, _trusted_lane, mission_from_dict, run_mission
+from conductor.mission import (
+    LaneResult,
+    Mission,
+    _cancel_winner,
+    _keep_cancelled_lanes,
+    _trusted_lane,
+    mission_from_dict,
+    run_mission,
+)
 
 
 def _transport_envelope(cost: float) -> str:
@@ -371,14 +379,19 @@ def test_the_import_cycle_guard_catches_the_absolute_spelling():
 def test_trusted_lane_keeps_a_lane_cancelled_before_it_ever_spawned(
     repo, home, monkeypatch, tmp_path
 ):
-    """A cancelled sink is a settled outcome of a mission that succeeded, so
-    resume keeps it rather than repeating the cancellation. The check matched
-    only the `"cancelled:"` spelling, but `mission._cancelled_before_spawn`
-    writes `"cancelled before spawn: ..."` for the lane that was cut before
-    any process started. That lane -- the only one that cost nothing at all --
-    was therefore the one resume refused to keep, so it was re-dispatched and
-    paid for, the reverse of what the cancel section describes (2026-09-08
-    review). Both spellings are settled; neither is unfinished work.
+    """What settles a cancelled lane is the winner that beat it, not the
+    lane's own receipt and not whether the prior mission finished ok.
+
+    `_trusted_lane` cannot answer this: the winner may sit later in
+    `mission.lanes` than the lane it cancelled, so `kept` is still being
+    built when the cancelled lane is judged. It therefore returns False for
+    every cancelled lane and `_keep_cancelled_lanes` decides afterwards.
+
+    The rule this replaced was `and prior_ok`, which read as conservative
+    and was not: an interrupt forces `ok = False`, and SIGINT-then-resume is
+    the documented flow (AGENTS.md rule 8), which promises finished lanes
+    are not paid twice. Under that rule every cancelled lane was
+    re-dispatched on exactly the resume it exists to serve.
     """
     monkeypatch.setattr(
         runner_mod,
@@ -399,13 +412,41 @@ def test_trusted_lane_keeps_a_lane_cancelled_before_it_ever_spawned(
 
     mid_run = replace(receipt)
     mid_run.skipped = "cancelled: lane b already passed"
-    assert _trusted_lane(mission, mission_dir, lane, mid_run, prior_ok=True) is True
-
     pre_spawn = replace(receipt)
     pre_spawn.skipped = "cancelled before spawn: lane b already passed"
-    assert _trusted_lane(mission, mission_dir, lane, pre_spawn, prior_ok=True) is True
-
-    # A skip that is not a cancellation is still unfinished work.
     other = replace(receipt)
     other.skipped = "paused: pause.before not answered; not started"
-    assert _trusted_lane(mission, mission_dir, lane, other, prior_ok=True) is False
+
+    # No skipped lane is trusted on its own receipt any more.
+    for skipped in (mid_run, pre_spawn, other):
+        assert _trusted_lane(mission, mission_dir, lane, skipped) is False
+
+    # Both cancel spellings name their winner, and nothing else does.
+    assert _cancel_winner(mid_run.skipped) == "b"
+    assert _cancel_winner(pre_spawn.skipped) == "b"
+    assert _cancel_winner(other.skipped) is None
+    assert _cancel_winner("cancelled: another lane already passed") is None
+
+    # The second pass keeps a cancelled lane when its winner is kept, and
+    # only then. `b` is not a lane of this one-lane mission, so it is named
+    # in `kept` directly -- what the pass reads is the kept set, not the graph.
+    for cancelled in (mid_run, pre_spawn):
+        kept: dict[str, LaneResult] = {"b": replace(receipt)}
+        rerun = {lane.name}
+        notes: list[str] = []
+        _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, notes)
+        assert lane.name in kept and not rerun
+        assert kept[lane.name].kept is True
+        assert notes == [f"lane '{lane.name}' stays cancelled: 'b' is kept"]
+
+        # Winner being rerun reopens the decision, so the loser reruns too.
+        kept = {}
+        rerun = {lane.name, "b"}
+        _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, [])
+        assert lane.name in rerun and lane.name not in kept
+
+    # A skip that is not a cancellation is still unfinished work.
+    kept = {"b": replace(receipt)}
+    rerun = {lane.name}
+    _keep_cancelled_lanes(mission, {lane.name: other}, kept, rerun, [])
+    assert lane.name in rerun and lane.name not in kept

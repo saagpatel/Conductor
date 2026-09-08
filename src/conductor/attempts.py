@@ -685,7 +685,6 @@ def _trusted_lane(
     lane: Lane,
     result: LaneResult,
     *,
-    prior_ok: bool = False,
     prior_result: dict | None = None,
     notes: list[str] | None = None,
     digests: dict[str, str] | None = None,
@@ -749,17 +748,20 @@ def _trusted_lane(
                 return False
         return _artifact_bytes_match(lane.name, result, digests, notes)
     if result.skipped is not None:
-        # A lane cancelled because another sink already passed is a settled
-        # outcome of a mission that succeeded, not unfinished work; rerunning
-        # it on resume would just repeat the cancellation for nothing.
+        # A cancelled lane is never settled by its own receipt: what settles
+        # it is whether the sink that beat it is still being kept on this
+        # resume. That is not knowable here -- `kept` is still being built --
+        # so the decision moves to `mission._keep_cancelled_lanes`, a second
+        # pass that runs once the kept set is complete, and this returns
+        # False so the lane reaches it.
         #
-        # Both spellings. `mission._cancelled_before_spawn` writes "cancelled
-        # before spawn: ...", which does not start with "cancelled:", so the
-        # one lane that cost nothing at all was the one this refused to keep:
-        # it was re-dispatched on resume and paid for, the exact opposite of
-        # what README's cancel section describes, and the mid-run spelling
-        # was kept correctly all along (2026-09-08 review).
-        return result.skipped.startswith(("cancelled:", "cancelled before spawn:")) and prior_ok
+        # The previous rule was `and prior_ok`, which looked safe and was
+        # not: an interrupt forces `ok = False`, and SIGINT-then-resume is
+        # the documented flow (AGENTS.md rule 8), which promises finished
+        # lanes are not paid twice. Every cancelled lane was re-dispatched
+        # and re-paid on exactly the resume the rule exists to serve
+        # (2026-09-08 review).
+        return False
     if result.ok is not True:
         return False
     if not result.attempts:
