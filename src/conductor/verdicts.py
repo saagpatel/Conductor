@@ -121,6 +121,12 @@ def checklist_contract(criteria: list[Criterion]) -> str:
     )
 
 
+# The three keys `checklist_schema` requires. `_answer_object` uses them to
+# tell a verdict from a schema restatement or an example object pasted after
+# it, both of which a model routinely writes below its real answer.
+_VERDICT_KEYS = frozenset({"verdict", "criteria", "summary"})
+
+
 def _embedded_objects(text: str) -> list[dict]:
     """Decode complete objects without letting a stray prose brace hide later JSON."""
     decoder = json.JSONDecoder()
@@ -146,7 +152,15 @@ def _answer_object(text: str) -> tuple[dict | None, str | None]:
     except json.JSONDecodeError:
         objects = _embedded_objects(text)
         if objects:
-            return objects[-1], None
+            # The last object that looks like a verdict, not simply the last
+            # object. A model that narrates, answers, and then restates the
+            # schema or pastes a filled-in example had that example counted
+            # as its judgment (2026-09-08 review). An answer with no
+            # verdict-shaped object at all still falls back to the last one,
+            # so a malformed verdict is still reported as malformed rather
+            # than as "no JSON at all".
+            shaped = [obj for obj in objects if _VERDICT_KEYS <= set(obj)]
+            return (shaped or objects)[-1], None
         return None, "answer contains no valid JSON object"
     if not isinstance(raw, dict):
         return None, "answer JSON must be an object"

@@ -3040,15 +3040,23 @@ def _check_ceiling(mission: Mission, base: Path) -> dict:
     bounds. Raises before a single dispatch, on a launch and a resume alike."""
     per_hour, per_day = _effective_ceiling(mission)
     spend = ceiling_mod.rolling_spend(base)
+
+    def bound(unpriced: int) -> str:
+        # An unpriced receipt in the window means these dollars are a lower
+        # bound, not the window's spend. The ceiling still compares the
+        # figure it has -- saying which figure that is belongs in the message
+        # rather than in the operator's head (2026-09-08 review).
+        return f" (a lower bound: {unpriced} unpriced run(s) in the window)" if unpriced else ""
+
     if per_hour is not None and spend.hour_usd >= per_hour:
         raise MissionInvalid(
             f"spend ceiling: ${spend.hour_usd:.2f} in the last hour is over the "
-            f"${per_hour:.2f} per-hour ceiling"
+            f"${per_hour:.2f} per-hour ceiling{bound(spend.unpriced_hour)}"
         )
     if per_day is not None and spend.day_usd >= per_day:
         raise MissionInvalid(
             f"spend ceiling: ${spend.day_usd:.2f} in the last 24 hours is over the "
-            f"${per_day:.2f} per-day ceiling"
+            f"${per_day:.2f} per-day ceiling{bound(spend.unpriced_day)}"
         )
     return {
         "per_hour_usd": per_hour,

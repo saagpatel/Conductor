@@ -256,3 +256,79 @@ def test_a_connection_refused_in_prose_is_transport_not_a_safety_refusal():
     )
 
     assert error_kind(result) == "transport"
+
+
+# --- parsers and the commit gate --------------------------------------------
+
+
+def test_a_trailing_non_verdict_object_does_not_displace_the_verdict():
+    """`_answer_object` kept the last complete JSON object in the answer, so a
+    metadata or usage blob printed after the judgment was parsed as the
+    judgment. The last VERDICT-SHAPED object wins now.
+
+    A trailing object that is itself verdict-shaped -- a filled-in example
+    pasted under the real answer -- is still read as the answer, and cannot be
+    told apart from one by shape alone. That one is an open question for the
+    operator, not something to guess at here.
+    """
+    from conductor.verdicts import Criterion, parse_verdict
+
+    criteria = [Criterion("a", "Is a satisfied?")]
+    answer = (
+        '{"verdict":"fail","criteria":[{"id":"a","ok":false,"evidence":"x.py:1"}],'
+        '"summary":"a is broken"}\n\n'
+        "Run metadata:\n"
+        '{"tokens": 1200, "elapsed_s": 31.4}\n'
+    )
+
+    verdict = parse_verdict(answer, criteria)
+
+    assert verdict.passed is False
+    assert verdict.invalid is None
+    assert verdict.summary == "a is broken"
+
+
+def test_an_answer_whose_only_object_is_malformed_is_still_reported_malformed():
+    from conductor.verdicts import Criterion, parse_verdict
+
+    verdict = parse_verdict('here you go: {"verdict": "pass"}', [Criterion("a", "?")])
+
+    assert verdict.passed is False
+    assert verdict.invalid is not None
+
+
+@pytest.mark.parametrize("value", [-1, -0.0001])
+def test_a_negative_token_count_is_not_a_token_count(value):
+    """A negative `cache_read_tokens` is subtracted from input on the cursor
+    and antigravity paths, which turns it into extra billed input."""
+    from conductor.outputs import usable_int
+
+    assert usable_int(value) is None
+
+
+def test_a_cut_short_stream_is_not_committed(tmp_path: Path):
+    """D15's other half: a truncated antigravity turn says so with a status,
+    not an `error`, because no fleet reported it. The commit gate read only
+    `output.error`, so a write that exited 0, moved bytes, and passed its
+    gate was committed under a receipt saying the run failed."""
+    from conductor.outputs import INCOMPLETE, _parse_antigravity
+
+    text = json.dumps({"event": "step_update", "step_update": {"step_index": 1}})
+    out = _parse_antigravity(text)
+
+    assert out.parsed is True
+    assert out.status == INCOMPLETE
+    assert out.error is None
+
+    # And the gate that reads it. Recomputing the condition here would pin a
+    # copy of it rather than the one that runs, so this reads dispatch's own
+    # source -- the same trick `test_error_kind_return_order_matches_kinds`
+    # uses for the kind order.
+    import inspect
+
+    from conductor.runner import dispatch
+
+    source = inspect.getsource(dispatch)
+    gate = source.split("commit: CommitOutcome | None = None", 1)[1].split("\n        ):", 1)[0]
+    assert "not output.error" in gate
+    assert "output.status != INCOMPLETE" in gate

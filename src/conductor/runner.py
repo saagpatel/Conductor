@@ -2821,6 +2821,14 @@ def dispatch(
             and error is None
             and exit_code == 0
             and not output.error
+            # D15's other half (2026-09-08 review): a cut-short antigravity
+            # stream says so with a status rather than an `error`, precisely
+            # because no fleet reported it. `Result.failure` reads that as
+            # not-ok, but this gate read only `output.error`, so a truncated
+            # write that exited 0, moved bytes, and passed its gate was
+            # committed under a receipt that says the run failed -- the
+            # branch and the verdict disagreeing about the same run.
+            and output.status != INCOMPLETE
         ):
             # F15 mission 2 item 3: a deliverable declared `commit: false` is
             # a receipt, not source -- excluded from the harness's own
