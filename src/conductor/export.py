@@ -33,7 +33,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__, attest, spend
-from .golden import _placeholder_map, _scrub_json_value, scrub_guard, scrub_text
+from .golden import (
+    _extra_cwds,
+    _placeholder_map,
+    _scrub_json_value,
+    scrub_guard,
+    scrub_text,
+)
 
 FORMAT = "conductor/export/v1"
 
@@ -299,7 +305,17 @@ def export(
         if isinstance(loaded, dict):
             mission_raw = loaded
     cwd = mission_raw.get("cwd")
-    replacements = _placeholder_map(home=home, cwd=cwd)
+    # E19/E26: a cross-repo mission's lanes each declare their own `cwd`, and
+    # only the mission's own was ever turned into a placeholder here, so
+    # every other repository's absolute path travelled with the bundle --
+    # and `scrub_guard`, which cannot recover a real path it was not told
+    # about, passed it clean. `golden.record` has always paired them; export
+    # now uses the same pairing for the scrub and for the guard that checks it.
+    extra_pairs = [(path, f"<cwd{2 + i}>") for i, path in enumerate(_extra_cwds(mission_raw, cwd))]
+    replacements = _placeholder_map(home=home, cwd=cwd, extra=extra_pairs)
+    guard_extra = [(path, f"mission cwd {2 + i}") for i, (path, _) in enumerate(extra_pairs)]
+    if isinstance(cwd, str) and cwd:
+        guard_extra.insert(0, (cwd, "mission cwd"))
 
     chain_path = mission_dir / "receipts" / "chain.json"
     chain_present = chain_path.is_file()
@@ -472,7 +488,7 @@ def export(
                 leaks=[f"{key_leak}: receipt key material"],
             )
 
-        leaks = scrub_guard(work)
+        leaks = scrub_guard(work, extra=guard_extra)
         if leaks:
             shutil.rmtree(work)
             raise ExportError(f"export leaked: {leaks[0]}", leaks=leaks)
