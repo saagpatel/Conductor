@@ -295,11 +295,16 @@ def effects(snapshot: dict | None = None, lanes: Iterable[dict] = ()) -> list[Ef
         if isinstance(snapshot_lanes, list):
             for lane_data in snapshot_lanes:
                 walk_lane(lane_data)
+        # Current first, then the superseded ones -- the order `resolve` and
+        # `previous_resolves` below already use. Reversed, a collate kept
+        # across a resume (the same run_id in both lists) was registered from
+        # `previous_collates` and, first occurrence winning, read as
+        # superseded for the rest of the mission's life (2026-09-08 review).
+        walk_collate(snapshot.get("collate"), False)
         previous_collates = snapshot.get("previous_collates")
         if isinstance(previous_collates, list):
             for collate in previous_collates:
                 walk_collate(collate, True)
-        walk_collate(snapshot.get("collate"), False)
         resolve = snapshot.get("resolve")
         if isinstance(resolve, dict):
             add(resolve.get("run_id"), "resolve", None, None, False, resolve)

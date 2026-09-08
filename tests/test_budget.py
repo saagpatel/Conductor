@@ -322,6 +322,44 @@ def test_resumed_codex_thread_counts_only_usage_after_spawn(tmp_path, monkeypatc
     assert fresh.poll().output_tokens == 520
 
 
+def test_a_nan_token_count_in_a_resumed_rollout_does_not_crash_the_watcher(
+    tmp_path, monkeypatch
+):
+    """`int(total.get(key) or 0)` on a bare NaN raises inside the poll loop --
+    the one place meant to fail closed rather than crash. Codex writes the
+    rollout, `json.loads` accepts bare NaN and Infinity, and the loop reads
+    it on every tick."""
+    from datetime import UTC, datetime, timedelta
+
+    from conductor.budget import _CodexRollout
+
+    rollout = _codex_home(tmp_path, monkeypatch)
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(STARTED + "\n")
+    spawn = datetime.now(UTC)
+    before = (spawn - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    after = (spawn + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+
+    def stamped(stamp: str, usage: str) -> str:
+        return (
+            '{"timestamp": "' + stamp + '", "type": "event_msg", "payload": '
+            '{"type": "token_count", "info": {"total_token_usage": ' + usage + "}}}"
+        )
+
+    rollout.write_text(
+        stamped(before, '{"input_tokens": 1000, "output_tokens": 500}')
+        + "\n"
+        + stamped(after, '{"input_tokens": NaN, "output_tokens": 520}')
+        + "\n"
+    )
+
+    usage = _CodexRollout(stdout, since=spawn).poll()
+
+    assert usage is not None
+    # The unusable figure is dropped, not coerced; the usable one still counts.
+    assert usage.output_tokens == 20
+
+
 # --- D11: the retry loop goes through the ledger too --------------------------
 
 

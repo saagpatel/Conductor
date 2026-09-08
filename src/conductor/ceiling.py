@@ -49,7 +49,12 @@ def rolling_spend(home: Path, *, now: datetime | None = None) -> RollingSpend:
     if runs_dir.is_dir():
         for result_file in runs_dir.glob("*/result.json"):
             run = _read_run(result_file)
-            if run is None or run.dry_run or run.created < day_ago:
+            # Both bounds. Without the upper one a receipt stamped in the
+            # future -- clock drift on the machine that wrote it, or a
+            # hand-edited stamp -- satisfies both `>= day_ago` and
+            # `>= hour_ago` forever, so it is summed into windows it is not
+            # in and can trip the ceiling on its own (2026-09-08 review).
+            if run is None or run.dry_run or not (day_ago <= run.created <= now):
                 continue
             runs_day += 1
             if run.cost_usd is None:
