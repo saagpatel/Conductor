@@ -232,7 +232,7 @@ def test_shape_a_mission_loads_and_carries_the_shape(repo, tmp_path):
     assert grok["cap_grace_usd"] == 0.25
     assert "cap_grace_usd" not in gemini
     assert gemini["mode"] == "read" and "Do not run the test suite" in gemini["prompt"]
-    assert grok["cap_usd"] == 1.5 and "Do not run the test suite" in grok["prompt"]
+    assert grok["cap_usd"] == 1.5 and "DO NOT RUN THE TEST SUITE" in grok["prompt"]
     assert fix["resume"] == "build" and fix["branch"] == "feat/widget"
     assert fix["commit"] == f"fix({repo.name}): address cross-vendor review of widget"
     assert fix["deliverable"] == {
@@ -267,7 +267,9 @@ def test_grok_prompt_lets_it_run_the_gate_only_when_asked(repo, tmp_path):
     raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=caps)
     grok = raw["lanes"][2]
     assert grok["cap_usd"] == 2.0
-    assert "run the gate named in the spec" in grok["prompt"]
+    assert "<gate>\ntrue\n</gate>" in grok["prompt"]
+    assert "gate in the <gate> block" in grok["prompt"]
+    assert "named in the spec" not in grok["prompt"]
     assert "--basetemp" in grok["prompt"]
 
 
@@ -876,7 +878,8 @@ def test_deliverable_replaces_the_evidence_map_and_the_fix_lane_becomes_a_build_
     }
     assert "evidence.json" not in lanes["build"]["prompt"]
     assert "`doc.md`" in lanes["build"]["prompt"]
-    assert "python3 check.py {path}" in lanes["build"]["prompt"]
+    assert "python3 check.py doc.md" in lanes["build"]["prompt"]
+    assert "python3 check.py {path}" not in lanes["build"]["prompt"]
     assert lanes["fix"]["stage"] == "build"
     assert lanes["fix"]["deliverable"]["path"] == "dispositions.json"
     assert "reproduce gate" not in lanes["fix"]["prompt"].split("not under the reproduce gate")[0]
@@ -885,7 +888,8 @@ def test_deliverable_replaces_the_evidence_map_and_the_fix_lane_becomes_a_build_
     for name in ("review-gemini", "review-grok"):
         assert "<evidence>" not in lanes[name]["prompt"]
         assert "The build's deliverable is the file `doc.md`" in lanes[name]["prompt"]
-        assert "validator `python3 check.py {path}` passed" in lanes[name]["prompt"]
+        assert "validator `python3 check.py doc.md` passed" in lanes[name]["prompt"]
+        assert "python3 check.py {path}" not in lanes[name]["prompt"]
     assert raw["policy"] == {
         "build": {"vendors": ["anthropic"]},
         "review": {"vendors": ["google", "xai"]},
@@ -1000,3 +1004,281 @@ def test_cli_deliverable_writes_the_lane_and_loads(tmp_path: Path, repo: Path, c
                  "--out", str(tmp_path / "m2.json"), "--skip-preflight"])
     assert code == 3
     assert "needs --deliverable" in capsys.readouterr().err
+
+
+# --- shipped prompt defects (items 1-9) ---------------------------------------
+
+
+def _lanes(raw: dict) -> dict[str, dict]:
+    return {lane["name"]: lane for lane in raw["lanes"]}
+
+
+def test_review_adversarial_and_fix_prompts_name_the_gate_block_not_the_spec(repo, tmp_path):
+    """Item 1: Grok (when it runs the suite), adversarial, and fix used to
+    say 'the gate named in the spec', but the spec is the operator's
+    prompt_file. The assembled prompts now carry the same <gate> block
+    BUILD_PROMPT does, filled from `test`."""
+    spec = _spec(tmp_path)
+    gate = 'pytest -q -n auto --dist loadgroup --basetemp="$TMPDIR/x"'
+    caps = shape.cap_arithmetic(1, 1, grok_runs_suite=True, adversarial=True)
+    raw = shape.shape_a(
+        spec=spec, repo=repo, test=gate, caps=caps, adversarial=True
+    )
+    lanes = _lanes(raw)
+    block = f"<gate>\n{gate}\n</gate>"
+    for name in ("review-grok", "adversarial", "fix"):
+        prompt = lanes[name]["prompt"]
+        assert block in prompt
+        assert "{gate}" not in prompt
+        assert "named in the spec" not in prompt
+        assert "gate in the <gate> block" in prompt
+    # The read-only Grok lane is told not to run a gate, so it must not
+    # receive one.
+    read = shape.shape_a(
+        spec=spec, repo=repo, test=gate, caps=shape.cap_arithmetic(1, 1)
+    )
+    grok_ro = _lanes(read)["review-grok"]["prompt"]
+    assert "<gate>" not in grok_ro
+    assert "run the gate" not in grok_ro.lower()
+    # A follow-on fix lane has no build thread to recall the gate from.
+    followon = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test=gate,
+        caps=shape.cap_arithmetic(1, 1),
+        name="salvaged",
+    )
+    followon_fix = _lanes(followon)["fix"]["prompt"]
+    assert block in followon_fix
+    assert "named in the spec" not in followon_fix
+    assert "gate in the <gate> block" in followon_fix
+
+
+def test_a_prompt_with_no_gate_does_not_claim_there_is_one():
+    """Item 1: empty `test` on the helpers must not tell the model to run
+    a gate that was never named."""
+    for assembled in (
+        shape.grok_review_prompt(""),
+        shape.grok_review_prompt(),
+        shape.adversarial_prompt(""),
+        shape.fix_prompt(""),
+    ):
+        assert "<gate>" not in assembled
+        assert "{gate}" not in assembled
+        assert "run the gate" not in assembled.lower()
+        assert "named in the spec" not in assembled
+
+
+def test_dispositions_schema_follows_the_three_reviewer_rewrite(tmp_path):
+    """Item 2: `--opus-review` rewrote FIX_PROMPT to name review-opus, but
+    DISPOSITIONS_SCHEMA's description still said only gemini or grok.
+    The schema the fixer receives as the deliverable contract must match."""
+    two = json.loads(shape.write_dispositions_schema(tmp_path / "two").read_text())
+    two_desc = two["properties"]["dispositions"]["description"]
+    assert '"review-gemini" or "review-grok"' in two_desc
+    assert "review-opus" not in two_desc
+    assert "both reviews said NO_FINDINGS" in two_desc
+    assert two == shape.DISPOSITIONS_SCHEMA
+    # Existing positional signature still writes the two-reviewer schema.
+    default = json.loads(shape.write_dispositions_schema(tmp_path / "default").read_text())
+    assert default == shape.DISPOSITIONS_SCHEMA
+
+    three = json.loads(
+        shape.write_dispositions_schema(tmp_path / "three", opus_review=True).read_text()
+    )
+    three_desc = three["properties"]["dispositions"]["description"]
+    assert "review-opus" in three_desc
+    assert '"review-gemini" or "review-grok"' not in three_desc
+    assert "both reviews" not in three_desc
+    assert "every review said NO_FINDINGS" in three_desc
+    assert "any reviewer numbered" in three_desc
+    # The prompt rewrite and the schema rewrite agree on the lane list.
+    assert (
+        '{"lane": "review-gemini", "review-grok", or "review-opus", "index": '
+        in shape.fix_prompt_with_opus(shape.fix_prompt("true"))
+    )
+    assert '{"lane": "review-gemini", "review-grok", or "review-opus", "index": ' in three_desc
+
+
+def test_deliverable_fix_prompt_does_not_claim_reproduce_or_basetemp(tmp_path, repo):
+    """Item 3: a document fix lane is `stage: build` with a file validator,
+    so 'nothing reproduces' and pytest's --basetemp are both false. Item 1's
+    <gate> block still names the mission test command."""
+    raw = _deliverable_mission(tmp_path, repo)
+    prompt = _lanes(raw)["fix"]["prompt"]
+    gate = "python3 check.py doc.md"
+    assert f"<gate>\n{gate}\n</gate>" in prompt
+    assert "named in the spec" not in prompt
+    assert "nothing reproduces" not in prompt
+    assert "--basetemp" not in prompt
+    assert "Run the gate in the <gate> block before finishing." in prompt
+    assert "If both reviews say NO_FINDINGS, change nothing and reply NO_CHANGES." in prompt
+    # Opus wording too: the reproduce phrase is gone after that rewrite.
+    opus_spec = tmp_path / "opus.md"
+    opus_spec.write_text("# opus\n")
+    opus = shape.shape_a(
+        spec=opus_spec,
+        repo=repo,
+        test=gate,
+        caps=shape.cap_arithmetic(1, 1, opus_review=True),
+        deliverable="doc.md",
+        deliverable_validator="python3 check.py {path}",
+        opus_review=True,
+    )
+    opus_fix = _lanes(opus)["fix"]["prompt"]
+    assert "nothing reproduces" not in opus_fix
+    assert "--basetemp" not in opus_fix
+    assert "If every review says NO_FINDINGS, change nothing and reply NO_CHANGES." in opus_fix
+
+
+def test_deliverable_build_prompt_drops_code_rules_and_does_not_repeat_them(tmp_path, repo):
+    """Item 4: a one-file deliverable is not a code change, so call-signature
+    and test-gaming sentences do not apply, and the commit / investigate
+    lines must appear once (from the deliverable paragraph, not twice)."""
+    raw = _deliverable_mission(tmp_path, repo)
+    prompt = _lanes(raw)["build"]["prompt"]
+    assert "existing call signature" not in prompt
+    assert "special-case a test" not in prompt
+    assert prompt.count("Do not commit; the harness commits") == 1
+    assert prompt.count("Investigate before answering") == 1
+    assert "read the file in full" in prompt
+    assert "read the code a change touches" not in prompt
+    # A code build still carries both rules.
+    code_spec = tmp_path / "code.md"
+    code_spec.write_text("# code\n")
+    code = shape.shape_a(
+        spec=code_spec, repo=repo, test="true", caps=shape.cap_arithmetic(1, 1)
+    )
+    code_prompt = _lanes(code)["build"]["prompt"]
+    assert "existing call signature" in code_prompt
+    assert "special-case a test" in code_prompt
+
+
+def test_validator_command_in_prompts_has_path_substituted(tmp_path, repo):
+    """Item 5: conductor substitutes `{path}` at run time; the copy in
+    prompt text must already name the deliverable, everywhere a validator
+    command appears."""
+    raw = _deliverable_mission(tmp_path, repo)
+    lanes = _lanes(raw)
+    assert lanes["build"]["deliverable"]["validator"] == "python3 check.py {path}"
+    for name in ("build", "review-gemini", "review-grok", "fix"):
+        prompt = lanes[name]["prompt"]
+        assert "python3 check.py doc.md" in prompt
+        assert "{path}" not in prompt
+    # review_prompt_with_deliverable is the helper the reviewers go through.
+    note = shape.review_prompt_with_deliverable(
+        shape.GEMINI_REVIEW_PROMPT, "doc.md", "python3 check.py {path}"
+    )
+    assert "validator `python3 check.py doc.md` passed" in note
+    assert "{path}" not in note
+
+
+def test_build_prompt_timing_claim_is_conditional_on_a_test_suite(repo, tmp_path):
+    """Item 6: 'the flags are what make it take under a minute' is true of
+    this repo's pytest gate, not of a one-file validator. The claim is
+    worded as conditionally as the existing pytest/--basetemp sentence."""
+    spec = tmp_path / "suite.md"
+    spec.write_text("# suite\n")
+    suite = shape.shape_a(
+        spec=spec,
+        repo=repo,
+        test='pytest -q -n auto --dist loadgroup --basetemp="$TMPDIR/x"',
+        caps=shape.cap_arithmetic(1, 1),
+    )
+    suite_prompt = _lanes(suite)["build"]["prompt"]
+    assert "When the gate is a test suite" in suite_prompt
+    assert "the flags are what make it take under a minute" in suite_prompt
+    assert "before you finish: the flags are what make it take under a minute" not in suite_prompt
+    raw = _deliverable_mission(tmp_path, repo)
+    deliverable_prompt = _lanes(raw)["build"]["prompt"]
+    assert "When the gate is a test suite" in deliverable_prompt
+    assert "before you finish: the flags are what make it take under a minute" not in (
+        deliverable_prompt
+    )
+
+
+def test_evidence_note_says_what_to_cite_when_the_map_omits_an_item(repo, tmp_path):
+    """Item 7: a spec item the map does not name has no map entry, so
+    telling the reviewer to cite 'the map's entry' drops the finding
+    under cite-or-drop. Cite the spec item and the map as the omission."""
+    spec = _spec(tmp_path)
+    raw = shape.shape_a(spec=spec, repo=repo, test="true", caps=shape.cap_arithmetic(1, 1))
+    for name in ("review-gemini", "review-grok"):
+        prompt = _lanes(raw)[name]["prompt"]
+        assert "Treat it as a claim" in prompt
+        assert "map's entry as the citation" in prompt
+        assert "spec item the map does not name" in prompt
+        assert "cite the spec item itself" in prompt
+        assert "map as the thing that omits it" in prompt
+        # The old instruction, citing a missing entry, is gone.
+        assert (
+            "or a spec item the map does not name is reportable "
+            "the same as any other item, with the map's entry as the citation"
+            not in prompt
+        )
+
+
+def test_followon_salvage_note_does_not_tell_reviewers_to_fix(repo):
+    """Item 8: salvage_note is inside {{mission.prompt}}, which every lane
+    including the read-only reviewers renders. It must describe the
+    situation without asking a reviewer to do the fixer's job."""
+    raw = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test="true",
+        caps=shape.cap_arithmetic(1, 1),
+        name="salvaged",
+        spec_prompt="the original spec",
+        branch="feat/salvaged",
+    )
+    shared = raw["prompt"]
+    assert "already committed at abc123" in shared
+    assert "Review or fix" not in shared
+    assert "The reviews judge the change as it stands" in shared
+    assert "the fix lane, if it edits anything, lands on branch 'feat/salvaged'" in shared
+    # Reviewers are still told CHANGE NOTHING / Change nothing in their
+    # own prompt; the shared spec must not contradict that with 'fix'.
+    gemini = _lanes(raw)["review-gemini"]["prompt"]
+    grok = _lanes(raw)["review-grok"]["prompt"]
+    assert "{{mission.prompt}}" in gemini and "{{mission.prompt}}" in grok
+    assert "Change nothing" in gemini
+    assert "CHANGE NOTHING" in grok
+
+
+def test_grok_read_only_capitalizes_do_not_run_the_test_suite(repo, tmp_path):
+    """Item 9: xAI capitalizes non-negotiables; running the suite in a
+    Grok review worktree fails the lane on bytes. Gemini and Opus stay
+    sentence case (Google and Anthropic guidance is the opposite)."""
+    spec = _spec(tmp_path)
+    raw = shape.shape_a(
+        spec=spec, repo=repo, test="true", caps=shape.cap_arithmetic(1, 1)
+    )
+    lanes = _lanes(raw)
+    grok = lanes["review-grok"]["prompt"]
+    gemini = lanes["review-gemini"]["prompt"]
+    assert "DO NOT RUN THE TEST SUITE" in grok
+    assert "Do not run the test suite" not in grok
+    assert "Do not run the test suite" in gemini
+    assert "DO NOT RUN THE TEST SUITE" not in gemini
+    opus_raw = shape.shape_a(
+        spec=spec,
+        repo=repo,
+        test="true",
+        caps=shape.cap_arithmetic(1, 1, opus_review=True),
+        opus_review=True,
+    )
+    opus = _lanes(opus_raw)["review-opus"]["prompt"]
+    assert "Do not run the test suite" in opus
+    assert "DO NOT RUN THE TEST SUITE" not in opus
+    # The follow-on Grok lane is also read-only.
+    followon = shape.shape_a_followon(
+        worktree=repo,
+        salvage_sha="abc123",
+        diff="",
+        test="true",
+        caps=shape.cap_arithmetic(1, 1),
+        name="salvaged",
+    )
+    assert "DO NOT RUN THE TEST SUITE" in _lanes(followon)["review-grok"]["prompt"]
