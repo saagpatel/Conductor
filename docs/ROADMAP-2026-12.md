@@ -66,6 +66,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | Wave 18: reprice and documentation consolidation | 0.102.0 | three Grok builds; local release integration | $15.14 |
 | Ownership corrections and shared evidence interpretation | 0.103.0 | direct implementation; bounded Grok/Gemini helpers | not measured |
 | Unavailable verification pauses resume | 0.104.0 | direct implementation; Grok/Gemini investigations | not measured |
+| Receipt and lifecycle consolidation | 0.105.0 | lead integration; Grok accounting helper | not measured |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten

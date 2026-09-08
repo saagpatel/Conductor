@@ -16,12 +16,14 @@ that name them:
   whose last attempt was not `spawned`, and refuses one whose recorded
   artifact digest no longer matches the bytes on disk).
 
-The attempt lifecycle proper -- actually dispatching a lane, its retry loop,
+Dispatching a lane, its retry loop,
 and folding a rerun's history into `previous_attempts` -- stays in
 `_execute_mission` (`_run_attempts` and its closures `dispatch_one`,
 `fresh_lane_result`, `settle`): they close over the scheduler's own local
-state (the ledger, the running lock, the cancel events), and moving them
-would change their call signature, which this slice forbids. `_run_receipt_spend`
+state (the ledger, the running lock, the cancel events). `_finish_attempt`
+is a separate operation with explicit per-attempt inputs; it captures normalized
+accounting and artifacts before settlement. Resume selection now resolves pure
+dependency and cancellation choices in resume.py after evidence collection. `_run_receipt_spend`
 stays too -- F20 owns it, and it reads `spend.effects`, never a `Lane` or an
 `Attempt` directly.
 
@@ -54,7 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import attest
-from .budget import budget_cost, unpriced_dispatch
+from .budget import budget_cost, cost_facts
 from .errors import KINDS
 from .fleets import TAINT_SHELL_MODES, Spec
 from .graph import MissionInvalid
@@ -1014,9 +1016,16 @@ def _attempt_from_run_receipt(run_id: str, receipt: dict) -> dict:
     attempt is not a complete spawned-ok record of a finished lane)."""
     attempt: dict = {"run_id": run_id}
     usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
-    cost = budget_cost(usage.get("cost_usd"))
-    if cost is not None:
-        attempt["cost_usd"] = cost
+    facts = cost_facts(
+        cost_usd=usage.get("cost_usd"),
+        spawned=receipt.get("spawned") is True,
+        interrupted=receipt.get("interrupted") is True,
+        cancelled=receipt.get("cancelled") is True,
+        timed_out=receipt.get("timed_out") is True,
+        dry_run=receipt.get("dry_run") is True,
+    )
+    if facts.cost_usd is not None:
+        attempt["cost_usd"] = facts.cost_usd
     duration = receipt.get("duration_s")
     if (
         isinstance(duration, int | float)
@@ -1027,14 +1036,8 @@ def _attempt_from_run_receipt(run_id: str, receipt: dict) -> dict:
         attempt["duration_s"] = float(duration)
     if isinstance(receipt.get("spawned"), bool):
         attempt["spawned"] = receipt["spawned"]
-    attempt["unpriced"] = unpriced_dispatch(
-        spawned=receipt.get("spawned") is True,
-        interrupted=receipt.get("interrupted") is True,
-        cancelled=receipt.get("cancelled") is True,
-        timed_out=receipt.get("timed_out") is True,
-        cost_usd=cost,
-    )
-    if receipt.get("spawned") is True and receipt.get("cancelled") is True and cost is None:
+    attempt["unpriced"] = facts.budget_unpriced
+    if facts.cancelled_unknown:
         attempt["cost_unknown"] = True
     if isinstance(receipt.get("fleet"), str):
         attempt["fleet"] = receipt["fleet"]

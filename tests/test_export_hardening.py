@@ -169,3 +169,12 @@ def test_scrub_guard_checks_the_home_the_caller_passed(tmp_path: Path, monkeypat
     findings = scrub_guard(work, home=used_home)
     assert findings != []
     assert any("conductor home" in finding for finding in findings)
+
+
+@pytest.mark.parametrize("field", ["home", "extra"])
+def test_long_literal_paths_are_not_hidden_by_base64_masking(tmp_path, field):
+    literal = "/fixture/" + "a" * 72 + "/private"
+    (tmp_path / "note.txt").write_text(f"see {literal} for receipts")
+    kwargs = {"home": literal} if field == "home" else {"extra": [(literal, "mission cwd")]}
+    label = "conductor home" if field == "home" else "mission cwd"
+    assert f"note.txt:1: {label}" in scrub_guard(tmp_path, **kwargs)

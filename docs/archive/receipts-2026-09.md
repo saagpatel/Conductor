@@ -2957,3 +2957,28 @@ expects. That guard issue is tracked for the failure-boundary phase.
 Implementation and investigation used only the operator and permitted Grok/Gemini
 helpers; no Claude or OpenAI dispatch. Helper account charges are not measured.
 Further accounting and lifecycle consolidation continues in this task.
+
+
+<a id="r-0.105.0"></a>
+## Receipt 2026-09-08: receipt and lifecycle consolidation, v0.105.0
+
+CostFacts supplies the same normalized cost and uncertainty flags to live budgets,
+resume accounting, recovered attempts, and final attempt summaries. Spend retains
+strict receipt admission and Decimal arithmetic; report now parses metadata and
+accounting from one JSON read. Resume dependency/cancellation selection operates
+on values in resume.py; attempt finalization is separated from dispatch and its
+scheduler closures. Existing entry points remain usable.
+
+Fault injection exercises process loss after a saved run, saved lane, and saved
+mission, including a second resume. The run-only boundary recovers its spend and
+reruns the unfinished lane; later boundaries reuse it. A state matrix checks live,
+recovered, and resumed accounting, including loss of the authoritative run file.
+The full gate's earlier cache-path failure exposed a real scrub-guard gap: long
+literal paths were hidden by base64 masking. Literal needles now scan raw text;
+only heuristic secret patterns use masking. Two path regressions and the report
+single-read regression fail behaviorally against 0.103.0.
+
+Validation: ruff exit 0; full parallel gate 2,201 passed on Python 3.14.7.
+The next step in this same task is the bounded real-work
+review/resume exercise with Gemini 3.8 Flash and Grok 4.6. No Claude/OpenAI lane,
+remote, push, or publication is authorized or used.

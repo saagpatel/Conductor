@@ -381,7 +381,11 @@ def scrub_guard(
             # alphabet can spell "key" before its "=" padding and read as an
             # env secret to a plain-text scan, which is not a leak, only
             # base64. The decoded scan below still sees everything inside it.
-            for name in _pattern_hits(_mask_base64_runs(line), patterns):
+            # Literal path needles must see the raw line: long directory
+            # names also match the base64 alphabet. Mask only the heuristic
+            # secret scan, which can mistake signature padding for KEY=.
+            literal_hits = [name for needle, name in patterns if needle and needle in line]
+            for name in literal_hits + _pattern_hits(_mask_base64_runs(line), []):
                 findings.append(f"{rel}:{line_no}: {name}")
             for decoded in _decode_base64_runs(line):
                 for name in _pattern_hits(decoded, patterns):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 from collections.abc import Iterable
@@ -13,6 +12,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
+from .budget import budget_cost
 from .paths import conductor_home
 
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -110,9 +110,7 @@ def _run_time(run_id: str) -> datetime | None:
 def _number(value: object) -> Decimal | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError
-    if not math.isfinite(float(value)) or value < 0:
+    if budget_cost(value) is None:
         raise ValueError
     return Decimal(str(value))
 
@@ -135,9 +133,9 @@ def _optional_count(value: object) -> int:
     return value
 
 
-def _read_run(path: Path) -> Run | None:
+def _run_from_receipt(raw: object) -> Run | None:
+    """Accounting fields from one already-loaded receipt object."""
     try:
-        raw: object = json.loads(path.read_text())
         if not isinstance(raw, dict):
             return None
         run_id = raw.get("run_id")
@@ -186,8 +184,16 @@ def _read_run(path: Path) -> Run | None:
             tool_calls,
             dry_run,
         )
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_run(path: Path) -> Run | None:
+    try:
+        raw: object = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         return None
+    return _run_from_receipt(raw)
 
 
 @dataclass(frozen=True)

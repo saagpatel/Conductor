@@ -154,7 +154,7 @@ from .attempts import (
     _validate_on as _validate_on,
 )
 from .budget import budget_cost as budget_cost
-from .budget import unpriced_dispatch
+from .budget import cost_facts
 from .errors import error_kind
 from .fleets import DispatchRefused, Spec, supports_schema_flag
 from .graph import (
@@ -184,8 +184,10 @@ from .graph import (
 from .prices import finite_nonnegative, finite_positive
 from .resume import (
     VerificationUnavailable,
+    cancelled_choices,
     clear_verification_block,
     record_verification_block,
+    settle_choices,
 )
 from .runner import (
     Result,
@@ -1798,47 +1800,18 @@ class Ledger:
             return None if self.max is None else max(self.max - self.spent, 0.0)
 
     def add(self, result: Result) -> None:
-        cost = (result.usage or {}).get("cost_usd")
-        # A cost that is not a finite, non-negative number is not evidence
-        # about the budget, and adding it destroys the running total: `spent`
-        # becomes NaN and every `spent >= max` comparison after it is False,
-        # or a negative figure shrinks `spent` and buys more dispatches. Both
-        # turn the mission budget off silently. `spend._number` already
-        # refuses these same values when it reads the receipts back, so the
-        # live guardrail was the looser of the two (2026-09-08 review).
-        # Counted as unpriced instead, which is the state it actually is.
-        cost = budget_cost(cost)
+        facts = cost_facts(
+            cost_usd=(result.usage or {}).get("cost_usd"),
+            spawned=result.spawned,
+            interrupted=result.interrupted,
+            cancelled=result.cancelled,
+            timed_out=getattr(result, "timed_out", False),
+            dry_run=getattr(result, "dry_run", False),
+        )
         with self._lock:
-            if cost is not None:
-                self.spent += float(cost)
-            elif unpriced_dispatch(
-                spawned=result.spawned,
-                interrupted=result.interrupted,
-                cancelled=result.cancelled,
-                timed_out=getattr(result, "timed_out", False),
-                cost_usd=cost,
-            ):
-                # A timeout is a run conductor stopped, the same state
-                # interrupted already carves out: not evidence about the
-                # cap, and not `unpriced` (which trips `blocker()` and
-                # halts the mission). `getattr` because some tests pass a
-                # duck-typed object that only names the fields `add` used
-                # before this carve-out.
-                self.unpriced += 1
-            elif result.spawned and result.cancelled:
-                # The previous rule treated a cancelled unpriced run as
-                # "not evidence" because it "cannot have spent past what
-                # its own cap allowed before then". That bounds the
-                # figure; it does not supply one. For a post-hoc fleet
-                # (cursor) the figure never arrives at all: Watcher.poll
-                # is always None, and a cancel preempts the one estimate
-                # the fleet would have emitted at the end. Counting it
-                # as unpriced would make blocker() refuse every later
-                # lane (and a resume as budget unverifiable). Counting
-                # it as $0 claims the vendor billed nothing. Track it as
-                # unknown instead: spent and unpriced stay put, the
-                # receipt says we do not know.
-                self.unknown_cost += 1
+            self.spent += facts.cost_usd or 0.0
+            self.unpriced += int(facts.budget_unpriced)
+            self.unknown_cost += int(facts.cancelled_unknown)
         self._publish()
 
     def seed(
@@ -3402,32 +3375,19 @@ def _run_receipt_accounting(
     # count the same paid dispatch twice.
     for run_id, summary in attempts.items():
         receipt = _json_object(base / "runs" / run_id / "result.json")
-        if receipt is not None and receipt.get("dry_run") is True:
-            continue
-        usage = receipt.get("usage") if receipt is not None else None
-        cost = budget_cost(usage.get("cost_usd") if isinstance(usage, dict) else None)
-        if cost is not None:
-            spent += cost
-        elif receipt is not None:
-            # The same rule `Ledger.add` applies to a live dispatch. It
-            # excluded `cancelled` as well as `interrupted` and this reader
-            # did not, so a run conductor cancelled and could not price was
-            # unpriced here and dropped there: the resumed mission could
-            # refuse to start anything as `budget unverifiable` over a run
-            # the original mission had already decided was not evidence
-            # (2026-09-08 review). Cursor is the live case -- it reports
-            # usage once, after the run, so a mid-dispatch cancel is
-            # spawned, unpriced, and cancelled.
-            if unpriced_dispatch(
+        if receipt is not None:
+            usage = receipt.get("usage")
+            facts = cost_facts(
+                cost_usd=usage.get("cost_usd") if isinstance(usage, dict) else None,
                 spawned=receipt.get("spawned") is True,
                 interrupted=receipt.get("interrupted") is True,
                 cancelled=receipt.get("cancelled") is True,
                 timed_out=receipt.get("timed_out") is True,
-                cost_usd=cost,
-            ):
-                unpriced += 1
-            elif receipt.get("spawned") is True and receipt.get("cancelled") is True:
-                unknown_cost += 1
+                dry_run=receipt.get("dry_run") is True,
+            )
+            spent += facts.cost_usd or 0.0
+            unpriced += int(facts.budget_unpriced)
+            unknown_cost += int(facts.cancelled_unknown)
         else:
             summary_cost = budget_cost(summary.get("cost_usd"))
             if summary_cost is not None:
@@ -3550,57 +3510,21 @@ def _keep_cancelled_lanes(
     rerun: set[str],
     notes: list[str],
 ) -> bool:
-    """Settle a cancelled lane when the sink that beat it is being kept.
-
-    A lane cancelled by early_cancel has no work of its own to redo: the
-    mission already decided, on evidence, that the winner made it
-    unnecessary. If that winner is kept on this resume the decision still
-    holds, and re-dispatching the loser is new spend on work the mission
-    had settled. If the winner is being rerun, the decision is open again
-    and so is the loser.
-
-    A cancelled lane whose own upstream is in `rerun` is not settled even
-    when its winner is kept: the dependency walk would immediately move it
-    back out, this would claim it again, and the fixed point never
-    terminated (notes grew without bound, resume held the running lock).
-    The winner-is-kept rule therefore does not claim a cancelled lane that
-    still has a need in `rerun`.
-
-    This runs after the kept set is complete, because the winner may sit
-    later in `mission.lanes` than the lane it cancelled. It also runs inside
-    the dependency cascade's own fixed point and answers in both directions,
-    because that cascade can move the winner into `rerun` after this decided
-    to keep the loser (2026-09-08 review). A cancelled loser is rarely a
-    dependent of its winner -- they are competitors -- so the needs walk
-    alone never revisited it, and a SIGINT resume could leave a sink settled
-    against a winner it was about to pay for again.
-
-    Returns whether it moved anything, so the caller's loop knows to keep
-    going.
-    """
-    changed = False
-    for lane in mission.lanes:
-        old = previous.get(lane.name)
-        if old is None:
-            continue
-        winner = _cancel_winner(old.skipped)
-        if winner is None:
-            continue
-        if (
-            lane.name in rerun
-            and winner in kept
-            and not any(need in rerun for need in lane.needs)
-        ):
-            old.kept = True
-            kept[lane.name] = old
-            rerun.discard(lane.name)
-            notes.append(f"lane '{lane.name}' stays cancelled: '{winner}' is kept")
-            changed = True
-        elif lane.name in kept and winner in rerun:
-            kept.pop(lane.name).kept = False
-            rerun.add(lane.name)
-            notes.append(f"lane '{lane.name}' runs after all: '{winner}' is being rerun")
-            changed = True
+    """Compatibility adapter for one pure cancellation-choice pass."""
+    chosen, retry, messages = cancelled_choices(
+        {lane.name: tuple(lane.needs) for lane in mission.lanes}, set(kept), rerun,
+        {name: winner for name, old in previous.items()
+         if (winner := _cancel_winner(old.skipped)) is not None},
+    )
+    changed = chosen != set(kept) or retry != rerun
+    for name in set(kept) - chosen:
+        kept.pop(name).kept = False
+    for name in chosen - set(kept):
+        previous[name].kept = True
+        kept[name] = previous[name]
+    rerun.clear()
+    rerun.update(retry)
+    notes.extend(messages)
     return changed
 
 
@@ -3672,20 +3596,20 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         else:
             rerun.add(lane.name)
 
-    # A downstream receipt describes the exact upstream artifacts it read or
-    # built on. If one of those inputs must run again, its consumers do too.
-    # Cancelled lanes settle inside the same fixed point rather than once
-    # before it: this walk can move a winner into `rerun` after that decision
-    # was made, and a loser is a competitor of its winner, not a dependent of
-    # it, so the needs walk alone never came back to it (2026-09-08 review).
-    changed = True
-    while changed:
-        changed = _keep_cancelled_lanes(mission, previous, kept, rerun, notes)
-        for lane in mission.lanes:
-            if lane.name in kept and any(need in rerun for need in lane.needs):
-                kept.pop(lane.name)
-                rerun.add(lane.name)
-                changed = True
+    # Evidence collection is complete. Resolve dependency and cancellation
+    # choices as values, then apply those choices to the in-memory plan.
+    chosen, rerun, choice_notes = settle_choices(
+        {lane.name: tuple(lane.needs) for lane in mission.lanes},
+        set(kept), rerun,
+        {name: winner for name, old in previous.items()
+         if (winner := _cancel_winner(old.skipped)) is not None},
+    )
+    notes.extend(choice_notes)
+    for name in set(kept) - chosen:
+        kept.pop(name).kept = False
+    for name in chosen - set(kept):
+        previous[name].kept = True
+        kept[name] = previous[name]
 
     collate: str | None = None
     if mission.collate:
@@ -3717,6 +3641,109 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         children_rollups=children_rollups,
         unknown_cost_dispatches=unknown_cost,
     )
+
+
+def _finish_attempt(
+    out: LaneResult,
+    result: Result,
+    *,
+    lane_name: str,
+    attempt_label: str,
+    attempt_cwd: str,
+    kind: str | None,
+    resume_state: dict | None,
+    resume_note: str | None,
+    retry_of: str | None,
+    retry_index: int,
+    cancel_reason: str | None,
+    answers_dir: Path,
+    diffs_dir: Path,
+    deliverables_dir: Path,
+    dry_run: bool,
+) -> None:
+    """Capture one result and its artifacts before the lane is settled.
+
+    Scheduler state and ledger reservations stay with the caller. A failed
+    artifact copy leaves the authoritative run receipt available for recovery;
+    this function never publishes a partially assembled lane receipt.
+    """
+    summary = result.summary()
+    summary["test_surface"] = result.test_surface
+    summary["verdict_data"] = result.verdict
+    summary["reproduce"] = result.reproduce
+    summary["lane"] = lane_name
+    summary["attempt"] = attempt_label
+    summary["resume"] = resume_state
+    summary["kind"] = kind
+    if retry_of is not None:
+        summary["retry_of"] = retry_of
+        summary["retry"] = retry_index
+    if resume_note:
+        summary["note"] = resume_note
+    elif result.gate and result.gate.get("skipped"):
+        # F3: a read lane whose own gate and clean gate were both
+        # skipped (nothing but a no-op or its E1 deliverable moved) --
+        # the report line says so instead of looking like the gate
+        # silently never ran.
+        summary["note"] = "gate skipped (read lane)"
+    if result.cancelled:
+        # dispatch() is told the winner via cancel_reason (see
+        # _LiveCancelReason). A dispatcher that ignores that
+        # keyword still lands the generic default on the run
+        # receipt; the attempt's error must match skipped.
+        cancel_reason = cancel_reason or "cancelled: another lane already passed"
+        summary["error"] = cancel_reason
+        summary["failure"] = cancel_reason
+    facts = cost_facts(
+        cost_usd=summary.get("cost_usd"),
+        spawned=result.spawned,
+        interrupted=result.interrupted,
+        cancelled=result.cancelled,
+        timed_out=result.timed_out,
+        dry_run=result.dry_run,
+    )
+    summary["cost_usd"] = facts.cost_usd
+    summary["unpriced"] = facts.budget_unpriced
+    if facts.cancelled_unknown:
+        summary["cost_unknown"] = True
+    # E6: a script attempt is priced at zero and verified, never
+    # unpriced (result.budget carries "free": true; its cost_usd is
+    # 0.0, so the line above already reads False here on its own).
+    summary["free"] = bool((result.budget or {}).get("free"))
+    out.attempts.append(summary)
+    out.kinds.append(kind)
+    if summary.get("cost_usd") is not None:
+        out.cost_usd += float(summary["cost_usd"])
+    if summary["unpriced"]:
+        out.unpriced_attempts += 1
+    out.tokens += int(summary.get("tokens") or 0)
+    out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
+    out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
+    out.input_tokens += int(summary.get("input_tokens") or 0)
+    out.tool_calls += int(summary.get("tool_calls") or 0)
+    out.breaker = summary.get("breaker")
+    # A lane's answer, diff, and tree are its final attempt's. A failed
+    # primary's answer left in place would be what the collate reads
+    # when the fallback produced none.
+    out.answer_path = _keep(result.answer_path, answers_dir / f"{lane_name}.txt")
+    out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane_name}.patch")
+    out.deliverable_path = _keep(
+        result.deliverable_path, deliverables_dir / f"{lane_name}-deliverable"
+    )
+    # W3: the bytes of those three files, as they stand now, so a
+    # resume can tell this lane's own output from anything edited
+    # into its place afterwards.
+    _record_artifact_digests(out)
+    out.cwd = attempt_cwd
+    iso = result.isolation or {}
+    if not dry_run:
+        out.base_sha = iso.get("base_sha") or ""
+        out.tip_sha = iso.get("tip_sha") or ""
+        out.clean = iso.get("clean")
+        out.branch = iso.get("branch") or ""
+    out.test_touched = _test_touched(result.test_surface)
+    out.verdict = result.verdict
+    out.session_id = result.session_id
 
 
 def run_mission(
@@ -3855,12 +3882,8 @@ def run_mission(
                 clear_verification_block(mission_dir)
             resume.notes.extend(lock_notes)
         if pending_pause is not None:
-            # After the lock, before `_build_resume_plan`: a human lane's
-            # answer file is what the plan trusts, so the write must land
-            # before the keep/rerun decision. `_check_branches` can still
-            # raise after this; the running-lock race this moves past is
-            # the one that left `pause.json` answered with no process
-            # holding `stop_answer`.
+            # Git verification has completed under the lock. Apply this
+            # one answer and update only its human lane in the checked plan.
             pause_path = mission_dir / "pause.json"
             answered_at = datetime.now(UTC).isoformat()
             if pending_pause.get("kind") == "human":
@@ -4331,90 +4354,13 @@ def _execute_mission(
                 if plan_message is not None:
                     result.error = f"plan: {plan_message}"
             kind = error_kind(result)
-            summary = result.summary()
-            summary["test_surface"] = result.test_surface
-            summary["verdict_data"] = result.verdict
-            summary["reproduce"] = result.reproduce
-            summary["lane"] = lane.name
-            summary["attempt"] = attempt.label()
-            summary["resume"] = resume_state
-            summary["kind"] = kind
-            if retry_of is not None:
-                summary["retry_of"] = retry_of
-                summary["retry"] = retry_index
-            if resume_note:
-                summary["note"] = resume_note
-            elif result.gate and result.gate.get("skipped"):
-                # F3: a read lane whose own gate and clean gate were both
-                # skipped (nothing but a no-op or its E1 deliverable moved) --
-                # the report line says so instead of looking like the gate
-                # silently never ran.
-                summary["note"] = "gate skipped (read lane)"
-            if result.cancelled:
-                # dispatch() is told the winner via cancel_reason (see
-                # _LiveCancelReason). A dispatcher that ignores that
-                # keyword still lands the generic default on the run
-                # receipt; the attempt's error must match skipped.
-                cancel_reason = cancel_reasons.get(
-                    lane.name, "cancelled: another lane already passed"
-                )
-                summary["error"] = cancel_reason
-                summary["failure"] = cancel_reason
-            summary["unpriced"] = unpriced_dispatch(
-                spawned=result.spawned,
-                interrupted=result.interrupted,
-                cancelled=result.cancelled,
-                timed_out=result.timed_out,
-                cost_usd=summary.get("cost_usd"),
+            _finish_attempt(
+                out, result, lane_name=lane.name, attempt_label=attempt.label(),
+                attempt_cwd=attempt_cwd, kind=kind, resume_state=resume_state,
+                resume_note=resume_note, retry_of=retry_of, retry_index=retry_index,
+                cancel_reason=cancel_reasons.get(lane.name), answers_dir=answers_dir,
+                diffs_dir=diffs_dir, deliverables_dir=deliverables_dir, dry_run=dry_run,
             )
-            # Same third state Ledger.add records as unknown_cost: a
-            # cancelled run with no figure is not unpriced (blocker /
-            # resume unverifiable) and not $0. Only present when true
-            # so existing attempt receipts do not grow a new key.
-            if (
-                result.spawned
-                and result.cancelled
-                and summary.get("cost_usd") is None
-            ):
-                summary["cost_unknown"] = True
-            # E6: a script attempt is priced at zero and verified, never
-            # unpriced (result.budget carries "free": true; its cost_usd is
-            # 0.0, so the line above already reads False here on its own).
-            summary["free"] = bool((result.budget or {}).get("free"))
-            out.attempts.append(summary)
-            out.kinds.append(kind)
-            if summary.get("cost_usd") is not None:
-                out.cost_usd += float(summary["cost_usd"])
-            if summary["unpriced"]:
-                out.unpriced_attempts += 1
-            out.tokens += int(summary.get("tokens") or 0)
-            out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
-            out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
-            out.input_tokens += int(summary.get("input_tokens") or 0)
-            out.tool_calls += int(summary.get("tool_calls") or 0)
-            out.breaker = summary.get("breaker")
-            # A lane's answer, diff, and tree are its final attempt's. A failed
-            # primary's answer left in place would be what the collate reads
-            # when the fallback produced none.
-            out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
-            out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
-            out.deliverable_path = _keep(
-                result.deliverable_path, deliverables_dir / f"{lane.name}-deliverable"
-            )
-            # W3: the bytes of those three files, as they stand now, so a
-            # resume can tell this lane's own output from anything edited
-            # into its place afterwards.
-            _record_artifact_digests(out)
-            out.cwd = attempt_cwd
-            iso = result.isolation or {}
-            if not dry_run:
-                out.base_sha = iso.get("base_sha") or ""
-                out.tip_sha = iso.get("tip_sha") or ""
-                out.clean = iso.get("clean")
-                out.branch = iso.get("branch") or ""
-            out.test_touched = _test_touched(result.test_surface)
-            out.verdict = result.verdict
-            out.session_id = result.session_id
             if result.resumed is not None and result.resumed.get("ok") is False:
                 resume_failed = True
             return result, kind

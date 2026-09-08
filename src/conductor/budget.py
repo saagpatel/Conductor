@@ -67,6 +67,14 @@ from .outputs import (
 POLL_S = 2.0
 
 
+def _admitted_cost(value: object) -> float | None:
+    """Finite non-negative number, else None. Shared by budget and CostFacts."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def budget_cost(value: object) -> float | None:
     """`value` as a dollar figure the budget may add, or None.
 
@@ -82,10 +90,45 @@ def budget_cost(value: object) -> float | None:
     the same values on the reporting side; this rule serves live and resume
     accounting.
     """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) and number >= 0 else None
+    return _admitted_cost(value)
+
+
+@dataclass(frozen=True)
+class CostFacts:
+    """Normalized cost plus the budget flags one receipt implies."""
+
+    cost_usd: float | None
+    budget_unpriced: bool
+    cancelled_unknown: bool
+
+
+def cost_facts(
+    *,
+    cost_usd: object,
+    spawned: bool = False,
+    interrupted: bool = False,
+    cancelled: bool = False,
+    timed_out: bool = False,
+    dry_run: bool = False,
+) -> CostFacts:
+    """Today's budget rule as one immutable value.
+
+    A dry run contributes nothing. A finite non-negative cost is priced even
+    when the run was stopped. A missing cost blocks only a spawned run that
+    conductor did not stop; a spawned cancel with no figure is unknown rather
+    than budget-unpriced.
+    """
+    if dry_run:
+        return CostFacts(cost_usd=None, budget_unpriced=False, cancelled_unknown=False)
+    admitted = _admitted_cost(cost_usd)
+    if admitted is not None:
+        return CostFacts(cost_usd=admitted, budget_unpriced=False, cancelled_unknown=False)
+    stopped = interrupted or cancelled or timed_out
+    return CostFacts(
+        cost_usd=None,
+        budget_unpriced=spawned and not stopped,
+        cancelled_unknown=spawned and cancelled,
+    )
 
 
 def unpriced_dispatch(
@@ -97,10 +140,13 @@ def unpriced_dispatch(
     A conductor stop does not establish a price; it also must not acquire
     a new budget-blocking failure simply because the mission was resumed.
     """
-    return (
-        spawned and not interrupted and not cancelled and not timed_out
-        and budget_cost(cost_usd) is None
-    )
+    return cost_facts(
+        cost_usd=cost_usd,
+        spawned=spawned,
+        interrupted=interrupted,
+        cancelled=cancelled,
+        timed_out=timed_out,
+    ).budget_unpriced
 
 
 @dataclass

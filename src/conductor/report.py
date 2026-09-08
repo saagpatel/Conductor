@@ -1,11 +1,12 @@
 """E11: the ledger report -- what Shape A's ten rules (AGENTS.md) look like
 as numbers, computed from the same durable receipts `conductor spend` reads.
 
-Every run receipt is read once (`spend._read_run` supplies the accounting
-fields already validated there; this module only adds the fields a rule
-needs: which pipeline stage and mission lane made the dispatch, its
-duration, its error kind, and whether its gate passed). A receipt written
-before E11 carries no `stage`, `lane`, or `mission` field at all; for those,
+Every run receipt is read once (`spend._run_from_receipt` supplies the
+accounting fields already validated there from that same object; this
+module only adds the fields a rule needs: which pipeline stage and mission
+lane made the dispatch, its duration, its error kind, and whether its gate
+passed). A receipt written before E11 carries no `stage`, `lane`, or
+`mission` field at all; for those,
 `_scan_missions` joins the run back to its mission snapshot the same way
 `spend._mission_map` does, but keeps the lane name and declared stage too,
 not just the mission name.
@@ -29,8 +30,7 @@ from .paths import conductor_home
 from .resume import verification_block
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
-from .spend import _number, _parse_bound, _run_time
-from .spend import _read_run as _spend_read_run
+from .spend import _number, _parse_bound, _run_from_receipt, _run_time
 
 BUILD_STAGE = "build"
 REVIEW_STAGE = "review"
@@ -397,14 +397,12 @@ def _gate_ran(tests: object, surface: object) -> bool:
 
 
 def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -> Run | None:
-    base = _spend_read_run(path)
-    if base is None:
-        return None
     try:
         raw: object = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict):
+    base = _run_from_receipt(raw)
+    if base is None or not isinstance(raw, dict):
         return None
 
     stage = _str_field(raw, "stage")

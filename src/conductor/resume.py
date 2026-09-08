@@ -59,3 +59,50 @@ def record_verification_block(mission_dir: Path, exc: VerificationUnavailable) -
 
 def clear_verification_block(mission_dir: Path) -> None:
     (mission_dir / VERIFICATION_FILE).unlink(missing_ok=True)
+
+
+def cancelled_choices(
+    needs: dict[str, tuple[str, ...]], kept: set[str], rerun: set[str],
+    cancelled_by: dict[str, str],
+) -> tuple[set[str], set[str], list[str]]:
+    """One cancellation pass, also used by the legacy mission adapter."""
+    kept, rerun = set(kept), set(rerun)
+    notes: list[str] = []
+    for name, winner in cancelled_by.items():
+        if name in rerun and winner in kept and not any(n in rerun for n in needs[name]):
+            kept.add(name)
+            rerun.remove(name)
+            notes.append(f"lane '{name}' stays cancelled: '{winner}' is kept")
+        elif name in kept and winner in rerun:
+            kept.remove(name)
+            rerun.add(name)
+            notes.append(f"lane '{name}' runs after all: '{winner}' is being rerun")
+    return kept, rerun, notes
+
+
+def settle_choices(
+    needs: dict[str, tuple[str, ...]],
+    kept: set[str],
+    rerun: set[str],
+    cancelled_by: dict[str, str],
+) -> tuple[set[str], set[str], list[str]]:
+    """Settle reuse decisions without reading files or mutating receipts.
+
+    A cancelled competitor is reusable only while its winner and inputs
+    remain reusable. Evaluate cancellation and downstream invalidation in
+    the same fixed point so neither can leave the other stale.
+    """
+    kept, rerun = set(kept), set(rerun)
+    notes: list[str] = []
+    changed = True
+    while changed:
+        before = (set(kept), set(rerun))
+        kept, rerun, cancellation_notes = cancelled_choices(needs, kept, rerun, cancelled_by)
+        notes.extend(cancellation_notes)
+        changed = before != (kept, rerun)
+        for name, upstream in needs.items():
+            if name in kept and any(n in rerun for n in upstream):
+                kept.remove(name)
+                rerun.add(name)
+                changed = True
+    return kept, rerun, notes
