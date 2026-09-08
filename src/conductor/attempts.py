@@ -752,7 +752,14 @@ def _trusted_lane(
         # A lane cancelled because another sink already passed is a settled
         # outcome of a mission that succeeded, not unfinished work; rerunning
         # it on resume would just repeat the cancellation for nothing.
-        return result.skipped.startswith("cancelled:") and prior_ok
+        #
+        # Both spellings. `mission._cancelled_before_spawn` writes "cancelled
+        # before spawn: ...", which does not start with "cancelled:", so the
+        # one lane that cost nothing at all was the one this refused to keep:
+        # it was re-dispatched on resume and paid for, the exact opposite of
+        # what README's cancel section describes, and the mid-run spelling
+        # was kept correctly all along (2026-09-08 review).
+        return result.skipped.startswith(("cancelled:", "cancelled before spawn:")) and prior_ok
     if result.ok is not True:
         return False
     if not result.attempts:
