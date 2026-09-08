@@ -525,7 +525,7 @@ def test_shape_a_without_the_adversarial_flag_is_unchanged(repo, tmp_path):
     fix_lane = next(lane for lane in raw["lanes"] if lane["name"] == "fix")
     assert fix_lane["base"] == "build"
     assert "<adversarial>" not in fix_lane["prompt"]
-    assert fix_lane["prompt"] == shape.FIX_PROMPT
+    assert fix_lane["prompt"] == shape.fix_prompt("true")
 
     shape.write_shape_schemas(spec.parent)
     mission = mission_from_dict(raw, base_dir=spec.parent)
