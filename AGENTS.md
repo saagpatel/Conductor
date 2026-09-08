@@ -136,6 +136,15 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    twice in `--items`): E10's build spent its whole cap on code and none on tests, and the salvage
    cost an hour of wall clock and two extra missions.
 
+12. **A lane's `--test` on this repository runs under `env -u CONDUCTOR_LANE`, and lane gates run
+   one at a time.** Every dispatched process carries `CONDUCTOR_LANE=1` so `land.py` can refuse to
+   run inside a lane; seven tests in `test_land_failure_paths.py` assert that refusal, so the suite
+   fails inside any lane that runs it. Wave 6 lost four lane gates to this and nothing else (the
+   commits were undone, the worktrees kept, and every one salvaged clean). Separately, five `-n auto`
+   suites at once flaked `test_stop.py::test_a_stop_request_kills_the_fleet_and_releases_its_worktree`
+   in all five worktrees including one that touched only `prices.py`: launch lanes in parallel, gate
+   their tips in series.
+
 `conductor shape a --adversarial` (E16) adds a lane whose deliverable is a test that fails
 on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
 is inherited rather than re-earned.
