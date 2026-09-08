@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from conductor import gc as gc_mod
@@ -291,3 +292,150 @@ def test_gc_plans_a_repository_once_when_a_lane_worktree_is_a_receipt_cwd(
     assert [plan.repo for plan in plans] == [repo.resolve()]
     removes = [item for item in plans[0].items if item.action == "remove"]
     assert [item.path for item in removes] == [str(Path(lane.worktree).resolve())]
+
+
+def test_age_reason_keeps_an_unparseable_stamp_distinct_from_no_stamp():
+    now = datetime(2026, 9, 8, tzinfo=UTC)
+    assert gc_mod._age_reason("nostamp-x", 24.0, now) == "run_id has no timestamp"
+    assert gc_mod._age_reason("20260230T000000Z-a", 24.0, now) == "run_id timestamp is unparseable"
+    assert gc_mod._age_reason("20261399T256199Z-x", 24.0, now) == "run_id timestamp is unparseable"
+    assert gc_mod._age_reason("20990101T000000Z-x", 24.0, now) == "newer than --older-than"
+
+
+def test_gc_plans_past_a_worktree_whose_stamp_matches_but_is_not_a_date(repo: Path, home: Path):
+    bad = worktrees.create(str(repo), "20260230T000000Z-x", home / "worktrees")
+    old = "20200101T000000Z-ok"
+    clean = worktrees.create(str(repo), old, home / "worktrees")
+    _receipt(home, old, repo)
+
+    plans, _ = build_plan(home, [str(repo)], 24.0)
+    items = plans[0].items
+    bad_row = next(item for item in items if item.path == bad.worktree)
+    clean_row = next(item for item in items if item.path == clean.worktree)
+
+    assert bad_row.action == "keep"
+    assert bad_row.reason == "run_id timestamp is unparseable"
+    assert clean_row.action == "remove"
+
+
+def test_gc_keeps_an_empty_port_claim_that_cannot_name_a_run(home: Path):
+    (home / "ports").mkdir(parents=True)
+    empty = home / "ports" / "40001"
+    empty.write_text("")
+
+    _plans, notices = build_plan(home, [], 0)
+    port = next(item for item in notices if item.kind == "port")
+
+    assert port.action == "keep"
+    assert port.reason == "claim file empty"
+    assert empty.exists()
+
+
+def test_gc_keeps_a_non_utf8_port_claim_instead_of_aborting_the_plan(home: Path):
+    (home / "ports").mkdir(parents=True)
+    garbage = home / "ports" / "40002"
+    garbage.write_bytes(b"\xff\xfe")
+
+    _plans, notices = build_plan(home, [], 0)
+    port = next(item for item in notices if item.kind == "port")
+
+    assert port.action == "keep"
+    assert port.reason == "claim file unreadable"
+    assert garbage.exists()
+
+
+def test_gc_removes_an_unattributable_port_claim_only_once_older_than(home: Path):
+    (home / "ports").mkdir(parents=True)
+    stale = home / "ports" / "40003"
+    stale.write_text("")
+    old = (datetime.now(UTC) - timedelta(hours=48)).timestamp()
+    os.utime(stale, (old, old))
+
+    plans, notices = build_plan(home, [], 24.0)
+    port = next(item for item in notices if item.kind == "port")
+    assert port.action == "remove"
+    assert port.reason == "claim file empty"
+
+    assert apply_plan(plans, notices, home, older_than=24.0) is False
+    assert not stale.exists()
+
+
+def test_gc_rechecks_an_empty_port_claim_before_apply_unlinks_it(home: Path):
+    (home / "ports").mkdir(parents=True)
+    claim = home / "ports" / "40004"
+    claim.write_text("")
+    old = (datetime.now(UTC) - timedelta(hours=48)).timestamp()
+    os.utime(claim, (old, old))
+
+    plans, notices = build_plan(home, [], 24.0)
+    assert any(item.action == "remove" and item.kind == "port" for item in notices)
+
+    live = "20200101T000000Z-became-live"
+    claim.write_text(live)
+    (home / "runs" / live).mkdir(parents=True)
+
+    assert apply_plan(plans, notices, home, older_than=24.0) is False
+    port = next(item for item in notices if item.kind == "port")
+    assert port.action == "keep"
+    assert port.reason == "run in progress (no result.json)"
+    assert claim.exists()
+
+
+def test_gc_keeps_a_completed_lane_worktree_while_its_mission_is_paused(
+    repo: Path, home: Path, monkeypatch, capsys
+):
+    run_id = "20200101T000000Z-paused-lane"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    _receipt(home, run_id, repo)
+    mission = home / "missions" / "20200101T000000Z-parked"
+    lane_dir = mission / "lanes"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "build.json").write_text(json.dumps({"attempts": [{"run_id": run_id}]}))
+    (mission / "result.json").write_text(
+        json.dumps({"paused": {"kind": "human", "lane": "ask", "question": "continue?"}})
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+
+    assert main(["gc", "--apply"]) == 0
+    rows = _rows(capsys.readouterr().out)
+    worktree = next(row for row in rows if row.get("path") == isolation.worktree)
+    assert worktree["reason"] == "run in progress (no result.json)"
+    assert Path(isolation.worktree).is_dir()
+
+
+def test_gc_keeps_a_completed_lane_worktree_while_its_mission_is_interrupted(
+    repo: Path, home: Path
+):
+    run_id = "20200101T000000Z-interrupted-lane"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    _receipt(home, run_id, repo)
+    mission = home / "missions" / "20200101T000000Z-stopped"
+    lane_dir = mission / "lanes"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "build.json").write_text(json.dumps({"attempts": [{"run_id": run_id}]}))
+    (mission / "result.json").write_text(json.dumps({"interrupted": True}))
+
+    plans, _ = build_plan(home, [str(repo)], 0)
+    worktree = next(item for item in plans[0].items if item.path == isolation.worktree)
+    assert worktree.action == "keep"
+    assert worktree.reason == "run in progress (no result.json)"
+
+
+def test_gc_does_not_protect_a_lane_of_a_pause_that_already_answered_stop(
+    repo: Path, home: Path
+):
+    run_id = "20200101T000000Z-stopped-lane"
+    isolation = worktrees.create(str(repo), run_id, home / "worktrees")
+    _receipt(home, run_id, repo)
+    mission = home / "missions" / "20200101T000000Z-answered"
+    lane_dir = mission / "lanes"
+    lane_dir.mkdir(parents=True)
+    (lane_dir / "build.json").write_text(json.dumps({"attempts": [{"run_id": run_id}]}))
+    (mission / "result.json").write_text(
+        json.dumps({"paused": {"kind": "lane", "lane": "fix", "answer": "stop"}})
+    )
+
+    plans, _ = build_plan(home, [str(repo)], 0)
+    worktree = next(item for item in plans[0].items if item.path == isolation.worktree)
+    assert worktree.action == "remove"
+    assert worktree.reason == "clean worktree"

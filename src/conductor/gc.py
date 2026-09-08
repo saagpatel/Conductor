@@ -73,7 +73,7 @@ class RepoPlan:
 def _json_object(path: Path) -> dict[str, object] | None:
     try:
         raw: object = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
         return None
@@ -122,7 +122,13 @@ def _age_reason(run_id: str, hours: float, now: datetime) -> str | None:
     match = _RUN_STAMP.match(run_id)
     if match is None:
         return "run_id has no timestamp"
-    created = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    # `_RUN_STAMP` matches an impossible calendar (20260230, 20261399T256199).
+    # `spend._run_time` already treats that as no stamp; raising here aborts
+    # the whole plan, so one corrupt worktree or branch name skips cleanup.
+    try:
+        created = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return "run_id timestamp is unparseable"
     if created >= now - timedelta(hours=hours):
         return "newer than --older-than"
     return None
@@ -172,6 +178,42 @@ def _unmerged_branch_reason(repo: Path, branch: str) -> str:
     return f"unmerged work on {branch} ({reason})" if action == "keep" else ""
 
 
+def _mission_awaiting_resume(data: dict[str, object] | None) -> bool:
+    """A parked or interrupted mission is still the salvage source for its runs.
+
+    `run_mission` writes `result.json` unconditionally, including when it
+    parks (`paused` without an `answer`) or writes an interrupted receipt.
+    Presence of that file is not finishedness. An unreadable receipt is
+    treated as still live: gc cannot prove the mission is done.
+    """
+    if data is None:
+        return True
+    paused = data.get("paused")
+    if isinstance(paused, dict) and "answer" not in paused:
+        return True
+    return data.get("interrupted") is True
+
+
+def _protect_lane_runs(mission_dir: Path, protected: set[str]) -> None:
+    lanes_dir = mission_dir / "lanes"
+    for receipt in lanes_dir.glob("*.json") if lanes_dir.is_dir() else ():
+        data = _json_object(receipt)
+        if data is None:
+            continue
+        # `previous_attempts` names the runs a retry superseded. Those
+        # runs have their own result.json, so the `runs/` scan above does
+        # not protect them, and until the mission itself finishes their
+        # worktree can still be the only copy of what the superseded
+        # attempt built (export.py reads both lists for the same reason).
+        for key in ("previous_attempts", "attempts"):
+            attempts = data.get(key)
+            if not isinstance(attempts, list):
+                continue
+            for attempt in attempts:
+                if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
+                    protected.add(attempt["run_id"])
+
+
 def _in_progress_run_ids(home: Path) -> set[str]:
     """Runs whose only worktree/branch copy may still be in use."""
     protected: set[str] = set()
@@ -186,25 +228,12 @@ def _in_progress_run_ids(home: Path) -> set[str]:
     if not missions.is_dir():
         return protected
     for mission_dir in missions.iterdir():
-        if not mission_dir.is_dir() or (mission_dir / "result.json").is_file():
+        if not mission_dir.is_dir():
             continue
-        lanes_dir = mission_dir / "lanes"
-        for receipt in lanes_dir.glob("*.json") if lanes_dir.is_dir() else ():
-            data = _json_object(receipt)
-            if data is None:
-                continue
-            # `previous_attempts` names the runs a retry superseded. Those
-            # runs have their own result.json, so the `runs/` scan above does
-            # not protect them, and until the mission itself finishes their
-            # worktree can still be the only copy of what the superseded
-            # attempt built (export.py reads both lists for the same reason).
-            for key in ("previous_attempts", "attempts"):
-                attempts = data.get(key)
-                if not isinstance(attempts, list):
-                    continue
-                for attempt in attempts:
-                    if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
-                        protected.add(attempt["run_id"])
+        result_file = mission_dir / "result.json"
+        if result_file.is_file() and not _mission_awaiting_resume(_json_object(result_file)):
+            continue
+        _protect_lane_runs(mission_dir, protected)
     return protected
 
 
@@ -340,7 +369,47 @@ def _plan_repo(
     return RepoPlan(repo, items)
 
 
-def _port_items(home: Path, protected_runs: set[str]) -> list[Item]:
+def _read_port_claim(path: Path) -> tuple[str, str | None]:
+    """Return the claimed run id, or ("", why) when gc cannot name a run.
+
+    `UnicodeDecodeError` is a ValueError, not an OSError: garbage bytes in
+    a claim file used to abort the whole plan. Empty is the create-then-write
+    window in `ports.claim` (`O_CREAT | O_EXCL`, then the run id).
+    """
+    try:
+        run_id = path.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return "", "claim file unreadable"
+    if not run_id:
+        return "", "claim file empty"
+    return run_id, None
+
+
+def _unattributable_claim_reason(
+    path: Path, hours: float, now: datetime, *, why: str
+) -> str | None:
+    """Keep a claim gc cannot attribute unless `--older-than` proves it dead.
+
+    Deleting an empty or unreadable claim races a live `ports.claim`: the
+    file exists before the run id is written. Keeping every such file
+    forever leaks ports. The operator's `--older-than` is the lever that
+    the claim's own mtime is old enough to be certainly dead. hours==0
+    cannot prove that, so the claim is kept.
+    """
+    if hours == 0:
+        return why
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return why
+    if mtime >= now - timedelta(hours=hours):
+        return "newer than --older-than"
+    return None
+
+
+def _port_items(
+    home: Path, protected_runs: set[str], *, older_than: float = 0, now: datetime | None = None
+) -> list[Item]:
     """One item per port claim file, live or stale.
 
     A claim file is created before the fleet spawns and removed when the
@@ -348,17 +417,17 @@ def _port_items(home: Path, protected_runs: set[str]) -> list[Item]:
     either the run is still going or it crashed hard enough to skip its own
     cleanup. Liveness is the same "no result.json yet" check that protects a
     run's worktree and branch, so a claim is never reclaimed while its run
-    could still be using the port.
+    could still be using the port. A claim gc cannot attribute to a run is
+    not a claim gc can prove is dead: it is kept unless `--older-than`
+    says its mtime is old enough.
     """
     items: list[Item] = []
     ports_dir = home / "ports"
     if not ports_dir.is_dir():
         return items
+    when = datetime.now(UTC) if now is None else now
     for claim_file in sorted(p for p in ports_dir.iterdir() if p.is_file()):
-        try:
-            run_id = claim_file.read_text().strip()
-        except OSError:
-            run_id = ""
+        run_id, unreadable = _read_port_claim(claim_file)
         if run_id and _run_in_progress(home, run_id, protected_runs):
             items.append(
                 Item(
@@ -370,28 +439,69 @@ def _port_items(home: Path, protected_runs: set[str]) -> list[Item]:
                     path=str(claim_file),
                 )
             )
-        else:
+            continue
+        if unreadable:
+            keep = _unattributable_claim_reason(
+                claim_file, older_than, when, why=unreadable
+            )
             items.append(
                 Item(
                     "",
                     "port",
-                    "remove",
-                    "run completed" if run_id else "claim file unreadable",
+                    "keep" if keep else "remove",
+                    keep or unreadable,
                     name=run_id,
                     path=str(claim_file),
                 )
             )
+            continue
+        items.append(
+            Item(
+                "",
+                "port",
+                "remove",
+                "run completed",
+                name=run_id,
+                path=str(claim_file),
+            )
+        )
     return items
 
 
-def _apply_port_remove(item: Item, home: Path, protected_runs: set[str]) -> bool:
-    """Recheck liveness immediately before deleting, same as a worktree remove."""
-    if item.name and _run_in_progress(home, item.name, protected_runs):
-        item.action = "keep"
-        item.reason = "run in progress (no result.json)"
+def _apply_port_remove(
+    item: Item,
+    home: Path,
+    protected_runs: set[str],
+    *,
+    older_than: float = 0,
+    now: datetime | None = None,
+) -> bool:
+    """Recheck liveness immediately before deleting, same as a worktree remove.
+
+    Re-read the claim file rather than trusting `item.name`: an empty name
+    used to skip this guard entirely, and a dispatch can write its run id
+    into a file that was empty at plan time.
+    """
+    path = Path(item.path)
+    when = datetime.now(UTC) if now is None else now
+    if not path.exists():
         item.done = True
         return False
-    path = Path(item.path)
+    run_id, unreadable = _read_port_claim(path)
+    if run_id:
+        item.name = run_id
+        if _run_in_progress(home, run_id, protected_runs):
+            item.action = "keep"
+            item.reason = "run in progress (no result.json)"
+            item.done = True
+            return False
+    elif unreadable:
+        keep = _unattributable_claim_reason(path, older_than, when, why=unreadable)
+        if keep:
+            item.action = "keep"
+            item.reason = keep
+            item.done = True
+            return False
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
@@ -481,7 +591,7 @@ def build_plan(
             _plan_repo(repo, (home / "worktrees").resolve(), older_than, now, protected_runs)
         )
     notices.extend(_audit_items(home))
-    notices.extend(_port_items(home, protected_runs))
+    notices.extend(_port_items(home, protected_runs, older_than=older_than, now=now))
     return plans, notices
 
 
@@ -558,6 +668,26 @@ def _apply_removes(
             item.reason = "run in progress (no result.json)"
             item.done = True
             continue
+        worktrees, error = _parse_worktrees(plan.repo)
+        if error:
+            item.done = False
+            item.error = error
+            failed = True
+            continue
+        branch = next(
+            (
+                worktree.branch
+                for worktree in worktrees
+                if worktree.path.resolve() == path.resolve()
+            ),
+            "",
+        )
+        unmerged = _unmerged_branch_reason(plan.repo, branch)
+        if unmerged:
+            item.action = "keep"
+            item.reason = unmerged
+            item.done = True
+            continue
         removed = git_run(plan.repo, "worktree", "remove", str(path))
         remaining, error = _parse_worktrees(plan.repo)
         registered = any(worktree.path.resolve() == path.resolve() for worktree in remaining)
@@ -625,7 +755,9 @@ def _apply_branches(plan: RepoPlan, home: Path, protected_runs: set[str]) -> boo
     return failed
 
 
-def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
+def apply_plan(
+    plans: list[RepoPlan], notices: list[Item], home: Path, *, older_than: float = 0
+) -> bool:
     """Apply the planned order and read back every destructive action."""
     failed = False
     worktree_root = (home / "worktrees").resolve()
@@ -633,6 +765,7 @@ def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
     # this scan; each attempt claims a fresh run. Cache that expensive walk,
     # then stat the one run beside every remove/delete so new runs still win.
     protected_runs = _in_progress_run_ids(home)
+    now = datetime.now(UTC)
     for plan in plans:
         failed = _apply_prunes(plan, worktree_root) or failed
         failed = _apply_removes(plan, worktree_root, home, protected_runs) or failed
@@ -642,7 +775,10 @@ def apply_plan(plans: list[RepoPlan], notices: list[Item], home: Path) -> bool:
                 item.done = True
     for item in notices:
         if item.kind == "port" and item.action == "remove":
-            failed = _apply_port_remove(item, home, protected_runs) or failed
+            failed = (
+                _apply_port_remove(item, home, protected_runs, older_than=older_than, now=now)
+                or failed
+            )
         else:
             item.done = True
     return failed
@@ -655,7 +791,9 @@ def cmd_gc(args: argparse.Namespace) -> int:
         return 2
     home = conductor_home()
     plans, notices = build_plan(home, args.repo, args.older_than)
-    failed = apply_plan(plans, notices, home) if args.apply else False
+    failed = (
+        apply_plan(plans, notices, home, older_than=args.older_than) if args.apply else False
+    )
     for item in [entry for plan in plans for entry in plan.items] + notices:
         print(json.dumps(item.to_dict(applied=args.apply), sort_keys=True))
     return 1 if failed else 0
