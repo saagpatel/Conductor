@@ -17,16 +17,40 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.budget import Budget, _Tail
+from conductor.errors import capped, error_kind
 from conductor.fleets import DispatchRefused, Spec, build_argv
 from conductor.mission import Ledger, mission_from_dict, run_mission
 from conductor.outputs import INCOMPLETE, parse
-from conductor.runner import dispatch
+from conductor.runner import Result, dispatch
 
 
 def spec_for(repo: Path, **kw) -> Spec:
     base = dict(fleet="claude", prompt="test cap", cwd=str(repo))
     base.update(kw)
     return Spec(**base)
+
+
+def _result(**overrides) -> Result:
+    base: dict = dict(
+        run_id="r1",
+        fleet="cursor",
+        model="m",
+        effort="standard",
+        mode="read",
+        cwd="/tmp/repo",
+        timeout=60,
+        exit_code=0,
+        timed_out=False,
+        duration_s=1.0,
+        run_dir="/tmp/r1",
+        stdout_path="/tmp/r1/stdout.log",
+        stderr_path="/tmp/r1/stderr.log",
+        tail="",
+        spawned=True,
+        git_verdict={"checked": True, "no_op": True},
+    )
+    base.update(overrides)
+    return Result(**base)
 
 
 # --- claude: the fleet caps itself ------------------------------------------
@@ -471,3 +495,75 @@ def test_ledger_a_timed_out_unpriced_run_does_not_halt_the_mission():
     assert state["unpriced_dispatches"] == 0
     assert state["unverifiable"] is False
     assert ledger.blocker() is None
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("verdict invalid: schema mismatch", "parse"),
+        ("resume failed: fleet reported session abc, requested wanted", "resume"),
+        ("clean gate could not run: git worktree add failed: boom", "gate"),
+        (
+            "test surface changed under policy forbid: tests/test_foo.py",
+            "gate_test_surface",
+        ),
+    ],
+)
+def test_an_unpriced_budget_with_conductor_own_check_prefixes_is_not_kind_cap(
+    error, expected
+):
+    """Item 1: settle still flags the run unpriced (no figure), but the
+    receipt's own error prefix is the cause, not the cap."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None)
+    assert budget.unpriced is True
+    result = _result(error=error, budget=budget.to_dict())
+    assert error_kind(result) == expected
+    assert error_kind(result) != "cap"
+
+
+def test_settle_unpriced_on_a_never_spawned_run_is_not_over_cap():
+    """Item 2: Popen never returned, settle still sets unpriced, and
+    `Result.summary()['over_cap']` used to follow that into True."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None)
+    assert budget.unpriced is True
+    assert budget.exceeded is False
+    result = _result(
+        spawned=False,
+        error="cannot spawn cursor-agent: [Errno 2] No such file or directory",
+        budget=budget.to_dict(),
+    )
+    assert capped(result) is False
+    assert result.summary()["over_cap"] is False
+    assert error_kind(result) == "refused"
+
+
+def test_a_priced_timeout_over_the_ceiling_is_not_settled_as_a_cap_kind():
+    """Item 3: settle's cost>ceiling limb fires on a timeout; `capped`
+    must still exclude it. A native stop that also timed out stays cap."""
+    over = Budget(cap_usd=1.0, enforcement="watcher")
+    over.settle(2.5, killed=False, fleet_status=None, timed_out=True)
+    assert over.exceeded is True
+    assert over.unpriced is False
+    timed = _result(
+        timed_out=True,
+        timeout=600,
+        budget=over.to_dict(),
+        error="timed out after 600s; process group killed",
+    )
+    assert capped(timed) is False
+    assert error_kind(timed) == "timeout"
+
+    native = Budget(cap_usd=1.0, enforcement="native")
+    native.settle(2.5, killed=False, fleet_status="error_max_budget_usd", timed_out=True)
+    assert native.exceeded is True
+    stopped = _result(
+        timed_out=True,
+        timeout=600,
+        fleet_status="error_max_budget_usd",
+        budget=native.to_dict(),
+        error="Reached maximum budget ($1.00)",
+    )
+    assert capped(stopped) is True
+    assert error_kind(stopped) == "cap"

@@ -578,15 +578,15 @@ order, first match wins:
 
 ```
 interrupted, cancelled, parse, setup, taint, settings, refused, agent, adversarial, plan,
-denied, reproduce, cap, breaker, timeout, rate_limit, transport, refusal, fleet_error, exit,
-gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit, unknown
+denied, reproduce, resume, gate_test_surface, gate, cap, breaker, timeout, rate_limit, transport, refusal, fleet_error, exit,
+deliverable, no_op, read_moved_bytes, no_answer, commit, unknown
 ```
 
 `parse` is checked that early on purpose: a dispatch that raised while its
 output was being read comes back with no priced usage, which the cap check
 below would otherwise read as a cap it could not enforce. Every kind
 conductor decides for itself, from the `error` text it wrote -- `setup`
-through `reproduce` -- is checked ahead of `cap` for the same reason: an
+through `gate` -- is checked ahead of `cap` for the same reason: an
 unpriced run (every cursor lane) cannot be shown to have stayed under its
 cap, so without that order a lane that failed its setup, or was refused
 before it ever spawned, came back as `cap` and sent a
