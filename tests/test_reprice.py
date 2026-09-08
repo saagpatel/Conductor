@@ -899,3 +899,17 @@ def test_summary_positional_constructor_keeps_skipped_and_moves_slots():
     assert payload["skipped"] == {"unreadable": 2}
     assert payload["moved"] == 0
     assert "fleet" not in payload
+
+
+def test_unfiltered_dry_run_keeps_legacy_metadata_precedence(home: Path):
+    directory = home / "runs" / "20260908T130000Z-dry-without-metadata"
+    directory.mkdir(parents=True)
+    (directory / "result.json").write_text(json.dumps({"dry_run": True}))
+    (directory / "stdout.log").write_text("unused")
+
+    unfiltered = reprice(home).to_dict()
+    assert unfiltered["skipped"]["dry_run"] == 1
+    assert unfiltered["skipped"]["unreadable"] == 0
+    filtered = reprice(home, fleet="antigravity").to_dict()
+    assert filtered["skipped"]["unreadable"] == 1
+    assert filtered["skipped"]["dry_run"] == 0

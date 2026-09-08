@@ -240,6 +240,9 @@ def _load_receipt(path: Path, *, fleet_filter: str | None = None) -> tuple[dict,
         return SKIP_UNREADABLE
     if not isinstance(raw, dict):
         return SKIP_UNREADABLE
+    # Unfiltered audits historically skip dry runs before requiring metadata.
+    if fleet_filter is None and raw.get("dry_run") is True:
+        return SKIP_DRY_RUN
     fleet = raw.get("fleet")
     model = raw.get("model")
     if not isinstance(fleet, str) or not isinstance(model, str):
