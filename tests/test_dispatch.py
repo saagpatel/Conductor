@@ -656,3 +656,41 @@ def test_a_read_lane_is_not_settings_checked(repo, home, fake_fleet):
     result = dispatch(spec_for(repo, mode="read"), home=home)
     assert result.ok is True, result.failure()
     assert result.settings == {"checked": False, "modified": []}
+
+
+def test_a_restricted_read_lane_is_settings_checked(repo, home, fake_fleet):
+    """The plain read lane above is not checked because plan mode cannot edit
+    files. A RESTRICTED read lane is a different animal: F12 runs it on
+    `--permission-mode acceptEdits`, which Edits and Writes, so it can rewrite
+    the policy it runs under exactly as a write lane can."""
+    _seed_settings(repo)
+    fake_fleet(["sh", "-c", "printf '{}\\n' > .claude/settings.json"])
+
+    result = dispatch(spec_for(repo, mode="read", restricted=True), home=home)
+
+    assert result.settings == {"checked": True, "modified": [".claude/settings.json"]}
+    assert result.ok is False
+    assert result.error == "settings modified: .claude/settings.json"
+
+
+def test_a_read_lane_with_a_deliverable_is_settings_checked(repo, home, fake_fleet):
+    """F12 gives a read lane with a declared deliverable the same acceptEdits
+    shape, so Shape A's evidence lanes are all in this class. And a lane that
+    names a settings file as its deliverable is exempt from the read-only byte
+    check, which would otherwise be the only thing catching it."""
+    _seed_settings(repo)
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "printf '{}\\n' > .claude/settings.local.json && printf 'x\\n' > out.txt",
+        ]
+    )
+
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "out.txt"}), home=home
+    )
+
+    assert result.settings["checked"] is True
+    assert result.settings["modified"] == [".claude/settings.local.json"]
+    assert result.ok is False

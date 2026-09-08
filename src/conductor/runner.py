@@ -45,6 +45,7 @@ from .fleets import (
     Spec,
     build_agy_hooks_argv,
     build_argv,
+    claude_can_edit,
     cli_version,
     taint_agy_denied_tools,
     taint_agy_matchers,
@@ -2412,10 +2413,17 @@ def dispatch(
         # Settings digest (third drill pass, 2026-09-07):
         # hashed here, beside the bytes baseline and before the spawn, so
         # a lane that edits its own permission policy mid-run is measured
-        # against what it started from. Only a claude write lane: a read lane
-        # runs in plan mode, which cannot edit these files, and a denial there
-        # is already a note rather than a failure.
-        settings_checked = spec.fleet == "claude" and spec.mode == "write"
+        # against what it started from.
+        #
+        # Every claude lane that can edit files at all, not only a write lane
+        # (2026-09-08 review). The old condition rested on "a read lane runs
+        # in plan mode, which cannot edit these files", and that is false for
+        # a restricted read lane: F12 puts `restricted: true` AND every read
+        # lane with a declared deliverable on `--permission-mode acceptEdits`,
+        # which Edits and Writes. Shape A's evidence lanes are exactly that
+        # shape, and one could name `.claude/settings.local.json` as its
+        # deliverable, where even the read-only byte check exempts it.
+        settings_checked = claude_can_edit(spec)
         settings_before = _settings_digests(spec.cwd) if settings_checked else {}
         try:
             surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
