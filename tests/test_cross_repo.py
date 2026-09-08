@@ -195,6 +195,62 @@ def test_a_three_lane_mission_across_two_repositories_prefixes_top_level_hotspot
     assert saved["collisions"] == result.collisions
 
 
+def test_multi_repository_report_keeps_conflict_details_on_prefixed_hotspots(
+    repo_a, repo_b, home, monkeypatch, tmp_path
+):
+    """Top-level hotspots are `<cwd>:`-prefixed when sinks span repositories;
+    `conflicts.files` must use that same key or `_collision_lines` drops
+    every `(conflict: ...)` from report.md."""
+
+    def build(spec: Spec) -> list[str]:
+        token = _token(spec)
+        if token == "A":
+            return ["sh", "-c", "echo v1 > shared.txt"]
+        if token == "B":
+            return ["sh", "-c", "echo v2 > shared.txt"]
+        return ["sh", "-c", "echo v3 > other.txt"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "prompt": "SPEC",
+        "lanes": [
+            {
+                "name": "a",
+                "fleet": "codex",
+                "mode": "write",
+                "prompt": "A",
+                "cwd": str(repo_a),
+                "commit": "feat: a",
+            },
+            {
+                "name": "b",
+                "fleet": "claude",
+                "mode": "write",
+                "prompt": "B",
+                "cwd": str(repo_a),
+                "commit": "feat: b",
+            },
+            {
+                "name": "c",
+                "fleet": "cursor",
+                "mode": "write",
+                "prompt": "C",
+                "cwd": str(repo_b),
+                "commit": "feat: c",
+            },
+        ],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+
+    assert result.ok is True
+    prefixed = f"{repo_a.resolve()}:shared.txt"
+    assert result.collisions["hotspots"] == [prefixed]
+    assert result.collisions["conflicts"]["files"] == {prefixed: [["a", "b"]]}
+    report = Path(result.report_path).read_text()
+    assert f"`{prefixed}`: a, b (conflict: a, b)" in report
+
+
 def _make_repo_with_old_txt(path: Path) -> Path:
     path.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
@@ -339,7 +395,7 @@ def test_the_collates_collisions_section_only_names_its_own_groups_paths(
     assert "## Collisions" in prompt
     # Only repo_a's hotspot line (its own lanes a, b) -- never repo_b's (c, d),
     # never a `<cwd>:`-prefixed path, and never repo_b's own directory.
-    assert "- `shared.txt`: a, b" in prompt
+    assert "- `shared.txt`: a, b (conflict: a, b)" in prompt
     assert "c, d" not in prompt
     assert str(repo_b.resolve()) not in prompt
 
