@@ -117,6 +117,11 @@ def test_a_land_over_an_ungated_merge_an_earlier_land_left_is_refused(
         land(mission_id, lane, home=home, checkout=str(repo))
 
     assert merge_sha[:12] in str(caught.value)
+    # This path has a failed receipt to quote, so the message says what the
+    # receipt says. The no-receipt path (an interrupt during the gate, or a
+    # merge made by hand) gets the other sentence; see
+    # `test_an_interrupt_during_the_gate_does_not_green_the_next_land`.
+    assert "failed its checks" in str(caught.value)
     # The refusal is receipted like every other one.
     assert "ungated merge" in _land_receipt(home, mission_id, lane)["refused"]
 
@@ -164,3 +169,101 @@ def test_the_shortcut_still_answers_for_a_lane_that_landed_cleanly(
 
     assert again.ok is True
     assert again.already_merged is True
+
+
+def test_an_interrupt_during_the_gate_does_not_green_the_next_land(
+    repo, home, fake_fleet, git_out, monkeypatch
+):
+    """`_perform` commits the merge and only then runs the gate; `land()`
+    writes the receipt only after `_land` returns. A death between those
+    two leaves the merge in HEAD with no receipt, and the already-merged
+    shortcut used to answer `ok=True` over it -- a green land of work whose
+    gate never finished."""
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    pre_head = git_out(repo, "rev-parse", "HEAD")
+
+    def die(*_args, **_kwargs):
+        raise RuntimeError("gate interrupted")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(land_mod, "_run_checks", die)
+        with pytest.raises(RuntimeError, match="gate interrupted"):
+            land(mission_id, lane, home=home, checkout=str(repo))
+
+    assert git_out(repo, "rev-parse", "HEAD") != pre_head
+    land_dir = home / "missions" / mission_id / "land"
+    assert not land_dir.is_dir() or not list(land_dir.glob("*.json"))
+
+    with pytest.raises(LandInvalid, match="ungated merge") as caught:
+        land(mission_id, lane, home=home, checkout=str(repo))
+    assert git_out(repo, "rev-parse", "HEAD")[:12] in str(caught.value)
+    # No receipt exists, so nothing "failed its checks": saying it did would
+    # be a claim conductor cannot support from anything on disk.
+    assert "no completed land receipt covers it" in str(caught.value)
+    assert "failed its checks" not in str(caught.value)
+
+
+@pytest.mark.parametrize("lane", ["../escape", "a/b", "..", "", "-leading-dash"])
+def test_a_lane_name_that_is_not_one_does_not_leave_the_land_directory(
+    repo, home, fake_fleet, lane
+):
+    """`land()` catches the `LandInvalid` `_land` raises for a bad name and
+    used to call `_write_receipt` with that name. `--lane` is an untyped CLI
+    string, so `../escape` wrote outside `land/` and `a/b` raised
+    `FileNotFoundError` instead of the refusal."""
+    mission_id, _ok = _run_landable_lane(repo, home, fake_fleet)
+    mission_dir = home / "missions" / mission_id
+    before = {p for p in mission_dir.rglob("*") if p.is_file()}
+
+    with pytest.raises(LandInvalid, match="is not a lane name"):
+        land(mission_id, lane, home=home, checkout=str(repo))
+
+    after = {p for p in mission_dir.rglob("*") if p.is_file()}
+    assert after == before
+    # `../escape` used to land in the mission directory, `../../x` one level
+    # above that; neither is a file that existed before this call.
+    assert not list((mission_dir).glob("escape-*.json"))
+    assert not list((home / "missions").glob("escape-*.json"))
+
+
+def test_a_prefix_lane_does_not_inherit_another_lanes_ungated_merge(
+    repo, home, fake_fleet, git_out
+):
+    """Receipts are `{lane}-{stamp}.json`, so `land_dir.glob(f"{lane}-*.json")`
+    for lane `fix` also matched every receipt of `fix-2`. The already-merged
+    guard then refused `fix` for a merge `fix-2` left behind."""
+    mission_id, lane = _run_landable_lane(repo, home, fake_fleet)
+    landed = land(mission_id, lane, home=home, checkout=str(repo))
+    assert landed.ok is True
+    assert lane == "fix"
+
+    land_dir = home / "missions" / mission_id / "land"
+    planted = land_dir / "fix-2-20260101T000000000000Z.json"
+    planted.write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "lane": "fix-2",
+                "merge_sha": git_out(repo, "rev-parse", "HEAD"),
+                "reset": False,
+            }
+        )
+    )
+
+    again = land(mission_id, lane, home=home, checkout=str(repo))
+
+    assert again.ok is True
+    assert again.already_merged is True
+
+
+def test_land_refuses_a_lane_environment_before_reading_the_mission(home, monkeypatch):
+    """The `CONDUCTOR_LANE` refusal sat after `_land` had already read the
+    mission directory, parsed lane and mission JSON, and run `git rev-parse`
+    in the lane's repository. A missing mission used to raise 'does not
+    exist' while the variable was set; the docstring says the refusal is
+    outright, so it is the first thing `_land` does."""
+    monkeypatch.setenv("CONDUCTOR_LANE", "1")
+
+    with pytest.raises(LandInvalid, match="lane's environment"):
+        land("no-such", "fix", home=home, checkout=str(home))
+    assert not (home / "missions" / "no-such").exists()

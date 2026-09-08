@@ -102,6 +102,22 @@ def test_pause_spend_usd_must_be_positive(tmp_path):
         )
 
 
+@pytest.mark.parametrize("bad", [True, float("nan"), float("inf"), "nan", "inf"])
+def test_pause_spend_usd_refuses_a_boolean_or_non_finite_threshold(tmp_path, bad):
+    """`float(True)` is 1.0, and `spent >= NaN` is never true, so a boolean
+    or non-finite threshold loaded as a pause that could never fire.
+    `max_cost_usd` already refuses this shape."""
+    with pytest.raises(MissionInvalid, match="pause.spend_usd must be a positive finite number"):
+        mission_from_dict(
+            {
+                "prompt": "x",
+                "lanes": [{"fleet": "codex", "name": "a"}],
+                "pause": {"spend_usd": bad},
+            },
+            base_dir=tmp_path,
+        )
+
+
 def test_pause_spend_usd_must_be_below_max_cost_usd(tmp_path):
     with pytest.raises(MissionInvalid, match="must be below max_cost_usd"):
         mission_from_dict(

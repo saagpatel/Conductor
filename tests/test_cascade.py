@@ -195,6 +195,27 @@ def test_cascade_snapshot_round_trips_through_mission_json(repo, home, tmp_path)
     assert reloaded.to_dict() == mission.to_dict() == snapshot
 
 
+def test_cascaded_snapshot_with_one_attempt_is_mission_invalid(tmp_path):
+    """A cascaded lane stores the cascade attempt and the real primary as
+    siblings. `from_snapshot` only required a non-empty attempts list, so a
+    one-attempt `cascaded: true` snapshot raised IndexError instead of
+    MissionInvalid."""
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "cascade": {"fleet": "codex"},
+            "lanes": [{"name": "a", "fleet": "claude", "mode": "write"}],
+        },
+        base_dir=tmp_path,
+    )
+    snapshot = mission.to_dict()
+    assert snapshot["lanes"][0]["cascaded"] is True
+    assert len(snapshot["lanes"][0]["attempts"]) >= 2
+    snapshot["lanes"][0]["attempts"] = snapshot["lanes"][0]["attempts"][:1]
+    with pytest.raises(MissionInvalid, match="cascaded needs a cascade"):
+        Mission.from_snapshot(snapshot)
+
+
 # --- running -------------------------------------------------------------
 
 

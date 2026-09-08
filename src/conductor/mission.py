@@ -176,7 +176,7 @@ from .graph import (
 from .graph import (
     _template_refs as _template_refs,
 )
-from .prices import finite_positive
+from .prices import finite_nonnegative, finite_positive
 from .runner import (
     Result,
     _slug,
@@ -896,6 +896,15 @@ class Mission:
             # attempt) here and let the mission-level cascade re-derive it
             # fresh against the real primary below, reproducing it exactly.
             cascaded = raw_lane["cascaded"]
+            # A cascaded lane stores the cascade attempt at checked[0] and
+            # the real primary at checked[1]; the non-empty-list check above
+            # is not enough, and indexing blindly raised IndexError on a
+            # one-attempt snapshot instead of MissionInvalid.
+            if cascaded and len(checked) < 2:
+                raise MissionInvalid(
+                    f"mission snapshot lane {index} cascaded needs a cascade "
+                    "attempt and a primary"
+                )
             primary_attempt, fallback_attempts = (
                 (checked[1], checked[2:]) if cascaded else (checked[0], checked[1:])
             )
@@ -1282,6 +1291,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 if "fleet" not in raw_judge:
                     raise MissionInvalid(f"collate judges[{idx}] needs a fleet")
                 judge_cap = raw_judge.get("cap_usd", cap)
+                judge_cap_usd = _parse_usd(judge_cap, f"collate judges[{idx}] cap_usd")
                 try:
                     judges.append(
                         Judge(
@@ -1289,11 +1299,12 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                             model=raw_judge.get("model"),
                             effort=str(raw_judge.get("effort", "standard")),
                             timeout=raw_judge.get("timeout"),
-                            cap_usd=float(judge_cap) if judge_cap is not None else None,
+                            cap_usd=judge_cap_usd,
                         )
                     )
                 except (TypeError, ValueError) as exc:
                     raise MissionInvalid(f"collate judges[{idx}]: {exc}") from exc
+        collate_cap_usd = _parse_usd(cap, "collate cap_usd")
         try:
             collate = Collate(
                 fleet=str(raw_collate["fleet"]),
@@ -1303,7 +1314,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 schema=str((base_dir / str(schema)).expanduser().resolve()) if schema else None,
                 instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
                 max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
-                cap_usd=float(cap) if cap is not None else None,
+                cap_usd=collate_cap_usd,
                 include_diffs=bool(raw_collate.get("include_diffs", True)),
                 rank=rank,
                 candidates=int(raw_collate.get("candidates", 0)),
@@ -1319,13 +1330,14 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         if "fleet" not in raw_resolve:
             raise MissionInvalid("resolve needs a fleet")
         resolve_cap = raw_resolve.get("cap_usd", defaults.get("cap_usd"))
+        resolve_cap_usd = _parse_usd(resolve_cap, "resolve cap_usd")
         try:
             resolve = Resolve(
                 fleet=str(raw_resolve["fleet"]),
                 model=raw_resolve.get("model"),
                 effort=str(raw_resolve.get("effort", "standard")),
                 timeout=raw_resolve.get("timeout"),
-                cap_usd=float(resolve_cap) if resolve_cap is not None else None,
+                cap_usd=resolve_cap_usd,
                 commit=raw_resolve.get("commit"),
                 instructions=str(
                     raw_resolve.get("instructions") or DEFAULT_RESOLVE_INSTRUCTIONS
@@ -1400,6 +1412,26 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     return mission
 
 
+def _parse_usd(value: object, where: str) -> float | None:
+    """An optional dollar figure, or None.
+
+    `float(True)` is 1.0, so a boolean is refused here the way
+    `max_cost_usd` is, before it looks like a real cap. NaN and infinity
+    are refused because they fail every comparison against a spend.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise MissionInvalid(f"{where} must be a positive finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MissionInvalid(f"{where} must be a number: {exc}") from exc
+    if not math.isfinite(number):
+        raise MissionInvalid(f"{where} must be a positive finite number")
+    return number
+
+
 def _parse_ceiling(raw_ceiling: object) -> dict | None:
     """E9: absent means both bounds are ceiling.py's module defaults; present
     means the mission states both explicitly, a number to override a bound or
@@ -1451,10 +1483,7 @@ def _parse_pause(raw_pause: object) -> dict | None:
         raise MissionInvalid("pause.before must be a list of lane names")
     before = list(before_raw) if before_raw else []
     spend_raw = raw_pause.get("spend_usd")
-    try:
-        spend_usd = float(spend_raw) if spend_raw is not None else None
-    except (TypeError, ValueError) as exc:
-        raise MissionInvalid(f"pause.spend_usd must be a number: {exc}") from exc
+    spend_usd = _parse_usd(spend_raw, "pause.spend_usd")
     if not before and spend_usd is None:
         raise MissionInvalid("pause needs 'before', 'spend_usd', or both")
     return {"before": before, "spend_usd": spend_usd}
@@ -1493,7 +1522,7 @@ def _parse_notify(raw_notify: object) -> dict | None:
         timeout = float(timeout_raw)
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"notify.timeout must be a number: {exc}") from exc
-    if isinstance(timeout_raw, bool) or timeout <= 0:
+    if isinstance(timeout_raw, bool) or not finite_positive(timeout):
         raise MissionInvalid("notify.timeout must be positive")
     return {"command": command, "events": list(events_raw), "timeout": timeout}
 
@@ -2047,7 +2076,10 @@ class LaneResult:
             "tool_calls",
         ):
             value = raw.get(key, 0)
-            if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+            # `value < 0` admits NaN and infinity (every comparison with
+            # them is False), so a rehydrated receipt could carry
+            # `cost_usd: NaN`. `budget_cost` already refuses those.
+            if not finite_nonnegative(value):
                 raise ValueError(f"lane receipt {key} must be a non-negative number")
         for key in (
             "answer_path",
@@ -2334,8 +2366,8 @@ def _stamp_epoch(identifier: str) -> float | None:
 
 
 def _numeric(value: object) -> float | None:
-    """A real number, or None -- booleans are not numbers here."""
-    if isinstance(value, int | float) and not isinstance(value, bool):
+    """A finite real number, or None -- booleans are not numbers here."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
         return float(value)
     return None
 
@@ -3245,17 +3277,30 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
     ) and isinstance(answer, str)
 
 
-def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
+def _resolve_is_trusted(
+    mission: Mission, prior_result: dict | None, *, notes: list[str] | None = None
+) -> bool:
     """D1 (cross-vendor review): whether a prior `resolve` outcome may be kept
     as-is rather than re-dispatched. Only called once no sink lane reran, so
     the collisions the resolver saw cannot have changed; still refuses to
     keep a run that failed (retried on resume like any other failed write)
-    or whose committed tip has since vanished."""
+    or whose committed tip has since vanished.
+
+    `ran: False` is settled only for `reason: "no hotspots"` -- there was
+    genuinely nothing to dispatch. A dry run and a ledger blocker write the
+    same `ran: False` shape and still have the work to do. Git returning
+    `GIT_UNRUN` is not a vanished tip: `_git_answer` covers that distinction,
+    the same way `_trusted_lane` does.
+    """
     resolve = (prior_result or {}).get("resolve")
     if not isinstance(resolve, dict):
         return False
     if not resolve.get("ran"):
-        return True  # nothing was dispatched; there is nothing to redo
+        # Only "no hotspots" is genuinely settled. The other two producers
+        # (`{"ran": False, "reason": "dry run"}` and a ledger blocker
+        # `"...; resolve not started"`) still have the work to do; trusting
+        # them kept an unexecuted resolver forever on resume.
+        return resolve.get("reason") == "no hotspots"
     if resolve.get("ok") is not True:
         return False
     tip = resolve.get("tip")
@@ -3264,8 +3309,10 @@ def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
         # enforced single by `Mission.validate`), never the mission's own
         # cwd when the two differ.
         resolve_cwd = mission.sinks()[0].attempts[0].effective_cwd(mission.cwd)
-        commit = git_run(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
-        if commit.returncode != 0:
+        commit = _git_answer(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
+        if commit is None:
+            _note_git_unrun(notes, "resolve", "tip commit")
+        elif commit.returncode != 0:
             return False
     return True
 
@@ -3307,6 +3354,13 @@ def _keep_cancelled_lanes(
     had settled. If the winner is being rerun, the decision is open again
     and so is the loser.
 
+    A cancelled lane whose own upstream is in `rerun` is not settled even
+    when its winner is kept: the dependency walk would immediately move it
+    back out, this would claim it again, and the fixed point never
+    terminated (notes grew without bound, resume held the running lock).
+    The winner-is-kept rule therefore does not claim a cancelled lane that
+    still has a need in `rerun`.
+
     This runs after the kept set is complete, because the winner may sit
     later in `mission.lanes` than the lane it cancelled. It also runs inside
     the dependency cascade's own fixed point and answers in both directions,
@@ -3327,7 +3381,11 @@ def _keep_cancelled_lanes(
         winner = _cancel_winner(old.skipped)
         if winner is None:
             continue
-        if lane.name in rerun and winner in kept:
+        if (
+            lane.name in rerun
+            and winner in kept
+            and not any(need in rerun for need in lane.needs)
+        ):
             old.kept = True
             kept[lane.name] = old
             rerun.discard(lane.name)
@@ -3433,7 +3491,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     if mission.resolve:
         resolve = (
             "kept"
-            if not rerun and _resolve_is_trusted(mission, prior_result)
+            if not rerun and _resolve_is_trusted(mission, prior_result, notes=notes)
             else "rerun"
         )
     spent, unpriced = _run_receipt_spend(base, previous, prior_result)
@@ -3977,7 +4035,10 @@ def _execute_mission(
                 summary["error"] = cancel_reason
                 summary["failure"] = cancel_reason
             summary["unpriced"] = (
-                result.spawned and not result.interrupted and summary.get("cost_usd") is None
+                result.spawned
+                and not result.interrupted
+                and not result.cancelled
+                and summary.get("cost_usd") is None
             )
             # E6: a script attempt is priced at zero and verified, never
             # unpriced (result.budget carries "free": true; its cost_usd is
@@ -4678,7 +4739,11 @@ def _execute_mission(
                     conflict_pairs.extend(group_out["pairs"])
                     repo_conflict_files = group_out["files"]
                     for path, pairs in repo_conflict_files.items():
-                        conflict_files.setdefault(path, []).extend(pairs)
+                        # Multi-repo top-level hotspots are `<cwd>:`-prefixed;
+                        # `_collision_lines` looks conflict pairs up by that
+                        # same key. A single-repository mission stays bare.
+                        key = f"{repo}:{path}" if len(all_repos) > 1 else path
+                        conflict_files.setdefault(key, []).extend(pairs)
 
                 repo_hotspots = sorted(set(repo_overlap["hotspots"]) | set(repo_conflict_files))
                 groups_out.append(
@@ -5057,7 +5122,12 @@ def _check_branches(
         remotes = git_run(repo, "remote").stdout.split()
         refs = [f"refs/heads/{lane.branch}"] + [f"refs/remotes/{r}/{lane.branch}" for r in remotes]
         for ref in refs:
-            current = git_run(repo, "rev-parse", "--verify", "--quiet", ref)
+            current = _git_answer(repo, "rev-parse", "--verify", "--quiet", ref)
+            if current is None:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': git could not confirm whether branch "
+                    f"'{lane.branch}' exists in {repo} ({ref})"
+                )
             if current.returncode != 0:
                 continue
             old = previous.get(lane.name)
@@ -5247,9 +5317,12 @@ def _collisions_for_cwd(collisions: dict | None, cwd: str) -> dict | None:
     conflicts = collisions.get("conflicts") or {}
     pairs = [pair for pair in conflicts.get("pairs") or [] if set(pair["lanes"]) <= lane_set]
     files: dict[str, list[list[str]]] = {}
+    prefix = f"{cwd}:"
     for path, path_pairs in (conflicts.get("files") or {}).items():
         kept = [pair for pair in path_pairs if set(pair) <= lane_set]
         if kept:
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
             files[path] = kept
     return {
         "overlap": group["overlap"],

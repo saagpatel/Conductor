@@ -103,6 +103,36 @@ def test_an_existing_branch_is_refused_before_any_fleet_runs(repo, home, monkeyp
     assert spawned == []
 
 
+def test_check_branches_does_not_treat_a_git_that_did_not_run_as_a_free_name(
+    repo, tmp_path, monkeypatch
+):
+    """`git_run` reports spawn failure as GIT_UNRUN (-1), which is not
+    'the ref does not exist'. Reading it as a free name would launch the
+    lane and then fail at `_rename_branch` with commits stranded."""
+    import subprocess
+
+    from conductor import mission as mission_mod
+    from conductor.verify import GIT_UNRUN
+
+    real = mission_mod.git_run
+
+    def git_unrun_on_verify(cwd, *args, **kwargs):
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            return subprocess.CompletedProcess(["git", *args], GIT_UNRUN, "", "EAGAIN")
+        return real(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(mission_mod, "git_run", git_unrun_on_verify)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "lanes": [{"name": "a", "fleet": "codex", "prompt": "A", "branch": "feat/x"}],
+        },
+        base_dir=tmp_path,
+    )
+    with pytest.raises(MissionInvalid, match="git could not confirm"):
+        mission_mod._check_branches(mission)
+
+
 def test_an_invalid_branch_name_is_refused_before_any_fleet_runs(repo, home, tmp_path):
     lanes = [dict(lane) for lane in PIPELINE["lanes"]]
     lanes[2] = lanes[2] | {"branch": "bad..name"}

@@ -8,6 +8,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from conductor import mission as mission_mod
 from conductor import runner as runner_mod
 from conductor.mission import Mission, mission_from_dict, run_mission
@@ -198,6 +200,22 @@ def test_gate_s_is_null_when_a_receipt_ran_a_gate_but_predates_duration_s(home):
     lane = mission_mod.LaneResult(
         name="a", ok=True, attempts=[{"run_id": "20260101T000000Z-old"}]
     )
+    assert mission_mod._gate_seconds([lane], home) is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_gate_s_is_null_when_duration_s_is_not_finite(home, bad):
+    """`_numeric` admitted NaN and infinity, so a gate that ran with
+    `duration_s: NaN` made `gate_s` NaN instead of unknown (never 0)."""
+    assert mission_mod._numeric(bad) is None
+    tag = "nan" if bad != bad else "inf"
+    run_id = f"20260101T000000Z-{tag}"
+    run_dir = home / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps({"tests": {"ran": True, "exit_code": 0, "tail": "", "duration_s": bad}})
+    )
+    lane = mission_mod.LaneResult(name="a", ok=True, attempts=[{"run_id": run_id}])
     assert mission_mod._gate_seconds([lane], home) is None
 
 

@@ -359,6 +359,13 @@ class CapArithmetic:
         grace = self.graced_lanes * self.cap_grace_usd
         return round(lanes + grace + USD_MISSION_SLACK, 2)
 
+    @property
+    def followon_budget(self) -> float:
+        """The mission budget without a build lane: same arithmetic as
+        `mission_budget`, minus the build cap. A salvage follow-on still
+        graces grok, fix, and opus, and those dollars are real spend."""
+        return round(self.mission_budget - self.build_cap, 2)
+
     def render(self) -> str:
         def line(label: str, terms: list[tuple[str, float]], total: float) -> str:
             body = " + ".join(f"${v:.2f} {name}" for name, v in terms)
@@ -427,6 +434,24 @@ def cap_arithmetic(
         findings=findings,
         opus_review=opus_review,
     )
+
+
+def _refuse_unsized_lanes(caps: CapArithmetic, **emitted: bool) -> None:
+    """The lanes this shape emits and the caps it sizes them against are two
+    separate arguments, and `max_cost_usd` comes from the caps alone. When
+    they disagree the mission loads and then runs out of budget partway
+    through, because the extra lane's cap was never in the total
+    (2026-09-08 review). The CLI always passes them together; a caller
+    that does not is refused rather than shipped an under-budgeted
+    mission.
+    """
+    for flag, value in emitted.items():
+        sized = getattr(caps, flag)
+        if value != sized:
+            raise ShapeInvalid(
+                f"{flag}={value} but the cap arithmetic was built with "
+                f"{flag}={sized}: the mission budget would not carry that lane's cap"
+            )
 
 
 def parse_ceiling(value: str) -> dict:
@@ -756,22 +781,7 @@ def shape_a(
         raise ShapeInvalid("--test must name the gate command; a Shape A build has one")
     if ports < 0:
         raise ShapeInvalid("--ports must be zero or more")
-    # The lanes this shape emits and the caps it sizes them against are two
-    # separate arguments, and `max_cost_usd` comes from the caps alone. When
-    # they disagree the mission loads and then runs out of budget partway
-    # through, because the extra lane's cap was never in the total
-    # (2026-09-08 review). The CLI always passes them together; a caller
-    # that does not is refused rather than shipped an under-budgeted
-    # mission.
-    for flag, emitted, sized in (
-        ("adversarial", adversarial, caps.adversarial),
-        ("opus_review", opus_review, caps.opus_review),
-    ):
-        if emitted != sized:
-            raise ShapeInvalid(
-                f"{flag}={emitted} but the cap arithmetic was built with "
-                f"{flag}={sized}: the mission budget would not carry that lane's cap"
-            )
+    _refuse_unsized_lanes(caps, adversarial=adversarial, opus_review=opus_review)
     if deliverable_validator and not deliverable:
         raise ShapeInvalid("--deliverable-validator needs --deliverable")
     if deliverable:
@@ -834,6 +844,7 @@ def shape_a(
             "mode": "write",
             "base": "build",
             "needs": ["build"],
+            "no_op_ok": True,
             "timeout": 1800,
             "cap_usd": caps.adversarial_cap,
             "test_policy": "allow",
@@ -1029,6 +1040,7 @@ def shape_a_followon(
         raise ShapeInvalid("--test must name the gate command; a Shape A build has one")
     if not name.strip():
         raise ShapeInvalid("name must not be empty")
+    _refuse_unsized_lanes(caps, opus_review=opus_review)
 
     mission_name = name
     scope = worktree.name
@@ -1119,7 +1131,7 @@ def shape_a_followon(
         "prompt": mission_prompt,
         "concurrency": 3 if opus_review else 2,
         "require": "all",
-        "max_cost_usd": round(caps.review_caps + caps.fix_cap + USD_MISSION_SLACK, 2),
+        "max_cost_usd": caps.followon_budget,
         "test": test,
         "template_max_chars": 160000,
         "ceiling": dict(ceiling) if ceiling is not None else dict(CEILING_NONE),

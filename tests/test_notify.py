@@ -88,6 +88,21 @@ def test_notify_refused_non_positive_timeout(tmp_path):
         )
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), "inf", "nan"])
+def test_notify_refused_non_finite_timeout(tmp_path, bad):
+    """`timeout <= 0` is False for NaN and infinity, so `{"timeout": "inf"}`
+    loaded and `proc.wait(timeout=inf)` never timed out."""
+    with pytest.raises(MissionInvalid, match="timeout must be positive"):
+        mission_from_dict(
+            {
+                "prompt": "x",
+                "lanes": [{"fleet": "codex"}],
+                "notify": {"command": "x", "timeout": bad},
+            },
+            base_dir=tmp_path,
+        )
+
+
 def test_notify_events_and_timeout_default(tmp_path):
     mission = mission_from_dict(
         {"prompt": "x", "lanes": [{"fleet": "codex"}], "notify": {"command": "x"}},
