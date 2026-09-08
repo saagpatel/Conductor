@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import attest, shape
 from .fleets import DEFAULT_TIMEOUT
+from .graph import is_lane_name
 from .mission import LaneResult, Mission, MissionInvalid, mission_from_dict
 from .runner import _clean_gate, _transplant_gate
 from .verify import TestOutcome, diff_since, git_run
@@ -168,6 +169,11 @@ def _unreconstructable(attempt_snapshot: dict) -> list[str]:
 def _gather(
     home: Path, mission_id: str, lane: str, *, stop: Callable[[], bool] | None
 ) -> SalvageResult:
+    # The lane name becomes three paths below -- the receipt it reads, the
+    # receipt it writes, and the scratch worktree it gates in -- so it is
+    # checked before any of them is built (2026-09-08 review).
+    if not is_lane_name(lane):
+        raise SalvageInvalid(f"'{lane}' is not a lane name")
     mission_dir = home / "missions" / mission_id
     if not mission_dir.is_dir():
         raise SalvageInvalid(f"mission '{mission_id}' does not exist")
@@ -239,7 +245,16 @@ def _gather(
 
     status = git_run(worktree, "status", "--porcelain")
     dirty = status.returncode != 0 or bool(status.stdout.strip())
-    head_sha = git_run(worktree, "rev-parse", "HEAD").stdout.strip()
+    # A `rev-parse` that did not run returns empty stdout, and an empty
+    # `head_sha` on the receipt says the salvage gated nothing while the gate
+    # steps beside it say it passed. Refuse instead (2026-09-08 review).
+    head = git_run(worktree, "rev-parse", "HEAD")
+    if head.returncode != 0 or not head.stdout.strip():
+        detail = head.stderr.strip() or f"exit {head.returncode}"
+        raise SalvageInvalid(
+            f"lane '{lane}' kept worktree has no readable HEAD: {detail}"
+        )
+    head_sha = head.stdout.strip()
 
     scratch = home / "salvage" / mission_id / lane
     own_outcome = _transplant_gate(

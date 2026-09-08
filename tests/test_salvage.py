@@ -568,3 +568,59 @@ def test_salvage_skips_the_clean_gate_when_the_lane_ran_under_test_policy_allow(
     assert result.own_gate["exit_code"] == 0
     assert result.gate["ran"] is False
     assert "test_policy allow" in result.gate["tail"]
+
+
+def test_a_worktree_edited_while_it_is_gated_is_refused_not_receipted(
+    repo, home, fake_fleet, monkeypatch
+):
+    """Both gates read the kept worktree, so the digest taken before them is
+    evidence about what they judged only for as long as those bytes held
+    still. The re-read that catches an edit landing mid-salvage had no
+    failing-path test: deleting it left the suite green (2026-09-08 audit)."""
+    from conductor import salvage as salvage_mod
+
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="true")
+    lane_raw = json.loads((home / "missions" / mission_id / "lanes" / f"{lane}.json").read_text())
+    worktree = Path(lane_raw["attempts"][-1]["worktree"])
+
+    real_clean_gate = salvage_mod._clean_gate
+
+    def edit_then_gate(*args, **kwargs):
+        # The edit lands while the gates are running, exactly as a stray
+        # editor or a second agent in the same worktree would.
+        (worktree / "app.py").write_text("edited mid-salvage\n")
+        return real_clean_gate(*args, **kwargs)
+
+    monkeypatch.setattr(salvage_mod, "_clean_gate", edit_then_gate)
+
+    with pytest.raises(SalvageInvalid, match="changed while it was being gated"):
+        salvage(home, mission_id, lane)
+
+
+def test_a_kept_worktree_with_no_readable_head_is_refused(repo, home, fake_fleet, monkeypatch):
+    """`git_run` turns a timeout or an OSError into an empty stdout, and an
+    empty `head_sha` on the receipt says the salvage gated nothing while the
+    gate steps beside it say it passed."""
+    from conductor import salvage as salvage_mod
+
+    mission_id, lane = _run_lane(repo, home, fake_fleet, test="true")
+    real_git_run = salvage_mod.git_run
+
+    def no_head(cwd, *args, **kwargs):
+        if args[:1] == ("rev-parse",) and "HEAD" in args:
+            return real_git_run(cwd, "rev-parse", "--verify", "--quiet", "nope-not-a-ref")
+        return real_git_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(salvage_mod, "git_run", no_head)
+
+    with pytest.raises(SalvageInvalid, match="no readable HEAD"):
+        salvage(home, mission_id, lane)
+
+
+@pytest.mark.parametrize("lane", ["../escape", "a/b", "..", "", "-leading-dash"])
+def test_a_lane_name_that_is_not_one_is_refused_before_it_becomes_a_path(home, lane):
+    """`land` and `salvage` take a lane name from the command line and build
+    three paths out of it. `Mission.validate` holds the pattern for a lane it
+    loaded; these two check it themselves."""
+    with pytest.raises(SalvageInvalid, match="is not a lane name"):
+        salvage(home, "20260101T000000Z-m", lane)
