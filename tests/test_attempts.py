@@ -16,6 +16,7 @@ from conductor import runner as runner_mod
 from conductor.mission import (
     LaneResult,
     Mission,
+    _build_resume_plan,
     _cancel_winner,
     _keep_cancelled_lanes,
     _trusted_lane,
@@ -450,3 +451,93 @@ def test_trusted_lane_keeps_a_lane_cancelled_before_it_ever_spawned(
     rerun = {lane.name}
     _keep_cancelled_lanes(mission, {lane.name: other}, kept, rerun, [])
     assert lane.name in rerun and lane.name not in kept
+
+
+def test_a_cancelled_lane_is_reopened_when_the_cascade_reruns_its_winner(
+    repo, home, monkeypatch, tmp_path
+):
+    """`_keep_cancelled_lanes` used to run once, before the needs cascade.
+    That cascade can move the winner into `rerun` afterwards, and a loser is
+    a competitor of its winner rather than a dependent of it, so the needs
+    walk never came back to the loser: the resume kept a sink settled
+    against a winner it was about to pay for again (2026-09-08 review).
+    """
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", f"printf '%s\\n' {shlex.quote(_ok_envelope(0.1))}"],
+    )
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "lanes": [{"name": "a", "fleet": "claude"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    mission_dir = Path(result.mission_dir)
+    lane = mission.lanes[0]
+    receipt = LaneResult.from_dict(json.loads((mission_dir / "lanes" / "a.json").read_text()))
+    cancelled = replace(receipt)
+    cancelled.skipped = "cancelled: lane b already passed"
+
+    # Kept while the winner is kept -- the first pass's answer.
+    kept: dict[str, LaneResult] = {"b": replace(receipt)}
+    rerun: set[str] = {lane.name}
+    notes: list[str] = []
+    assert _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, notes) is True
+    assert lane.name in kept
+
+    # The cascade then moves the winner into `rerun`. Asked again -- which is
+    # what the fixed point now does -- the loser comes back out of `kept`.
+    kept.pop("b")
+    rerun.add("b")
+    assert _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, notes) is True
+    assert lane.name in rerun and lane.name not in kept
+    assert notes[-1] == f"lane '{lane.name}' runs after all: 'b' is being rerun"
+
+    # And it settles: asked once more, nothing moves.
+    assert _keep_cancelled_lanes(mission, {lane.name: cancelled}, kept, rerun, notes) is False
+
+
+def test_the_resume_plan_settles_cancelled_lanes_inside_the_cascade(
+    repo, home, monkeypatch, tmp_path
+):
+    """The whole path AGENTS.md rule 8 names, driven through
+    `_build_resume_plan` rather than through the helper alone: a prior run
+    that was interrupted (so `ok` is False) with one lane cancelled by
+    another. Wrapping the settle in `if prior_result.get("ok")` -- the
+    `prior_ok` trap -- re-dispatches the cancelled lane, and nothing pinned
+    that until now (2026-09-08 review)."""
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", f"printf '%s\\n' {shlex.quote(_ok_envelope(0.1))}"],
+    )
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "lanes": [{"name": "a", "fleet": "claude"}, {"name": "b", "fleet": "claude"}],
+    }
+    mission = mission_from_dict(raw, base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+    mission_dir = Path(result.mission_dir)
+
+    # `a` was cancelled because `b` passed; the mission itself was
+    # interrupted, so its own `ok` is False.
+    lane_a = json.loads((mission_dir / "lanes" / "a.json").read_text())
+    lane_a["skipped"] = "cancelled: lane b already passed"
+    lane_a["ok"] = False
+    (mission_dir / "lanes" / "a.json").write_text(json.dumps(lane_a))
+    prior = json.loads((mission_dir / "result.json").read_text())
+    prior["ok"] = False
+    prior["interrupted"] = True
+    (mission_dir / "result.json").write_text(json.dumps(prior))
+
+    plan = _build_resume_plan(mission, mission_dir, Path(home))
+
+    assert "b" in plan.kept
+    assert "a" in plan.kept, "a cancelled lane whose winner is kept is not paid for twice"
+    assert plan.rerun == set()
+    assert any("stays cancelled" in note for note in plan.notes)
