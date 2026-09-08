@@ -220,3 +220,45 @@ def test_cache_reads_count_toward_the_long_context_threshold():
     assert price.cost(150_000, 0, cache_read_tokens=100_000) == round(
         150_000 * 4.00 / 1e6 + 100_000 * 1.00 / 1e6, 6
     )
+
+
+def test_gpt56_family_bills_long_context_rate_above_272k():
+    """GPT-5.6 Sol, Terra, and Luna double input meters and add 50% to output
+    when prompt tokens exceed 272K."""
+    for model_id, base_in, base_out, long_in, long_out in [
+        ("gpt-5.6-sol", 4.00, 20.00, 8.00, 30.00),
+        ("gpt-5.6-terra", 2.00, 12.00, 4.00, 18.00),
+        ("gpt-5.6-luna", 0.20, 1.20, 0.40, 1.80),
+    ]:
+        under = estimate(
+            model_id,
+            input_tokens=200_000,
+            output_tokens=10_000,
+            table=DEFAULT_PRICES,
+        )
+        over = estimate(
+            model_id,
+            input_tokens=300_000,
+            output_tokens=10_000,
+            table=DEFAULT_PRICES,
+        )
+        assert under == round(200_000 * base_in / 1e6 + 10_000 * base_out / 1e6, 6)
+        assert over == round(300_000 * long_in / 1e6 + 10_000 * long_out / 1e6, 6)
+
+
+def test_gpt56_long_context_tier_derives_cache_rates_and_sets_threshold():
+    """Each GPT-5.6 model sets a 272K threshold and derives cache rates on its
+    long-context tier via _std."""
+    for model_id, expected_long_in in [
+        ("gpt-5.6-sol", 8.00),
+        ("gpt-5.6-terra", 4.00),
+        ("gpt-5.6-luna", 0.40),
+    ]:
+        price = DEFAULT_PRICES[model_id]
+        assert price.long_context_tokens == 272_000
+        assert price.long_context is not None
+        assert price.long_context.input == expected_long_in
+        assert price.long_context.cache_read == round(expected_long_in * 0.10, 6)
+        assert price.long_context.cache_write == round(expected_long_in * 1.25, 6)
+        assert price.long_context.note == ">272K prompt-token rate"
+

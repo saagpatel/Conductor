@@ -114,7 +114,15 @@ class Price:
         return round(per_m / 1_000_000, 6)
 
 
-def _std(input: float, output: float, note: str = "", source: str = "default") -> Price:
+def _std(
+    input: float,
+    output: float,
+    note: str = "",
+    source: str = "default",
+    *,
+    long_context_tokens: int | None = None,
+    long_context: Price | None = None,
+) -> Price:
     """The common vendor pattern: cache reads at 10% of input, cache writes at
     125% of input (Anthropic and OpenAI both publish exactly this)."""
     return Price(
@@ -124,6 +132,8 @@ def _std(input: float, output: float, note: str = "", source: str = "default") -
         cache_write=round(input * 1.25, 6),
         note=note,
         source=source,
+        long_context_tokens=long_context_tokens,
+        long_context=long_context,
     )
 
 
@@ -139,10 +149,26 @@ DEFAULT_PRICES: dict[str, Price] = {
     # OpenAI pricing page 2026-09-02 (operator screenshot): Sol $4 / $0.40
     # cached / $5 cache write / $20, Terra $2 / $0.20 / $2.50 / $12, Luna
     # $0.20 / $0.02 / $0.25 / $1.20. Long context (>~272K input) doubles the
-    # input meters and adds 50% to output; not modeled here.
-    "gpt-5.6-sol": _std(4.00, 20.00, "promotional rate, floor through 2026-11-21"),
-    "gpt-5.6-terra": _std(2.00, 12.00),
-    "gpt-5.6-luna": _std(0.20, 1.20),
+    # input meters and adds 50% to output; modeled here.
+    "gpt-5.6-sol": _std(
+        4.00,
+        20.00,
+        "promotional rate, floor through 2026-11-21",
+        long_context_tokens=272_000,
+        long_context=_std(8.00, 30.00, ">272K prompt-token rate"),
+    ),
+    "gpt-5.6-terra": _std(
+        2.00,
+        12.00,
+        long_context_tokens=272_000,
+        long_context=_std(4.00, 18.00, ">272K prompt-token rate"),
+    ),
+    "gpt-5.6-luna": _std(
+        0.20,
+        1.20,
+        long_context_tokens=272_000,
+        long_context=_std(0.40, 1.80, ">272K prompt-token rate"),
+    ),
     # Google Gemini Flash, introductory pricing through 2026-12-31; standard
     # pricing from 2027-01-01 is $1.50 / $7.50. Output includes thinking.
     "gemini-3.8-flash": Price(0.75, 3.75, 0.075, 0.0, "intro rate through 2026-12-31"),
