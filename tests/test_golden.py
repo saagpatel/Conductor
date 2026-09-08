@@ -921,6 +921,20 @@ def test_cli_golden_record_and_check(repo, home, monkeypatch, tmp_path, capsys):
     assert any(out_dir.name in line and "rendered prompt differs" in line for line in lines)
 
 
+def test_cli_golden_check_with_nothing_to_check_does_not_pass(tmp_path, monkeypatch, capsys):
+    """Default discovery that finds no fixtures is a failed check (exit 1),
+    not 'every fixture matched'. A named directory list that contains no
+    golden.json is a refused argument list (exit 3)."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["golden", "check"]) == 1
+    assert "compared nothing" in capsys.readouterr().err
+
+    empty = tmp_path / "not-a-fixture"
+    empty.mkdir()
+    assert main(["golden", "check", str(empty)]) == 3
+    assert "named directories" in capsys.readouterr().err
+
+
 def test_cli_golden_record_exits_1_on_refusal(home, monkeypatch, tmp_path):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     assert main(["golden", "record", "no-such-mission", "--out", str(tmp_path / "x")]) == 1

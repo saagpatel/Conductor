@@ -652,3 +652,30 @@ def test_golden_check_still_replays_in_process_for_a_tree_that_is_not_conductor(
     lines = _golden_check(worktree)
 
     assert lines and all(line.startswith("fixture: ") for line in lines), lines
+
+
+def test_default_land_checkout_does_not_read_a_path_shaped_lane(home: Path, tmp_path: Path):
+    """`--lane` is validated before it is interpolated. The helper itself
+    also refuses to build a path from a name `is_lane_name` rejects, so a
+    caller that skips the parser cannot read outside the mission directory."""
+    from conductor.cli import _default_land_checkout
+
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"cwd": "/should-not-be-read"}')
+    mission = home / "missions" / "m1"
+    (mission / "lanes").mkdir(parents=True)
+    (mission / "mission.json").write_text('{"cwd": "/mission"}')
+
+    assert _default_land_checkout(home, "m1", "../outside") == ""
+    assert _default_land_checkout(home, "m1", "build/../../outside") == ""
+
+
+def test_land_missing_checkout_is_an_error_not_a_traceback(
+    home: Path, monkeypatch, tmp_path: Path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    code = main(
+        ["land", "m1", "--lane", "build", "--checkout", str(tmp_path / "nope")]
+    )
+    assert code == 2
+    assert "not a directory" in capsys.readouterr().err
