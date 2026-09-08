@@ -345,40 +345,29 @@ def cmd_missions(args: argparse.Namespace) -> int:
         print("[]")
         return 0
     entries = sorted((p for p in missions_dir.iterdir() if p.is_dir()), reverse=True)
+    child_counts = _child_counts_from_snapshots(entries)
     rows = []
     for path in entries[: args.limit]:
         result_file = path / "result.json"
-        paused = False
-        pause_file = path / "pause.json"
-        if pause_file.is_file():
-            try:
-                pause_doc = json.loads(pause_file.read_text())
-            except (OSError, json.JSONDecodeError):
-                pause_doc = None
-            if isinstance(pause_doc, dict):
-                paused = pause_doc.get("answer") is None
+        pause_doc, pause_unreadable = _load_pause_doc(path)
         # E10 second spec: `parent`/`depth` are load-derived mission.json
         # fields (never in result.json), so a child's parent id is read off
         # its own snapshot, present whether or not the mission ever finished.
-        parent_id = None
-        mission_file = path / "mission.json"
-        if mission_file.is_file():
-            try:
-                mission_raw = json.loads(mission_file.read_text())
-            except (OSError, json.JSONDecodeError):
-                mission_raw = None
-            if isinstance(mission_raw, dict) and isinstance(mission_raw.get("parent"), dict):
-                parent_id = mission_raw["parent"].get("mission_id")
+        parent_id = _snapshot_parent_id(path)
         if not result_file.is_file():
             rows.append(
                 {
                     "mission_id": path.name,
                     "status": "incomplete",
-                    "resumes": 0,
+                    "resumes": _resume_count_without_receipt(pause_doc, pause_unreadable),
                     "running": (path / "running.json").is_file(),
-                    "paused": paused,
+                    "paused": _mission_paused(
+                        result_data=None,
+                        pause_doc=pause_doc,
+                        pause_unreadable=pause_unreadable,
+                    ),
                     "parent": parent_id,
-                    "children": 0,
+                    "children": child_counts.get(path.name, 0),
                 }
             )
             continue
@@ -397,28 +386,46 @@ def cmd_missions(args: argparse.Namespace) -> int:
         resolve = data.get("resolve")
         if resolve is None:
             resolve_status = None
+        elif not isinstance(resolve, dict):
+            resolve_status = None
         elif not resolve.get("ran"):
             resolve_status = "skipped"
         else:
             resolve_status = "ok" if resolve.get("ok") else "failed"
+        lanes_raw = data.get("lanes") or []
+        if not isinstance(lanes_raw, list):
+            lanes_raw = []
+        lanes = [
+            (lane.get("name"), lane.get("ok"))
+            for lane in lanes_raw
+            if isinstance(lane, dict)
+        ]
         rows.append(
             {
                 "mission_id": data["mission_id"],
                 "ok": data.get("ok"),
-                "lanes": [(lane["name"], lane["ok"]) for lane in data.get("lanes", [])],
-                "cost_usd": round(data.get("cost_usd", 0), 4),
-                "duration_s": round(data.get("duration_s", 0), 1),
-                "wall_s": (data.get("wall") or {}).get("wall_s"),
+                "lanes": lanes,
+                "cost_usd": _json_number(data.get("cost_usd"), 4),
+                "duration_s": _json_number(data.get("duration_s"), 1),
+                "wall_s": (data.get("wall") or {}).get("wall_s")
+                if isinstance(data.get("wall"), dict)
+                else None,
                 "resumes": len(data.get("resumes") or []),
                 "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),
-                "paused": paused,
+                "paused": _mission_paused(
+                    result_data=data,
+                    pause_doc=pause_doc,
+                    pause_unreadable=pause_unreadable,
+                ),
                 "escalation": data.get("escalation"),
                 "errors": data.get("errors"),
                 "tainted": [
-                    lane["name"] for lane in data.get("lanes", []) if lane.get("tainted")
+                    lane["name"]
+                    for lane in lanes_raw
+                    if isinstance(lane, dict) and lane.get("tainted") and "name" in lane
                 ],
-                "hotspots": len(collisions["hotspots"]) if collisions else None,
+                "hotspots": _hotspot_count(collisions),
                 "resolve": resolve_status,
                 "parent": parent_id,
                 "children": len(data.get("children") or []),
@@ -602,6 +609,117 @@ def cmd_land(args: argparse.Namespace) -> int:
 LIVENESS_STALE_S: int = 30
 
 
+def _json_number(value: object, digits: int) -> float | None:
+    """A finite number rounded for a listing cell, or null.
+
+    `dict.get(key, 0)` is not a null guard: a stored JSON null is returned
+    as Python None and `round(None)` raises. A real zero and an unknown
+    figure must stay distinct in the listing.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value):
+        return None
+    return round(float(value), digits)
+
+
+def _load_pause_doc(mission_dir: Path) -> tuple[dict | None, bool]:
+    """`(document, unreadable)`. A missing file is `(None, False)`."""
+    pause_file = mission_dir / "pause.json"
+    if not pause_file.is_file():
+        return None, False
+    try:
+        raw = json.loads(pause_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, True
+    if isinstance(raw, dict):
+        return raw, False
+    return None, True
+
+
+def _snapshot_parent_id(mission_dir: Path) -> str | None:
+    mission_file = mission_dir / "mission.json"
+    if not mission_file.is_file():
+        return None
+    try:
+        mission_raw = json.loads(mission_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(mission_raw, dict) or not isinstance(mission_raw.get("parent"), dict):
+        return None
+    parent_id = mission_raw["parent"].get("mission_id")
+    return parent_id if isinstance(parent_id, str) else None
+
+
+def _child_counts_from_snapshots(entries: list[Path]) -> dict[str, int]:
+    """How many sibling mission.json snapshots name each mission as parent.
+
+    Load-derived the same way `parent` is: present on the child's snapshot
+    whether or not either mission ever wrote result.json.
+    """
+    counts: dict[str, int] = {}
+    for path in entries:
+        parent_id = _snapshot_parent_id(path)
+        if parent_id is None:
+            continue
+        counts[parent_id] = counts.get(parent_id, 0) + 1
+    return counts
+
+
+def _resume_count_without_receipt(
+    pause_doc: dict | None, pause_unreadable: bool
+) -> int | None:
+    """Pause-resume history is on pause.json's `answers`, not result.json.
+
+    An unreadable pause file is unknown, not zero. A missing file is zero
+    pause-resumes (a first launch still running).
+    """
+    if pause_unreadable:
+        return None
+    if pause_doc is None:
+        return 0
+    answers = pause_doc.get("answers") or []
+    if not isinstance(answers, list):
+        return None
+    return len(answers)
+
+
+def _mission_paused(
+    *,
+    result_data: dict | None,
+    pause_doc: dict | None,
+    pause_unreadable: bool,
+) -> bool | None:
+    """The same paused question `report._mission_unfinished` asks.
+
+    When result.json exists, its `paused` field is authoritative: a dict
+    without an `answer` key is parked. pause.json is only the live file for
+    a mission that has not written a receipt yet. An unreadable pause file
+    is not "not paused".
+    """
+    if result_data is not None:
+        paused = result_data.get("paused")
+        return bool(isinstance(paused, dict) and "answer" not in paused)
+    if pause_unreadable:
+        return None
+    if pause_doc is None:
+        return False
+    return pause_doc.get("answer") is None
+
+
+def _hotspot_count(collisions: object) -> int | None:
+    """Collision hotspot count, or null when the block has no `hotspots`.
+
+    `collisions.py` always writes `hotspots` (possibly empty). A present
+    collisions object without that key is an older or partial block, not
+    zero hotspots, and not a reason to fail the listing.
+    """
+    if not isinstance(collisions, dict) or "hotspots" not in collisions:
+        return None
+    spots = collisions["hotspots"]
+    return len(spots) if isinstance(spots, list) else None
+
+
 def _is_pid_alive(pid: object) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
@@ -616,16 +734,72 @@ def _is_pid_alive(pid: object) -> bool:
         return False
 
 
+def _heartbeat_age_s(at_str: object) -> float | None:
+    """Seconds since the heartbeat timestamp, or null if it cannot be read.
+
+    A missing or malformed `at` is not "zero seconds old".
+    """
+    if not isinstance(at_str, str):
+        return None
+    try:
+        heartbeat_dt = datetime.fromisoformat(at_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if heartbeat_dt.tzinfo is None:
+        heartbeat_dt = heartbeat_dt.replace(tzinfo=UTC)
+    return max(0.0, (datetime.now(UTC) - heartbeat_dt).total_seconds())
+
+
+def _liveness_status(pid_alive: bool, heartbeat_age: float | None) -> str:
+    """Live-run status from pid and heartbeat, both of which we already have.
+
+    `running` is a live pid with a fresh, parseable heartbeat.
+    `silent` is a live pid whose heartbeat is stale or unparseable.
+    `dead` is a pid that is gone, whatever the heartbeat says.
+    """
+    if not pid_alive:
+        return "dead"
+    if heartbeat_age is not None and heartbeat_age <= LIVENESS_STALE_S:
+        return "running"
+    return "silent"
+
+
 _RESULT_FIELDS = {f.name for f in dataclasses.fields(Result)}
+
+# Neutral stand-ins for Result fields that have no dataclass default, so a
+# legacy receipt missing one of them can still be classified. Chosen not to
+# invent a cause: empty identity, no timeout, no exit, not timed out.
+_LEGACY_RESULT_DEFAULTS: dict[str, object] = {
+    "run_id": "",
+    "fleet": "",
+    "model": "",
+    "effort": "",
+    "mode": "",
+    "cwd": "",
+    "timeout": 0,
+    "exit_code": None,
+    "timed_out": False,
+    "duration_s": 0.0,
+    "run_dir": "",
+    "stdout_path": "",
+    "stderr_path": "",
+    "tail": "",
+}
 
 
 def _kind_from_legacy_receipt(data: dict) -> str | None:
     """`kind` is computed, not stored, so a receipt written before it existed
     (no `kind` key on disk at all) must still classify here instead of
     reading back as `null`. Rebuild just enough of a `Result` from the raw
-    receipt fields to run it back through `error_kind`."""
+    receipt fields to run it back through `error_kind`. Missing required
+    fields take a neutral default so one absent key is not "unclassifiable";
+    `None` is only for a constructor that still cannot run."""
+    payload = {
+        **_LEGACY_RESULT_DEFAULTS,
+        **{k: v for k, v in data.items() if k in _RESULT_FIELDS},
+    }
     try:
-        result = Result(**{k: v for k, v in data.items() if k in _RESULT_FIELDS})
+        result = Result(**payload)
     except TypeError:
         return None
     return error_kind(result)
@@ -652,28 +826,18 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 if not isinstance(live, dict):
                     rows.append({"run_id": path.name, "status": "incomplete"})
                     continue
-                at_str = live.get("at")
-                heartbeat_age = 0.0
-                if isinstance(at_str, str):
-                    try:
-                        heartbeat_dt = datetime.fromisoformat(at_str.replace("Z", "+00:00"))
-                        if heartbeat_dt.tzinfo is None:
-                            heartbeat_dt = heartbeat_dt.replace(tzinfo=UTC)
-                        heartbeat_age = max(
-                            0.0, (datetime.now(UTC) - heartbeat_dt).total_seconds()
-                        )
-                    except ValueError:
-                        pass
-                status = "silent" if heartbeat_age > LIVENESS_STALE_S else "running"
+                heartbeat_age = _heartbeat_age_s(live.get("at"))
+                pid_alive = _is_pid_alive(live.get("pid"))
+                status = _liveness_status(pid_alive, heartbeat_age)
                 has_breaker = "tool_calls" in live
                 rows.append(
                     {
                         "run_id": path.name,
                         "status": status,
-                        "heartbeat_age_s": round(heartbeat_age, 1),
+                        "heartbeat_age_s": _json_number(heartbeat_age, 1),
                         "elapsed_s": live.get("elapsed_s"),
                         "pid": live.get("pid"),
-                        "pid_alive": _is_pid_alive(live.get("pid")),
+                        "pid_alive": pid_alive,
                         "spend_usd": live.get("spend_usd"),
                         "tool_calls": live.get("tool_calls") if has_breaker else None,
                         "last_output_age_s": (
@@ -692,7 +856,8 @@ def cmd_runs(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             rows.append({"run_id": path.name, "status": "unreadable"})
             continue
-        if not isinstance(data, dict) or not {"run_id", "fleet", "model"} <= set(data):
+        required = {"run_id", "fleet", "model", "exit_code"}
+        if not isinstance(data, dict) or not required <= set(data):
             rows.append({"run_id": path.name, "status": "unreadable"})
             continue
         git_verdict = data.get("git_verdict")
@@ -709,7 +874,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 "session_id": data.get("session_id"),
                 "exit_code": data["exit_code"],
                 "no_op": git_verdict.get("no_op"),
-                "duration_s": round(data.get("duration_s", 0), 1),
+                "duration_s": _json_number(data.get("duration_s"), 1),
                 "tool_calls": (data.get("breaker") or {}).get("tool_calls", 0),
                 "taint": data.get("taint") is not None,
                 "agent": (data.get("agent") or {}).get("name"),
