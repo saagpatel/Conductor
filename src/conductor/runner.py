@@ -217,6 +217,12 @@ class Result:
     # read lane with a declared `deliverable` (see `fleets._build_claude`).
     permission_mode: str | None = None
     restricted: bool = False
+    # Whether a structured-output flag was on the argv (`--json-schema` for
+    # claude and antigravity, `--output-schema` for codex; cursor refuses
+    # one). Recorded so `golden._recorded_contract` can compare it: it was
+    # listed in `_CONTRACT_KEYS` but no receipt carried it, so every fixture
+    # reported it uncomparable (2026-09-08 review).
+    structured: bool = False
     # Settings digest (third drill pass, 2026-09-07):
     # `{"checked": bool, "modified": [<relative path>]}` -- whether this
     # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
@@ -2252,6 +2258,13 @@ def dispatch(
         if "--permission-mode" in argv:
             permission_mode = argv[argv.index("--permission-mode") + 1]
         restricted_flag = "--restricted" in argv
+    # 2026-09-08 review: `golden._CONTRACT_KEYS` lists `schema`, and
+    # `_requested_contract` always sets it, but no receipt carried the fact,
+    # so every fixture reported it uncomparable and turning structured output
+    # on or off for a lane was never a difference. Read off the real argv,
+    # like the two above, and fleet-agnostic: claude and antigravity spell it
+    # `--json-schema`, codex `--output-schema`, cursor refuses it outright.
+    structured_flag = "--json-schema" in argv or "--output-schema" in argv
     if tainted_agy:
         # E21: needs this run's own directory, which no Spec field carries;
         # appended here rather than threaded into build_argv's signature (see
@@ -2295,6 +2308,7 @@ def dispatch(
             prompt_versions=prompt_versions,
             permission_mode=permission_mode,
             restricted=restricted_flag,
+            structured=structured_flag,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -3348,6 +3362,7 @@ def dispatch(
         permission_denials=list(output.permission_denials),
         permission_mode=permission_mode,
         restricted=restricted_flag,
+        structured=structured_flag,
         settings=settings_state,
     )
     if result.spawned:

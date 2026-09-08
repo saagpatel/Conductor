@@ -859,6 +859,11 @@ def _recorded_contract(recorded_result: dict) -> dict[str, object]:
         # dispatched through the real argv builder (a test's faked fleet), so
         # its `restricted: false` is not evidence about the flag.
         out["restricted"] = bool(recorded_result["restricted"])
+    if "structured" in recorded_result:
+        # Added 2026-09-08; a fixture recorded before it stays uncomparable
+        # on this key, which is the documented behaviour for an older
+        # receipt rather than a difference.
+        out["schema"] = bool(recorded_result["structured"])
     return out
 
 
