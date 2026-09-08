@@ -270,6 +270,88 @@ def test_spend_skips_a_receipt_whose_ok_is_not_a_bool(home: Path, monkeypatch, c
     assert rows[-1]["cost_usd"] == 3.75
 
 
+def _priced_receipt(run_id: str) -> dict:
+    return {
+        "run_id": run_id,
+        "fleet": "claude",
+        "model": "sonnet",
+        "usage": {
+            "cost_usd": 4.0,
+            "cost_basis": "reported",
+            "total_tokens": 10,
+            "cache_read_tokens": 3,
+            "cache_write_tokens": 2,
+        },
+        "breaker": {"tool_calls": 7, "tripped": None},
+        "ok": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"usage": {"cache_read_tokens": None}},
+        {"usage": {"cache_write_tokens": None}},
+        {"breaker": {"tool_calls": None, "tripped": None}},
+    ],
+)
+def test_spend_keeps_a_priced_run_whose_optional_counter_is_json_null(
+    home: Path, monkeypatch, capsys, patch: dict
+):
+    """`dict.get` returns a stored null, and the three optional counters used
+    to treat that as a malformed receipt -- dropping the whole run, cost
+    included. A missing key already counted as 0; an explicit null is the
+    same missing count, not a skip."""
+    first, _, _ = _sample(home)
+    run_id = "20260105T000000Z-claude-null-counter"
+    payload = _priced_receipt(run_id)
+    if "usage" in patch:
+        payload["usage"] = {**payload["usage"], **patch["usage"]}
+    if "breaker" in patch:
+        payload["breaker"] = patch["breaker"]
+    _write_receipt(home, run_id, payload)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert rows[-1]["runs"] == 4
+    assert rows[-1]["skipped"] == 0
+    assert rows[-1]["cost_usd"] == 7.75
+    assert first  # sanity: the sample fixture still ran
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cache_read_tokens", True),
+        ("cache_read_tokens", "8"),
+        ("cache_read_tokens", -1),
+        ("cache_write_tokens", True),
+        ("tool_calls", True),
+        ("total_tokens", True),
+    ],
+)
+def test_spend_still_skips_a_receipt_whose_optional_counter_is_the_wrong_type(
+    home: Path, monkeypatch, capsys, field: str, value: object
+):
+    """A null is a missing count; a bool, a string, or a negative is still a
+    refusal of the whole receipt. `True` is the load-bearing case: it is an
+    `int` subclass and would otherwise read as 1."""
+    _sample(home)
+    run_id = "20260105T000000Z-claude-bad-counter"
+    payload = _priced_receipt(run_id)
+    if field == "tool_calls":
+        payload["breaker"] = {"tool_calls": value, "tripped": None}
+    else:
+        payload["usage"][field] = value
+    _write_receipt(home, run_id, payload)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert rows[-1]["runs"] == 3
+    assert rows[-1]["skipped"] == 1
+    assert rows[-1]["cost_usd"] == 3.75
+
+
 def test_spend_reads_a_receipt_with_and_without_a_price_block(home: Path, monkeypatch, capsys):
     """W6: `usage.price` is new; a receipt written before it existed, and one
     that never estimated (a reported figure), both carry none of it -- and
@@ -431,8 +513,10 @@ def _every_generation_snapshot() -> dict:
 
 _EVERY_GENERATION_ORDER: list[tuple[str, str, str | None, str | None, bool]] = [
     ("run-final", "attempt", "build", "build", False),
-    ("run-prev-attempt", "attempt", "fix", "fix", True),
+    # Live attempts before the superseded ones, matching `collate` /
+    # `previous_collates` and `resolve` / `previous_resolves` below.
     ("run-attempt", "attempt", "fix", "fix", False),
+    ("run-prev-attempt", "attempt", "fix", "fix", True),
     # The live collate before the superseded ones, matching `resolve` and
     # `previous_resolves` below (2026-09-08 review).
     ("run-collate", "collate", None, None, False),
@@ -475,6 +559,57 @@ def test_a_collate_kept_across_a_resume_is_not_read_as_superseded():
     assert by_id["run-older"].superseded is True
     # The shape that was already right, asserted beside it.
     assert by_id["run-r"].superseded is False
+
+
+def test_an_attempt_in_both_lists_is_not_read_as_superseded():
+    """`walk_lane` visited `previous_attempts` before `attempts`, so a run_id
+    in both lists was registered as superseded -- the same first-occurrence
+    bug `walk_collate` had. `final` is walked before both, so this uses an
+    id that is not the lane's final: the overlap `final` does not already
+    cover."""
+    snapshot = {
+        "lanes": [
+            {
+                "name": "build",
+                "stage": "build",
+                "final": "run-final",
+                "attempts": [{"run_id": "run-live"}],
+                "previous_attempts": [{"run_id": "run-live"}, {"run_id": "run-old"}],
+            }
+        ]
+    }
+    by_id = {e.run_id: e for e in effects(snapshot)}
+    assert by_id["run-live"].superseded is False
+    assert by_id["run-old"].superseded is True
+    assert by_id["run-final"].superseded is False
+
+    via_lanes = effects(
+        lanes=[
+            {
+                "name": "fix",
+                "stage": "fix",
+                "attempts": [{"run_id": "run-live"}],
+                "previous_attempts": [{"run_id": "run-live"}, {"run_id": "run-old"}],
+            }
+        ]
+    )
+    by_lane = {e.run_id: e for e in via_lanes}
+    assert by_lane["run-live"].superseded is False
+    assert by_lane["run-old"].superseded is True
+
+
+def test_effects_docstring_names_current_before_superseded():
+    """The snapshot-shape sentence used to list `previous_collates` before
+    `collate` -- the traversal that caused the 2026-09-08 bug -- and
+    `previous_attempts` before `attempts`. The code walks the live side
+    first; the prose has to name that order."""
+    doc = effects.__doc__
+    assert doc is not None
+    start = doc.index("`snapshot` is a mission")
+    shape = doc[start : doc.index("iterable of lane-receipt")]
+    assert shape.index("`attempts`") < shape.index("`previous_attempts`")
+    assert shape.index("`collate`") < shape.index("`previous_collates`")
+    assert shape.index("`resolve`") < shape.index("`previous_resolves`")
 
 
 def test_report_scan_missions_join_names_every_effect_from_one_snapshot(home: Path):

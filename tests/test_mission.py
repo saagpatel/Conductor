@@ -602,8 +602,14 @@ def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(
 
 def test_default_collate_instructions_allow_a_negative_result_and_live_in_the_reply():
     """The default prose collate must not demand a winner, must say the
-    whole answer is this reply, and must treat listing order as arbitrary.
-    The old text failed all three (AGENTS.md reviewer-prompt rules 1 and 6).
+    whole answer is this reply, and must reconcile both candidate orders.
+    The old text failed the first two (AGENTS.md reviewer-prompt rules 1 and
+    6). It answered the third by asserting that "the order the lanes are
+    listed in carries no meaning" -- which is rule 7's own counter-example,
+    not a mitigation: position bias is systematic, and telling a model to
+    ignore it does not make it go away. W14: the single dispatch now asks for
+    the judgment in both orders and calls a disagreement inconclusive, which
+    is what rule 7 actually requires.
     """
     text = DEFAULT_COLLATE_INSTRUCTIONS
     assert "agree" in text and "disagree" in text
@@ -612,7 +618,9 @@ def test_default_collate_instructions_allow_a_negative_result_and_live_in_the_re
     assert "equivalent" in text.lower()
     assert "none is usable" in text
     assert "put the entire comparison in this reply" in text.lower()
-    assert "the order the lanes are listed in carries no meaning" in text.lower()
+    assert "carries no meaning" not in text.lower()
+    assert "in reverse order" in text.lower()
+    assert "inconclusive" in text.lower()
     for banned in ("at least", "find the", "hunt"):
         assert banned not in text.lower()
 

@@ -546,7 +546,11 @@ def test_collate_candidates_judges_only_the_top_two_of_four(
     assert set(result.collate["candidates"]) == {"b", "d"}
 
     schema = json.loads(Path(result.mission_dir, "collate-rank.schema.json").read_text())
-    assert set(schema["properties"]["strongest"]["enum"]) == {"b", "d"}
+    # W14: `none` joins the candidates in the enum. AGENTS.md's reviewer-prompt
+    # rule 1 says an empty result is a correct answer, and a schema that can
+    # only name a winner makes "no candidate meets the bar" unrepresentable --
+    # a judge holding that view had to name one anyway.
+    assert set(schema["properties"]["strongest"]["enum"]) == {"b", "d", "none"}
 
     prompt = Path(result.mission_dir, "collate-prompt-forward.txt").read_text()
     assert "Lane `b`" in prompt and "Lane `d`" in prompt
@@ -577,13 +581,17 @@ def test_collate_candidates_drops_a_sink_lane_that_early_cancel_skipped(
     assert result.ok is True
     assert result.collate["candidates"] == ["fast"]
 
-    schema = json.loads(Path(result.mission_dir, "collate-rank.schema.json").read_text())
-    assert schema["properties"]["strongest"]["enum"] == ["fast"]
-
-    prompt = Path(result.mission_dir, "collate-prompt-forward.txt").read_text()
-    assert "Lane `slow`" not in prompt
-    assert "Lane `pending`" not in prompt
-    assert "omitted by ranking: slow, pending" in prompt
+    # W14: one candidate is not a comparison. The sitting used to dispatch two
+    # paid judge orders to compare `fast` against itself; it now names the lane
+    # and spends nothing, so no schema and no order prompt are written at all.
+    assert result.collate["strongest"] == "fast"
+    assert result.collate["ok"] is True
+    assert result.collate["cost_usd"] is None
+    assert result.collate["orders"] == []
+    assert result.collate["tally"] is None
+    assert not Path(result.mission_dir, "collate-rank.schema.json").exists()
+    assert not Path(result.mission_dir, "collate-prompt-forward.txt").exists()
+    assert not Path(result.mission_dir, "collate-prompt-reverse.txt").exists()
 
 
 # --- item 5: documentation ---------------------------------------------------

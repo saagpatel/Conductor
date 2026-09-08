@@ -55,7 +55,7 @@ def is_forward(spec: Spec, names: list[str]) -> bool:
     """Which lane order this dispatch's rendered prompt actually carries --
     read from the prompt itself rather than call order, since a sitting's
     2M dispatches run concurrently and give no other reliable signal."""
-    return f"strongest: {', '.join(names)}?" in spec.prompt
+    return f"Candidates, in the order shown: {', '.join(names)}." in spec.prompt
 
 
 def sitting_mission_raw(
@@ -209,6 +209,34 @@ def test_split_sitting_escalates_with_vote_count_error(repo, home, monkeypatch, 
     assert result.collate["tally"]["agreement"] == "split"
 
 
+def test_unanimous_none_sitting_is_agreement_none_not_invalid(repo, home, monkeypatch, tmp_path):
+    """Every judge in every order saying no candidate is usable is a
+    completed sitting, not a broken one."""
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "claude":
+            return shell(claude_envelope("a answer"))
+        if spec.fleet == "codex":
+            return shell(codex_stream("b answer"))
+        answer = {
+            "strongest": "none",
+            "reason": "src/x.py:1 neither candidate does what the spec asked",
+        }
+        return shell(antigravity_envelope(answer))
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    mission = mission_from_dict(sitting_mission_raw(repo), base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+
+    assert result.collate["ok"] is True
+    assert result.collate["strongest"] is None
+    assert result.collate["error"] is None
+    tally = result.collate["tally"]
+    assert tally["agreement"] == "none"
+    assert tally["votes"] == {"a": 0, "b": 0}
+    assert tally["none_votes"] == 2
+
+
 def test_invalid_second_judge_order_escalates_naming_judge_2(repo, home, monkeypatch, tmp_path):
     names = ["a", "b"]
 
@@ -283,7 +311,10 @@ def test_scores_are_recorded_and_mean_scores_computed(repo, home, monkeypatch, t
     assert orders[0]["scores"] == {"a": 8, "b": 4}
     assert orders[1]["scores"] == {"a": 6, "b": 2}
     mean_scores = result.collate["tally"]["mean_scores"]
-    assert mean_scores == {"a": 7.0, "b": 3.0}
+    assert mean_scores == {
+        "a": {"mean": 7.0, "n": 2},
+        "b": {"mean": 3.0, "n": 2},
+    }
 
 
 # --- resume trust and spend accounting --------------------------------------

@@ -171,11 +171,41 @@ def test_parse_verdict_rejects_every_untallyable_shape(mutate, reason):
     assert verdict.invalid and __import__("re").search(reason, verdict.invalid)
 
 
+def test_ok_true_with_reserved_no_evidence_is_invalid():
+    """The contract reserves 'no evidence' for a failing criterion; an ok:
+    true criterion with that literal used to parse as a pass because the
+    parser only required a non-empty string."""
+    raw = json.loads(verdict_answer(True, True))
+    raw["criteria"][0]["evidence"] = "no evidence"
+    verdict = parse_verdict(json.dumps(raw), CRITERIA)
+    assert verdict.passed is False
+    assert verdict.invalid == "criterion 'correct' ok: true evidence cannot be 'no evidence'"
+    assert verdict.reported == "pass"
+    assert verdict.criteria[0]["ok"] is True
+    assert verdict.criteria[0]["evidence"] == "no evidence"
+    raw_fail = json.loads(verdict_answer(True, False))
+    raw_fail["criteria"][1]["evidence"] = "no evidence"
+    allowed = parse_verdict(json.dumps(raw_fail), CRITERIA)
+    assert allowed.invalid is None and allowed.passed is False
+    assert allowed.criteria[1]["evidence"] == "no evidence"
+
+
 def test_reported_verdict_never_overrides_computed_criteria():
     verdict = parse_verdict(verdict_answer(True, False, reported="pass"), CRITERIA)
     assert verdict.invalid is None and verdict.passed is False and verdict.reported == "pass"
     assert verdict.failed == ["tested"]
     assert "model reported pass; computed fail from the criteria" in verdict.summary
+
+
+def test_model_reported_fail_does_not_become_a_pass():
+    """A reviewer that reports fail while marking every criterion ok used
+    to be computed into a pass; the headline is the only channel for
+    something the checklist did not ask."""
+    verdict = parse_verdict(verdict_answer(True, True, reported="fail"), CRITERIA)
+    assert verdict.invalid is None and verdict.passed is False and verdict.reported == "fail"
+    assert verdict.failed == []
+    assert "model reported fail; computed pass from the criteria" in verdict.summary
+    assert render_verdict(verdict).splitlines()[0] == "verdict: fail (2/2 ok)"
 
 
 def test_render_verdict_is_deterministic_one_line_and_bounded():

@@ -444,6 +444,22 @@ def model_vendor(fleet: str, model: str | None) -> str:
     return FLEETS[fleet].model(model).vendor
 
 
+def supports_schema_flag(fleet: str, mode: str) -> bool:
+    """Whether this fleet/mode can take a structured-output schema flag.
+
+    Cursor and script have no such flag. Antigravity in read mode refuses
+    `--schema` because a schema turn has written files on record. The
+    DispatchRefused checks in Spec.validate stay authoritative -- this is
+    the same knowledge, read-only, so a caller that already embeds the
+    schema as prompt text can drop the flag instead of failing load.
+    """
+    if fleet in ("cursor", "script"):
+        return False
+    if fleet == "antigravity" and mode == "read":
+        return False
+    return True
+
+
 def _why_refused(fleet: str, model: str) -> str:
     """Name the policy, not just the rule. A refusal a caller cannot act on
     gets worked around instead of respected."""

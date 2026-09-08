@@ -342,7 +342,7 @@ def test_ranking_collate_disagreement_escalates_instead_of_choosing(
         # E4 dispatches both lane orders in parallel, so a shared call
         # counter can no longer tell forward from reverse deterministically;
         # the rendered prompt itself can.
-        forward = "strongest: a, b?" in spec.prompt
+        forward = "Candidates, in the order shown: a, b." in spec.prompt
         answer = {"strongest": "a", "reason": "x"} if forward else {"strongest": "b", "reason": "y"}
         return shell(antigravity_envelope(json.dumps(answer)))
 
@@ -366,7 +366,7 @@ def test_ranking_collate_an_invalid_order_is_reported_and_not_ok(
         # E4 dispatches both lane orders in parallel, so a shared call
         # counter can no longer tell forward from reverse deterministically;
         # the rendered prompt itself can.
-        forward = "strongest: a, b?" in spec.prompt
+        forward = "Candidates, in the order shown: a, b." in spec.prompt
         answer = (
             {"strongest": "a", "reason": "x"}
             if forward
@@ -386,9 +386,27 @@ def test_ranking_collate_an_invalid_order_is_reported_and_not_ok(
     )
 
 
-def test_ranking_collate_refuses_cursor_at_load(repo, tmp_path):
-    with pytest.raises(MissionInvalid, match="no structured-output flag"):
-        mission_from_dict(rank_mission_raw(repo, collate_fleet="cursor"), base_dir=tmp_path)
+def test_ranking_collate_cursor_loads(repo, tmp_path):
+    """Grok (fleet cursor) cannot take --schema, but the rank contract
+    embeds the schema as text and parse extracts JSON, so a cursor rank
+    collate loads. The DispatchRefused in fleets.py is unchanged: passing
+    a schema path to Spec.validate still refuses."""
+    from conductor.fleets import DispatchRefused
+    from conductor.mission import _rank_schema_for
+
+    mission = mission_from_dict(rank_mission_raw(repo, collate_fleet="cursor"), base_dir=tmp_path)
+    assert mission.collate.fleet == "cursor"
+    assert _rank_schema_for("cursor", "/tmp/rank.schema.json") is None
+    schema = tmp_path / "rank.schema.json"
+    schema.write_text("{}")
+    with pytest.raises(DispatchRefused, match="no structured-output flag"):
+        Spec(
+            fleet="cursor",
+            prompt="x",
+            cwd=str(repo),
+            mode="read",
+            schema=str(schema),
+        ).validate()
 
 
 def test_ranking_collate_refuses_a_single_lane_mission(repo, tmp_path):
