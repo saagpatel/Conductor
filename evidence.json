@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": ["src/conductor/spend.py"],
+      "tests": [
+        "tests/test_spend.py::test_spend_keeps_a_priced_run_whose_optional_counter_is_json_null",
+        "tests/test_spend.py::test_spend_still_skips_a_receipt_whose_optional_counter_is_the_wrong_type"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/ruff check src tests; env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w14b",
+      "note": "_optional_count reads total_tokens, cache_read_tokens, cache_write_tokens, and breaker.tool_calls: JSON null is 0, a bool/non-int/negative still refuses the receipt."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": ["src/conductor/spend.py"],
+      "tests": [
+        "tests/test_spend.py::test_an_attempt_in_both_lists_is_not_read_as_superseded",
+        "tests/test_spend.py::test_effects_walks_every_generation_of_key_in_encounter_order"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/ruff check src tests; env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w14b",
+      "note": "walk_lane now visits attempts before previous_attempts, matching walk_collate; a shared run_id is live, not superseded."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": ["src/conductor/spend.py"],
+      "tests": [
+        "tests/test_spend.py::test_effects_docstring_names_current_before_superseded"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/ruff check src tests; env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w14b",
+      "note": "effects() snapshot-shape sentence now names attempts then previous_attempts, collate then previous_collates; resolve then previous_resolves was already right."
+    }
+  ]
+}

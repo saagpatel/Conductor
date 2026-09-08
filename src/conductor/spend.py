@@ -117,6 +117,24 @@ def _number(value: object) -> Decimal | None:
     return Decimal(str(value))
 
 
+def _optional_count(value: object) -> int:
+    """An optional non-negative integer counter off a receipt.
+
+    JSON null (and a missing key, whose caller passes None) is a missing
+    count, not a malformed run: it reads as 0. A bool, a non-int, or a
+    negative value is a wrong type and refuses the receipt -- `_read_run`
+    already treats ValueError as skip. A JSON float (`13028437.0`) is a
+    non-int and stays a refusal: the write path (`outputs.usable_int`)
+    already coerces integral floats to int before the receipt is stored,
+    so a float still on disk is not a conductor-written count.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError
+    return value
+
+
 def _read_run(path: Path) -> Run | None:
     try:
         raw: object = json.loads(path.read_text())
@@ -139,10 +157,7 @@ def _read_run(path: Path) -> Run | None:
         if breaker is None:
             tool_calls = 0
         elif isinstance(breaker, dict):
-            raw_tools = breaker.get("tool_calls", 0)
-            if isinstance(raw_tools, bool) or not isinstance(raw_tools, int) or raw_tools < 0:
-                return None
-            tool_calls = raw_tools
+            tool_calls = _optional_count(breaker.get("tool_calls"))
         else:
             return None
         usage = raw.get("usage")
@@ -154,23 +169,9 @@ def _read_run(path: Path) -> Run | None:
         basis = usage.get("cost_basis")
         if basis is not None and basis not in {"reported", "estimated"}:
             return None
-        raw_tokens = usage.get("total_tokens")
-        if raw_tokens is None:
-            tokens = 0
-        elif isinstance(raw_tokens, bool) or not isinstance(raw_tokens, int) or raw_tokens < 0:
-            return None
-        else:
-            tokens = raw_tokens
-        raw_cache = usage.get("cache_read_tokens", 0)
-        if isinstance(raw_cache, bool) or not isinstance(raw_cache, int) or raw_cache < 0:
-            return None
-        raw_cache_write = usage.get("cache_write_tokens", 0)
-        if (
-            isinstance(raw_cache_write, bool)
-            or not isinstance(raw_cache_write, int)
-            or raw_cache_write < 0
-        ):
-            return None
+        tokens = _optional_count(usage.get("total_tokens"))
+        cache_read = _optional_count(usage.get("cache_read_tokens"))
+        cache_write = _optional_count(usage.get("cache_write_tokens"))
         return Run(
             run_id,
             created,
@@ -180,8 +181,8 @@ def _read_run(path: Path) -> Run | None:
             cost,
             basis == "estimated",
             tokens,
-            raw_cache,
-            raw_cache_write,
+            cache_read,
+            cache_write,
             tool_calls,
             dry_run,
         )
@@ -234,8 +235,8 @@ def effects(snapshot: dict | None = None, lanes: Iterable[dict] = ()) -> list[Ef
 
     `snapshot` is a mission's `result.json` shape: its `lanes` (each lane's
     `final` as a bare string or as a dict with `run_id`, then
-    `previous_attempts`, then `attempts`), then `previous_collates` and
-    `collate`, then `resolve` and `previous_resolves`. `lanes` is an
+    `attempts`, then `previous_attempts`), then `collate` and
+    `previous_collates`, then `resolve` and `previous_resolves`. `lanes` is an
     iterable of lane-receipt dicts (`lanes/<name>.json`, carrying `name`,
     `stage`, `attempts`, `previous_attempts`), each walked the same way as
     a snapshot lane. Every key above may be absent on an older receipt;
@@ -262,7 +263,12 @@ def effects(snapshot: dict | None = None, lanes: Iterable[dict] = ()) -> list[Ef
             add(final, "attempt", lane_name, stage, False, {})
         elif isinstance(final, dict):
             add(final.get("run_id"), "attempt", lane_name, stage, False, final)
-        for key, superseded in (("previous_attempts", True), ("attempts", False)):
+        # Current first, then the superseded ones -- the order `walk_collate`
+        # and `resolve` / `previous_resolves` already use. Reversed, an
+        # attempt kept across a resume (the same run_id in both lists) was
+        # registered from `previous_attempts` and, first occurrence winning,
+        # read as superseded for the rest of the mission's life.
+        for key, superseded in (("attempts", False), ("previous_attempts", True)):
             attempts = lane_data.get(key)
             if not isinstance(attempts, list):
                 continue
