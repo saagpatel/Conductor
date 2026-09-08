@@ -111,23 +111,43 @@ def test_a_lane_flag_the_cap_arithmetic_was_not_built_with_is_refused(
         )
 
 
-def test_followon_budget_is_the_mission_budget_minus_the_build_cap():
+def test_followon_budget_is_the_lanes_a_followon_actually_emits():
     """A salvage follow-on has no build lane, but the grace on grok, fix,
     and opus is still spend against the same ledger. The old inline sum
-    left that band out of the ceiling."""
+    left that band out of the ceiling.
+
+    2026-09-08: this used to assert `mission_budget - build_cap`, which is
+    not the same thing as "without the build lane" -- subtracting the cap
+    left the build lane's own grace band inside the follow-on ceiling
+    ($0.25), and with `adversarial` set left that whole lane's cap in it
+    too. The budget is now derived from the lanes the follow-on emits, and
+    Grok is always the read-only figure because a follow-on always sends
+    `GROK_READ_ONLY_PROMPT`. Strengthened, not relaxed: the assertions
+    below pin the composition rather than a subtraction that happened to
+    agree with it."""
     caps = shape.cap_arithmetic(2, 1)
-    assert caps.followon_budget == round(caps.mission_budget - caps.build_cap, 2)
-    omitted = round(caps.review_caps + caps.fix_cap + shape.USD_MISSION_SLACK, 2)
+    emitted = round(
+        caps.gemini_cap + caps.followon_grok_cap + caps.fix_cap + shape.USD_MISSION_SLACK, 2
+    )
+    assert caps.followon_graced_lanes == 2  # review-grok and fix; never build
     assert caps.followon_budget == round(
-        omitted + caps.graced_lanes * caps.cap_grace_usd, 2
+        emitted + caps.followon_graced_lanes * caps.cap_grace_usd, 2
+    )
+    # The build lane's grace is exactly what the old subtraction left behind.
+    assert caps.followon_budget == round(
+        caps.mission_budget - caps.build_cap - caps.cap_grace_usd, 2
     )
     with_opus = shape.cap_arithmetic(2, 1, opus_review=True)
     assert with_opus.followon_budget == round(
-        with_opus.mission_budget - with_opus.build_cap, 2
-    )
-    assert with_opus.followon_budget == round(
         caps.followon_budget + with_opus.opus_cap + with_opus.cap_grace_usd, 2
     )
+    # An adversarial lane is never emitted by a follow-on, so neither its
+    # cap nor its grace may reach the ceiling.
+    with_adv = shape.cap_arithmetic(2, 1, adversarial=True)
+    assert with_adv.followon_budget == caps.followon_budget
+    # Grok reads only on a follow-on whatever the original mission did.
+    suite = shape.cap_arithmetic(2, 1, grok_runs_suite=True)
+    assert suite.followon_budget == caps.followon_budget
 
 
 def test_followon_max_cost_uses_the_followon_budget(repo):

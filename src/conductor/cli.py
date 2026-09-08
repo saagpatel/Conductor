@@ -944,7 +944,14 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
         # fix prompt: the schema's description is prompt text the fixer reads,
         # and a two-reviewer description on a three-reviewer mission tells it
         # Opus's items need no disposition.
-        shape.write_shape_schemas(base_dir, opus_review=args.opus_review)
+        # `adversarial` carries for the same reason `opus_review` does: the
+        # schema's description is prompt text the fixer reads, and an
+        # --adversarial mission whose fix prompt was rewritten but whose
+        # schema was not tells it an adversarial-only finding needs no
+        # disposition -- while the prompt beside it says otherwise.
+        shape.write_shape_schemas(
+            base_dir, opus_review=args.opus_review, adversarial=args.adversarial
+        )
         mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
         # F17: the forecast is read twice on purpose. The first pass sizes
         # the caps against the history, `apply_caps` raises every warned
