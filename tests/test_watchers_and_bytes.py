@@ -1,0 +1,258 @@
+"""The failing paths of the primitives everything else trusts.
+
+A cold read of breakers.py, collisions.py, verify.py, and errors.py
+(2026-09-08) found eight places where a limit, a path, or a git command that
+did not answer was read as an answer. Each test here goes red without its
+fix.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from conductor.breakers import Breaker, _limit
+from conductor.collisions import _parse_conflicts, merge_conflicts
+from conductor.errors import TRANSPORT_PATTERNS, error_kind
+from conductor.verify import GitState, compare, same_repo
+
+
+def _codex_tool_line(call_id: str, command: str = "ls") -> str:
+    return json.dumps(
+        {
+            "type": "item.completed",
+            "item": {"id": call_id, "type": "command_execution", "command": command},
+        },
+        separators=(",", ":"),
+    )
+
+
+# --- breaker limits ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -1, -0.5, float("nan"), float("inf"), "5", None, 0],
+)
+def test_a_limit_that_is_not_a_positive_finite_number_disables_the_breaker(value):
+    """`value or None` let three of these through: `True` compares equal to 1,
+    so `stall_timeout: true` killed a healthy run after a second; a negative
+    is already behind every elapsed time; NaN is False against every
+    comparison and turns the breaker off without saying so."""
+    assert _limit(value) is None
+
+
+@pytest.mark.parametrize(("value", "expected"), [(1, 1), (600, 600), (2.0, 2)])
+def test_a_usable_limit_is_kept(value, expected):
+    assert _limit(value) == expected
+
+
+def test_a_true_stall_timeout_does_not_kill_a_healthy_run(tmp_path: Path):
+    log = tmp_path / "stdout.log"
+    log.write_text("")
+    breaker = Breaker(
+        "codex", log, stall_s=True, loop_limit=None, max_tool_calls=None
+    )
+    assert breaker.stall_s is None
+    assert breaker.check() is None
+
+
+def test_a_replaced_log_is_counted_afresh_not_mixed_with_the_old_tally(tmp_path: Path):
+    """The file about to be re-read from zero is the only record of what the
+    run did. Keeping the old signatures counted every re-read call with a
+    fresh identity twice while skipping every identity already seen."""
+    log = tmp_path / "stdout.log"
+    log.write_text("\n".join(_codex_tool_line(f"c{i}") for i in range(4)) + "\n")
+    breaker = Breaker("codex", log, stall_s=None, loop_limit=None, max_tool_calls=10)
+    breaker.check()
+    assert len(breaker.signatures) == 4
+
+    # A shorter file at the same path: a truncation or a replacement.
+    log.write_text(_codex_tool_line("c0") + "\n")
+    breaker.check()
+
+    assert len(breaker.signatures) == 1
+    assert breaker.tripped is None
+
+
+def test_a_tool_call_carrying_a_unicode_line_separator_is_still_counted(tmp_path: Path):
+    """The stream is newline-delimited JSON, and U+2028 is legal inside a
+    JSON string. `splitlines()` broke the line into fragments that failed to
+    parse and vanished from the count."""
+    log = tmp_path / "stdout.log"
+    # A writer that does not escape non-ASCII (`ensure_ascii=False`, which
+    # every JS `JSON.stringify` does by default) puts the separator in the
+    # stream raw.
+    separator = "\u2028"
+    event = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "c1",
+                "type": "command_execution",
+                "command": f"printf 'a{separator}b'",
+            },
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    assert separator in event
+    assert len(event.splitlines()) == 2 and len(event.split("\n")) == 1
+    log.write_text(event + "\n")
+    breaker = Breaker("codex", log, stall_s=None, loop_limit=None, max_tool_calls=None)
+
+    breaker.check()
+
+    assert len(breaker.signatures) == 1
+
+
+# --- collisions -------------------------------------------------------------
+
+
+def test_a_quoted_conflict_path_is_unquoted_the_way_a_diff_header_is():
+    """`touched_files` unquotes; `_parse_conflicts` did not, so a conflicting
+    path and the hotspot naming the same file never matched each other."""
+    stdout = 'treeoid\n"caf\\303\\251.txt"\nplain.txt\n'
+
+    assert _parse_conflicts(stdout) == ["café.txt", "plain.txt"]
+
+
+def test_a_merge_tree_conflict_that_names_no_file_is_an_error_not_a_clean_merge(
+    monkeypatch, tmp_path: Path
+):
+    """Exit 1 is git saying the merge conflicts. Recording `conflicts: []`
+    for it read as exactly the opposite."""
+
+    class _Proc:
+        returncode = 1
+        stdout = "treeoid\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "conductor.collisions.subprocess.run", lambda *a, **kw: _Proc()
+    )
+
+    report = merge_conflicts(str(tmp_path), {"a": "sha1", "b": "sha2"})
+
+    entry = report["pairs"][0]
+    assert "conflicts" not in entry
+    assert entry["error"] == "git merge-tree reported a conflict but named no files"
+
+
+# --- verify -----------------------------------------------------------------
+
+
+def test_a_status_that_could_not_be_read_is_not_a_clean_tree(tmp_path: Path):
+    """`_manifest("", {})` is the manifest of a clean tree, so two failed
+    `git status` calls compared equal and the lane was failed for a no-op it
+    never made."""
+    before = GitState(is_repo=True, head="a" * 40, branch="main", status_read=False)
+    after = GitState(is_repo=True, head="a" * 40, branch="main", status_read=False)
+
+    verdict = compare(str(tmp_path), before, after)
+
+    assert verdict.checked is False
+    assert verdict.no_op is False
+    assert "git status could not be read" in verdict.notes[0]
+
+
+def test_two_states_that_were_read_still_compare_as_before(tmp_path: Path):
+    before = GitState(is_repo=True, head="a" * 40, branch="main", manifest="m")
+    after = GitState(is_repo=True, head="a" * 40, branch="main", manifest="m")
+
+    verdict = compare(str(tmp_path), before, after)
+
+    assert verdict.checked is True
+    assert verdict.no_op is True
+
+
+def test_same_repo_says_no_for_a_path_that_is_not_in_a_repository_at_all(
+    tmp_path: Path, repo: Path
+):
+    """The `a is None or b is None` guard: without it, two non-repositories
+    would compare equal and `land` would merge into a stranger's checkout."""
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    other = tmp_path / "also-not-a-repo"
+    other.mkdir()
+
+    assert same_repo(str(outside), str(repo)) is False
+    assert same_repo(str(repo), str(outside)) is False
+    assert same_repo(str(outside), str(other)) is False
+    # And the true case still holds, for the repository and a subdirectory
+    # of it, whose `--git-common-dir` answer is relative.
+    assert same_repo(str(repo), str(repo)) is True
+
+
+# --- error kinds ------------------------------------------------------------
+
+
+def _failed(**overrides) -> object:
+    from conductor.runner import Result
+
+    base: dict = dict(
+        run_id="r1",
+        fleet="cursor",
+        model="grok-4.6",
+        effort="hard",
+        mode="read",
+        cwd="/tmp/repo",
+        timeout=60,
+        exit_code=0,
+        timed_out=False,
+        duration_s=1.0,
+        run_dir="/tmp/r1",
+        stdout_path="/tmp/r1/stdout.log",
+        stderr_path="/tmp/r1/stderr.log",
+        tail="",
+        spawned=True,
+        answer_path="/tmp/r1/answer.txt",
+        git_verdict={"checked": True, "no_op": True},
+    )
+    base.update(overrides)
+    return Result(**base)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("setup failed: exit 2", "setup"),
+        ("setup timed out", "setup"),
+        ("taint hooks not enforced: hook missing", "taint"),
+        ("settings modified: .claude/settings.json changed", "settings"),
+        ("isolation failed: worktree add failed", "refused"),
+    ],
+)
+def test_an_unpriced_run_conductor_stopped_itself_is_not_called_a_cap(error, expected):
+    """Every cursor lane is unpriced, and `capped` reads an unpriced run as a
+    cap because it cannot be shown to have stayed under one. A lane that
+    failed its own setup has its cause on the receipt already, and calling it
+    `cap` sent `fallback: [{on: ["cap"]}]` chasing a budget that was never
+    the problem."""
+    result = _failed(budget={"unpriced": True}, error=error, spawned=False)
+
+    assert result.ok is False
+    assert error_kind(result) == expected
+
+
+def test_an_unpriced_run_with_no_other_cause_is_still_a_cap():
+    result = _failed(budget={"unpriced": True}, error="")
+
+    assert error_kind(result) == "cap"
+
+
+def test_a_connection_refused_in_prose_is_transport_not_a_safety_refusal():
+    """`_is_refusal` matches the substring "refus", and the transport table
+    carried only `ECONNREFUSED`, so a transient network failure classified as
+    a model refusal -- which no retry policy covers."""
+    assert any("connection refused" == pattern.lower() for pattern in TRANSPORT_PATTERNS)
+
+    result = _failed(
+        fleet="claude",
+        fleet_error="Connection refused",
+        fleet_status="error_during_execution",
+    )
+
+    assert error_kind(result) == "transport"

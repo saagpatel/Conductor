@@ -9,6 +9,7 @@ until the fleet finishes writing it.
 from __future__ import annotations
 
 import json
+import math
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -152,7 +153,12 @@ def _identity(fleet: str, event: dict, nested: object | None = None) -> str | No
 
 def _entries(fleet: str, text: str) -> list[tuple[str, str | None]]:
     entries: list[tuple[str, str | None]] = []
-    for line in text.splitlines():
+    # `split("\n")`, not `splitlines()`: the stream is newline-delimited JSON,
+    # and `splitlines()` also breaks on U+2028, U+2029, \x0b and \x0c, which
+    # are legal inside a JSON string. A tool call whose arguments carried one
+    # was split into fragments, failed to parse, and was dropped from the
+    # count -- exactly the churn the breakers exist to catch (2026-09-08).
+    for line in text.split("\n"):
         event = json_line(line)
         if event is None:
             continue
@@ -192,6 +198,26 @@ def tool_events(fleet: str, text: str) -> list[str]:
     return _new_signatures(fleet, text, set())
 
 
+def _limit(value: object) -> int | None:
+    """A breaker limit, or None when there is nothing usable to compare
+    against.
+
+    `value or None` alone let three shapes through that make a breaker fire
+    on a healthy run or never fire at all (2026-09-08 review): `True`, which
+    compares equal to 1, so `stall_timeout: true` killed a run after one
+    second and named it "no output for Trues"; a negative, which is already
+    behind every elapsed time and trips on the first check; and NaN, which is
+    False against every comparison and disables the breaker silently.
+    `Spec` refuses all three at load -- this is the second wall, since
+    `Breaker` is constructed directly by the runner and by tests.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return int(value)
+
+
 class Breaker:
     """Incrementally watch one fleet stdout file for runaway shapes."""
 
@@ -207,10 +233,10 @@ class Breaker:
     ) -> None:
         self.fleet = fleet
         self.stdout_path = stdout_path
-        self.stall_s = stall_s or None
-        self.loop_limit = loop_limit or None
-        self.max_tool_calls = max_tool_calls or None
-        self.idle_s = idle_s or None
+        self.stall_s = _limit(stall_s)
+        self.loop_limit = _limit(loop_limit)
+        self.max_tool_calls = _limit(max_tool_calls)
+        self.idle_s = _limit(idle_s)
         self.signatures: list[str] = []
         self.tripped: str | None = None
         self._offset = 0
@@ -234,8 +260,18 @@ class Breaker:
         if size < self._offset:
             # A replacement or truncation must not leave the reader seeking
             # forever beyond EOF and silently disabling every tool breaker.
+            #
+            # The tally resets with the offset, not just the offset: the file
+            # about to be re-read from zero is the only record of what the
+            # run did, so keeping the old signatures counts every re-read
+            # call that carries a fresh identity twice while skipping every
+            # one whose identity was already seen -- a mixture of over- and
+            # under-count that could trip the tool budget on a healthy run or
+            # hide a loop (2026-09-08 review).
             self._offset = 0
             self._partial = b""
+            self._seen_calls.clear()
+            self.signatures.clear()
         try:
             with self.stdout_path.open("rb") as source:
                 source.seek(self._offset)

@@ -21,7 +21,7 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.cli import main
-from conductor.errors import KINDS, error_kind
+from conductor.errors import KINDS, _own_check_kind, error_kind
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import Result, dispatch
@@ -288,9 +288,6 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "interrupted",
         "cancelled",
         "parse",
-        "cap",
-        "breaker",
-        "timeout",
         "setup",
         "taint",
         "settings",
@@ -300,6 +297,9 @@ def test_kinds_are_exhaustive_over_the_documented_order():
         "plan",
         "denied",
         "reproduce",
+        "cap",
+        "breaker",
+        "timeout",
         "rate_limit",
         "transport",
         "refusal",
@@ -320,7 +320,14 @@ def test_error_kind_return_order_matches_kinds():
     """F18: reads `error_kind`'s own source rather than a hand-copied list,
     so the declared order in `KINDS` cannot drift from the checked order
     again without this test failing on the old tuple's order."""
+    # `error_kind` delegates conductor's own-check prefixes to
+    # `_own_check_kind`, so the checked order spans both functions, spliced
+    # at the call site rather than concatenated (2026-09-08 review).
     source = inspect.getsource(error_kind)
+    marker = "    own_check = _own_check_kind(result)\n"
+    assert marker in source
+    head, tail = source.split(marker, 1)
+    source = head + inspect.getsource(_own_check_kind) + tail
     returned = re.findall(r'return "([a-z_]+)"', source)
     seen: list[str] = []
     for kind in returned:
@@ -688,18 +695,11 @@ def test_readme_documents_error_kinds_fallback_on_and_retry():
     section = readme.read_text().split("### Structured error kinds", 1)[1].split(
         "\n## ", 1
     )[0]
-    assert (
-        "interrupted, cancelled, parse, cap, breaker, timeout, setup, taint, settings, refused,"
-        " agent," in section
-    )
-    assert (
-        "adversarial, plan, denied, reproduce, rate_limit, transport, refusal, fleet_error, "
-        "exit," in section
-    )
-    assert (
-        "gate_test_surface, gate, deliverable, no_op, read_moved_bytes, no_answer, commit,"
-        " unknown" in section
-    )
+    # The list itself is pinned against `KINDS` by
+    # `test_readme_error_kinds_code_block_matches_kinds_exactly`, which reads
+    # the block rather than a second hand-copy of it. Three literal copies
+    # here had to be rewritten every time the order changed, and a wrong copy
+    # would have failed for the wrong reason (2026-09-08 review).
     assert "cap kill that also timed out is `cap`, not `timeout`" in section
     assert "rate limit is `rate_limit`, not `fleet_error`" in section
     assert "I can't help` or `I cannot help`" in section

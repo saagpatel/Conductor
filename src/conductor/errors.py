@@ -35,9 +35,10 @@ KINDS: tuple[str, ...] = (
     "interrupted",
     "cancelled",
     "parse",
-    "cap",
-    "breaker",
-    "timeout",
+    # Conductor's own checks come before the cap (2026-09-08 review): an
+    # unpriced run cannot be shown to have stayed under its cap, so `capped`
+    # read every one of these as `cap` on a cursor lane. See
+    # `_own_check_kind`.
     "setup",
     "taint",
     "settings",
@@ -47,6 +48,9 @@ KINDS: tuple[str, ...] = (
     "plan",
     "denied",
     "reproduce",
+    "cap",
+    "breaker",
+    "timeout",
     "rate_limit",
     "transport",
     "refusal",
@@ -77,6 +81,12 @@ _PATTERN_TABLE: tuple[tuple[str, str, str, str], ...] = (
     ("*", "rate_limit", "too many requests", "generic HTTP 429 status text"),
     ("*", "transport", "ECONNRESET", "TCP connection reset"),
     ("*", "transport", "ECONNREFUSED", "TCP connection refused"),
+    # The same failure in prose. Without it, a claude receipt reading
+    # "Connection refused" under an `error_*` status matched `_is_refusal`'s
+    # "refus" and was classified as a safety refusal, which no retry policy
+    # covers, instead of the transport error a `retry: [transport]` lane
+    # would have retried (2026-09-08 review).
+    ("*", "transport", "connection refused", "a connection refused in prose"),
     ("*", "transport", "ETIMEDOUT", "TCP connection timed out"),
     ("*", "transport", "EPIPE", "broken pipe on a dropped connection"),
     ("*", "transport", "socket hang up", "a Node HTTP client (cursor-agent, agy) losing a socket"),
@@ -219,30 +229,21 @@ def _commit_failed(result: Result) -> bool:
     return not (result.no_op_ok and nothing)
 
 
-def error_kind(result: Result) -> str | None:
-    """One of `KINDS`, or `None` when `result.ok`."""
-    if result.ok:
-        return None
-    # `_bail` refusals during setup or the reproduce gate route a stop
-    # request through `error` text rather than the `interrupted` field
-    # (they never reach the code that sets it); the prefix every such
-    # message shares is the second half of this check.
-    if result.interrupted or (result.error or "").startswith("interrupted:"):
-        return "interrupted"
-    if result.cancelled:
-        return "cancelled"
-    # D9: checked ahead of the cap because a run whose output could not be
-    # read comes back with no priced usage, which `capped` reads as an
-    # unenforced cap. What actually ended this run is the parse, and the
-    # receipt exists only because conductor wrote it after the fact.
-    if (result.error or "").startswith(PARSE_FAILURE_PREFIX):
-        return "parse"
-    if capped(result):
-        return "cap"
-    if (result.breaker or {}).get("tripped"):
-        return "breaker"
-    if result.timed_out:
-        return "timeout"
+def _own_check_kind(result: Result) -> str | None:
+    """The kind for a failure conductor itself decided, from the `error`
+    text it wrote: a setup command, a taint or settings verdict, a refusal
+    before the paid turn ever spawned, a persona or adversarial or plan or
+    permission check, or the reproduce gate. None when the receipt carries
+    no such prefix.
+
+    Split out and asked BEFORE `capped` (2026-09-08 review), for D9's own
+    reason: an unpriced run -- every cursor lane -- cannot be shown to have
+    stayed under its cap, so `capped` reads any of these as `cap`. A lane
+    that failed its setup, or was refused before it spawned, has its cause
+    on the receipt already, and naming it `cap` puts the wrong one there
+    and sends a `fallback: [{on: ["cap"]}]` lane chasing a budget that was
+    never the problem.
+    """
     error_text = result.error or ""
     if error_text == "setup timed out" or error_text.startswith("setup failed:"):
         return "setup"
@@ -295,6 +296,36 @@ def error_kind(result: Result) -> str | None:
         "reproduce gate passed on the base:"
     ):
         return "reproduce"
+    return None
+
+
+def error_kind(result: Result) -> str | None:
+    """One of `KINDS`, or `None` when `result.ok`."""
+    if result.ok:
+        return None
+    # `_bail` refusals during setup or the reproduce gate route a stop
+    # request through `error` text rather than the `interrupted` field
+    # (they never reach the code that sets it); the prefix every such
+    # message shares is the second half of this check.
+    if result.interrupted or (result.error or "").startswith("interrupted:"):
+        return "interrupted"
+    if result.cancelled:
+        return "cancelled"
+    # D9: checked ahead of the cap because a run whose output could not be
+    # read comes back with no priced usage, which `capped` reads as an
+    # unenforced cap. What actually ended this run is the parse, and the
+    # receipt exists only because conductor wrote it after the fact.
+    if (result.error or "").startswith(PARSE_FAILURE_PREFIX):
+        return "parse"
+    own_check = _own_check_kind(result)
+    if own_check is not None:
+        return own_check
+    if capped(result):
+        return "cap"
+    if (result.breaker or {}).get("tripped"):
+        return "breaker"
+    if result.timed_out:
+        return "timeout"
     fleet_text = result.fleet_error
     if fleet_text:
         if _matches(fleet_text, RATE_LIMIT_PATTERNS):
