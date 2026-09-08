@@ -600,6 +600,60 @@ def test_every_rerun_collate_remains_in_the_cumulative_budget(
     assert len({item["run_id"] for item in result.previous_collates}) == 2
 
 
+def test_parking_a_resume_keeps_the_prior_collate_and_its_dollars(
+    repo, home, monkeypatch, tmp_path
+):
+    """Parking starts nothing new and loses nothing already paid for. The
+    interrupt path kept the collate via `previous_collates`; a park used
+    to `pass` and drop it from the snapshot, so the next resume never
+    priced it again."""
+
+    def fake_build(spec: Spec) -> list[str]:
+        cost = 0.2 if spec.prompt.startswith("You are collating") else 0.1
+        return _command("done", cost=cost)
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "concurrency": 1,
+            "max_cost_usd": 2,
+            "pause": {"spend_usd": 0.25},
+            "lanes": [
+                {"name": "a", "fleet": "claude", "prompt": "A"},
+                {"name": "b", "fleet": "claude", "prompt": "B"},
+            ],
+            "collate": {"fleet": "claude"},
+            "self_judging": "allow",
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    assert first.paused is None and first.collate is not None
+    collate_run = first.collate["run_id"]
+    Path(first.lanes[0]["answer_path"]).unlink()
+
+    parked = run_mission(
+        _snapshot(first), home=home, resume_dir=Path(first.mission_dir)
+    )
+    assert parked.paused is not None and "answer" not in parked.paused
+    assert parked.collate is not None
+    assert parked.collate["run_id"] == collate_run
+    snapshot = json.loads((Path(parked.mission_dir) / "result.json").read_text())
+    assert snapshot["collate"]["run_id"] == collate_run
+    assert parked.budget["spent_usd"] == pytest.approx(first.cost_usd)
+
+    continued = run_mission(
+        _snapshot(parked),
+        home=home,
+        resume_dir=Path(parked.mission_dir),
+        answer="continue",
+    )
+    # Original collate still counted, plus the forced rerun of `a` and a
+    # fresh collate now that a summarized lane reran.
+    assert continued.budget["spent_usd"] == pytest.approx(first.cost_usd + 0.1 + 0.2)
+
+
 def test_unreadable_lane_receipt_reruns_with_visible_preserved_spend(
     repo, home, monkeypatch, tmp_path
 ):
@@ -738,7 +792,9 @@ def test_resume_refusals_stale_lock_cli_and_mission_listing(
     assert main(["missions"]) == 0
     rows = json.loads(capsys.readouterr().out)
     row = next(item for item in rows if item["mission_id"] == first.mission_id)
-    assert row["resumes"] == 2 and row["running"] is True
+    # Dry-run resumes must not rewrite the mission's own receipt, so they
+    # do not append to the on-disk `resumes` list the listing reads.
+    assert row["resumes"] == 0 and row["running"] is True
 
 
 def _verdict_answer(passed: bool) -> str:
@@ -905,6 +961,26 @@ def test_a_published_lock_is_whole_and_owner_bound(tmp_path):
     assert lock.is_file()
     assert mission_mod._release_lock(lock, "mine") is True
     assert not lock.exists()
+
+
+def test_release_lock_does_not_unlink_a_lock_it_no_longer_owns(tmp_path, monkeypatch):
+    """The owner check and the removal are one decision about one file.
+    Reading `owner` then unlinking the path let a second resume remove the
+    first's live lock after both reclaimed the same dead pid."""
+    lock = tmp_path / "running.json"
+    assert mission_mod._publish_lock(lock, mission_mod._lock_body("old")) is True
+    original = mission_mod._json_object
+
+    def racing(path):
+        body = original(path)
+        if path == lock and body is not None and body.get("owner") == "old":
+            lock.unlink()
+            assert mission_mod._publish_lock(lock, mission_mod._lock_body("new")) is True
+        return body
+
+    monkeypatch.setattr(mission_mod, "_json_object", racing)
+    assert mission_mod._release_lock(lock, "old") is False
+    assert json.loads(lock.read_text())["owner"] == "new"
 
 
 def test_a_source_lock_mid_publication_is_not_reclaimed(home, tmp_path):

@@ -8,8 +8,11 @@ operator instead of a fleet's own output ever being trusted to ask for one.
 from __future__ import annotations
 
 import json
+import socket
+import subprocess
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -578,3 +581,81 @@ def test_answer_stop_is_resolved_not_still_waiting(repo, home, monkeypatch, tmp_
     assert summary["paused"]["answer"] == "stop"
     report = Path(summary["report_path"]).read_text()
     assert "Resume with: conductor mission --resume" not in report
+
+
+def test_dry_run_resume_does_not_overwrite_a_parked_missions_receipt(
+    repo, home, monkeypatch, tmp_path
+):
+    """A rehearsal does not overwrite the thing it is rehearsing.
+
+    `gc._mission_awaiting_resume` treats `paused` without `answer` as still
+    live. Writing `paused: null, dry_run: true` over that receipt would let
+    the next `conductor gc --apply` delete the parked lanes' worktrees.
+    `report.md` is written on the same path and has the same problem.
+    """
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    assert first.paused is not None and "answer" not in first.paused
+    mission_dir = Path(first.mission_dir)
+    parked = json.loads((mission_dir / "result.json").read_text())
+    report = (mission_dir / "report.md").read_text()
+    pause_doc = json.loads((mission_dir / "pause.json").read_text())
+
+    rehearsal = run_mission(
+        _snapshot(first), home=home, resume_dir=mission_dir, dry_run=True
+    )
+
+    assert rehearsal.dry_run is True
+    on_disk = json.loads((mission_dir / "result.json").read_text())
+    assert on_disk == parked
+    assert isinstance(on_disk.get("paused"), dict) and "answer" not in on_disk["paused"]
+    assert (mission_dir / "report.md").read_text() == report
+    assert json.loads((mission_dir / "pause.json").read_text()) == pause_doc
+
+
+def test_pause_answer_is_not_recorded_until_the_running_lock_is_held(
+    repo, home, monkeypatch, tmp_path
+):
+    """An answer is consumed by the resume that acts on it. Recording it
+    before `_acquire_running_lock` left `pause.json` answered while the
+    still-running process held the directory, so a later resume saw
+    'is not paused' and dispatched every lane."""
+    by_prompt(
+        monkeypatch,
+        {"BUILD": ("built", None), "REVIEW": ("reviewed", None), "FIX": ("fixed", None)},
+    )
+    mission = mission_from_dict(PIPELINE | {"cwd": str(repo)}, base_dir=tmp_path)
+    first = run_mission(mission, home=home)
+    mission_dir = Path(first.mission_dir)
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        (mission_dir / "running.json").write_text(
+            json.dumps(
+                {
+                    "pid": sleeper.pid,
+                    "started": datetime.now(UTC).isoformat(),
+                    "host": socket.gethostname(),
+                    "owner": "still-running",
+                }
+            )
+        )
+        with pytest.raises(MissionInvalid, match="still running"):
+            run_mission(
+                _snapshot(first),
+                home=home,
+                resume_dir=mission_dir,
+                answer="stop",
+            )
+        pause_doc = json.loads((mission_dir / "pause.json").read_text())
+        assert pause_doc.get("answer") is None
+        snapshot = json.loads((mission_dir / "result.json").read_text())
+        paused = snapshot.get("paused")
+        assert isinstance(paused, dict) and "answer" not in paused
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
+        (mission_dir / "running.json").unlink(missing_ok=True)
