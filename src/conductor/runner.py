@@ -3121,6 +3121,19 @@ def dispatch(
                 git_verdict.notes.append(
                     "budget watcher saw no running usage; cap checked after the run"
                 )
+            # 2026-09-08 review: the cap verdict is only known here, after
+            # the commit decision. A run that crossed its cap between the
+            # last watcher poll and its own exit -- and every cursor lane,
+            # which has no in-run watcher at all -- was committed and only
+            # then receipted as over budget, so the branch and the verdict
+            # disagreed about the same run. `unpriced` is the same case:
+            # `Result.failure` fails it closed as an unenforced cap, and it
+            # kept its commit too. Undone, not discarded: the work stays
+            # staged, so a kept worktree still holds it for salvage.
+            settled = budget.to_dict()
+            if commit and commit.committed and (settled["exceeded"] or settled["unpriced"]):
+                why = "over budget" if settled["exceeded"] else "cap unenforced"
+                commit = uncommit(spec.cwd, commit, before.head, why=why)
 
         # Teardown runs after the gate and the commit decision, ok or not: the
         # work is already judged, so its own outcome is a note, never a reason

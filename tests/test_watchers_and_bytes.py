@@ -9,6 +9,7 @@ fix.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -423,4 +424,57 @@ def test_a_self_commit_does_not_survive_a_run_that_failed_before_the_gate(
     assert "the run failed before the gate" in result.commit["reason"]
     # The branch is back where it started; the work is still in the tree.
     assert _head(repo) == head_before
+    assert (repo / "new.txt").read_text() == "work\n"
+
+
+def _cost_envelope(cost: float) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "done",
+            "usage": {"inputTokens": 10, "outputTokens": 5},
+            "total_cost_usd": cost,
+        },
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("cost", "why"),
+    [(9.99, "over budget"), (None, "cap unenforced")],
+)
+def test_a_run_that_failed_its_cap_does_not_keep_its_commit(repo, home, fake_fleet, cost, why):
+    """`budget.settle` is the cap verdict, and it runs AFTER the commit
+    decision. The wait loop re-checks the breaker with `final=True` for
+    exactly this reason -- a runaway must not evade the ceiling by exiting in
+    the same poll tick -- but the watcher has no such re-check, and a cursor
+    lane has no in-run watcher at all. So a run that crossed its cap was
+    committed and only then receipted as over budget: the branch and the
+    verdict disagreeing about the same run.
+
+    `unpriced` is the same case. `Result.failure` fails it closed as an
+    unenforced cap, and it kept its commit too.
+    """
+    from conductor.fleets import Spec
+    from conductor.runner import dispatch
+
+    head_before = _head(repo)
+    body = "echo work > new.txt"
+    if cost is not None:
+        body += f"; printf '%s\\n' {shlex.quote(_cost_envelope(cost))}"
+    fake_fleet(["sh", "-c", body])
+
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", cap_usd=0.10),
+        home=home,
+        commit_message="feat: x",
+    )
+
+    assert result.ok is False
+    assert result.commit["committed"] is False
+    assert result.commit["reason"].startswith(why)
+    assert _head(repo) == head_before
+    # Undone, not discarded: a kept worktree still holds the work for salvage.
     assert (repo / "new.txt").read_text() == "work\n"
