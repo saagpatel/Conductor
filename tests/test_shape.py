@@ -656,6 +656,32 @@ def test_cli_inline_still_writes_the_dispositions_schema(
     assert (out.parent / "dispositions.schema.json").is_file()
 
 
+def test_cli_writes_the_three_reviewer_schema_for_an_opus_mission(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """The schema file on disk is what the fix lane's deliverable resolves to,
+    so an --opus-review mission must not ship the two-reviewer description:
+    it would tell the fixer that review-opus items need no disposition, which
+    is exactly what `fix_prompt_with_opus` rewrites the prompt to deny."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = _spec(tmp_path)
+    out = tmp_path / "m" / "mission.json"
+    out.parent.mkdir()
+    code = main(
+        [
+            "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+            "--items", "1", "--modules", "1", "--out", str(out), "--dry-run",
+            "--opus-review",
+        ]
+    )
+    assert code == 0
+    written = json.loads((out.parent / "dispositions.schema.json").read_text())
+    description = written["properties"]["dispositions"]["description"]
+    assert "review-opus" in description
+    assert "both reviews said NO_FINDINGS" not in description
+    assert written == shape.dispositions_schema(opus_review=True)
+
+
 # --- F9 Shape C as a launcher option (Phase H item 4) -----------------------
 
 
