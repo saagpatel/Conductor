@@ -28,7 +28,7 @@ from . import verdicts as verdicts_mod
 from .paths import conductor_home
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
-from .spend import _number, _parse_bound
+from .spend import _number, _parse_bound, _run_time
 from .spend import _read_run as _spend_read_run
 
 BUILD_STAGE = "build"
@@ -81,6 +81,16 @@ def _wall_figures(wall: dict | None) -> dict[str, float | int | None]:
     return out
 
 
+def _unmatched_vendor(fleet: str) -> str:
+    """The vendor-column key for a receipt whose model id matches none of
+    that fleet's registered ids. The fleet name is still the most useful
+    thing to say; the `unmatched:` prefix keeps it from sharing a cell with
+    a registered vendor (`cursor` is both a fleet and a vendor, and so is
+    `script`). Never raises: an old receipt must not stop the report.
+    """
+    return f"unmatched:{fleet}"
+
+
 def _vendor(fleet: str, model: str) -> str:
     """The vendor behind a receipt's resolved model id.
 
@@ -89,16 +99,17 @@ def _vendor(fleet: str, model: str) -> str:
     is keyed by, so lookup matches against every effort-resolved id a
     registered model can take. An unregistered fleet, or a model id that
     matches none of them (an older receipt, a since-removed model), reports
-    the fleet name itself -- never raises, since a malformed old receipt
+    `unmatched:<fleet>` -- never the bare fleet name, which can be a
+    registered vendor, and never raises, since a malformed old receipt
     must not stop the whole report.
     """
     registered = fleets.FLEETS.get(fleet)
     if registered is None:
-        return fleet
+        return _unmatched_vendor(fleet)
     for candidate in registered.models:
         if model == candidate.name or model in candidate.resolve.values():
             return candidate.vendor
-    return fleet
+    return _unmatched_vendor(fleet)
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,11 @@ class Run(_SpendRun):
     # the false green rule 7's figures are read for (2026-09-08 review).
     interrupted: bool = False
     cancelled: bool = False
+    # False when the receipt carries no `breaker` block (a crash or
+    # spawn-failure writes null). `tool_calls` is then unknown, not zero --
+    # VendorStageRow leaves it out of the mean the same way it leaves an
+    # unknown duration out (2026-09-08 review).
+    tool_calls_known: bool = True
     # E24: how much of the grace band this run drew on, and whether it
     # finished inside the band (grace used, and not over budget) -- the
     # two figures rule 10 reports per stage.
@@ -247,6 +263,7 @@ def _scan_missions(
                     findings = lane_raw["review"].get("findings")
                     findings_parsed = isinstance(findings, int) and not isinstance(findings, bool)
                     raw_items = lane_raw["review"].get("items")
+                    last_run_id = last.get("run_id") if isinstance(last, dict) else None
                     review_lanes[lane_name] = {
                         "vendor": _vendor(fleet, model if isinstance(model, str) else ""),
                         "findings": findings if findings_parsed else 0,
@@ -260,6 +277,9 @@ def _scan_missions(
                         # "confidence"} the review lane's FINDING: lines
                         # parsed to; [] on a receipt that predates item 1.
                         "items": raw_items if isinstance(raw_items, list) else [],
+                        # Join to the last attempt's run receipt: a lane
+                        # receipt does not carry `interrupted`/`cancelled`.
+                        "run_id": last_run_id if isinstance(last_run_id, str) else None,
                     }
             if stage == FIX_STAGE:
                 malformed = lane_raw.get("dispositions_malformed")
@@ -277,7 +297,13 @@ def _scan_missions(
 def _land_merged(path: Path) -> bool:
     """A `conductor land` receipt for a merge that happened: `ok` true, not
     a dry run, not the already-merged answer. A refusal receipt carries
-    `refused` and none of these keys."""
+    `refused` and none of these keys.
+
+    `dry_run` missing is a real merge, matching `land.py` (a missing key
+    is `is not True` there). Live receipts always write the key; a
+    truncated or hand-written one may not, and the two surfaces must
+    still agree about that file.
+    """
     try:
         raw: object = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -285,7 +311,9 @@ def _land_merged(path: Path) -> bool:
     if not isinstance(raw, dict):
         return False
     return (
-        raw.get("ok") is True and raw.get("dry_run") is False and not raw.get("already_merged")
+        raw.get("ok") is True
+        and raw.get("dry_run") is not True
+        and raw.get("already_merged") is not True
     )
 
 
@@ -402,6 +430,7 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         gate_ran=gate_ran,
         interrupted=raw.get("interrupted") is True,
         cancelled=raw.get("cancelled") is True,
+        tool_calls_known=raw.get("breaker") is not None,
         grace_used=grace_used,
         finished_in_band=finished_in_band,
     )
@@ -429,6 +458,9 @@ class VendorStageRow:
     # are out of the mean and median entirely rather than counted as
     # zero-second runs, so the column says what it measured.
     unknown_durations: int = 0
+    # Runs whose receipt carried no `breaker` block. Same shape: out of
+    # `mean_tool_calls` rather than averaged in as zero.
+    unknown_tool_calls: int = 0
     _durations: list[float] = field(default_factory=list)
     _tool_calls: list[int] = field(default_factory=list)
 
@@ -447,7 +479,10 @@ class VendorStageRow:
             self.unknown_durations += 1
         else:
             self._durations.append(run.duration_s)
-        self._tool_calls.append(run.tool_calls)
+        if not run.tool_calls_known:
+            self.unknown_tool_calls += 1
+        else:
+            self._tool_calls.append(run.tool_calls)
         self.cache_read_tokens += run.cache_read_tokens
         self.cache_write_tokens += run.cache_write_tokens
         self.input_tokens += run.input_tokens
@@ -479,6 +514,7 @@ class VendorStageRow:
             "mean_tool_calls": (
                 round(statistics.mean(self._tool_calls), 1) if self._tool_calls else None
             ),
+            "unknown_tool_calls": self.unknown_tool_calls,
         }
 
 
@@ -665,6 +701,7 @@ class MissionRow:
             "landed_ok": self.landed_ok,
             "items": self.items,
             "unpriced_runs": self.unpriced_runs,
+            "windowed": self.windowed,
             "usd_per_item": _money(per_item) if per_item is not None else None,
         }
 
@@ -673,12 +710,15 @@ class MissionRow:
 class LandedRow:
     """Review item 2: cost per landed item across the report's missions.
     `missions` and `cost_usd` cover every mission with a merge that
-    happened; `usd_per_item` divides the cost of the subset whose build
-    lane left a parsed evidence map (`with_items`) by the items those maps
-    name, so a mission without a map neither inflates nor deflates it. A
-    mission whose own cost is a lower bound -- an unpriced run, or a report
-    window that cut some of its runs -- is out of the division on the same
-    grounds (2026-09-08 review)."""
+    happened; `usd_per_item` divides `items_cost_usd` -- the cost of the
+    subset whose build lane left a parsed evidence map, every run carried
+    a price, and the report's window holds the whole mission (`with_items`)
+    -- by the items those maps name, so a mission without a map neither
+    inflates nor deflates it. A mission whose own cost is a lower bound
+    -- an unpriced run, or a report window that cut some of its runs --
+    is out of the division on the same grounds (2026-09-08 review).
+    `with_items` is that subset, not "has a map".
+    """
 
     missions: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
@@ -696,6 +736,7 @@ class LandedRow:
             "cost_usd": _money(self.cost_usd),
             "with_items": self.with_items,
             "items": self.items,
+            "items_cost_usd": _money(self.items_cost_usd),
             "usd_per_item": _money(per_item) if per_item is not None else None,
         }
 
@@ -791,6 +832,11 @@ class Report:
     missions: list[MissionRow]
     rules: Rules
     skipped: int = 0
+    # Receipts too malformed to have a usable timestamp (the directory
+    # name did not parse as a run id). They cannot be bounded by `--since`
+    # / `--until`, so they are never folded into `skipped` -- that figure
+    # is the same window as every other table.
+    skipped_unwindowable: int = 0
     wall_clock: list[WallClockRow] = field(default_factory=list)
     # F15 item 3: totals the per-vendor `reviewer_precision` rows cannot
     # carry -- a disposition naming a lane that is not a review lane on its
@@ -821,6 +867,7 @@ class Report:
             "landed": self.landed.to_dict(),
             "rules": self.rules.to_dict(),
             "skipped": self.skipped,
+            "skipped_unwindowable": self.skipped_unwindowable,
             "wall_clock": [row.to_dict() for row in self.wall_clock],
         }
 
@@ -829,7 +876,14 @@ def _is_no_findings(answer_path: str) -> dict | None:
     """F1: a thin call to `verdicts.review_verdict` over the answer text --
     the parser conductor now trusts instead of `text.strip() ==
     "NO_FINDINGS"`, which a reviewer's own narration before its verdict
-    line defeated."""
+    line defeated.
+
+    None means the file could not be read or decoded. The finding-rate
+    loop counts that as `unparsed` (the verdict did not parse), not as a
+    sitting that never happened -- an unreadable `answer.txt` is the
+    strongest unparsed case, and dropping it made vendor/stage and the
+    finding-rate table disagree about how many reviews ran.
+    """
     try:
         text = Path(answer_path).read_text()
     except (OSError, ValueError):
@@ -868,6 +922,18 @@ def _matches_a_finding(items: object, index: object) -> bool:
         isinstance(entry, dict) and type(index) is int and entry.get("index") == index
         for entry in items
     )
+
+
+def _review_sitting_stopped(info: dict, stopped_ids: set[str]) -> bool:
+    """Whether this review lane's last attempt is a run conductor stopped.
+
+    A lane receipt does not carry `interrupted`/`cancelled`; the join is
+    the last attempt's `run_id` to the run receipt the finding rate already
+    skipped. Precision uses the same sittings so the two tables cannot
+    disagree about whether the review happened.
+    """
+    run_id = info.get("run_id")
+    return isinstance(run_id, str) and run_id in stopped_ids
 
 
 def _unique_dispositions(
@@ -911,6 +977,7 @@ def _build_report(
     mission_meta: dict[str, dict[str, object]],
     *,
     windowed: bool = False,
+    skipped_unwindowable: int = 0,
 ) -> Report:
     vendor_stage: dict[tuple[str, str | None], VendorStageRow] = {}
     error_kinds: dict[str, ErrorKindRow] = {}
@@ -938,15 +1005,14 @@ def _build_report(
             and not run.cancelled
         ):
             verdict = _is_no_findings(run.answer_path)
-            if verdict is not None:
-                row = reviewer.setdefault(vendor, ReviewerFindingRow(vendor=vendor))
-                row.runs += 1
-                if verdict["verdict"] == "unparsed":
-                    row.unparsed += 1
-                else:
-                    row.findings += verdict["findings"]
-                    if verdict["findings"]:
-                        row.with_findings += 1
+            row = reviewer.setdefault(vendor, ReviewerFindingRow(vendor=vendor))
+            row.runs += 1
+            if verdict is None or verdict["verdict"] == "unparsed":
+                row.unparsed += 1
+            else:
+                row.findings += verdict["findings"]
+                if verdict["findings"]:
+                    row.with_findings += 1
 
         if run.mission is not None:
             mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
@@ -971,6 +1037,12 @@ def _build_report(
     # well-formed disposition whose index names no finding the review lane
     # reported. Both were previously counted as ordinary dispositions.
     disposition_counts = {"duplicate": 0, "unmatched": 0}
+    # Finding rate skips a run conductor stopped; precision joins the
+    # snapshot's last attempt to that same receipt so the two tables name
+    # the same sittings.
+    stopped_review_ids = {
+        r.run_id for r in rows if (r.interrupted or r.cancelled) and r.stage == REVIEW_STAGE
+    }
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
@@ -1003,6 +1075,8 @@ def _build_report(
                 # lane just as on one whose dispositions named other lanes.
                 if info.get("unparsed") or not info.get("findings"):
                     continue
+                if _review_sitting_stopped(info, stopped_review_ids):
+                    continue
                 row = precision.setdefault(
                     info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"])
                 )
@@ -1015,6 +1089,8 @@ def _build_report(
         # list -- the field's presence is what "with dispositions" means)
         # joins a disposition's named reviewer lane back to its vendor.
         for info in review_lanes.values():
+            if _review_sitting_stopped(info, stopped_review_ids):
+                continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             if info.get("unparsed"):
                 row.unparsed += 1
@@ -1036,6 +1112,8 @@ def _build_report(
             info = review_lanes.get(lane_name)
             if info is None:
                 dispositions_unknown_lane += 1
+                continue
+            if _review_sitting_stopped(info, stopped_review_ids):
                 continue
             if info.get("unparsed"):
                 continue
@@ -1073,6 +1151,8 @@ def _build_report(
         # fix lane could never have dispositioned.
         for lane_name, info in review_lanes.items():
             if info.get("unparsed") or not info.get("findings"):
+                continue
+            if _review_sitting_stopped(info, stopped_review_ids):
                 continue
             if lane_name in dispositioned_lanes:
                 continue
@@ -1133,9 +1213,14 @@ def _build_report(
     # E24: rule 10's other half -- how much of the grace band each Claude
     # build/fix stage actually drew on, and how many of its runs finished
     # inside the band instead of being lost the way rule 10's dollar names.
+    # Rule 10 is the Claude *fleet*'s cap (AGENTS.md: every Claude cap),
+    # not `_vendor == "anthropic"`. A since-renamed model id still ran on
+    # that fleet; selecting by vendor made vendor/stage show a cap miss
+    # that this table called "no Claude run at all". A run whose fleet is
+    # not `claude` is not claimed.
     grace: dict[str, object] = {}
     for stage in ("build", "fix"):
-        matches = [r for r in rows if _vendor(r.fleet, r.model) == "anthropic" and r.stage == stage]
+        matches = [r for r in rows if r.fleet == "claude" and r.stage == stage]
         if not matches:
             cap_losses[stage] = "n/a"
         else:
@@ -1143,12 +1228,22 @@ def _build_report(
             # and passed. A watcher-killed run never gets that far, and
             # counting its "no gate ran" as passed read not-checked as green.
             capped = [r for r in matches if r.kind == "cap"]
-            cap_losses[stage] = {
+            unmatched_vendor_runs = sum(
+                1 for r in matches if _vendor(r.fleet, r.model) != "anthropic"
+            )
+            cohort: dict[str, object] = {
                 "gate_passed": sum(1 for r in capped if r.gate_ran and r.gate_passed),
                 "gate_failed": sum(1 for r in capped if r.gate_ran and not r.gate_passed),
                 "gate_not_run": sum(1 for r in capped if not r.gate_ran),
                 "total": len(capped),
             }
+            if unmatched_vendor_runs:
+                # The fleet is Claude; the model id did not resolve to
+                # anthropic. Surfaced rather than silently claimed as that
+                # vendor, or dropped from the table that exists to count
+                # these cap misses.
+                cohort["unmatched_vendor_runs"] = unmatched_vendor_runs
+            cap_losses[stage] = cohort
         grace_total = sum((r.grace_used for r in matches if r.grace_used), Decimal("0"))
         grace[stage] = {
             "used_usd": _money(grace_total),
@@ -1156,12 +1251,11 @@ def _build_report(
         }
     cap_losses["grace"] = grace
 
-    # F2: every mission this pass ever saw (`_scan_missions` reads every
-    # `result.json` under `home/missions`, not just the ones with a run in
-    # the window `rows` was filtered to), so a mission recorded before this
-    # field existed still gets its row, blanks and all.
-    # ... restricted to the missions with a run inside the requested window,
-    # so `--since` bounds this table the way it bounds every other one.
+    # F2: one row per mission this report included -- every mission on disk
+    # when the report is unwindowed, and only missions with a run inside
+    # `--since`/`--until` when those are set, the same bound as every other
+    # table. A mission recorded before this field existed still gets its
+    # row when it is in that set, blanks and all.
     wall_rows = [
         WallClockRow(mission=name, **_wall_figures(mission_meta[name].get("wall")))
         for name in sorted(mission_meta)
@@ -1181,6 +1275,7 @@ def _build_report(
         landed=landed,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
         skipped=skipped,
+        skipped_unwindowable=skipped_unwindowable,
         wall_clock=wall_rows,
     )
 
@@ -1192,9 +1287,23 @@ def report(home: Path, *, since: datetime | None = None, until: datetime | None 
     result_files = sorted(runs_dir.glob("*/result.json")) if runs_dir.is_dir() else []
     rows: list[Run] = []
     skipped = 0
+    skipped_unwindowable = 0
     for result_file in result_files:
         run = _read_run(result_file, join)
         if run is None:
+            # `_read_run` failed; the directory name is the only stamp we
+            # can still window on. A receipt whose name is not a run id
+            # cannot be bounded by `--since`/`--until`, so it is counted
+            # separately rather than silently included in or dropped from
+            # `skipped`.
+            created = _run_time(result_file.parent.name)
+            if created is None:
+                skipped_unwindowable += 1
+                continue
+            if since is not None and created < since:
+                continue
+            if until is not None and created >= until:
+                continue
             skipped += 1
             continue
         if since is not None and run.created < since:
@@ -1206,7 +1315,11 @@ def report(home: Path, *, since: datetime | None = None, until: datetime | None 
             continue
         rows.append(run)
     return _build_report(
-        rows, skipped, mission_meta, windowed=since is not None or until is not None
+        rows,
+        skipped,
+        mission_meta,
+        windowed=since is not None or until is not None,
+        skipped_unwindowable=skipped_unwindowable,
     )
 
 
@@ -1376,7 +1489,8 @@ def _print_report(rpt: Report) -> None:
         per_item = landed["usd_per_item"]
         print(
             f"  Landed: {landed['missions']} mission(s), ${landed['cost_usd']}; "
-            f"{landed['with_items']} with an evidence map naming {landed['items']} item(s): "
+            f"{landed['with_items']} fully priced, unwindowed, with an evidence map "
+            f"naming {landed['items']} item(s) (${landed['items_cost_usd']}): "
             + (f"${per_item} per landed item" if per_item is not None else "no per-item figure")
         )
     else:
@@ -1451,6 +1565,11 @@ def _print_report(rpt: Report) -> None:
     )
     if rpt.skipped:
         print(f"{rpt.skipped} receipt(s) skipped (malformed or unreadable)")
+    if rpt.skipped_unwindowable:
+        print(
+            f"{rpt.skipped_unwindowable} receipt(s) skipped "
+            "(malformed or unreadable, no usable timestamp to window)"
+        )
 
 
 def cmd_report(args: argparse.Namespace) -> int:

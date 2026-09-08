@@ -134,6 +134,36 @@ def test_report_groups_by_vendor_and_stage_with_join_for_missing_stage(home: Pat
     assert joined_run.cost_usd == 2
 
 
+def test_an_unmatched_cursor_model_does_not_share_composers_vendor_row(home: Path):
+    """`cursor` is both a fleet and a vendor. A stale Grok id used to fall
+    back to the fleet name and collapse into Composer's row, attributing
+    Grok's spend to Composer under a vendor name that looks legitimate."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-composer",
+        fleet="cursor",
+        model="composer-2.5",
+        cost=1.0,
+        stage="review",
+    )
+    _write_receipt(
+        home,
+        "20260101T010000Z-stale-grok",
+        fleet="cursor",
+        model="cursor-grok-4.5-medium",
+        cost=4.0,
+        stage="review",
+    )
+    rpt = report(home)
+    by_vendor = {r.vendor: r for r in rpt.vendor_stage}
+    assert by_vendor["cursor"].runs == 1
+    assert by_vendor["cursor"].cost_usd == 1
+    unmatched = next(r for r in rpt.vendor_stage if r.vendor == "unmatched:cursor")
+    assert unmatched.runs == 1
+    assert unmatched.cost_usd == 4
+    assert unmatched.vendor != "cursor"
+
+
 def test_report_counts_cap_misses_and_gate_failures(home: Path):
     _write_receipt(
         home,
@@ -664,6 +694,8 @@ def test_readme_documents_wall_clock_in_the_report_section():
     assert "concurrency" in section
     assert "lanes_s / (wall_s * concurrency)" in section
     assert "cache_read_tokens" in section and "input_tokens" in section
+    assert "one row per mission this report included" in section
+    assert "same bound as every other table" in section
 
 
 def test_report_reviewer_precision_blank_under_three_dispositions(home: Path):
@@ -1239,6 +1271,32 @@ def test_report_rules_section_reports_n_a_when_no_data(home: Path):
     assert review_entry["finding_rate"] == "n/a"
 
 
+def test_an_unregistered_claude_model_is_a_rule_10_cap_miss_not_absent(home: Path):
+    """A since-renamed Claude id (`claude-opus-4-6`) does not resolve to
+    `anthropic`. Rule 10 used to select `_vendor == "anthropic"` and print
+    n/a (README: a stage with no Claude run at all) while vendor/stage
+    showed cap_misses 1. Rule 10 is the Claude fleet's cap; the unmatched
+    vendor is surfaced, not claimed as anthropic."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-old-opus",
+        fleet="claude",
+        model="claude-opus-4-6",
+        ok=False,
+        kind="cap",
+        stage="build",
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.vendor_stage if r.stage == "build")
+    assert row.vendor == "unmatched:claude"
+    assert row.cap_misses == 1
+    build = rpt.rules.cap_losses["build"]
+    assert build != "n/a"
+    assert build["total"] == 1
+    assert build["unmatched_vendor_runs"] == 1
+    assert rpt.rules.cap_losses["grace"]["build"]["runs"] == 0
+
+
 def test_report_json_key_order(home: Path, monkeypatch, capsys):
     _write_receipt(
         home,
@@ -1263,6 +1321,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "landed",
         "rules",
         "skipped",
+        "skipped_unwindowable",
         "wall_clock",
     ]
     assert list(payload["rules"].keys()) == ["review", "cap_losses"]
@@ -1271,6 +1330,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "cost_usd",
         "with_items",
         "items",
+        "items_cost_usd",
         "usd_per_item",
     ]
     assert payload["landed"] == {
@@ -1278,6 +1338,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "cost_usd": "0.00",
         "with_items": 0,
         "items": 0,
+        "items_cost_usd": "0.00",
         "usd_per_item": None,
     }
     row = payload["vendor_stage"][0]
@@ -1295,6 +1356,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "cap_misses",
         "gate_failures",
         "mean_tool_calls",
+        "unknown_tool_calls",
     ]
     assert row["cost_usd"] == "1.00"
 
@@ -1349,6 +1411,33 @@ def test_report_wall_clock_table_is_bounded_by_since_like_every_other_table(home
     assert {row.mission for row in rpt.wall_clock} == {"m-new"}
     unbounded = report(home)
     assert {row.mission for row in unbounded.wall_clock} == {"m-new", "m-old"}
+
+
+def test_skipped_counts_only_unreadable_receipts_inside_the_window(home: Path):
+    """`skipped` used to increment before the since/until tests, so a
+    home of June garbage plus one day of `--since` printed the day's
+    tables and then '40 receipt(s) skipped'. A directory name that is
+    not a run stamp cannot be windowed; those are `skipped_unwindowable`,
+    never silently included in or dropped from `skipped`."""
+    from datetime import UTC, datetime
+
+    for run_id in ("20260601T000000Z-june-bad", "20260907T120000Z-sept-bad"):
+        directory = home / "runs" / run_id
+        directory.mkdir(parents=True)
+        (directory / "result.json").write_text("{not json")
+    unwindowable = home / "runs" / "not-a-run-id"
+    unwindowable.mkdir(parents=True)
+    (unwindowable / "result.json").write_text("{not json")
+    _write_receipt(
+        home, "20260907T130000Z-ok", fleet="claude", model="claude-sonnet-5", stage="build"
+    )
+
+    windowed = report(home, since=datetime(2026, 9, 7, tzinfo=UTC))
+    assert windowed.skipped == 1
+    assert windowed.skipped_unwindowable == 1
+    unbounded = report(home)
+    assert unbounded.skipped == 2
+    assert unbounded.skipped_unwindowable == 1
 
 
 def test_report_keeps_every_fix_lanes_dispositions_on_a_multi_fix_mission(home: Path):
@@ -1774,6 +1863,23 @@ def test_report_landed_counts_only_merges_that_happened(home: Path):
     assert row.to_dict()["usd_per_item"] == "1.00"
 
 
+def test_land_merged_treats_a_missing_dry_run_key_as_a_real_merge(home: Path):
+    """`land.py` treats a missing `dry_run` as a real merge (`is not True`).
+    Report required `is False`, so a truncated receipt with only `ok` and
+    `already_merged` left `landed_ok` at 0 and blanked every per-item figure."""
+    _landed_mission(
+        home,
+        "20260101T000000Z-m-no-dry",
+        cost=4.0,
+        items=[1, 2],
+        land=[{"ok": True, "already_merged": False}],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.missions if r.mission == "20260101T000000Z-m-no-dry")
+    assert row.landed_ok == 1
+    assert row.to_dict()["usd_per_item"] == "2.00"
+
+
 def test_report_landed_aggregate_divides_only_missions_with_an_evidence_map(home: Path):
     _landed_mission(home, "20260101T000000Z-m-a", cost=6.0, items=[1, 2, 3], land=[MERGED])
     # Merged, but its build lane predates the evidence map: counted in the
@@ -1797,6 +1903,7 @@ def test_report_landed_aggregate_divides_only_missions_with_an_evidence_map(home
         "cost_usd": "18.00",
         "with_items": 1,
         "items": 3,
+        "items_cost_usd": "6.00",
         "usd_per_item": "2.00",
     }
 
@@ -1858,8 +1965,8 @@ def test_report_prints_landed_columns_and_summary_line(home: Path, monkeypatch, 
     row = next(line for line in out.splitlines() if "20260101T000000Z-m-p" in line)
     assert row.split()[-4:] == ["1", "2", "0", "2.50"]
     assert (
-        "Landed: 1 mission(s), $5.00; 1 with an evidence map naming 2 item(s): "
-        "$2.50 per landed item" in out
+        "Landed: 1 mission(s), $5.00; 1 fully priced, unwindowed, with an evidence map "
+        "naming 2 item(s) ($5.00): $2.50 per landed item" in out
     )
 
 
@@ -1880,3 +1987,5 @@ def test_readme_documents_cost_per_landed_item():
     assert "evidence map" in section
     assert "per landed item" in section
     assert "AGENTS.md rule 2" in section
+    assert "items_cost_usd" in section
+    assert "fully priced, unwindowed" in section

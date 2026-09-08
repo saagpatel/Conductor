@@ -78,6 +78,35 @@ def test_a_missing_duration_is_left_out_of_the_mean_not_counted_as_zero(home: Pa
     assert row["unknown_durations"] == 1
 
 
+def test_a_missing_breaker_is_left_out_of_the_tool_call_mean_not_counted_as_zero(home: Path):
+    """`spend._read_run` sets `tool_calls = 0` when `breaker` is null; the
+    vendor/stage mean used to average that 0 in, so a 40-call run plus a
+    crash printed `mean_tools 20.0` with no column saying one figure was
+    never measured."""
+    measured = _write_receipt(
+        home,
+        "20260101T000000Z-a",
+        fleet="claude",
+        model="claude-sonnet-5",
+        tool_calls=40,
+    )
+    crash = _write_receipt(
+        home,
+        "20260101T000000Z-b",
+        fleet="claude",
+        model="claude-sonnet-5",
+        tool_calls=0,
+    )
+    raw = json.loads((crash / "result.json").read_text())
+    raw["breaker"] = None
+    (crash / "result.json").write_text(json.dumps(raw))
+    row = report(home).vendor_stage[0].to_dict()
+    assert row["mean_tool_calls"] == 40.0
+    assert row["unknown_tool_calls"] == 1
+    assert row["runs"] == 2
+    assert "breaker" in json.loads((measured / "result.json").read_text())
+
+
 def test_input_tokens_reported_as_a_float_still_count_against_the_cache_rate(home: Path):
     """A vendor that writes the count as a JSON float used to read as 0,
     which drops it out of the denominator and inflates the hit rate."""
@@ -96,10 +125,11 @@ def test_input_tokens_reported_as_a_float_still_count_against_the_cache_rate(hom
     assert report(home).vendor_stage[0].cache_pct() == 50.0
 
 
-def test_an_answer_that_is_not_valid_utf8_is_skipped_not_a_crash(home: Path):
+def test_an_answer_that_is_not_valid_utf8_counts_as_unparsed_not_absent(home: Path):
     """`UnicodeDecodeError` is a ValueError, not an OSError: an interrupted
     write that truncated `answer.txt` mid-sequence used to abort the whole
-    report."""
+    report. The sitting still happened; an unreadable file is `unparsed`,
+    not a review that never ran."""
     directory = _write_receipt(
         home,
         "20260101T000000Z-a",
@@ -115,7 +145,10 @@ def test_an_answer_that_is_not_valid_utf8_is_skipped_not_a_crash(home: Path):
 
     rows = report(home).reviewer_finding_rate
 
-    assert [row.runs for row in rows] == [1]
+    assert len(rows) == 1
+    assert rows[0].runs == 2
+    assert rows[0].unparsed == 1
+    assert rows[0].findings == 0
 
 
 def test_a_mission_snapshot_that_is_not_valid_utf8_is_skipped_not_a_crash(home: Path):
@@ -139,6 +172,54 @@ def test_an_interrupted_review_is_not_scored_as_a_completed_sitting(home: Path):
     assert len(rows) == 1
     assert rows[0].runs == 1
     assert rows[0].findings == 1
+
+
+def test_an_interrupted_review_is_absent_from_precision_as_well_as_finding_rate(home: Path):
+    """Finding rate skips a stop because a partial answer is not a sitting.
+    Precision used to add the snapshot's `findings` anyway, so the two
+    tables disagreed about whether the review happened. The join is the
+    last attempt's `run_id` to that run receipt -- a lane receipt does not
+    carry `interrupted`."""
+    from test_report import _fix_lane, _write_mission
+
+    run_id = "20260101T000000Z-a"
+    _review(home, run_id, "FINDINGS: 3\n", interrupted=True)
+    path = home / "runs" / run_id / "result.json"
+    raw = json.loads(path.read_text())
+    raw["mission"] = "m-int"
+    path.write_text(json.dumps(raw))
+    _write_receipt(
+        home,
+        "20260101T000000Z-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-int",
+    )
+    _write_mission(
+        home,
+        "m-int",
+        name="m-int",
+        ok=False,
+        lanes=[
+            {
+                "name": "review-grok",
+                "stage": "review",
+                "review": {"verdict": "findings", "findings": 3},
+                "attempts": [{"run_id": run_id, "fleet": "cursor", "model": "grok-4.6"}],
+            },
+            _fix_lane(
+                [{"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r"}]
+            ),
+        ],
+    )
+    _review(home, "20260101T000000Z-c", "FINDINGS: 1\n")
+
+    rpt = report(home)
+    rate = next(r for r in rpt.reviewer_finding_rate if r.vendor == "xai")
+    assert rate.runs == 1
+    assert rate.findings == 1
+    assert not [r for r in rpt.reviewer_precision if r.vendor == "xai"]
 
 
 def test_a_landed_mission_with_an_unpriced_run_reports_no_per_item_figure(home: Path):
@@ -170,6 +251,7 @@ def test_a_landed_mission_with_an_unpriced_run_reports_no_per_item_figure(home: 
         "cost_usd": "4.00",
         "with_items": 0,
         "items": 0,
+        "items_cost_usd": "0.00",
         "usd_per_item": None,
     }
 
@@ -191,4 +273,9 @@ def test_a_windowed_report_reports_no_per_item_figure(home: Path):
     assert row.items == 2
     assert row.landed_ok == 1
     assert row.usd_per_item() is None
+    assert row.to_dict()["windowed"] is True
+    assert row.to_dict()["usd_per_item"] is None
+    whole_row = next(r for r in whole.missions if r.mission == "20260101T000000Z-m-p")
+    assert whole_row.to_dict()["windowed"] is False
+    assert whole_row.to_dict()["usd_per_item"] == "2.00"
     assert windowed.landed.to_dict()["usd_per_item"] is None

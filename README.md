@@ -2847,17 +2847,23 @@ The report has seven sections, in this order:
   `input_tokens`, `cache_read_tokens` and `cache_write_tokens`, summed per
   group, as a percentage -- blank when that sum is zero),
   cap misses (`kind == "cap"`), gate failures (`kind == "gate"`), and mean
-  tool calls, grouped by the vendor behind the model (`fleets.py`) and the
-  pipeline stage (the fleet name in place of an unrecognized vendor, `null`
-  stage for a dispatch outside a staged pipeline).
+  tool calls (over the runs whose receipt carried a `breaker` block;
+  `--json` also carries `unknown_tool_calls`, the runs in the group that
+  did not -- a crash or spawn-failure writes `breaker: null` -- and are
+  out of the mean rather than averaged in as zero), grouped by the vendor
+  behind the model (`fleets.py`) and the pipeline stage (`unmatched:<fleet>`
+  when the model id matches none of that fleet's registered ids, so a
+  stale cursor id cannot share Composer's vendor key; `null` stage for a
+  dispatch outside a staged pipeline).
 - **Error kinds**: count and cost per `errors.error_kind`.
 - **Reviewer finding rate**: among `stage: review` dispatches that wrote an
   answer and were not interrupted or cancelled (a run conductor itself
   stopped can leave a partial `answer.txt`, and scoring it reads a stop as a
   completed sitting), `verdicts.review_verdict` parses the LAST non-empty line (a
   trailing code fence is skipped first): exactly `NO_FINDINGS` counts as
-  zero findings, `FINDINGS: N` counts as `N`, and anything else is
-  `unparsed`, its own column -- a reviewer that narrates before its verdict
+  zero findings, `FINDINGS: N` counts as `N`, and anything else -- including
+  an `answer.txt` that could not be read or decoded -- is `unparsed`, its
+  own column -- a reviewer that narrates before its verdict
   (Grok routinely does) used to read every one of those narrations as a
   finding, since the old check was `answer.strip() == "NO_FINDINGS"` against
   the whole reply. `rate` divides by parsed runs only, excluding
@@ -2868,7 +2874,11 @@ The report has seven sections, in this order:
   them the fix lane marked fixed, refused, already true, or wording-only,
   plus `unparsed`, the review lanes on that vendor whose verdict line did
   not parse at all (F15 item 2; the same column the finding-rate table
-  carries, counted here per vendor).
+  carries, counted here per vendor). A review conductor itself stopped
+  (the last attempt's run receipt carries `interrupted` or `cancelled`)
+  is not a sitting here either, matching the finding-rate table: a lane
+  receipt does not carry those flags, so the join is that last attempt's
+  `run_id`.
   `precision` is `fixed / (fixed + refused)`, blank under three total
   dispositions -- not enough to read as a rate. D20: a disposition is
   counted once per finding it names. Entries are keyed by (mission,
@@ -2918,16 +2928,22 @@ The report has seven sections, in this order:
   `usd_per_item` is blank rather than a figure divided out of one. It is
   blank for the same reason under `--since`/`--until`, which bound the runs
   that reach the row while `merged` and `items` are read from the mission's
-  whole life. One line under
+  whole life; `--json` carries `windowed` so a withheld figure is not
+  mistaken for a missing map. One line under
   the table sums it: how many missions merged and what they cost, and,
-  over the subset with an evidence map, the cost per landed item. A
-  merged mission without a map is in the first pair of figures and out of
-  the division, so it neither inflates nor deflates the rate; a mission
-  whose own cost is a lower bound is out of it on the same grounds.
+  over the subset that is fully priced, unwindowed, and with an evidence
+  map, that subset's own cost (`items_cost_usd`) and the cost per landed
+  item. A merged mission without a map is in the first pair of figures
+  and out of the division, so it neither inflates nor deflates the rate; a
+  mission whose own cost is a lower bound is out of it on the same
+  grounds. `with_items` counts that subset, not "has a map".
   `--json` carries the same four columns per mission -- the `merged` column is
   emitted under its field name `landed_ok`, beside the `landed` count the
   table's own line sums.
-- **Wall clock**: one row per mission ever recorded, from that mission's own
+- **Wall clock**: one row per mission this report included -- every mission
+  on disk when the report is unwindowed, and only missions with a run
+  inside `--since`/`--until` when those are set, the same bound as every
+  other table -- from that mission's own
   `result.json` `wall` block -- `{"launched_at", "finished_at", "wall_s",
   "paused_s", "gate_s", "lanes_s", "idle_s", "occupied_s",
   "critical_path_s", "lead_s"}`. `launched_at` is the
