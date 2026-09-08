@@ -2720,6 +2720,32 @@ def _tighter(*caps: float | None) -> float | None:
     return min(known) if known else None
 
 
+def _fit_cap_to_remaining(
+    cap_usd: float | None,
+    grace_usd: float | None,
+    remaining: float | None,
+) -> tuple[float | None, float | None]:
+    """Tighten a lane's cap so its ceiling (cap plus grace) fits in remaining.
+
+    Ordinary case: remaining is None or covers cap+grace; both stay, so a
+    lane whose own cap is well inside the mission budget keeps its band.
+    Last-dollars: the cap itself is min(cap, remaining), and grace only
+    occupies whatever of remaining is left after that -- never a full band
+    stacked on a cap that was already squeezed to the last dollar.
+    """
+    cap_usd = _tighter(cap_usd, remaining)
+    if cap_usd is None or grace_usd is None:
+        return cap_usd, grace_usd
+    if remaining is None:
+        return cap_usd, grace_usd
+    room = round(remaining - cap_usd, 6)
+    if room <= 0:
+        return cap_usd, None
+    if room >= grace_usd:
+        return cap_usd, grace_usd
+    return cap_usd, room
+
+
 def _pollable_sleep(seconds: float, cancel_event: threading.Event | None) -> str | None:
     """C5's retry backoff: sleep in one-second steps, polling the global stop
     flag and this lane's own cancel event exactly like a running dispatch's
@@ -3407,7 +3433,9 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     history = (prior_result or {}).get("resumes")
     if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
         history = []
-    previous, notes, accounting_unknown = _read_previous_lanes(mission_dir, mission)
+    previous, notes, accounting_unknown = _read_previous_lanes(
+        mission_dir, mission, base=base
+    )
     kept: dict[str, LaneResult] = {}
     rerun: set[str] = set()
     children_rollups: list[tuple[float, int]] = []
@@ -3919,10 +3947,13 @@ def _execute_mission(
             )
             # E26: this attempt's own repository, or the mission's default.
             attempt_cwd = attempt.effective_cwd(mission.cwd)
-            cap_usd = _tighter(attempt.cap_usd, ledger.remaining())
+            cap_usd, grace_usd = _fit_cap_to_remaining(
+                attempt.cap_usd, attempt.cap_grace_usd, ledger.remaining()
+            )
             spec = attempt.spec(
                 attempt_cwd,
                 cap_usd=cap_usd,
+                cap_grace_usd=grace_usd,
                 prompt=prompt,
                 resume=resume_id,
                 stage=lane.stage,
@@ -3945,7 +3976,16 @@ def _execute_mission(
             # override `cap_usd` figure, which never actually reaches the
             # dispatch and would otherwise read a free script in flight as
             # able to spend the whole remaining budget.
-            ledger_cap_usd = 0.0 if attempt.fleet == "script" else cap_usd
+            # The in-flight figure is the ceiling the lane can actually
+            # reach (cap plus whatever grace survived tightening), not the
+            # un-graced cap: otherwise outstanding_cap_usd understates the
+            # worst case by every in-flight lane's band.
+            if attempt.fleet == "script":
+                ledger_cap_usd = 0.0
+            elif cap_usd is None:
+                ledger_cap_usd = None
+            else:
+                ledger_cap_usd = cap_usd + (grace_usd or 0.0)
             ledger.start(ledger_cap_usd)
             try:
                 if dispatcher is not None:

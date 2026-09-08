@@ -19,6 +19,7 @@ from conductor.mission import (
     _build_resume_plan,
     _cancel_winner,
     _keep_cancelled_lanes,
+    _read_previous_lanes,
     _trusted_lane,
     mission_from_dict,
     run_mission,
@@ -586,3 +587,45 @@ def test_the_resume_plan_settles_cancelled_lanes_inside_the_cascade(
     assert "a" in plan.kept, "a cancelled lane whose winner is kept is not paid for twice"
     assert plan.rerun == set()
     assert any("stays cancelled" in note for note in plan.notes)
+
+
+def test_read_previous_lanes_recovers_runs_when_the_lane_receipt_was_never_written(
+    tmp_path: Path,
+):
+    """A hard-killed mission writes `runs/<id>/result.json` but not
+    `lanes/<name>.json`. Resume must find those runs, note the recovery, and
+    not mark a lane that never started as accounting_unknown."""
+    home = tmp_path
+    mission_dir = home / "missions" / "mid"
+    (mission_dir / "lanes").mkdir(parents=True)
+    run_dir = home / "runs" / "r-spent"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r-spent",
+                "spawned": True,
+                "mission": "mid",
+                "lane": "build",
+                "usage": {"cost_usd": 1.5},
+            }
+        )
+    )
+    mission = mission_from_dict(
+        {
+            "prompt": "x",
+            "lanes": [
+                {"name": "build", "fleet": "claude"},
+                {"name": "review", "fleet": "claude"},
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+    previous, notes, unknown = _read_previous_lanes(mission_dir, mission, base=home)
+
+    assert unknown == 0
+    assert "review" not in previous
+    assert [item["run_id"] for item in previous["build"].attempts] == ["r-spent"]
+    assert any("no lane receipt" in note and "recovered 1 run" in note for note in notes)
+    assert attempts_mod._read_previous_lanes is _read_previous_lanes

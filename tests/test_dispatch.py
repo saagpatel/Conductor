@@ -263,7 +263,7 @@ def test_tokens_without_dollars_are_priced_from_the_table(repo, home, fake_fleet
     # W6: the receipt names which table entry, from which source, priced it.
     assert result.usage["price"]["key"] == "composer-2.5"
     assert result.usage["price"]["source"] == "default"
-    assert result.usage["price"]["as_of"] == prices_mod.AS_OF
+    assert result.usage["price"]["as_of"] == prices_mod.DEFAULT_PRICES["composer-2.5"].as_of
 
 
 def test_an_estimate_from_an_override_priced_model_says_so_on_the_receipt(
@@ -503,6 +503,80 @@ def test_a_crash_after_the_spend_is_a_receipt_with_the_cost_so_far(
     receipt = json.loads((Path(result.run_dir) / "result.json").read_text())
     assert receipt["kind"] == "parse" and receipt["ok"] is False
     assert "unhashable" in (Path(result.run_dir) / "parse-error.txt").read_text()
+    # The fleet already reported $0.25. A watcher estimate from the same
+    # tokens must not replace that figure, and a crash after parse must not
+    # throw the reported cost away.
+    assert result.usage["cost_usd"] == 0.25
+    assert result.usage["cost_basis"] == "reported"
+    assert receipt["usage"]["cost_usd"] == 0.25
+    assert receipt["usage"]["cost_basis"] == "reported"
+
+
+def test_a_cursor_teardown_crash_keeps_the_reported_cost(repo, home, fake_fleet, monkeypatch):
+    """Cursor has no watcher. A Grok review that reported $1.90 and then
+    hit an OSError in teardown used to land `usage: null` and
+    'no priced usage was recovered', so the ledger counted it unpriced."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"NO_FINDINGS",'
+        '"usage":{"inputTokens":10,"outputTokens":5},"total_cost_usd":1.90}'
+    )
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
+
+    def boom(*_a, **_k):
+        raise OSError("teardown crashed")
+
+    monkeypatch.setattr(runner_mod, "run_tests", boom)
+    result = dispatch(
+        spec_for(
+            repo,
+            fleet="cursor",
+            model="composer-2.5",
+            mode="read",
+            teardown="true",
+        ),
+        home=home,
+    )
+
+    assert result.ok is False
+    assert result.error.startswith("parse failed: OSError:")
+    assert result.usage is not None
+    assert result.usage["cost_usd"] == 1.90
+    assert result.usage["cost_basis"] == "reported"
+    notes = " ".join(result.git_verdict["notes"])
+    assert "no priced usage was recovered" not in notes
+
+
+def test_a_teardown_crash_does_not_clear_a_native_budget_stop(
+    repo, home, fake_fleet, monkeypatch
+):
+    """Claude stopped on its native flag with spend still inside the grace
+    band. settle #1 sets exceeded=True; a teardown crash must not settle
+    again with fleet_status=None and flip that to False."""
+    envelope = {
+        "type": "result",
+        "subtype": "error_max_budget_usd",
+        "is_error": True,
+        "errors": ["Reached maximum budget ($1.25)"],
+        "total_cost_usd": 0.90,
+        "usage": {"input_tokens": 2, "output_tokens": 10},
+    }
+    fake_fleet(["sh", "-c", f"echo '{json.dumps(envelope)}'; exit 1"])
+
+    def boom(*_a, **_k):
+        raise OSError("teardown crashed")
+
+    monkeypatch.setattr(runner_mod, "run_tests", boom)
+    result = dispatch(
+        spec_for(repo, cap_usd=1.0, cap_grace_usd=0.25, teardown="true"),
+        home=home,
+    )
+
+    assert result.ok is False
+    assert result.error.startswith("parse failed: OSError:")
+    assert result.budget["exceeded"] is True
+    assert result.budget["observed_usd"] == 0.90
+    assert result.usage["cost_usd"] == 0.90
+    assert result.usage["cost_basis"] == "reported"
 
 
 def test_a_keyboardinterrupt_after_the_spend_still_writes_a_receipt(

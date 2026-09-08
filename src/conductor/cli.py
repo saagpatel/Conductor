@@ -288,14 +288,7 @@ def cmd_prices(args: argparse.Namespace) -> int:
         "override_file": str(conductor_home() / "prices.json"),
         "override_errors": errors,
         "usd_per_million_tokens": {
-            key: {
-                "input": p.input,
-                "output": p.output,
-                "cache_read": p.cache_read,
-                "cache_write": p.cache_write,
-                "note": p.note,
-            }
-            for key, p in sorted(table.items())
+            key: prices.rates_for_display(p) for key, p in sorted(table.items())
         },
     }
     print(json.dumps(out, indent=2))
