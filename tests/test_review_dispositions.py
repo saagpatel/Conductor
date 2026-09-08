@@ -487,6 +487,41 @@ def test_mission_settle_prefers_the_dispositions_deliverable_over_prose(
     assert by_name["fix"]["dispositions_malformed"] == 1
 
 
+def test_mission_settle_reads_dispositions_from_a_build_stage_lane_that_declares_them(
+    repo, home, monkeypatch, tmp_path
+):
+    """F23: a Shape A deliverable mission's review-applying lane runs as
+    `stage: build` (a file has no test to reproduce) and still writes
+    `dispositions.json`; its dispositions are the receipt, as for a fix lane."""
+    monkeypatch.setattr(runner_mod, "build_argv", _build_argv_with_deliverable)
+    raw = {
+        "cwd": str(repo),
+        "concurrency": 2,
+        "lanes": [
+            {
+                "name": "review",
+                "fleet": "antigravity",
+                "stage": "review",
+                "mode": "read",
+                "prompt": "REVIEW",
+            },
+            {
+                "name": "fix",
+                "fleet": "claude",
+                "stage": "build",
+                "mode": "write",
+                "prompt": "FIX",
+                "deliverable": {"path": "dispositions.json"},
+            },
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    by_name = {lane["name"]: lane for lane in result.lanes}
+
+    assert [entry["index"] for entry in by_name["fix"]["dispositions"]] == [1, 2]
+    assert by_name["fix"]["dispositions_malformed"] == 1
+
+
 def test_every_report_table_row_has_the_header_cell_count(repo, home, monkeypatch, tmp_path):
     """Cross-vendor review of F1: the `review/fix` column widened the header
     to 19 cells, and the human row and the skipped-without-attempts row were

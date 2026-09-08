@@ -1253,6 +1253,23 @@ times the pair's cost; use it on lifecycle, security, and spec-risk work, not by
 
 Four more terms round out the arithmetic (F6, all in `shape.py` and `cli.py`):
 
+`--deliverable PATH` (F23) runs a document or data spec through the same shape. The
+build lane declares the file (repo-relative, no `..`) as its E1 deliverable in place of
+the evidence map, with `--deliverable-validator CMD` as its F22 validator (`{path}`
+substituted; conductor runs it on the base bytes and the worktree bytes and refuses a
+file that fails it), and its prompt names the file and the command instead of asking for
+`evidence.json`. The reviewers read a note in place of the evidence block: what a machine
+can check is checked, whether the file still says what the spec asked is their question.
+The review-applying lane keeps its name, its `dispositions.json` receipt, and its place in
+`pause.before`, but runs as `stage: build`: a file has no test to reproduce, and the
+validator already passes on the build's tip, so under `stage: fix` it would be refused
+every time with `validator passed on the base too` (the data consumer's drill 2). The
+policy then names `build` and `review` only, and `mission.py` reads dispositions from any
+lane that declares `dispositions.json`, not only a fix lane. `--adversarial` is refused
+with it. The cap arithmetic is unchanged and the forecast reads the same Anthropic build
+history as a code mission, so pass `--no-forecast-cap` when the rule 2 figure fits a
+one-file spec.
+
 - **`--tests-items N`** (default 0): spec items, already counted once in `--items`, that
   are tests -- rule 11 sizes a spec whose tests are a fifth of the items as if they were
   half, so each one earns a second dollar on the build cap, printed as its own term

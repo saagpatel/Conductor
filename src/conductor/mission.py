@@ -3572,6 +3572,7 @@ def _execute_mission(
                 json.dumps(done[lane.name].to_dict(), indent=2)
             )
     sink_names = {lane.name for lane in mission.sinks()}
+    lane_specs = {lane.name: lane for lane in mission.lanes}
     # B5 early cancel: a per-lane cancel event, created the moment a lane is
     # dispatched, plus the reason it fired -- written before the event is set,
     # so the running dispatch's own thread always sees it once `cancel.is_set()`.
@@ -4042,13 +4043,23 @@ def _execute_mission(
                     out.branch = lane.branch
                     out.attempts[-1]["branch"] = lane.branch
 
+    def _declares_dispositions(lane_name: str) -> bool:
+        """F23: a Shape A deliverable mission's review-applying lane runs as
+        `stage: build` (a file has no test to reproduce) and still writes
+        `dispositions.json`; its dispositions are read like a fix lane's."""
+        spec = lane_specs.get(lane_name)
+        if spec is None or not spec.attempts:
+            return False
+        declared = spec.attempts[-1].deliverable
+        return bool(declared) and Path(str(declared.get("path", ""))).name == "dispositions.json"
+
     def _settle_parse(lane_result: LaneResult) -> None:
         """The parsing half of `settle`, split out so one boundary covers it
         all (see the caller)."""
         answer_text = _read_lane_text(lane_result.answer_path)
         if lane_result.stage == "review" and answer_text is not None:
             lane_result.review = verdicts_mod.review_verdict(answer_text)
-        elif lane_result.stage == "fix":
+        elif lane_result.stage == "fix" or _declares_dispositions(lane_result.name):
             # F15 mission 2 item 2: the kept deliverable copy (dispositions.json,
             # when the fix lane declared one) is the receipt; prose
             # `DISPOSITION:` lines are only read when no deliverable copy

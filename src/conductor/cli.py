@@ -841,6 +841,8 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             adversarial=args.adversarial,
             ceiling=ceiling,
             opus_review=args.opus_review,
+            deliverable=args.deliverable or "",
+            deliverable_validator=args.deliverable_validator or "",
         )
         base_dir = mission_dir or Path(args.spec).expanduser().resolve().parent
         if out is None:
@@ -1197,6 +1199,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shape C (F9): add Opus 5 at hard as a third cold reviewer beside Gemini and "
         "Grok, at the $4.00 cap; the mission carries self_judging: allow because the build "
         "is Sonnet, and the fix lane reads all three reviews",
+    )
+    p_shape_a.add_argument(
+        "--deliverable",
+        metavar="PATH",
+        help="F23: the repo-relative file a document or data spec produces; the build lane "
+        "declares it in place of the evidence map, and the review-applying lane runs as a "
+        "build lane (a file has no test to reproduce)",
+    )
+    p_shape_a.add_argument(
+        "--deliverable-validator",
+        metavar="CMD",
+        help="F22 validator conductor runs on --deliverable before and after each lane's "
+        "change, {path} substituted; needs --deliverable",
     )
     p_shape_a.add_argument(
         "--tests-items",

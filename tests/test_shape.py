@@ -699,3 +699,155 @@ def test_cli_writes_the_evidence_schema_beside_the_mission(
     assert code == 0
     assert (out.parent / "evidence.schema.json").is_file()
     assert '"ok": true' in capsys.readouterr().out
+
+
+# --- F23: a document or data deliverable through the shape ---------------------
+
+
+def _deliverable_mission(tmp_path: Path, repo: Path, **kw) -> dict:
+    return shape.shape_a(
+        spec=_spec(tmp_path),
+        repo=repo,
+        test="python3 check.py doc.md",
+        caps=shape.cap_arithmetic(1, 1),
+        deliverable="doc.md",
+        deliverable_validator="python3 check.py {path}",
+        **kw,
+    )
+
+
+def test_deliverable_replaces_the_evidence_map_and_the_fix_lane_becomes_a_build_lane(
+    tmp_path: Path, repo: Path
+):
+    raw = _deliverable_mission(tmp_path, repo)
+    lanes = {lane["name"]: lane for lane in raw["lanes"]}
+    assert lanes["build"]["deliverable"] == {
+        "path": "doc.md",
+        "validator": "python3 check.py {path}",
+    }
+    assert "evidence.json" not in lanes["build"]["prompt"]
+    assert "`doc.md`" in lanes["build"]["prompt"]
+    assert "python3 check.py {path}" in lanes["build"]["prompt"]
+    assert lanes["fix"]["stage"] == "build"
+    assert lanes["fix"]["deliverable"]["path"] == "dispositions.json"
+    assert "reproduce gate" not in lanes["fix"]["prompt"].split("not under the reproduce gate")[0]
+    assert "there is no test to write" in lanes["fix"]["prompt"]
+    assert "dispositions.json" in lanes["fix"]["prompt"]
+    for name in ("review-gemini", "review-grok"):
+        assert "<evidence>" not in lanes[name]["prompt"]
+        assert "The build's deliverable is the file `doc.md`" in lanes[name]["prompt"]
+        assert "validator `python3 check.py {path}` passed" in lanes[name]["prompt"]
+    assert raw["policy"] == {
+        "build": {"vendors": ["anthropic"]},
+        "review": {"vendors": ["google", "xai"]},
+    }
+    assert raw["pause"] == {"before": ["fix"]}
+    shape.write_shape_schemas(tmp_path / "specs")
+    mission = mission_from_dict(raw, base_dir=tmp_path / "specs")
+    assert [lane.stage for lane in mission.lanes] == ["build", "review", "review", "build"]
+
+
+def test_deliverable_with_opus_review_notes_the_third_reviewer_too(tmp_path: Path, repo: Path):
+    raw = _deliverable_mission(tmp_path, repo, opus_review=True)
+    lanes = {lane["name"]: lane for lane in raw["lanes"]}
+    assert "The build's deliverable is the file `doc.md`" in lanes["review-opus"]["prompt"]
+    assert "<review_opus>" in lanes["fix"]["prompt"]
+    shape.write_shape_schemas(tmp_path / "specs")
+    mission = mission_from_dict(raw, base_dir=tmp_path / "specs")
+    assert mission.self_judging == "allow"
+
+
+def test_deliverable_without_a_validator_says_so_in_neither_prompt(tmp_path: Path, repo: Path):
+    raw = shape.shape_a(
+        spec=_spec(tmp_path),
+        repo=repo,
+        test="true",
+        caps=shape.cap_arithmetic(1, 1),
+        deliverable="doc.md",
+    )
+    lanes = {lane["name"]: lane for lane in raw["lanes"]}
+    assert lanes["build"]["deliverable"] == {"path": "doc.md"}
+    assert "Conductor runs" not in lanes["build"]["prompt"]
+    assert "validator" not in lanes["review-gemini"]["prompt"].split("Report anything")[0]
+
+
+def test_deliverable_refusals(tmp_path: Path, repo: Path):
+    spec = _spec(tmp_path)
+    with pytest.raises(shape.ShapeInvalid, match="needs --deliverable"):
+        shape.shape_a(
+            spec=spec,
+            repo=repo,
+            test="true",
+            caps=shape.cap_arithmetic(1, 1),
+            deliverable_validator="true",
+        )
+    for bad in ("/abs/doc.md", "../doc.md"):
+        with pytest.raises(shape.ShapeInvalid, match="repo-relative"):
+            shape.shape_a(
+                spec=spec,
+                repo=repo,
+                test="true",
+                caps=shape.cap_arithmetic(1, 1),
+                deliverable=bad,
+            )
+    with pytest.raises(shape.ShapeInvalid, match="adversarial"):
+        shape.shape_a(
+            spec=spec,
+            repo=repo,
+            test="true",
+            caps=shape.cap_arithmetic(1, 1),
+            deliverable="doc.md",
+            adversarial=True,
+        )
+
+
+def test_without_a_deliverable_the_shape_is_unchanged(tmp_path: Path, repo: Path):
+    spec = _spec(tmp_path)
+    before = shape.shape_a(spec=spec, repo=repo, test="true", caps=shape.cap_arithmetic(1, 1))
+    after = shape.shape_a(
+        spec=spec,
+        repo=repo,
+        test="true",
+        caps=shape.cap_arithmetic(1, 1),
+        deliverable="",
+        deliverable_validator="",
+    )
+    assert before == after
+
+
+def test_cli_deliverable_writes_the_lane_and_loads(tmp_path: Path, repo: Path, capsys):
+    spec = _spec(tmp_path)
+    out = tmp_path / "mission.json"
+    code = main(
+        [
+            "shape",
+            "a",
+            "--spec",
+            str(spec),
+            "--repo",
+            str(repo),
+            "--test",
+            "true",
+            "--items",
+            "1",
+            "--modules",
+            "1",
+            "--deliverable",
+            "doc.md",
+            "--deliverable-validator",
+            "true",
+            "--out",
+            str(out),
+            "--skip-preflight",
+        ]
+    )
+    assert code == 0, capsys.readouterr().err
+    raw = json.loads(out.read_text())
+    lanes = {lane["name"]: lane for lane in raw["lanes"]}
+    assert lanes["build"]["deliverable"] == {"path": "doc.md", "validator": "true"}
+    assert lanes["fix"]["stage"] == "build"
+    code = main(["shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+                 "--items", "1", "--modules", "1", "--deliverable-validator", "true",
+                 "--out", str(tmp_path / "m2.json"), "--skip-preflight"])
+    assert code == 3
+    assert "needs --deliverable" in capsys.readouterr().err

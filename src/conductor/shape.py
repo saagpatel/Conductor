@@ -501,6 +501,39 @@ EVIDENCE_REVIEW_NOTE = (
 )
 
 
+# F23: a document or data deliverable through Shape A. The build lane's
+# deliverable is the file itself, with its validator (F22) in place of the
+# evidence map (a one-file spec has nothing for a map to map), the reviewers
+# read a note instead of the evidence block, and the review-applying lane
+# runs as `stage: build`: a document fix has no test to reproduce, and the
+# validator already passes on the build's tip, so a `stage: fix` lane would
+# be refused every time with `validator passed on the base too` (drill 2 of
+# `docs/research/2026-09-07-consumer-validator-data.md`).
+DELIVERABLE_BUILD_PARAGRAPH = (
+    "Your deliverable is the file `{path}`; the spec below is about that file, and the "
+    "change stays inside it unless the spec names another. {validator_sentence}Do not "
+    "commit; the harness commits. Investigate before answering: read the file in full "
+    "before changing it.\n\n"
+)
+
+DELIVERABLE_VALIDATOR_SENTENCE = (
+    "Conductor runs `{validator}` on the file before and after your change and refuses a "
+    "file that fails it; run it yourself before you finish. "
+)
+
+DELIVERABLE_REVIEW_NOTE = (
+    "The build's deliverable is the file `{path}`{validator_clause}. What a machine can "
+    "check is checked; whether the file still says what the spec asked, and nothing the "
+    "spec did not ask, is your question. "
+)
+
+DELIVERABLE_FIX_SENTENCES = (
+    "For each reported item, edit `{path}` to address it and nothing else; the deliverable "
+    "is a file, not code, so there is no test to write and this lane runs as a build "
+    "lane, not under the reproduce gate. {validator_sentence}"
+)
+
+
 def write_evidence_schema(base_dir: Path) -> Path:
     """`evidence.json`'s schema, written beside the mission file like the
     dispositions schema, so the build lane's `deliverable.schema` path
@@ -531,7 +564,43 @@ def review_prompt_with_evidence(prompt: str) -> str:
     )
 
 
-def build_prompt(test: str) -> str:
+def review_prompt_with_deliverable(prompt: str, path: str, validator: str) -> str:
+    """A Shape A review prompt for a deliverable mission (F23): the note on
+    what the build's deliverable is ahead of the review tail, and no
+    evidence block, since the build lane declared the file instead of a
+    map."""
+    clause = f", and conductor's validator `{validator}` passed on it" if validator else ""
+    note = DELIVERABLE_REVIEW_NOTE.format(path=path, validator_clause=clause)
+    return prompt.replace(
+        "Report anything that could cause incorrect behavior",
+        note + "Report anything that could cause incorrect behavior",
+        1,
+    )
+
+
+def fix_prompt_for_deliverable(prompt: str, path: str, validator: str) -> str:
+    """`FIX_PROMPT` (or a variant) for a deliverable mission (F23): the
+    reproduce-gate sentences give way to the file edit, and the gate line
+    stays (the mission's gate is the validator command on that file)."""
+    old = (
+        "For each reported item, first write a test that fails on the current tree because "
+        "of it; then fix only what that test proves. This lane runs under conductor's "
+        "reproduce gate: a fix with no test change is refused, and a test that already "
+        "passes on the current tree is refused. "
+    )
+    assert old in prompt
+    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=validator) if validator else ""
+    rewritten = prompt.replace(
+        old, DELIVERABLE_FIX_SENTENCES.format(path=path, validator_sentence=sentence), 1
+    )
+    return rewritten.replace(
+        "Use fixed for an item you changed code for",
+        "Use fixed for an item you edited the file for",
+        1,
+    )
+
+
+def build_prompt(test: str, deliverable: str = "", validator: str = "") -> str:
     """The Shape A build lane's prompt: `BUILD_PROMPT` with the gate command filled in.
 
     Idea 7 of the 2026-09 review: the build lane used to receive the bare spec, so a builder
@@ -539,8 +608,22 @@ def build_prompt(test: str) -> str:
     lead's gate uses (under a minute), and spent its cap on that. Naming the gate verbatim
     costs one line and removes the guess. `{{mission.prompt}}` stays a template reference,
     rendered by the mission like every other lane prompt.
+
+    `deliverable` (F23) names the file a document or data build produces: the evidence-map
+    paragraph gives way to one naming the file and, when `validator` is set, the command
+    conductor runs on it before and after.
     """
-    return BUILD_PROMPT.replace("{gate}", test)
+    prompt = BUILD_PROMPT.replace("{gate}", test)
+    if not deliverable:
+        return prompt
+    start = "Before you finish, write an evidence map"
+    end = "The harness keeps evidence.json out of the commit.\n\n"
+    assert start in prompt and end in prompt
+    head, _, rest = prompt.partition(start)
+    _, _, tail = rest.partition(end)
+    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=validator) if validator else ""
+    paragraph = DELIVERABLE_BUILD_PARAGRAPH.format(path=deliverable, validator_sentence=sentence)
+    return head + paragraph + tail
 
 
 def _prefix(repo: Path, about: str | None) -> str:
@@ -573,6 +656,8 @@ def shape_a(
     adversarial: bool = False,
     ceiling: dict | None = None,
     opus_review: bool = False,
+    deliverable: str = "",
+    deliverable_validator: str = "",
 ) -> dict:
     """The Shape A mission as a dict ready for `mission_from_dict` or `json.dump`.
 
@@ -601,6 +686,15 @@ def shape_a(
     `self_judging: allow` and the review policy admits `anthropic`; the fix lane needs the third
     review and its prompt carries a `<review_opus>` block. Concurrency rises to three so the
     reviewers still run side by side (rule 11).
+
+    `deliverable` (F23) is a repo-relative file a document or data spec produces, with
+    `deliverable_validator` the F22 command conductor runs on it (`{path}` substituted).
+    The build lane declares the file in place of the evidence map, the reviewers read a
+    note in place of the evidence block, and the review-applying lane keeps its name,
+    its `dispositions.json` receipt, and its place in `pause.before`, but runs as
+    `stage: build`: a file has no test to reproduce and the validator already passes on
+    the build's tip, so under `stage: fix` it would be refused every time. The mission
+    policy then names `build` and `review` only. `adversarial` is refused with it.
     """
     spec = Path(spec).expanduser().resolve()
     repo = Path(repo).expanduser().resolve()
@@ -612,6 +706,16 @@ def shape_a(
         raise ShapeInvalid("--test must name the gate command; a Shape A build has one")
     if ports < 0:
         raise ShapeInvalid("--ports must be zero or more")
+    if deliverable_validator and not deliverable:
+        raise ShapeInvalid("--deliverable-validator needs --deliverable")
+    if deliverable:
+        if Path(deliverable).is_absolute() or ".." in Path(deliverable).parts:
+            raise ShapeInvalid("--deliverable must be a repo-relative path without '..'")
+        if adversarial:
+            raise ShapeInvalid(
+                "--adversarial with --deliverable: an adversarial lane writes a test that "
+                "fails on the build, and a file deliverable has no test surface"
+            )
     base = Path(mission_dir).expanduser().resolve() if mission_dir else spec.parent
     mission_name = name or spec.stem
     scope = repo.name
@@ -643,8 +747,12 @@ def shape_a(
             "schema": "evidence.schema.json",
             "commit": False,
         },
-        "prompt": build_prompt(test),
+        "prompt": build_prompt(test, deliverable, deliverable_validator),
     }
+    if deliverable:
+        build["deliverable"] = {"path": deliverable}
+        if deliverable_validator:
+            build["deliverable"]["validator"] = deliverable_validator
     if ports:
         build["ports"] = ports
     if caps.cap_grace_usd:
@@ -687,6 +795,13 @@ def shape_a(
         # After the adversarial rewrite, so the Opus block lands between the
         # Grok block and the adversarial one: reviews first, then the test.
         fix_prompt = fix_prompt_with_opus(fix_prompt)
+    if deliverable:
+        fix_prompt = fix_prompt_for_deliverable(fix_prompt, deliverable, deliverable_validator)
+
+    def review_prompt(prompt: str) -> str:
+        if deliverable:
+            return review_prompt_with_deliverable(prompt, deliverable, deliverable_validator)
+        return review_prompt_with_evidence(prompt)
     review_grok: dict = {
         "name": "review-grok",
         "stage": "review",
@@ -697,7 +812,7 @@ def shape_a(
         "base": "build",
         "timeout": 1200,
         "cap_usd": caps.grok_cap,
-        "prompt": review_prompt_with_evidence(
+        "prompt": review_prompt(
             GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT
         ),
     }
@@ -715,14 +830,14 @@ def shape_a(
             "base": "build",
             "timeout": 1800,
             "cap_usd": caps.opus_cap,
-            "prompt": review_prompt_with_evidence(OPUS_REVIEW_PROMPT),
+            "prompt": review_prompt(OPUS_REVIEW_PROMPT),
         }
         if caps.cap_grace_usd:
             review_opus["cap_grace_usd"] = caps.cap_grace_usd
     reviewers = ["review-gemini", "review-grok"] + (["review-opus"] if opus_review else [])
     fix: dict = {
         "name": "fix",
-        "stage": "fix",
+        "stage": "build" if deliverable else "fix",
         "fleet": "claude",
         "model": "sonnet",
         "effort": "standard",
@@ -758,6 +873,10 @@ def shape_a(
     }
     if adversarial:
         policy["adversarial"] = {"vendors": ["anthropic"]}
+    if deliverable:
+        # No lane declares `fix` now, and a policy stage no lane declares is
+        # refused at load.
+        del policy["fix"]
     mission: dict = {
         "name": mission_name,
         "cwd": rel(repo),
@@ -783,7 +902,7 @@ def shape_a(
                 "base": "build",
                 "timeout": 1200,
                 "cap_usd": caps.gemini_cap,
-                "prompt": review_prompt_with_evidence(GEMINI_REVIEW_PROMPT),
+                "prompt": review_prompt(GEMINI_REVIEW_PROMPT),
             },
             review_grok,
             *([review_opus] if review_opus is not None else []),
