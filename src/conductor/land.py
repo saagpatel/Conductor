@@ -76,13 +76,26 @@ def _tail(text: str, lines: int = 20) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
+# `{lane}-{stamp}.json`. The stamp is always this many characters, so a glob
+# of `{lane}-*.json` is not an identity: lane `fix` would also match every
+# receipt of `fix-2`. `_lane_receipt_paths` matches on this length instead.
+_RECEIPT_STAMP = "%Y%m%dT%H%M%S%fZ"
+_RECEIPT_STAMP_LEN = len("20260101T000000000000Z")
+
+
 def _write_receipt(home: Path, mission_id: str, lane: str, payload: dict) -> Path:
+    # `--lane` is an untyped CLI string. `land()` catches `LandInvalid` from
+    # `_land` (including a rejected name) and still receipted with that name,
+    # so a `../escape` or `a/b` here would write outside `land/` or raise
+    # `FileNotFoundError` (2026-09-08). The name is checked before it is a path.
+    if not is_lane_name(lane):
+        raise LandInvalid(f"'{lane}' is not a lane name")
     land_dir = home / "missions" / mission_id / "land"
     land_dir.mkdir(parents=True, exist_ok=True)
     # Microsecond precision, not `claim_dir`'s second-granularity stamp: a
     # dry run followed by a real land within one second must not silently
     # overwrite each other's receipt.
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime(_RECEIPT_STAMP)
     path = land_dir / f"{lane}-{stamp}.json"
     doc = {
         **payload,
@@ -106,7 +119,32 @@ def _load_json(path: Path, *, what: str) -> dict:
     return raw
 
 
-def _ungated_merge(home: Path, mission_id: str, lane: str, root: str) -> str | None:
+def _lane_receipt_paths(land_dir: Path, lane: str) -> list[Path]:
+    """This lane's land receipts, and only this lane's.
+
+    Filenames are `{lane}-{stamp}.json` with a fixed-length stamp, so a glob
+    of `{lane}-*.json` is a prefix match: `fix` also yields `fix-2`. Matching
+    on the stamp length (and the receipt's own `lane` field, below) keeps
+    the two apart.
+    """
+    if not land_dir.is_dir() or not is_lane_name(lane):
+        return []
+    prefix = f"{lane}-"
+    found: list[Path] = []
+    for path in sorted(land_dir.iterdir()):
+        name = path.name
+        if not path.is_file() or not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        stamp = name[len(prefix) : -len(".json")]
+        if len(stamp) != _RECEIPT_STAMP_LEN or stamp[8] != "T" or not stamp.endswith("Z"):
+            continue
+        found.append(path)
+    return found
+
+
+def _ungated_merge(
+    home: Path, mission_id: str, lane: str, root: str, *, head: str = ""
+) -> str | None:
     """The merge sha of an earlier `land` of this lane that failed a check
     and could not put the checkout back, when that merge is still reachable
     from HEAD. None otherwise.
@@ -120,22 +158,44 @@ def _ungated_merge(home: Path, mission_id: str, lane: str, root: str) -> str | N
     then reported success over it without running gate, golden, or attest
     (2026-09-08 review). Read from this lane's own land receipts, which
     already record `merge_sha` and whether the reset happened.
+
+    The same class with the receipt missing: `_perform` commits the merge
+    and only then runs the gate; `land()` writes the receipt only after
+    `_land` returns. A death between those two leaves the merge in HEAD and
+    no receipt at all, so a scan that only reads `ok is False` finds nothing
+    and the shortcut used to answer `ok=True`. A tip that is already in HEAD
+    with no completed (ok, not already-merged, not dry-run) land receipt is
+    ungated the same way; `head` is the sha the message names when there is
+    no failed receipt to quote.
     """
     land_dir = home / "missions" / mission_id / "land"
-    if not land_dir.is_dir():
-        return None
-    for path in sorted(land_dir.glob(f"{lane}-*.json")):
+    failed_merge: str | None = None
+    gated = False
+    for path in _lane_receipt_paths(land_dir, lane):
         try:
             raw = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if not isinstance(raw, dict) or raw.get("ok") is not False:
+        if not isinstance(raw, dict) or raw.get("lane", lane) != lane:
+            continue
+        if (
+            raw.get("ok") is True
+            and raw.get("already_merged") is not True
+            and raw.get("dry_run") is not True
+        ):
+            gated = True
+            continue
+        if raw.get("ok") is not False:
             continue
         merge_sha = raw.get("merge_sha")
         if not isinstance(merge_sha, str) or not merge_sha or raw.get("reset") is True:
             continue
         if git_run(root, "merge-base", "--is-ancestor", merge_sha, "HEAD").returncode == 0:
-            return merge_sha
+            failed_merge = merge_sha
+    if failed_merge is not None:
+        return failed_merge
+    if not gated:
+        return head or git_run(root, "rev-parse", "HEAD").stdout.strip() or None
     return None
 
 
@@ -409,6 +469,14 @@ def _land(
     gate_command: str | None,
     dry_run: bool,
 ) -> LandResult:
+    # First, before any mission I/O or git: the module docstring says land
+    # "refuses outright when that variable is present in its own environment,
+    # so no fleet can ever reach it". The check used to sit after the lane
+    # receipt, the snapshot, and `rev-parse` in the lane's repository.
+    if os.environ.get("CONDUCTOR_LANE"):
+        raise LandInvalid(
+            "land refuses to run inside a lane's environment: it is the lead's own act"
+        )
     # The lane name becomes both the receipt this reads and the receipt it
     # writes, so it is checked before either path is built (2026-09-08).
     if not is_lane_name(lane):
@@ -451,11 +519,6 @@ def _land(
             f"{lane_result.tip_sha}: the branch moved since the run"
         )
 
-    if os.environ.get("CONDUCTOR_LANE"):
-        raise LandInvalid(
-            "land refuses to run inside a lane's environment: it is the lead's own act"
-        )
-
     top = git_run(checkout, "rev-parse", "--show-toplevel")
     if top.returncode != 0:
         raise LandInvalid(f"checkout '{checkout}' is not a git repository")
@@ -490,7 +553,7 @@ def _land(
     branch_tip = tip_sha
 
     if git_run(root, "merge-base", "--is-ancestor", branch_tip, head).returncode == 0:
-        ungated = _ungated_merge(home, mission_id, lane, root)
+        ungated = _ungated_merge(home, mission_id, lane, root, head=head)
         if ungated is not None:
             raise LandInvalid(
                 f"an earlier land of lane '{lane}' failed its checks and left merge "
@@ -576,7 +639,10 @@ def land(
             home, mission_id, lane, checkout=checkout, gate_command=gate_command, dry_run=dry_run
         )
     except LandInvalid as exc:
-        if (home / "missions" / mission_id).is_dir():
+        # A rejected lane name must not be joined into the receipt path: the
+        # name was refused for exactly that. A mission that does not exist
+        # has nowhere to hold a receipt either.
+        if (home / "missions" / mission_id).is_dir() and is_lane_name(lane):
             _write_receipt(home, mission_id, lane, {"refused": str(exc)})
         raise
     path = _write_receipt(home, mission_id, lane, result.to_dict())
