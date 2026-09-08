@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import ceiling as ceiling_mod
 from .fleets import CAP_GRACE_CEILING_USD
+from .prices import finite_nonnegative, finite_positive
 from .runner import GATE_TIMEOUT
 from .verify import git_run, run_tests
 
@@ -314,6 +315,13 @@ class CapArithmetic:
     # joins the mission budget only when it does.
     opus_review: bool = False
 
+    # Optional lanes this object can size. `_refuse_unsized_lanes` checks
+    # every one, including flags a caller omitted: a follow-on that does
+    # not pass `adversarial=` used to ship that lane's cap in a budget for
+    # a shape that never emits it. Learned here, not from the caller's
+    # kwargs -- a forgotten flag is exactly the case the helper exists for.
+    LANE_FLAGS = ("adversarial", "opus_review")
+
     @property
     def build_terms(self) -> list[tuple[str, float]]:
         terms = [(f"{self.spec_items} spec items", self.spec_items * USD_PER_SPEC_ITEM)]
@@ -352,11 +360,19 @@ class CapArithmetic:
 
     @property
     def gemini_cap(self) -> float:
-        return USD_GEMINI_READ
+        return round(USD_GEMINI_READ, 2)
 
     @property
     def grok_cap(self) -> float:
-        return USD_GROK_SUITE if self.grok_runs_suite else USD_GROK_READ
+        return round(USD_GROK_SUITE if self.grok_runs_suite else USD_GROK_READ, 2)
+
+    @property
+    def followon_grok_cap(self) -> float:
+        """A follow-on always sends `GROK_READ_ONLY_PROMPT` (rule 7: $1.50),
+        even when these caps were built with `grok_runs_suite=True` for the
+        original mission. `grok_cap` itself is untouched: `shape_a` needs
+        both figures."""
+        return round(USD_GROK_READ, 2)
 
     @property
     def adversarial_terms(self) -> list[tuple[str, float]]:
@@ -384,7 +400,7 @@ class CapArithmetic:
         total = self.gemini_cap + self.grok_cap
         if self.opus_review:
             total += self.opus_cap
-        return total
+        return round(total, 2)
 
     @property
     def graced_lanes(self) -> int:
@@ -394,6 +410,15 @@ class CapArithmetic:
         if not self.cap_grace_usd:
             return 0
         return 3 + int(self.adversarial) + int(self.opus_review)
+
+    @property
+    def followon_graced_lanes(self) -> int:
+        """How many lanes a follow-on actually graces: review-grok and fix
+        always, plus Opus when this shape has it. Never the build or
+        adversarial lanes: `shape_a_followon` emits neither."""
+        if not self.cap_grace_usd:
+            return 0
+        return 2 + int(self.opus_review)
 
     @property
     def mission_budget(self) -> float:
@@ -415,10 +440,20 @@ class CapArithmetic:
 
     @property
     def followon_budget(self) -> float:
-        """The mission budget without a build lane: same arithmetic as
-        `mission_budget`, minus the build cap. A salvage follow-on still
-        graces grok, fix, and opus, and those dollars are real spend."""
-        return round(self.mission_budget - self.build_cap, 2)
+        """The follow-on mission's budget: the lanes `shape_a_followon`
+        actually emits, their grace, and the slack.
+
+        Derived the same way as `mission_budget`, not by subtracting the
+        build cap from it. Subtracting left the build lane's grace in the
+        ceiling and, when `adversarial` was set, the whole adversarial cap
+        for a lane the follow-on never emits. Grok is always the read-only
+        figure: a follow-on sends `GROK_READ_ONLY_PROMPT`.
+        """
+        lanes = self.gemini_cap + self.followon_grok_cap + self.fix_cap
+        if self.opus_review:
+            lanes += self.opus_cap
+        grace = self.followon_graced_lanes * self.cap_grace_usd
+        return round(lanes + grace + USD_MISSION_SLACK, 2)
 
     def render(self) -> str:
         def line(label: str, terms: list[tuple[str, float]], total: float) -> str:
@@ -436,7 +471,7 @@ class CapArithmetic:
         if self.adversarial:
             lines.append(line("adversarial cap", self.adversarial_terms, self.adversarial_cap))
         lines.append(line("fix cap", self.fix_terms, self.fix_cap))
-        grace_total = self.graced_lanes * self.cap_grace_usd
+        grace_total = round(self.graced_lanes * self.cap_grace_usd, 2)
         lines.append(
             f"grace: ${self.cap_grace_usd:.2f} per claude lane and the grok read lane "
             f"(E24/F5, on top of its own cap; {self.graced_lanes} lanes, "
@@ -469,7 +504,11 @@ def cap_arithmetic(
         raise ShapeInvalid("--items must be at least 1")
     if modules < 1:
         raise ShapeInvalid("--modules must be at least 1")
-    if cap_grace_usd < 0 or cap_grace_usd > CAP_GRACE_CEILING_USD:
+    # `cap_grace_usd` is the only float that reaches this constructor;
+    # `--items`, `--modules`, `--tests-items` and `--findings` are ints.
+    # Zero disables the band (`finite_nonnegative`), NaN/inf/bool do not
+    # (the `< 0 or > ceiling` comparisons are all False for NaN).
+    if not finite_nonnegative(cap_grace_usd) or cap_grace_usd > CAP_GRACE_CEILING_USD:
         raise ShapeInvalid(f"--cap-grace-usd must be between 0 and ${CAP_GRACE_CEILING_USD:.2f}")
     if tests_items < 0:
         raise ShapeInvalid("--tests-items must be zero or more")
@@ -495,11 +534,23 @@ def _refuse_unsized_lanes(caps: CapArithmetic, **emitted: bool) -> None:
     separate arguments, and `max_cost_usd` comes from the caps alone. When
     they disagree the mission loads and then runs out of budget partway
     through, because the extra lane's cap was never in the total
-    (2026-09-08 review). The CLI always passes them together; a caller
-    that does not is refused rather than shipped an under-budgeted
-    mission.
+    (2026-09-08 review). The inverse is also a refusal: caps sized for a
+    lane this shape never emits ship an over-budget (a follow-on that
+    omits `adversarial=` used to carry that lane's cap and its grace).
+
+    Every flag `CapArithmetic.LANE_FLAGS` names is checked, including ones
+    the caller forgot to pass -- a forgotten flag is the case this helper
+    exists for. An unknown flag is `ShapeInvalid`, not `AttributeError`.
     """
-    for flag, value in emitted.items():
+    modeled = CapArithmetic.LANE_FLAGS
+    for flag in emitted:
+        if flag not in modeled:
+            raise ShapeInvalid(
+                f"{flag} is not a lane flag the cap arithmetic models "
+                f"({', '.join(modeled)})"
+            )
+    for flag in modeled:
+        value = emitted.get(flag, False)
         sized = getattr(caps, flag)
         if value != sized:
             raise ShapeInvalid(
@@ -529,7 +580,12 @@ def parse_ceiling(value: str) -> dict:
         per_hour, per_day = float(parts[0]), float(parts[1])
     except ValueError:
         raise ShapeInvalid("--ceiling H,D must both be numbers") from None
-    if per_hour <= 0 or per_day <= 0:
+    # One rule for a dollar figure, the same helper `cap_usd` and
+    # `max_cost_usd` use. `<= 0` lets inf through (no finite spend exceeds
+    # it) and nan through (every comparison is False); a bool is not a
+    # dollar either, however well `True` behaves as `1`. Empty parts and
+    # non-numeric tokens already fail `float()`.
+    if not finite_positive(per_hour) or not finite_positive(per_day):
         raise ShapeInvalid("--ceiling H,D must both be positive")
     return {"per_hour_usd": per_hour, "per_day_usd": per_day}
 
@@ -1201,7 +1257,7 @@ def shape_a_followon(
         "effort": "standard",
         "mode": "read",
         "timeout": 1200,
-        "cap_usd": caps.grok_cap,
+        "cap_usd": caps.followon_grok_cap,
         "prompt": grok_prompt,
     }
     if caps.cap_grace_usd:

@@ -319,6 +319,13 @@ def test_shape_a_raises_a_warned_cap_to_the_p80_and_the_budget_with_it(
         "basis": "forecast p80",
     }
     assert "cap raised: build $4.00 -> $8.00 (forecast p80 $8.00, 5 runs)" in printed
+    # The last budget number on screen is what was written, not the rule-2
+    # figure `caps.render()` still prints above the raises.
+    assert (
+        "written mission budget: $19.75 (rule 2 $15.75 + $4.00 forecast raises)"
+        in printed
+    )
+    assert raw["max_cost_usd"] == 19.75
     # The raised mission still loads, caps block and all.
     assert mission_from_dict(raw, base_dir=out.parent).name == "widget"
 
@@ -343,6 +350,8 @@ def test_no_forecast_cap_leaves_the_caps_alone_and_records_the_declined_p80(
         "basis": "rule 2",
     }
     assert "cap raised:" not in printed
+    assert "written mission budget: $15.75" in printed
+    assert "forecast raises" not in printed
 
 
 def test_a_home_with_no_history_moves_nothing_and_records_a_null_p80(
@@ -359,3 +368,4 @@ def test_a_home_with_no_history_moves_nothing_and_records_a_null_p80(
     assert all(row["forecast_p80_usd"] is None for row in raw["caps"].values())
     assert sorted(raw["caps"]) == ["build", "fix", "review-gemini", "review-grok"]
     assert "cap raised:" not in printed
+    assert "written mission budget: $15.75" in printed

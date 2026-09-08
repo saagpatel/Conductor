@@ -967,12 +967,26 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
     # this is printed against the real conductor home right here -- whether
     # or not --dry-run is also given (that branch's own JSON carries the
     # same block, via MissionResult.summary()).
+    raise_total = 0.0
     for raised in cap_raises:
         print(
             f"cap raised: {raised['lane']} ${raised['old_usd']:.2f} -> "
             f"${raised['cap_usd']:.2f} (forecast p80 ${raised['p80_usd']:.2f}, "
             f"{raised['runs']} runs)"
         )
+        raise_total += raised["cap_usd"] - raised["old_usd"]
+    # F17 raises the written `max_cost_usd`; `caps.render()` is still the
+    # rule-2 figure constructed before `apply_caps`. Print what was written
+    # so the operator does not have to re-add the raises by hand.
+    written_budget = raw["max_cost_usd"]
+    if cap_raises:
+        print(
+            f"written mission budget: ${written_budget:.2f} "
+            f"(rule 2 ${caps.mission_budget:.2f} + ${round(raise_total, 2):.2f} "
+            f"forecast raises)"
+        )
+    else:
+        print(f"written mission budget: ${written_budget:.2f}")
     print("forecast:")
     for lane_fc in fc.lanes:
         marker = " [warn]" if lane_fc.warn else ""
