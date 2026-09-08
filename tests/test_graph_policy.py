@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from conductor.graph import CollateTaintSources, _tainted_names, resolve_taint_sources
+from conductor.graph import (
+    CollateTaintSources,
+    _tainted_names,
+    collate_taint_sources,
+    resolve_taint_sources,
+)
 from conductor.mission import MissionInvalid, mission_from_dict
 
 CURSOR_TAINT_REFUSAL = "taint is enforceable on the claude and antigravity fleets only"
@@ -213,3 +218,68 @@ def test_collate_taint_sources_carries_only_what_validate_reads():
     candidate pool itself -- a field nothing reads is dead weight a later
     edit could mistake for load-bearing."""
     assert {f.name for f in dataclasses.fields(CollateTaintSources)} == {"tainted_lanes"}
+
+    # And the function itself answers, over the pool `_run_collate` hands
+    # `_collate_candidates`: a body that never called it left a helper that
+    # could return an empty result forever and still pass (2026-09-08 audit).
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {"name": "dirty", "fleet": "claude", "mode": "write", "taint": True, "prompt": "T"},
+            {"name": "clean", "fleet": "claude", "mode": "write", "prompt": "C"},
+        ],
+        "collate": {"fleet": "antigravity"},
+    }
+    sources = collate_taint_sources(mission_from_dict(raw, base_dir=Path("/tmp")))
+    assert sources.tainted_lanes == ["dirty"]
+    assert sources.tainted is True
+
+
+def test_collate_taint_sources_is_empty_when_no_candidate_is_tainted():
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write", "prompt": "A"},
+            {"name": "b", "fleet": "claude", "mode": "write", "prompt": "B"},
+        ],
+        "collate": {"fleet": "antigravity"},
+    }
+    sources = collate_taint_sources(mission_from_dict(raw, base_dir=Path("/tmp")))
+    assert sources.tainted_lanes == []
+    assert sources.tainted is False
+
+
+def test_d4_a_resolver_that_cannot_take_taint_is_refused_over_a_tainted_sink():
+    """The refusal D4 exists for. Both existing D4 tests route the resolver
+    to claude, which may take tainted input, so neither ever fired it: the
+    `taint=bool(tainted_sinks)` that `Mission.validate` passes into the
+    resolver's spec could have been hardcoded False and both stayed green
+    (2026-09-08 audit)."""
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {"name": "dirty", "fleet": "claude", "mode": "write", "taint": True, "prompt": "T"},
+            {"name": "clean", "fleet": "claude", "mode": "write", "prompt": "C"},
+        ],
+        # cursor has no per-lane deny rule covering its native web tools, so
+        # conductor refuses a tainted dispatch to it outright (E21).
+        "resolve": {"fleet": "cursor", "model": "grok-4.6"},
+    }
+
+    with pytest.raises(MissionInvalid, match="taint"):
+        mission_from_dict(raw, base_dir=Path("/tmp"))
+
+
+def test_d4_the_same_resolver_loads_when_no_sink_is_tainted():
+    raw = {
+        "cwd": "/tmp",
+        "lanes": [
+            {"name": "a", "fleet": "claude", "mode": "write", "prompt": "A"},
+            {"name": "b", "fleet": "claude", "mode": "write", "prompt": "B"},
+        ],
+        "resolve": {"fleet": "cursor", "model": "grok-4.6"},
+    }
+
+    mission = mission_from_dict(raw, base_dir=Path("/tmp"))
+
+    assert resolve_taint_sources(mission).tainted_sinks == []
