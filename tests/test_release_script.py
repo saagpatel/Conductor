@@ -1,6 +1,6 @@
 """Tests for scripts/release.py, the lead-only release helper.
 
-Every fixture is built in tmp_path; the real repository files are never read.
+Fixtures cover both receipt layouts; the real repository is also checked read-only.
 """
 
 from __future__ import annotations
@@ -265,3 +265,43 @@ def test_script_runs_as_a_subprocess(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "git add pyproject.toml src/conductor/__init__.py uv.lock" in proc.stdout
     assert "docs/RESET-2026-09.md docs/ROADMAP-2026-10.md" in proc.stdout
+
+
+def test_release_updates_split_receipts_and_preserves_the_archive(tmp_path: Path) -> None:
+    root = make_repo(tmp_path)
+    index = root / release.RECEIPT_DOC
+    index.write_text(
+        "# Reset\n\n| wave | date | version | scope | cost | receipt |\n"
+        "|---|---|---|---|---|---|\n"
+        "| 17 | 2026-09-08 | 0.47.0 | prior | $0.00 | old |\n"
+    )
+    archive = root / "docs/archive/receipts-2026-09.md"
+    archive.parent.mkdir()
+    archive.write_text(RECEIPTS)
+    before = snapshot(root)
+    assert run(root, *ok_args(), "--dry-run") == 0
+    assert snapshot(root) == before
+    assert run(root, *ok_args()) == 0
+    assert archive.read_text().startswith(RECEIPTS.rstrip())
+    assert '<a id="r-0.48.0"></a>' in archive.read_text()
+    assert "TODO: write the receipt." in archive.read_text()
+    assert "archive/receipts-2026-09.md#r-0.48.0" in index.read_text()
+    assert "## Receipt" not in index.read_text()
+    assert 'version = "0.48.0"' in (root / "pyproject.toml").read_text()
+
+
+def test_current_repository_release_plan_is_complete_and_read_only() -> None:
+    root = _SCRIPT.parent.parent
+    current = release._pyproject_version_span((root / "pyproject.toml").read_text())[2]
+    major, minor, patch = release.parse_version(current, "current")
+    args = release.build_parser().parse_args(
+        [f"{major}.{minor}.{patch + 1}", "--item", "integration check", "--cost", "0.00"]
+    )
+    edits, previous = release.plan(args)
+    assert previous == current
+    assert {edit.rel for edit in edits} >= {
+        "pyproject.toml", "src/conductor/__init__.py", "uv.lock", release.RECEIPT_DOC,
+    }
+    for edit in edits:
+        assert edit.path.read_text() == edit.old
+        assert edit.new != edit.old

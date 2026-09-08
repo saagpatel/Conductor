@@ -2882,3 +2882,32 @@ cwd). Operating note: the draft was uncommitted at launch, so `extend` read it f
 checkout instead of its worktree and reported that. A read lane that must see a document gets it
 committed or passed through `include`.
 
+<a id="r-0.102.0"></a>
+## Receipt 2026-09-08: Wave 18: reprice and documentation consolidation shipped as v0.102.0 ($15.14, three Grok builds; local release integration)
+
+The three already-merged build tips are `47e009c` (reprice), `ca9c066`
+(README/reference split), and `5843ff6` (documentation consolidation).
+Their run receipts, all under `runs/20260908T184819Z-cursor-*`, report:
+
+| run suffix | commit | current estimated cost |
+|---|---|---|
+| build-one-new-conductor-command | 47e009c | $4.578560 |
+| split-conductor-s-readme-into-a | ca9c066 | $7.435212 |
+| consolidate-conductor-s-accumula | 5843ff6 | $3.127032 |
+
+Total: $15.140804 estimated, displayed as $15.14; these are existing build
+receipts, not new dispatches for release bookkeeping. No provider billing
+attestation is inferred from the estimates.
+
+The ownership evaluation found that the consolidated docs broke
+`scripts/release.py`: it still searched the reset index for full receipt
+headings. The release helper now updates the index and appends an anchored
+receipt to the archive while preserving the original-layout interface.
+A regression test fails on 0.101.0's script with the split documentation
+layout, and a read-only integration test plans a release against the actual
+repository. The original 2115-test baseline was green. The release gate passed: ruff
+clean, 2117 tests in 48.84 seconds using xdist loadgroup and an external
+basetemp. Exit codes were captured separately; both were 0.
+
+The 19 inherited review findings remain separate from this release; they
+are not represented as fixed by the version bump.

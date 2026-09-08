@@ -29,6 +29,7 @@ PYPROJECT = "pyproject.toml"
 INIT = "src/conductor/__init__.py"
 LOCK = "uv.lock"
 RECEIPT_DOC = "docs/RESET-2026-09.md"
+RECEIPT_ARCHIVE = "docs/archive/receipts-2026-09.md"
 
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _RECEIPT_HEADING_RE = re.compile(r"^## Receipt ")
@@ -158,6 +159,41 @@ def receipt_edit(root: Path, new_version: str, item: str, cost: str, shape: str,
     return Edit(path=path, rel=rel, old=text, new="".join(new_lines))
 
 
+def receipt_edits(root: Path, new_version: str, item: str, cost: str, shape: str,
+                  date: str) -> list[Edit]:
+    """Support both the original receipt log and its archived, indexed layout."""
+    path = root / RECEIPT_DOC
+    text = read_text(path, RECEIPT_DOC)
+    header = "| wave | date | version | scope | cost | receipt |"
+    if header not in text.splitlines():
+        return [receipt_edit(root, new_version, item, cost, shape, date)]
+    lines = text.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if line.strip() == header)
+    if index + 1 >= len(lines) or not re.fullmatch(r"[| :\-]+", lines[index + 1].strip()):
+        raise Refusal(f"{RECEIPT_DOC}: receipt index has no table separator")
+    archive_path = root / RECEIPT_ARCHIVE
+    archive = read_text(archive_path, RECEIPT_ARCHIVE)
+    anchor = f'r-{new_version}'
+    if f'id="{anchor}"' in archive:
+        raise Refusal(f"{RECEIPT_ARCHIVE}: receipt for {new_version} already exists")
+    wave = re.search(r"\bwave\s+(\d+)\b", item, re.IGNORECASE)
+    row = (
+        f"| {wave.group(1) if wave else '-'} | {date} | {new_version} | {item} | ${cost} | "
+        f"[full](archive/receipts-2026-09.md#{anchor}) |\n"
+    )
+    lines.insert(index + 2, row)
+    stub = (
+        f'\n\n<a id="{anchor}"></a>\n'
+        f"## Receipt {date}: {item} shipped as v{new_version} (${cost}, {shape})\n\n"
+        f"{RECEIPT_BODY}\n"
+    )
+    return [
+        Edit(path=path, rel=RECEIPT_DOC, old=text, new="".join(lines)),
+        Edit(path=archive_path, rel=RECEIPT_ARCHIVE, old=archive,
+             new=archive + stub),
+    ]
+
+
 # --- roadmap row -------------------------------------------------------------
 
 
@@ -273,7 +309,7 @@ def plan(args: argparse.Namespace) -> tuple[list[Edit], str]:
             raise Refusal(f"--date is not YYYY-MM-DD: {args.date!r}")
         date = args.date or _dt.date.today().isoformat()
         roadmap = args.roadmap or default_roadmap(root)
-        edits.append(receipt_edit(root, new_version, item, cost, args.shape, date))
+        edits.extend(receipt_edits(root, new_version, item, cost, args.shape, date))
         edits.append(roadmap_edit(root, roadmap, new_version, item, cost, args.shape))
 
     return edits, current
