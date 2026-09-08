@@ -1069,3 +1069,42 @@ def test_a_contract_field_the_recording_lacks_is_a_note_not_a_difference(
     notes: list[str] = []
     assert golden.check(fixture, notes=notes) == []
     assert any("restricted" in line and "taint" in line for line in notes), notes
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "run --api-key s3cretvalue123456",
+        "https://user:s3cretpassword@host/x",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+        "github_pat_11ABCDEFG0123456789abcdefg",
+        "glpat-ABCDEFGHIJKLMNOPQRST",
+        "sk-ant-api03-abcdefghijklmnop123",
+        "AKIAIOSFODNN7EXAMPLE1234",
+    ],
+)
+def test_secret_shapes_are_redacted_and_the_guard_agrees(secret):
+    """A credential a fleet echoed into its transcript, prompt, or patch left
+    the machine inside an export bundle that `scrub_guard` then declared
+    clean: only `KEY=value` was matched, so a CLI flag, URL userinfo, a
+    private key block, and every vendor token prefix newer than the original
+    four went through verbatim (probed 2026-09-08). Every shape the scrubber
+    rewrites needs its guard side too, or the bundle still passes with the
+    secret in it."""
+    assert golden._pattern_hits(secret, []) != []
+    scrubbed = golden._redact_secrets(secret)
+    assert "redacted" in scrubbed
+    assert golden._pattern_hits(scrubbed, []) == []
+
+
+def test_redaction_leaves_ordinary_prose_and_counts_alone():
+    """The guard must not fire on a token count or on prose: a rule matching
+    `name: value` by name was withdrawn on 2026-09-08 for exactly this, after
+    it redacted `"total_tokens": 12345678` and four committed fixtures."""
+    for benign in (
+        '{"total_tokens": 12345678, "cache_read_tokens": 98647}',
+        "a keyboard, a token of appreciation, and the secret of good pastry",
+        '{"keyid": "abc123def4567890"}',
+    ):
+        assert golden._pattern_hits(benign, []) == []
+        assert golden._redact_secrets(benign) == benign
