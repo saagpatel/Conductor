@@ -32,6 +32,7 @@ from .fleets import (
     cli_version,
 )
 from .gc import cmd_gc
+from .graph import is_lane_name
 from .mission import (
     STAGES,
     Mission,
@@ -147,6 +148,47 @@ def _nonneg_float(text: str) -> float:
     return value
 
 
+def _nonneg_int(text: str) -> int:
+    """An argparse `type` for a whole number that may be zero.
+
+    Stall, loop, tool-call, idle, and port flags treat 0 as disable (or
+    claim none). `type=int` still lets a negative through to Spec.validate.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be zero or more, got {value}")
+    return value
+
+
+def _lane_name(text: str) -> str:
+    """An argparse `type` for a lane name, which salvage and land join onto
+    a path under the mission directory.
+
+    `is_lane_name` is the rule `Mission.validate` already holds; using it
+    here rather than a second pattern means a `--lane` with separators or
+    `..` is refused before `_default_land_checkout` interpolates it.
+    """
+    if not is_lane_name(text):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a lane name: it must be a single path segment"
+        )
+    return text
+
+
+def _runs_in_band(func: Callable[..., int]) -> Callable[..., int]:
+    """Mark a command that can be interrupted mid-work: it spawns a fleet
+    or a gate subprocess group and writes its receipt only after that
+    returns. `main` installs the two-stage SIGINT/SIGTERM handler for every
+    command with this flag, so adding a new one cannot forget a hardcoded
+    tuple of `func` objects."""
+    func.runs_in_band = True  # type: ignore[attr-defined]
+    return func
+
+
+@_runs_in_band
 def cmd_dispatch(args: argparse.Namespace) -> int:
     prompt = args.prompt
     if args.prompt_file:
@@ -169,12 +211,20 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         print("error: give a prompt argument or --prompt-file", file=sys.stderr)
         return 2
 
+    cwd_path = Path(args.cwd).expanduser()
+    if not cwd_path.is_dir():
+        # A mistyped --cwd is the same family as a missing --prompt-file:
+        # parser-level bad input (exit 2), not a DispatchRefused and not a
+        # traceback from `subprocess.run(..., cwd=...)`.
+        print(f"error: --cwd is not a directory: {args.cwd}", file=sys.stderr)
+        return 2
+
     try:
         raw_verdict: list[object] = list(args.verdict)
         if args.verdict_file:
             try:
                 from_file = json.loads(Path(args.verdict_file).read_text())
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 raise DispatchRefused(f"verdict file unreadable: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise DispatchRefused(f"verdict file is not valid JSON: {exc}") from exc
@@ -193,7 +243,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         if args.agent_file:
             try:
                 agent = json.loads(Path(args.agent_file).read_text())
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 raise DispatchRefused(f"agent file unreadable: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise DispatchRefused(f"agent file is not valid JSON: {exc}") from exc
@@ -211,7 +261,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         spec = Spec(
             fleet=args.fleet,
             prompt=prompt,
-            cwd=str(Path(args.cwd).resolve()),
+            cwd=str(cwd_path.resolve()),
             model=args.model,
             effort=args.effort,
             mode=args.mode,
@@ -266,9 +316,14 @@ def _report(result: Result, args: argparse.Namespace) -> None:
         print(result.tail, file=sys.stderr)
 
 
+@_runs_in_band
 def cmd_verify(args: argparse.Namespace) -> int:
     """Re-run the byte check by hand, or run a gate against a repo."""
-    cwd = str(Path(args.cwd).resolve())
+    cwd_path = Path(args.cwd).expanduser()
+    if not cwd_path.is_dir():
+        print(f"error: --cwd is not a directory: {args.cwd}", file=sys.stderr)
+        return 2
+    cwd = str(cwd_path.resolve())
     state = GitState.capture(cwd)
     out: dict = {"cwd": cwd, "git": state.__dict__}
     if args.test:
@@ -450,6 +505,7 @@ def cmd_attest(args: argparse.Namespace) -> int:
     return 0 if out["verified"] else 1
 
 
+@_runs_in_band
 def cmd_salvage(args: argparse.Namespace) -> int:
     """E23: re-run the clean gate from a kept lane's worktree by hand, and
     optionally emit the follow-on review-and-fix mission once the lead has
@@ -458,17 +514,50 @@ def cmd_salvage(args: argparse.Namespace) -> int:
     if Path(mission_id).name != mission_id or mission_id in {".", ".."}:
         _invalid("MISSION_ID must be a mission directory name")
         return 3
-    if args.emit and (args.items is None or args.modules is None):
-        _invalid("--emit needs --items and --modules")
-        return 3
+
+    # Everything `--emit` can refuse without the gate is checked first:
+    # `parse_ceiling` and `cap_arithmetic` raise ShapeInvalid, and a
+    # whitespace-only `--name` or a `--branch` inside `conductor/` does
+    # too. `--about` and `--fix-commit` cannot fail on their own (empty
+    # is defaulted; nonempty is prompt/commit text).
+    ceiling = None
+    caps = None
+    if args.emit:
+        if args.items is None or args.modules is None:
+            _invalid("--emit needs --items and --modules")
+            return 3
+        try:
+            ceiling = shape.parse_ceiling(args.ceiling)
+            caps = shape.cap_arithmetic(
+                args.items, args.modules, scheduler=args.scheduler
+            )
+            name = args.name or f"salvage-{mission_id}-{args.lane}"
+            if not name.strip():
+                raise shape.ShapeInvalid("name must not be empty")
+            branch = args.branch or ""
+            if branch and (branch.startswith("conductor/") or not branch.strip()):
+                raise shape.ShapeInvalid("--branch must be a name outside conductor/")
+        except shape.ShapeInvalid as exc:
+            _invalid(str(exc))
+            return 3
 
     home = conductor_home()
     try:
-        result = salvage_mod.salvage(home, mission_id, args.lane)
+        result = salvage_mod.salvage(
+            home, mission_id, args.lane, stop=stop_requested
+        )
     except salvage_mod.SalvageInvalid as exc:
         _invalid(str(exc))
         return 3
 
+    # own_gate is always `_transplant_gate`, which returns ran=True (the
+    # tests ran, or `_git_failure` which also stamps ran=True). The clean
+    # gate is the same, except a `test_policy: allow` lane records it as
+    # skipped (ran=False) by design -- README Salvage, rule 3. `_gate_passed`
+    # treats not-ran as not-failed, which is that skip: a salvage that
+    # reached here has always judged the own gate. Both-not-ran cannot
+    # occur: salvage() raises before returning if it never got as far
+    # as the gates.
     passed = _runner_gate_passed(result.gate, None) and _runner_gate_passed(
         result.own_gate, None
     )
@@ -496,10 +585,11 @@ def cmd_salvage(args: argparse.Namespace) -> int:
         if not passed:
             _invalid("--emit refused: a gate is red")
             return 3
+        assert caps is not None
         try:
-            ceiling = shape.parse_ceiling(args.ceiling)
-            caps = shape.cap_arithmetic(args.items, args.modules, scheduler=args.scheduler)
-            snapshot = json.loads((home / "missions" / mission_id / "mission.json").read_text())
+            snapshot = json.loads(
+                (home / "missions" / mission_id / "mission.json").read_text()
+            )
             spec_prompt = snapshot.get("prompt") if isinstance(snapshot, dict) else None
             salvage_mod.emit(
                 result,
@@ -513,7 +603,13 @@ def cmd_salvage(args: argparse.Namespace) -> int:
                 spec_prompt=spec_prompt if isinstance(spec_prompt, str) else "",
                 ceiling=ceiling,
             )
-        except (salvage_mod.SalvageInvalid, shape.ShapeInvalid, MissionInvalid, OSError) as exc:
+        except (
+            salvage_mod.SalvageInvalid,
+            shape.ShapeInvalid,
+            MissionInvalid,
+            OSError,
+            UnicodeDecodeError,
+        ) as exc:
             _invalid(str(exc))
             return 3
         print(f"conductor mission {args.emit}")
@@ -526,18 +622,21 @@ def _default_land_checkout(home: Path, mission_id: str, lane: str) -> str:
     """The lane's repository: its own recorded `cwd`, else the mission
     snapshot's `cwd`. Never raises -- an unreadable or missing snapshot
     just falls through to an empty string, and `land()` itself refuses with
-    a proper reason once it checks the mission and lane exist."""
+    a proper reason once it checks the mission and lane exist. A lane name
+    that is not `is_lane_name` is the same: never interpolated into a path."""
+    if not is_lane_name(lane):
+        return ""
     mission_file = home / "missions" / mission_id / "mission.json"
     try:
         mission_raw = json.loads(mission_file.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         mission_raw = {}
     mission_cwd = mission_raw.get("cwd") if isinstance(mission_raw, dict) else None
 
     lane_file = home / "missions" / mission_id / "lanes" / f"{lane}.json"
     try:
         lane_raw = json.loads(lane_file.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         lane_raw = {}
     lane_cwd = lane_raw.get("cwd") if isinstance(lane_raw, dict) else None
 
@@ -545,6 +644,7 @@ def _default_land_checkout(home: Path, mission_id: str, lane: str) -> str:
     return checkout if isinstance(checkout, str) else ""
 
 
+@_runs_in_band
 def cmd_land(args: argparse.Namespace) -> int:
     """F7: the lead's hands after the diff is read and the reviewers have
     covered it -- merge a lane's branch, gate the merged head in a fresh
@@ -553,6 +653,9 @@ def cmd_land(args: argparse.Namespace) -> int:
     if Path(mission_id).name != mission_id or mission_id in {".", ".."}:
         _invalid("MISSION_ID must be a mission directory name")
         return 3
+    if args.checkout and not Path(args.checkout).expanduser().is_dir():
+        print(f"error: --checkout is not a directory: {args.checkout}", file=sys.stderr)
+        return 2
 
     home = conductor_home()
     checkout = args.checkout or _default_land_checkout(home, mission_id, args.lane)
@@ -737,6 +840,12 @@ def cmd_golden_record(args: argparse.Namespace) -> int:
 def cmd_golden_check(args: argparse.Namespace) -> int:
     if args.dirs:
         fixture_dirs = [Path(d) for d in args.dirs]
+        if not any((d / "golden.json").is_file() for d in fixture_dirs):
+            # The operator named the inputs and none of them is a golden
+            # fixture. That is a refused argument list (exit 3), not "every
+            # fixture matched" and not a projection mismatch.
+            print("error: no golden fixtures in the named directories", file=sys.stderr)
+            return 3
     else:
         golden_root = Path("tests/golden")
         fixture_dirs = (
@@ -744,6 +853,17 @@ def cmd_golden_check(args: argparse.Namespace) -> int:
             if golden_root.is_dir()
             else []
         )
+        if not fixture_dirs:
+            # Default discovery compared nothing: wrong cwd, a fresh
+            # clone, a worktree that never recorded fixtures. That is a
+            # failed check (exit 1), the same family as a mismatch -- the
+            # command was well-formed, the comparison did not pass.
+            print(
+                "error: no golden fixtures found under tests/golden; "
+                "a check that compared nothing did not pass",
+                file=sys.stderr,
+            )
+            return 1
     any_diff = False
     for fixture_dir in fixture_dirs:
         notes: list[str] = []
@@ -1027,27 +1147,27 @@ def build_parser() -> argparse.ArgumentParser:
 )
     p_dispatch.add_argument(
         "--stall-timeout",
-        type=int,
+        type=_nonneg_int,
         default=600,
         metavar="SECONDS",
         help="kill after this many seconds without stdout growth; 0 disables",
     )
     p_dispatch.add_argument(
         "--loop-limit",
-        type=int,
+        type=_nonneg_int,
         default=6,
         metavar="N",
         help="kill after N identical consecutive tool calls; 0 disables",
     )
     p_dispatch.add_argument(
         "--max-tool-calls",
-        type=int,
+        type=_nonneg_int,
         metavar="N",
         help="kill after more than N tool calls; 0 disables",
     )
     p_dispatch.add_argument(
         "--tool-idle-timeout",
-        type=int,
+        type=_nonneg_int,
         metavar="SECONDS",
         help="kill after this many seconds without a tool call; 0 disables",
     )
@@ -1082,13 +1202,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dispatch.add_argument(
         "--cap-usd",
-        type=float,
+        type=_nonneg_float,
         help="per-dispatch dollar cap: claude stops itself, codex and antigravity are killed "
         "when their running usage prices over it, cursor is judged after the run",
     )
     p_dispatch.add_argument(
         "--cap-grace-usd",
-        type=float,
+        type=_nonneg_float,
         help="claude, or cursor in read mode: a band on top of --cap-usd so claude's own "
         "terminal message can finish and a complete cursor answer a few cents over cap "
         f"still settles ok, ceiling ${CAP_GRACE_CEILING_USD:.2f}",
@@ -1120,7 +1240,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_dispatch.add_argument(
         "--ports",
-        type=int,
+        type=_nonneg_int,
         default=0,
         metavar="N",
         help="claim N free TCP ports before spawning; exported as CONDUCTOR_PORT_1.. and "
@@ -1205,6 +1325,7 @@ def build_parser() -> argparse.ArgumentParser:
     mission_source.add_argument(
         "--resume",
         metavar="MISSION_ID",
+        type=_mission_id,
         help="resume a mission directory under CONDUCTOR_HOME/missions",
     )
     p_mission.add_argument(
@@ -1394,15 +1515,21 @@ def build_parser() -> argparse.ArgumentParser:
         "optionally emit the follow-on review-and-fix mission",
     )
     p_salvage.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
-    p_salvage.add_argument("--lane", required=True, help="the kept lane's name")
+    p_salvage.add_argument(
+        "--lane", required=True, type=_lane_name, help="the kept lane's name"
+    )
     p_salvage.add_argument(
         "--emit", metavar="PATH", help="write a follow-on mission file here; needs a green gate"
     )
     p_salvage.add_argument(
-        "--items", type=int, help="hand-counted spec items for the fix cap (rule 2); needs --emit"
+        "--items",
+        type=_positive_int,
+        help="hand-counted spec items for the fix cap (rule 2); needs --emit",
     )
     p_salvage.add_argument(
-        "--modules", type=int, help="hand-counted modules touched (rule 2); needs --emit"
+        "--modules",
+        type=_positive_int,
+        help="hand-counted modules touched (rule 2); needs --emit",
     )
     p_salvage.add_argument(
         "--scheduler", action="store_true", help="rule 2: +$2 fix cap"
@@ -1430,7 +1557,9 @@ def build_parser() -> argparse.ArgumentParser:
         "attest the mission -- the lead's own act, never run inside a mission",
     )
     p_land.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
-    p_land.add_argument("--lane", required=True, help="the lane whose branch lands")
+    p_land.add_argument(
+        "--lane", required=True, type=_lane_name, help="the lane whose branch lands"
+    )
     p_land.add_argument(
         "--checkout", help="repo to merge into (default: the lane's own repository)"
     )
@@ -1456,7 +1585,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_golden_record.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
     p_golden_record.add_argument("--out", required=True, metavar="DIR")
     p_golden_record.add_argument(
-        "--max-bytes", type=int, default=golden.DEFAULT_MAX_BYTES, metavar="N"
+        "--max-bytes", type=_positive_int, default=golden.DEFAULT_MAX_BYTES, metavar="N"
     )
     p_golden_record.set_defaults(func=cmd_golden_record)
 
@@ -1515,9 +1644,14 @@ def _install_stop_handlers(exit_hook: Callable[[int], object] = os._exit) -> Non
         signal.signal(sig, on_signal)
 
 
+# `cmd_mission`'s body is owned by another lane; the flag is the property
+# `main` keys off, so a mission still gets the two-stage handler.
+cmd_mission.runs_in_band = True  # type: ignore[attr-defined]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.func in (cmd_dispatch, cmd_mission, cmd_verify):
+    if getattr(args.func, "runs_in_band", False):
         _install_stop_handlers()
     return args.func(args)
 

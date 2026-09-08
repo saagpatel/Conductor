@@ -1,0 +1,79 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_salvage.py"],
+      "tests": ["test_cli_salvage_emit_validates_flags_before_the_gate"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_salvage.py::test_cli_salvage_emit_validates_flags_before_the_gate",
+      "note": "parse_ceiling, cap_arithmetic, whitespace name, and conductor/ branch are refused before salvage() runs; --about and --fix-commit cannot fail on their own."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_salvage.py"],
+      "tests": [
+        "test_salvage_skips_the_clean_gate_when_the_lane_ran_under_test_policy_allow",
+        "test_cli_salvage_treats_a_skipped_clean_gate_as_green_when_own_passed"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_salvage.py::test_cli_salvage_treats_a_skipped_clean_gate_as_green_when_own_passed",
+      "note": "Settled on bytes: a not-ran clean gate is reachable only as the test_policy allow skip; own_gate always ran=True when salvage() returns. No code change besides the comment."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_cli_input.py", "tests/test_land.py"],
+      "tests": [
+        "test_a_path_shaped_lane_name_is_refused",
+        "test_default_land_checkout_does_not_read_a_path_shaped_lane"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_cli_input.py::test_a_path_shaped_lane_name_is_refused tests/test_land.py::test_default_land_checkout_does_not_read_a_path_shaped_lane",
+      "note": "Parser type=_lane_name using is_lane_name, like _mission_id, so a path-shaped --lane is exit 2 before any file is read. The helper also returns empty rather than interpolating."
+    },
+    {
+      "item": 4,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_golden.py"],
+      "tests": ["test_cli_golden_check_with_nothing_to_check_does_not_pass"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_golden.py::test_cli_golden_check_with_nothing_to_check_does_not_pass",
+      "note": "Default discovery finding nothing is exit 1 (failed check). Named dirs with no golden.json are exit 3 (refused arguments)."
+    },
+    {
+      "item": 5,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_stop.py"],
+      "tests": [
+        "test_salvage_and_land_install_stop_handlers",
+        "test_cmd_salvage_passes_the_stop_flag_to_the_gates"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_stop.py::test_salvage_and_land_install_stop_handlers tests/test_stop.py::test_cmd_salvage_passes_the_stop_flag_to_the_gates",
+      "note": "runs_in_band marks any command that spawns a fleet or gate subprocess group. Interrupted salvage receipts interrupted gates; land's first SIGINT sets the flag, the second kills live groups."
+    },
+    {
+      "item": 6,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_cli_input.py", "tests/test_land.py"],
+      "tests": [
+        "test_a_missing_cwd_is_an_error_not_a_traceback",
+        "test_verify_missing_cwd_is_an_error_not_a_traceback",
+        "test_a_missing_verdict_file_is_an_error_not_a_traceback",
+        "test_a_binary_verdict_file_is_an_error_not_a_traceback",
+        "test_a_binary_agent_file_is_an_error_not_a_traceback",
+        "test_land_missing_checkout_is_an_error_not_a_traceback"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_cli_input.py::test_a_missing_cwd_is_an_error_not_a_traceback tests/test_cli_input.py::test_a_binary_verdict_file_is_an_error_not_a_traceback",
+      "note": "Directory typos (--cwd, --checkout) and --prompt-file are exit 2. JSON sidecars (--verdict-file, --agent-file) stay DispatchRefused exit 3, now including UnicodeDecodeError so a binary file is not a traceback. Invalid JSON content is also 3."
+    },
+    {
+      "item": 7,
+      "status": "built",
+      "files": ["src/conductor/cli.py", "tests/test_cli_input.py"],
+      "tests": [
+        "test_a_money_wait_or_count_outside_its_bound_is_refused_at_the_parser",
+        "test_a_zero_that_disables_a_breaker_still_parses"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest tests/test_cli_input.py::test_a_money_wait_or_count_outside_its_bound_is_refused_at_the_parser tests/test_cli_input.py::test_a_zero_that_disables_a_breaker_still_parses",
+      "note": "cap-usd/cap-grace-usd use _nonneg_float (0 is Spec's refusal). stall/loop/max-tool/tool-idle/ports use _nonneg_int because 0 disables. salvage --items/--modules and golden --max-bytes use _positive_int. mission --resume uses _mission_id. Shape a subparser untouched."
+    }
+  ]
+}

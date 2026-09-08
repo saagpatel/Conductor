@@ -194,3 +194,134 @@ def test_shape_a_out_is_directory_is_clean_error_not_traceback(
     err = capsys.readouterr().err
     parsed = json.loads(err)
     assert "invalid" in parsed
+
+
+# --- lane names are one path segment ----------------------------------------
+
+
+@pytest.mark.parametrize("command", ["salvage", "land"])
+def test_a_path_shaped_lane_name_is_refused(command, capsys):
+    """`cmd_land` interpolated `--lane` into a receipt path before `land()`
+    checked `is_lane_name`; salvage already checked inside `_gather`."""
+    with pytest.raises(SystemExit) as excinfo:
+        main([command, "a-mission", "--lane", "../elsewhere"])
+
+    assert excinfo.value.code == 2
+    assert "is not a lane name" in capsys.readouterr().err
+
+
+# --- money, seconds, counts, and resume ids --------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["dispatch", "--fleet", "claude", "--cap-usd", "nan", "hello"],
+        ["dispatch", "--fleet", "claude", "--cap-usd", "inf", "hello"],
+        ["dispatch", "--fleet", "claude", "--cap-usd", "-1", "hello"],
+        ["dispatch", "--fleet", "claude", "--cap-grace-usd", "nan", "hello"],
+        ["dispatch", "--fleet", "claude", "--stall-timeout", "-1", "hello"],
+        ["dispatch", "--fleet", "claude", "--loop-limit", "-1", "hello"],
+        ["dispatch", "--fleet", "claude", "--max-tool-calls", "-1", "hello"],
+        ["dispatch", "--fleet", "claude", "--tool-idle-timeout", "-1", "hello"],
+        ["dispatch", "--fleet", "claude", "--ports", "-1", "hello"],
+        ["salvage", "m", "--lane", "build", "--items", "0"],
+        ["salvage", "m", "--lane", "build", "--modules", "-1"],
+        ["golden", "record", "m", "--out", "/tmp/x", "--max-bytes", "-1"],
+        ["mission", "--resume", "../elsewhere"],
+    ],
+)
+def test_a_money_wait_or_count_outside_its_bound_is_refused_at_the_parser(argv, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv)
+
+    assert excinfo.value.code == 2
+    assert "error:" in capsys.readouterr().err
+
+
+def test_a_zero_that_disables_a_breaker_still_parses():
+    """stall/loop/tool-idle/ports treat 0 as disable (or claim none)."""
+    from conductor.cli import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "dispatch",
+            "hello",
+            "--fleet",
+            "claude",
+            "--stall-timeout",
+            "0",
+            "--loop-limit",
+            "0",
+            "--max-tool-calls",
+            "0",
+            "--tool-idle-timeout",
+            "0",
+            "--ports",
+            "0",
+        ]
+    )
+    assert args.stall_timeout == 0
+    assert args.loop_limit == 0
+    assert args.max_tool_calls == 0
+    assert args.tool_idle_timeout == 0
+    assert args.ports == 0
+
+
+# --- path arguments -----------------------------------------------------------
+
+
+def test_a_missing_cwd_is_an_error_not_a_traceback(capsys, tmp_path: Path):
+    missing = tmp_path / "no-such-repo"
+    code = main(["dispatch", "--fleet", "claude", "--cwd", str(missing), "hello"])
+
+    assert code == 2
+    assert "not a directory" in capsys.readouterr().err
+
+
+def test_verify_missing_cwd_is_an_error_not_a_traceback(capsys, tmp_path: Path):
+    code = main(["verify", "--cwd", str(tmp_path / "nope")])
+
+    assert code == 2
+    assert "not a directory" in capsys.readouterr().err
+
+
+def test_a_missing_verdict_file_is_an_error_not_a_traceback(capsys, tmp_path: Path):
+    code = main(
+        [
+            "dispatch",
+            "--fleet",
+            "claude",
+            "--verdict-file",
+            str(tmp_path / "nope.json"),
+            "hello",
+        ]
+    )
+
+    assert code == 3
+    parsed = json.loads(capsys.readouterr().err)
+    assert "verdict file unreadable" in parsed["refused"]
+
+
+def test_a_binary_verdict_file_is_an_error_not_a_traceback(capsys, tmp_path: Path):
+    path = tmp_path / "verdict.bin"
+    path.write_bytes(b"\xff\xfe not utf-8")
+    code = main(
+        ["dispatch", "--fleet", "claude", "--verdict-file", str(path), "hello"]
+    )
+
+    assert code == 3
+    parsed = json.loads(capsys.readouterr().err)
+    assert "verdict file unreadable" in parsed["refused"]
+
+
+def test_a_binary_agent_file_is_an_error_not_a_traceback(capsys, tmp_path: Path):
+    path = tmp_path / "agent.bin"
+    path.write_bytes(b"\xff\xfe not utf-8")
+    code = main(
+        ["dispatch", "--fleet", "claude", "--agent-file", str(path), "hello"]
+    )
+
+    assert code == 3
+    parsed = json.loads(capsys.readouterr().err)
+    assert "agent file unreadable" in parsed["refused"]

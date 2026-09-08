@@ -566,8 +566,90 @@ def test_salvage_skips_the_clean_gate_when_the_lane_ran_under_test_policy_allow(
     mission_id = sorted((home / "missions").iterdir())[-1].name
     result = salvage(home, mission_id, "build")
     assert result.own_gate["exit_code"] == 0
+    assert result.own_gate["ran"] is True
     assert result.gate["ran"] is False
     assert "test_policy allow" in result.gate["tail"]
+
+
+def test_cli_salvage_treats_a_skipped_clean_gate_as_green_when_own_passed(
+    repo, home, fake_fleet, monkeypatch
+):
+    """A not-ran clean gate is reachable here (test_policy allow) and is
+    the documented skip, not a vacuous pass. Both-not-ran cannot occur:
+    own_gate is always `_transplant_gate`, which stamps ran=True."""
+    fake_fleet(_claude_ok_argv("mkdir -p tests && echo x > tests/test_new.py && echo y >> app.py"))
+    lane = {
+        "name": "build",
+        "fleet": "claude",
+        "mode": "write",
+        "test": "test -f tests/test_new.py",
+        "test_policy": "allow",
+    }
+    mission = mission_from_dict(
+        {"cwd": str(repo), "prompt": "x", "lanes": [lane]}, base_dir=repo
+    )
+    run_mission(mission, home=home)
+    mission_id = sorted((home / "missions").iterdir())[-1].name
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["salvage", mission_id, "--lane", "build", "--json"]) == 0
+
+
+def test_cli_salvage_emit_validates_flags_before_the_gate(
+    tmp_path, monkeypatch, capsys
+):
+    """`--ceiling garbage` and `--branch conductor/x` used to run the full
+    suite first, then refuse. The gate is the lead's wall clock."""
+    from conductor import cli as cli_mod
+    from conductor.salvage import SalvageInvalid
+
+    called: list[bool] = []
+
+    def boom(*_a, **_k):
+        called.append(True)
+        raise SalvageInvalid("salvage should not have run")
+
+    monkeypatch.setattr(cli_mod.salvage_mod, "salvage", boom)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+
+    code = main(
+        [
+            "salvage",
+            "any-id",
+            "--lane",
+            "build",
+            "--emit",
+            str(tmp_path / "out.json"),
+            "--items",
+            "1",
+            "--modules",
+            "1",
+            "--ceiling",
+            "garbage",
+        ]
+    )
+    assert code == 3
+    assert called == []
+    assert "ceiling" in capsys.readouterr().err
+
+    code = main(
+        [
+            "salvage",
+            "any-id",
+            "--lane",
+            "build",
+            "--emit",
+            str(tmp_path / "out.json"),
+            "--items",
+            "1",
+            "--modules",
+            "1",
+            "--branch",
+            "conductor/x",
+        ]
+    )
+    assert code == 3
+    assert called == []
+    assert "conductor/" in capsys.readouterr().err
 
 
 def test_a_worktree_edited_while_it_is_gated_is_refused_not_receipted(

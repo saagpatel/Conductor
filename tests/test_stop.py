@@ -266,3 +266,40 @@ def test_a_stop_during_the_gate_kills_the_suite_and_takes_the_commit_back(
     assert result.commit["committed"] is False
     assert git_out(repo, "log", "--oneline").count("\n") == 0
     assert "work.txt" in git_out(repo, "diff", "--cached", "--name-only")
+
+
+def test_salvage_and_land_install_stop_handlers(monkeypatch, tmp_path):
+    """A command that runs `verify.run_tests` in-band must get the two-stage
+    handler: first signal asks running work to stop, second kills live
+    groups. The property is `runs_in_band` on the command, not a tuple of
+    functions that forgets the next one."""
+    installed: list[bool] = []
+    monkeypatch.setattr(cli_mod, "_install_stop_handlers", lambda: installed.append(True))
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+
+    assert cli_mod.main(["salvage", "no-such", "--lane", "build"]) == 3
+    assert installed == [True]
+    installed.clear()
+    assert cli_mod.main(["land", "no-such", "--lane", "build"]) == 3
+    assert installed == [True]
+    installed.clear()
+    assert cli_mod.main(["fleets", "--json"]) == 0
+    assert installed == []
+
+
+def test_cmd_salvage_passes_the_stop_flag_to_the_gates(monkeypatch, tmp_path):
+    """An interrupted salvage leaves a receipt with interrupted gates, the
+    scratch worktrees removed, and the kept worktree untouched. Passing
+    `stop_requested` is what makes the first SIGINT land inside the gate."""
+    from conductor.salvage import SalvageInvalid
+
+    seen: dict[str, object] = {}
+
+    def fake(_home, _mission_id, _lane, *, stop=None):
+        seen["stop"] = stop
+        raise SalvageInvalid("x")
+
+    monkeypatch.setattr(cli_mod.salvage_mod, "salvage", fake)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    assert cli_mod.main(["salvage", "m", "--lane", "build"]) == 3
+    assert seen["stop"] is runner_mod.stop_requested
