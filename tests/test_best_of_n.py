@@ -340,6 +340,44 @@ def test_resuming_an_ok_early_cancel_mission_keeps_the_cancelled_lanes(
     assert by_name["fast"]["kept"] is True
 
 
+def test_a_lane_cancelled_mid_run_is_not_receipted_as_unpriced(
+    repo, home, monkeypatch, tmp_path
+):
+    """`Ledger.add` and `_run_receipt_spend` both exclude a cancelled dispatch.
+    The attempt summary did not, so a mid-run cancel that never reported a
+    price was receipted as an unpriced dispatch the ledger did not know
+    about, and a resume could refuse as `budget unverifiable`."""
+    from conductor.mission import LaneResult, _run_receipt_spend
+
+    monkeypatch.setattr(runner_mod, "build_argv", _early_cancel_build)
+    monkeypatch.setattr(runner_mod, "POLL_S", 0.2)
+    mission = mission_from_dict(_early_cancel_mission(repo), base_dir=tmp_path)
+    result = run_mission(mission, home=home)
+
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    slow = by_name["slow"]
+    assert slow["skipped"] == "cancelled: lane fast already passed"
+    assert slow["attempts"], "the slow lane spawned before it was cancelled"
+    attempt = slow["attempts"][0]
+    assert attempt["spawned"] is True
+    assert attempt.get("cost_usd") is None
+    assert attempt["unpriced"] is False
+    assert slow["unpriced_attempts"] == 0
+    assert result.budget["unpriced_dispatches"] == 0
+
+    # The resume seed falls back to the attempt summary when the run receipt
+    # is gone; that summary must not still say unpriced.
+    run_id = attempt["run_id"]
+    (home / "runs" / run_id / "result.json").unlink()
+    previous = {
+        "slow": LaneResult.from_dict(
+            json.loads((Path(result.mission_dir) / "lanes" / "slow.json").read_text())
+        )
+    }
+    _spent, unpriced = _run_receipt_spend(home, previous, None)
+    assert unpriced == 0
+
+
 # --- item 3: mechanical ranking ----------------------------------------------
 
 
