@@ -153,6 +153,7 @@ def _plan_check_child(
     ledger: Ledger,
     base: Path,
     lane_cwd: str | None = None,
+    clamp_budget: bool = False,
 ) -> tuple[dict, str | None]:
     """E10: everything the scheduler must confirm about a plan lane's
     deliverable before the mission may ask the operator to launch it: the
@@ -203,12 +204,20 @@ def _plan_check_child(
         plan["refused"] = message
         return plan, message
     if remaining is not None and child.max_cost_usd > remaining:
-        message = (
-            f"child budget ${child.max_cost_usd:.2f} is over the parent's "
-            f"remaining ${remaining:.2f}"
-        )
-        plan["refused"] = message
-        return plan, message
+        # `clamp_budget` is the launch-time call. E10 second spec item 1 says
+        # the child's cap is clamped to the parent's remaining ledger there,
+        # and the parent can have spent since the park (a mission parks while
+        # other lanes are still dispatching), so refusing an over-budget
+        # child at launch made that clamp dead code and failed a plan the
+        # operator had just approved. Nothing left at all is still a refusal
+        # -- there is no budget to clamp to (2026-09-08 review).
+        if not clamp_budget or remaining <= 0:
+            message = (
+                f"child budget ${child.max_cost_usd:.2f} is over the parent's "
+                f"remaining ${remaining:.2f}"
+            )
+            plan["refused"] = message
+            return plan, message
     parent_hour, parent_day = mission_mod._effective_ceiling(mission)
     child_hour, child_day = mission_mod._effective_ceiling(child)
     for label, parent_bound, child_bound in (
@@ -498,7 +507,13 @@ def _launch_plan_child(
     if parent is None:
         return _fail("cannot re-check the approved child plan: no parent mission"), None, None
     try:
-        child = mission_mod.load_mission(plan["child_path"], base_dir=child_base_dir)
+        # The same base as `_plan_check_child`'s own load, which falls back
+        # to the parent's cwd: a relative child path must resolve to the same
+        # file at launch as it did at the park, or the digest below reads as
+        # a changed plan when nothing changed.
+        child = mission_mod.load_mission(
+            plan["child_path"], base_dir=child_base_dir or parent.cwd
+        )
     except MissionInvalid as exc:
         return _fail(f"child plan no longer loads: {exc}"), None, None
 
@@ -528,6 +543,10 @@ def _launch_plan_child(
         ledger=ledger,
         base=base,
         lane_cwd=child_base_dir,
+        # The cap the parent's ledger can no longer cover is clamped below,
+        # not refused: that is what E10 second spec item 1 asks for, and the
+        # ledger is what actually stops the child either way.
+        clamp_budget=True,
     )
     if refusal is not None:
         plan["refused"] = refusal

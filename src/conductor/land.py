@@ -105,6 +105,39 @@ def _load_json(path: Path, *, what: str) -> dict:
     return raw
 
 
+def _ungated_merge(home: Path, mission_id: str, lane: str, root: str) -> str | None:
+    """The merge sha of an earlier `land` of this lane that failed a check
+    and could not put the checkout back, when that merge is still reachable
+    from HEAD. None otherwise.
+
+    The already-merged shortcut below answers `ok=True` for any tip that is
+    an ancestor of HEAD, which is right for a landing that passed and wrong
+    for one that did not: `_perform` resets to the pre-merge head only when
+    HEAD is still exactly the merge commit and the tree is clean, so a
+    failed gate over a dirty submodule checkout, or a `reset --hard` that
+    itself failed, leaves the ungated merge in the branch. A second `land`
+    then reported success over it without running gate, golden, or attest
+    (2026-09-08 review). Read from this lane's own land receipts, which
+    already record `merge_sha` and whether the reset happened.
+    """
+    land_dir = home / "missions" / mission_id / "land"
+    if not land_dir.is_dir():
+        return None
+    for path in sorted(land_dir.glob(f"{lane}-*.json")):
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict) or raw.get("ok") is not False:
+            continue
+        merge_sha = raw.get("merge_sha")
+        if not isinstance(merge_sha, str) or not merge_sha or raw.get("reset") is True:
+            continue
+        if git_run(root, "merge-base", "--is-ancestor", merge_sha, "HEAD").returncode == 0:
+            return merge_sha
+    return None
+
+
 def _mission_test(mission_raw: dict) -> str | None:
     test = mission_raw.get("test")
     return test if isinstance(test, str) and test else None
@@ -294,7 +327,24 @@ def _perform(
         # reset can undo it): a rejecting commit-msg hook, for one, leaves
         # MERGE_HEAD set and the tree staged even though the command itself
         # failed, and the next `land` must not find the checkout mid-merge.
-        git_run(root, "merge", "--abort")
+        #
+        # The abort's own exit code is read: an abort that itself fails (an
+        # index.lock, a timeout, `git_run`'s own GIT_UNRUN) leaves MERGE_HEAD
+        # set, and every later `land` then refuses with "checkout is
+        # mid-merge" naming nothing about why. Saying it in this receipt is
+        # what turns that into something the operator can act on.
+        aborted = git_run(root, "merge", "--abort")
+        if (
+            aborted.returncode != 0
+            and git_run(root, "rev-parse", "--verify", "--quiet", "MERGE_HEAD").returncode == 0
+        ):
+            abort_detail = (
+                aborted.stderr.strip() or aborted.stdout.strip() or f"exit {aborted.returncode}"
+            )
+            detail = (
+                f"{detail}\ngit merge --abort also failed ({_tail(abort_detail, 3)}); "
+                "the checkout is still mid-merge and must be aborted by hand"
+            )
         return LandResult(
             mission=mission_id,
             lane=lane,
@@ -435,6 +485,13 @@ def _land(
     branch_tip = tip_sha
 
     if git_run(root, "merge-base", "--is-ancestor", branch_tip, head).returncode == 0:
+        ungated = _ungated_merge(home, mission_id, lane, root)
+        if ungated is not None:
+            raise LandInvalid(
+                f"an earlier land of lane '{lane}' failed its checks and left merge "
+                f"{ungated[:12]} in the checkout: this branch holds an ungated merge, "
+                "so undo it by hand before landing again"
+            )
         return LandResult(
             mission=mission_id,
             lane=lane,

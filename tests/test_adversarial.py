@@ -524,7 +524,11 @@ def test_shape_a_adversarial_fix_prompt_explains_the_inherited_check(repo, tmp_p
     spec_path = tmp_path / "spec.md"
     spec_path.write_text("x")
     raw = shape_a(
-        spec=spec_path, repo=repo, test="true", caps=cap_arithmetic(1, 1), adversarial=True
+        spec=spec_path,
+        repo=repo,
+        test="true",
+        caps=cap_arithmetic(1, 1, adversarial=True),
+        adversarial=True,
     )
     fix_prompt = next(lane["prompt"] for lane in raw["lanes"] if lane["name"] == "fix")
     assert "is your reproducing check" in fix_prompt

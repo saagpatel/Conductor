@@ -16,6 +16,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from test_plan_lanes import _child_raw, _plan_lane, _snapshot, _write_deliverable_argv, envelope
 
 from conductor import runner as runner_mod
@@ -310,6 +311,15 @@ class _MissionImportVisitor(ast.NodeVisitor):
             self.violations.append(node)
         elif node.level == 0 and node.module == "conductor.mission":
             self.violations.append(node)
+        # And the absolute form of the relative spelling above: `from
+        # conductor import mission[ as x]`, which the guard used to miss
+        # entirely (2026-09-08 audit of this file).
+        elif (
+            node.level == 0
+            and node.module == "conductor"
+            and any(alias.name == "mission" for alias in node.names)
+        ):
+            self.violations.append(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         if self._guarded():
@@ -360,6 +370,25 @@ def test_the_import_cycle_guard_also_catches_the_absolute_spelling():
     import (`ast.ImportFrom.level == 0`, `module == "conductor.mission"`),
     which the level-1-only check would miss."""
     poisoned = "from conductor.mission import load_mission\n"
+    visitor = _MissionImportVisitor()
+    visitor.visit(ast.parse(poisoned, filename="poisoned.py"))
+    assert len(visitor.violations) == 1
+
+
+@pytest.mark.parametrize(
+    "poisoned",
+    [
+        "from conductor import mission\n",
+        "from conductor import mission as mission_mod\n",
+        "from conductor import ceiling, mission\n",
+    ],
+)
+def test_the_import_cycle_guard_catches_the_absolute_package_spelling(poisoned):
+    """The fourth spelling, and the one the guard missed until a 2026-09-08
+    audit of this file: `from conductor import mission` is level 0 with
+    `module == "conductor"`, so neither the level-1 branch nor the
+    `"conductor.mission"` branch saw it. It binds the same module and
+    reintroduces the same cycle."""
     visitor = _MissionImportVisitor()
     visitor.visit(ast.parse(poisoned, filename="poisoned.py"))
     assert len(visitor.violations) == 1

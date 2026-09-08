@@ -170,7 +170,15 @@ def test_report_reviewer_finding_rate_no_findings_and_non_empty(home: Path):
     # with no final marker is unparsed, not counted as a finding.
     empty = home / "runs" / "empty-answer.txt"
     empty.parent.mkdir(parents=True)
-    empty.write_text("NO_FINDINGS\n")
+    # The narration is the point: `NO_FINDINGS` on the last line after a
+    # paragraph of preamble is what the old `text.strip() == "NO_FINDINGS"`
+    # check read as a finding. A fixture that is only the bare token would
+    # pass against that old check too (2026-09-08 audit).
+    empty.write_text(
+        "I read the diff and the two modules it touches.\n"
+        "Nothing here meets the bar.\n\n"
+        "NO_FINDINGS\n"
+    )
     found = home / "runs" / "found-answer.txt"
     found.write_text("file.py:12: off-by-one\nFINDINGS: 1\n")
 
@@ -1074,6 +1082,13 @@ def test_report_reviewer_precision_heading_labels_fixer_agreement_not_truth(
     printed = capsys.readouterr().out
     heading = next(line for line in printed.splitlines() if line.startswith("Reviewer precision"))
     assert "fixer agreement" in heading
+    # W7 item 2 again, from the other side: the heading must not offer the
+    # figure as truth, correctness, or accuracy. Asserting only that "fixer
+    # agreement" appears left "fixer agreement is reviewer accuracy" green
+    # (2026-09-08 audit).
+    lowered = heading.lower()
+    assert not any(word in lowered for word in ("truth", "true", "correct", "accura", "valid"))
+    assert "findings fixed vs. refused" in heading
 
 
 def test_reviewer_precision_row_defaults_missions_and_undispositioned_to_zero():
@@ -1275,6 +1290,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "unpriced_runs",
         "mean_duration_s",
         "median_duration_s",
+        "unknown_durations",
         "cache_pct",
         "cap_misses",
         "gate_failures",
@@ -1836,10 +1852,11 @@ def test_report_prints_landed_columns_and_summary_line(home: Path, monkeypatch, 
         "landed",
         "merged",
         "items",
+        "unpriced",
         "usd_per_item",
     ]
     row = next(line for line in out.splitlines() if "20260101T000000Z-m-p" in line)
-    assert row.split()[-3:] == ["1", "2", "2.50"]
+    assert row.split()[-4:] == ["1", "2", "0", "2.50"]
     assert (
         "Landed: 1 mission(s), $5.00; 1 with an evidence map naming 2 item(s): "
         "$2.50 per landed item" in out

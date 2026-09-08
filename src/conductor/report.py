@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from dataclasses import dataclass, field
@@ -110,7 +111,11 @@ class Run(_SpendRun):
     stage: str | None = None
     lane: str | None = None
     mission: str | None = None
-    duration_s: float = 0.0
+    # None when the receipt carries no usable figure -- a missing, bool, or
+    # non-finite `duration_s`. 0.0 is a real answer ("it took no time"), so
+    # coercing the unknown to it pulled every mean and median toward zero
+    # (2026-09-08 review).
+    duration_s: float | None = None
     # F2: the receipt's own `usage.input_tokens` -- the "cache" column's
     # denominator, cache_read_tokens (already on spend.Run) over this.
     input_tokens: int = 0
@@ -123,6 +128,12 @@ class Run(_SpendRun):
     # right for `ok` and wrong for "capped after its gate passed": a
     # watcher-killed run never reaches the gate at all.
     gate_ran: bool = False
+    # A run conductor itself stopped. Neither is a sitting that finished, so
+    # neither is scored as a review: an interrupt can leave a partial
+    # `answer.txt` behind, and reading it as a completed review is exactly
+    # the false green rule 7's figures are read for (2026-09-08 review).
+    interrupted: bool = False
+    cancelled: bool = False
     # E24: how much of the grace band this run drew on, and whether it
     # finished inside the band (grace used, and not over budget) -- the
     # two figures rule 10 reports per stage.
@@ -173,7 +184,7 @@ def _scan_missions(
     for result_file in sorted(missions_dir.glob("*/result.json")):
         try:
             raw: object = json.loads(result_file.read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             continue
         if not isinstance(raw, dict):
             continue
@@ -269,7 +280,7 @@ def _land_merged(path: Path) -> bool:
     `refused` and none of these keys."""
     try:
         raw: object = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return False
     if not isinstance(raw, dict):
         return False
@@ -294,7 +305,7 @@ def _evidence_items(lane_raw: dict) -> int | None:
         return None
     try:
         raw: object = json.loads(Path(copy).read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     if not isinstance(raw, dict) or not isinstance(raw.get("items"), list):
         return None
@@ -320,7 +331,7 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         return None
     try:
         raw: object = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -334,21 +345,25 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
             mission, lane, stage = joined
 
     duration = raw.get("duration_s")
-    duration_s = (
-        float(duration)
-        if isinstance(duration, int | float) and not isinstance(duration, bool)
-        else 0.0
-    )
+    duration_s: float | None = None
+    if isinstance(duration, int | float) and not isinstance(duration, bool):
+        number = float(duration)
+        # NaN and inf both survive `isinstance`, and json round-trips both;
+        # either one poisons `statistics.mean` for the whole group.
+        if math.isfinite(number) and number >= 0:
+            duration_s = number
     gate_passed = _runner_gate_passed(raw.get("tests"), raw.get("test_surface"))
     gate_ran = _gate_ran(raw.get("tests"), raw.get("test_surface"))
 
     usage = raw.get("usage")
     raw_input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
-    input_tokens = (
-        raw_input_tokens
-        if isinstance(raw_input_tokens, int) and not isinstance(raw_input_tokens, bool)
-        else 0
-    )
+    input_tokens = 0
+    if isinstance(raw_input_tokens, int | float) and not isinstance(raw_input_tokens, bool):
+        # A vendor that reports the count as a JSON float used to read as 0,
+        # which drops it out of `cache_pct`'s denominator and inflates the
+        # hit rate -- the very error that column was rewritten to avoid.
+        if math.isfinite(raw_input_tokens) and raw_input_tokens >= 0:
+            input_tokens = int(raw_input_tokens)
 
     budget = raw.get("budget")
     grace_used: Decimal | None = None
@@ -385,6 +400,8 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
         answer_path=_str_field(raw, "answer_path"),
         gate_passed=gate_passed,
         gate_ran=gate_ran,
+        interrupted=raw.get("interrupted") is True,
+        cancelled=raw.get("cancelled") is True,
         grace_used=grace_used,
         finished_in_band=finished_in_band,
     )
@@ -408,6 +425,10 @@ class VendorStageRow:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     input_tokens: int = 0
+    # Runs in this group whose receipt carried no usable `duration_s`. They
+    # are out of the mean and median entirely rather than counted as
+    # zero-second runs, so the column says what it measured.
+    unknown_durations: int = 0
     _durations: list[float] = field(default_factory=list)
     _tool_calls: list[int] = field(default_factory=list)
 
@@ -422,7 +443,10 @@ class VendorStageRow:
             self.cap_misses += 1
         if run.kind == "gate":
             self.gate_failures += 1
-        self._durations.append(run.duration_s)
+        if run.duration_s is None:
+            self.unknown_durations += 1
+        else:
+            self._durations.append(run.duration_s)
         self._tool_calls.append(run.tool_calls)
         self.cache_read_tokens += run.cache_read_tokens
         self.cache_write_tokens += run.cache_write_tokens
@@ -448,6 +472,7 @@ class VendorStageRow:
             "median_duration_s": (
                 round(statistics.median(self._durations), 1) if self._durations else None
             ),
+            "unknown_durations": self.unknown_durations,
             "cache_pct": self.cache_pct(),
             "cap_misses": self.cap_misses,
             "gate_failures": self.gate_failures,
@@ -607,12 +632,23 @@ class MissionRow:
     # Review item 2: spec items the build lane's evidence map names; None
     # when the mission carries no parsed map.
     items: int | None = None
+    # Runs of this mission that spawned but carried no price. `cost_usd` is
+    # then a lower bound, not the mission's cost (2026-09-08 review).
+    unpriced_runs: int = 0
+    # True when `--since`/`--until` narrowed the runs that reached this row.
+    # `landed_ok` and `items` are read from the mission's own directory, over
+    # its whole life, so dividing a windowed cost by them is not a rate.
+    windowed: bool = False
 
     def usd_per_item(self) -> Decimal | None:
         """The mission's whole cost over the items it landed: AGENTS.md
         rule 2's "about a dollar per spec item" as a measured figure. None
-        unless a merge happened and the map is known."""
+        unless a merge happened, the map is known, every run of the mission
+        carried a price, and the report's window holds the whole mission --
+        an unknown is reported as unknown, never divided."""
         if not self.landed_ok or not self.items:
+            return None
+        if self.unpriced_runs or self.windowed:
             return None
         return self.cost_usd / self.items
 
@@ -628,6 +664,7 @@ class MissionRow:
             "landed": self.landed,
             "landed_ok": self.landed_ok,
             "items": self.items,
+            "unpriced_runs": self.unpriced_runs,
             "usd_per_item": _money(per_item) if per_item is not None else None,
         }
 
@@ -638,7 +675,10 @@ class LandedRow:
     `missions` and `cost_usd` cover every mission with a merge that
     happened; `usd_per_item` divides the cost of the subset whose build
     lane left a parsed evidence map (`with_items`) by the items those maps
-    name, so a mission without a map neither inflates nor deflates it."""
+    name, so a mission without a map neither inflates nor deflates it. A
+    mission whose own cost is a lower bound -- an unpriced run, or a report
+    window that cut some of its runs -- is out of the division on the same
+    grounds (2026-09-08 review)."""
 
     missions: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
@@ -792,7 +832,10 @@ def _is_no_findings(answer_path: str) -> dict | None:
     line defeated."""
     try:
         text = Path(answer_path).read_text()
-    except OSError:
+    except (OSError, ValueError):
+        # An interrupted write leaves `answer.txt` truncated mid-UTF-8, and
+        # `UnicodeDecodeError` is a ValueError, not an OSError: one such file
+        # used to abort the whole report instead of being skipped.
         return None
     return verdicts_mod.review_verdict(text)
 
@@ -885,7 +928,15 @@ def _build_report(
             if run.cost_usd is not None:
                 kind_row.cost_usd += run.cost_usd
 
-        if run.stage == REVIEW_STAGE and run.answer_path:
+        # A run conductor stopped is not a review that happened: an
+        # interrupt can leave a partial `answer.txt`, and scoring it reads a
+        # stop as a completed sitting in rule 7's own figures.
+        if (
+            run.stage == REVIEW_STAGE
+            and run.answer_path
+            and not run.interrupted
+            and not run.cancelled
+        ):
             verdict = _is_no_findings(run.answer_path)
             if verdict is not None:
                 row = reviewer.setdefault(vendor, ReviewerFindingRow(vendor=vendor))
@@ -901,6 +952,11 @@ def _build_report(
             mission_row = missions.setdefault(run.mission, MissionRow(mission=run.mission))
             if run.cost_usd is not None:
                 mission_row.cost_usd += run.cost_usd
+            elif not run.dry_run:
+                # A dry run spent nothing and is not unpriced. Anything else
+                # without a price leaves this mission's cost a lower bound,
+                # and `usd_per_item` refuses to divide a lower bound.
+                mission_row.unpriced_runs += 1
             if run.kind == "cap":
                 mission_row.capped = True
 
@@ -929,6 +985,7 @@ def _build_report(
         items = meta.get("items")
         known = isinstance(items, int) and not isinstance(items, bool)
         mission_row.items = items if known else None
+        mission_row.windowed = windowed
 
         review_lanes = meta.get("review_lanes")
         review_lanes = review_lanes if isinstance(review_lanes, dict) else {}
@@ -1046,7 +1103,10 @@ def _build_report(
             continue
         landed.missions += 1
         landed.cost_usd += row.cost_usd
-        if row.items:
+        # `usd_per_item`, not `items`: a mission whose cost is a lower bound
+        # (an unpriced run) or whose runs were cut by the report's window is
+        # out of the division, the same way one with no map already was.
+        if row.usd_per_item() is not None:
             landed.with_items += 1
             landed.items += row.items
             landed.items_cost_usd += row.cost_usd
@@ -1291,6 +1351,7 @@ def _print_report(rpt: Report) -> None:
             "landed",
             "merged",
             "items",
+            "unpriced",
             "usd_per_item",
         ),
         [
@@ -1304,6 +1365,7 @@ def _print_report(rpt: Report) -> None:
                 _cell(d["landed"]),
                 _cell(d["landed_ok"]),
                 _cell(d["items"]),
+                _cell(d["unpriced_runs"]),
                 _cell(d["usd_per_item"]),
             )
             for d in (row.to_dict() for row in rpt.missions)

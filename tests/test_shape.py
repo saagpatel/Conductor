@@ -45,16 +45,95 @@ def test_grok_cap_depends_on_whether_it_runs_the_suite():
     assert shape.cap_arithmetic(1, 1, grok_runs_suite=True).grok_cap == 2.0
 
 
-def test_mission_budget_covers_every_lane_plus_slack():
+def test_mission_budget_covers_every_lane_plus_its_grace_plus_slack():
+    """The grace band is spend against the same ledger, so leaving it out of
+    the mission budget let every lane finish inside its own cap+grace and
+    the mission still run out before the fix lane."""
     caps = shape.cap_arithmetic(2, 1)
+    grace = 3 * caps.cap_grace_usd
+    assert caps.graced_lanes == 3
+    assert caps.mission_budget == caps.build_cap + 1.0 + 1.5 + caps.fix_cap + grace + 1.5
+
+
+def test_mission_budget_carries_grace_for_the_optional_lanes_too():
+    caps = shape.cap_arithmetic(2, 1, adversarial=True, opus_review=True)
+    assert caps.graced_lanes == 5
+    assert caps.mission_budget == round(
+        caps.build_cap
+        + caps.review_caps
+        + caps.fix_cap
+        + caps.adversarial_cap
+        + 5 * caps.cap_grace_usd
+        + 1.5,
+        2,
+    )
+
+
+def test_the_followon_fix_prompt_does_not_claim_a_thread_it_never_had():
+    """`shape_a`'s fix lane resumes the build's session, so "by you earlier
+    in this thread" is true there. A salvage follow-on has no build lane and
+    nothing to resume."""
+    assert "by you earlier in this thread" in shape.FIX_PROMPT
+
+    rewritten = shape.followon_fix_prompt(shape.FIX_PROMPT)
+
+    assert "by you earlier in this thread" not in rewritten
+    assert "You did not write it" in rewritten
+    # Everything after the opening is untouched.
+    assert "<spec>\n{{mission.prompt}}\n</spec>" in rewritten
+    assert "reproduce gate" in rewritten
+
+
+@pytest.mark.parametrize("flag", ["adversarial", "opus_review"])
+def test_a_lane_flag_the_cap_arithmetic_was_not_built_with_is_refused(
+    tmp_path: Path, repo: Path, flag
+):
+    """`max_cost_usd` comes from the caps alone, so emitting a lane the caps
+    were not sized for produces a mission that loads and then runs out of
+    budget partway through."""
+    spec = _spec(tmp_path)
+    with pytest.raises(shape.ShapeInvalid, match=flag):
+        shape.shape_a(
+            spec=spec,
+            repo=repo,
+            test="true",
+            caps=shape.cap_arithmetic(1, 1),
+            **{flag: True},
+        )
+
+    # And the other direction: caps sized for a lane the shape will not emit.
+    with pytest.raises(shape.ShapeInvalid, match=flag):
+        shape.shape_a(
+            spec=spec,
+            repo=repo,
+            test="true",
+            caps=shape.cap_arithmetic(1, 1, **{flag: True}),
+        )
+
+
+def test_disabled_grace_puts_nothing_in_the_mission_budget():
+    caps = shape.cap_arithmetic(2, 1, cap_grace_usd=0.0)
+    assert caps.graced_lanes == 0
     assert caps.mission_budget == caps.build_cap + 1.0 + 1.5 + caps.fix_cap + 1.5
 
 
 def test_render_prints_every_term_not_just_the_sum():
-    text = shape.cap_arithmetic(5, 4, scheduler=True).render()
+    """Every line the lead reads to find which term is wrong. The old body
+    checked the build line alone, so dropping the fix, grace, or review
+    lines left the suite green."""
+    caps = shape.cap_arithmetic(5, 4, scheduler=True, adversarial=True, opus_review=True)
+    text = caps.render()
     assert "$5.00 5 spec items + $2.00 scheduler tax + $2.00 2 modules past the second" in text
-    assert "= $10.00" in text
-    assert "mission budget" in text
+    assert "build cap: " in text and f"= ${caps.build_cap:.2f}" in text
+    assert f"review-gemini cap: ${caps.gemini_cap:.2f}" in text
+    assert f"review-grok cap: ${caps.grok_cap:.2f}" in text
+    assert "review-opus cap: " in text and f"= ${caps.opus_cap:.2f}" in text
+    assert "adversarial cap: " in text and f"= ${caps.adversarial_cap:.2f}" in text
+    assert "fix cap: " in text and f"= ${caps.fix_cap:.2f}" in text
+    grace_total = caps.graced_lanes * caps.cap_grace_usd
+    assert f"grace: ${caps.cap_grace_usd:.2f}" in text
+    assert f"{caps.graced_lanes} lanes, ${grace_total:.2f} in the mission budget" in text
+    assert f"+ ${grace_total:.2f} grace + $1.50 slack = ${caps.mission_budget:.2f}" in text
 
 
 @pytest.mark.parametrize("items,modules", [(0, 1), (1, 0)])
@@ -580,7 +659,10 @@ def test_opus_review_cap_arithmetic_adds_its_own_line_and_budget_term():
     plain = shape.cap_arithmetic(2, 1)
     with_opus = shape.cap_arithmetic(2, 1, opus_review=True)
     assert with_opus.opus_cap == 4.0
-    assert with_opus.mission_budget == round(plain.mission_budget + 4.0, 2)
+    # The cap, and the grace band that lane may draw on top of it.
+    assert with_opus.mission_budget == round(
+        plain.mission_budget + 4.0 + plain.cap_grace_usd, 2
+    )
     assert "review-opus cap: $3.00 Opus cold read + $1.00 Claude summary = $4.00" in (
         with_opus.render()
     )
@@ -705,11 +787,18 @@ def test_cli_writes_the_evidence_schema_beside_the_mission(
 
 
 def _deliverable_mission(tmp_path: Path, repo: Path, **kw) -> dict:
+    # The caps carry the same lane flags the shape does: a mission budget
+    # sized without the extra lane's cap runs out partway through.
     return shape.shape_a(
         spec=_spec(tmp_path),
         repo=repo,
         test="python3 check.py doc.md",
-        caps=shape.cap_arithmetic(1, 1),
+        caps=shape.cap_arithmetic(
+            1,
+            1,
+            adversarial=kw.get("adversarial", False),
+            opus_review=kw.get("opus_review", False),
+        ),
         deliverable="doc.md",
         deliverable_validator="python3 check.py {path}",
         **kw,
