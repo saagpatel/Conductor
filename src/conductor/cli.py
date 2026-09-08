@@ -43,6 +43,7 @@ from .mission import (
 )
 from .paths import conductor_home
 from .report import cmd_report
+from .reprice import cmd_reprice
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import cmd_spend
@@ -1500,6 +1501,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--until", help="exclusive UTC date or ISO datetime")
     p_report.add_argument("--json", action="store_true")
     p_report.set_defaults(func=cmd_report)
+
+    p_reprice = sub.add_parser(
+        "reprice",
+        help="re-parse stored stdout and correct receipt usage against the current parser",
+    )
+    reprice_mode = p_reprice.add_mutually_exclusive_group()
+    reprice_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="rewrite receipts after archiving; default is dry-run",
+    )
+    reprice_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report without writing (default)",
+    )
+    p_reprice.add_argument("--json", action="store_true")
+    p_reprice.set_defaults(func=cmd_reprice)
 
     p_mission = sub.add_parser(
         "mission",
