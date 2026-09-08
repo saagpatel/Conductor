@@ -120,7 +120,8 @@ def checklist_contract(criteria: list[Criterion]) -> str:
         "criterion's evidence must cite a file and line or a hunk from the diff; 'no "
         "evidence' is only a correct value for a criterion reported as not ok. Set verdict "
         "to pass only when every criterion is ok. Write that object once and end there: no "
-        "example, no restatement of the schema, and no second copy of the object after it."
+        "example, no restatement of the schema, and no second copy of the object after it. "
+        "Put the entire verdict in this reply."
     )
 
 

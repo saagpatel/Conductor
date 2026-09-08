@@ -13,6 +13,7 @@ import pytest
 from conductor.fleets import DispatchRefused, Spec, supports_schema_flag
 from conductor.mission import (
     DEFAULT_COLLATE_INSTRUCTIONS,
+    DEFAULT_RESOLVE_INSTRUCTIONS,
     LaneResult,
     Ledger,
     _build_rank_tally,
@@ -24,6 +25,7 @@ from conductor.mission import (
     _rank_schema_for,
     _rendered_verdict,
     _resolve_is_trusted,
+    _resolve_prompt,
     _run_collate,
     _run_rank_collate,
     mission_from_dict,
@@ -386,3 +388,57 @@ def test_collate_body_lists_each_lane_once_instructions_carry_the_second_order(r
     assert body.count("### Lane `a`") == 1
     assert body.count("### Lane `b`") == 1
     assert "reverse order" not in body.lower()
+
+
+# --- resolve default: pin what conductor sends ------------------------------
+
+
+def _resolve_composed(repo, tmp_path, *, strongest: str | None) -> str:
+    """The text `_resolve_prompt` actually concatenates, not the constant
+    alone. Default instructions are what a resolve block with no custom
+    text sends."""
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "prompt": "implement the spec",
+            "lanes": [
+                {"name": "a", "fleet": "claude", "prompt": "A", "mode": "write"},
+                {"name": "b", "fleet": "codex", "prompt": "B", "mode": "write"},
+            ],
+            "resolve": {"fleet": "cursor"},
+        },
+        base_dir=tmp_path,
+    )
+    patch_a = tmp_path / "a.diff"
+    patch_b = tmp_path / "b.diff"
+    patch_a.write_text("--- a\n+++ a\n")
+    patch_b.write_text("--- b\n+++ b\n")
+    lanes = [
+        LaneResult(name="a", ok=True, diff_path=str(patch_a)),
+        LaneResult(name="b", ok=True, diff_path=str(patch_b)),
+    ]
+    collisions = {
+        "hotspots": ["hot.py"],
+        "overlap": {"files": {"hot.py": ["a", "b"]}},
+    }
+    assert mission.resolve.instructions == DEFAULT_RESOLVE_INSTRUCTIONS
+    return _resolve_prompt(mission, lanes, collisions, mission.resolve, strongest)
+
+
+def test_resolve_prompt_names_the_strongest_lane_when_a_rank_collate_named_one(
+    repo, tmp_path
+):
+    prompt = _resolve_composed(repo, tmp_path, strongest="a")
+    assert "The collate judged lane `a` the strongest candidate." in prompt
+    assert "what was kept from which lane" in prompt
+    assert DEFAULT_RESOLVE_INSTRUCTIONS.strip() in prompt
+
+
+def test_resolve_prompt_states_the_mission_order_fallback_when_none_is_named(
+    repo, tmp_path
+):
+    prompt = _resolve_composed(repo, tmp_path, strongest=None)
+    assert "The collate judged lane" not in prompt
+    assert "first candidate lane in mission order" in prompt
+    assert "what was kept from which lane" in prompt
+    assert DEFAULT_RESOLVE_INSTRUCTIONS.strip() in prompt
