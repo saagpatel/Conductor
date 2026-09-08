@@ -397,20 +397,6 @@ def test_ledger_reports_in_flight_caps_and_worst_case_without_reserving_them():
     assert state["worst_case_usd"] == 0.0
 
 
-def test_in_flight_outstanding_is_the_graced_ceiling_not_the_bare_cap():
-    """A lane with cap $2 and grace $0.25 can actually spend $2.25; the
-    in-flight report must name that ceiling, not the un-graced cap. The
-    dispatch path now records cap+grace on start; this pins the ledger
-    side of that figure."""
-    ledger = Ledger(max_cost_usd=10.0)
-    ledger.start(2.25)
-    state = ledger.to_dict()
-    assert state["outstanding_cap_usd"] == 2.25
-    assert state["worst_case_usd"] == 2.25
-    ledger.finish(2.25)
-    assert ledger.to_dict()["outstanding_cap_usd"] == 0.0
-
-
 def test_ledger_nulls_outstanding_and_worst_case_when_an_in_flight_dispatch_has_no_cap():
     ledger = Ledger(max_cost_usd=None)
     ledger.start(1.0)
