@@ -11,9 +11,9 @@ primary and its `fallback` list) following as the fallbacks:
 
 ```json
 {
-  "cascade": {"fleet": "codex", "model": "luna", "cap_usd": 0.10},
+  "cascade": {"fleet": "antigravity", "model": "gemini-3.8-flash-high", "cap_usd": 0.50},
   "lanes": [
-    {"fleet": "claude", "model": "opus", "mode": "write"}
+    {"fleet": "claude", "model": "sonnet", "mode": "write"}
   ]
 }
 ```
@@ -52,10 +52,16 @@ running past them cost. `report.md` carries one line: `Cascade: <cheap_ok> of
 <lanes> lanes passed on <fleet/model>; <escalated> escalated ($<cascade_usd>
 on the cheap attempts, $<escalated_usd> after)`.
 
+Retries belong to the phase they retry: a successful cheap retry counts in
+`cheap_ok`, and all its paid retries count in `cascade_usd`. Primary and
+fallback retries count in `escalated_usd`. If a spawned dispatch in a phase
+has no usable price, that phase's cost is `null` and the text says `unknown`.
+These figures summarize the current attempt sequence of each lane; lifetime
+spend, including earlier resume attempts, comes from the receipt ledger.
+
 The cascade is a mission option, never a default: routing one cheap lane
 first cut cost 31% at 0.91 micro-F1 in one benchmark
 ([UCCI](https://arxiv.org/pdf/2605.18796)), and conductor's own cheap lanes
 have found real defects for $0.03 — but a fixed ladder can be worse than
 routing on some code tasks ([Is Escalation Worth
 It](https://arxiv.org/pdf/2605.06350)); see `docs/archive/roadmaps-closed.md` item B3.
-

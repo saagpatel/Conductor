@@ -263,7 +263,7 @@ def test_cascade_escalation_across_two_lanes(repo, home, monkeypatch, tmp_path, 
         "cheap_ok": 1,
         "escalated": 1,
         "rate": 0.5,
-        "cascade_usd": 0.01,
+        "cascade_usd": None,  # the failed cheap dispatch reported no usage
         "escalated_usd": 0.2,
     }
     summary = result.summary()
@@ -275,7 +275,7 @@ def test_cascade_escalation_across_two_lanes(repo, home, monkeypatch, tmp_path, 
     report = Path(result.report_path).read_text()
     assert (
         "Cascade: 1 of 2 lanes passed on cursor; 1 escalated "
-        "($0.0100 on the cheap attempts, $0.2000 after)" in report
+        "(unknown on the cheap attempts, $0.2000 after)" in report
     )
 
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
@@ -327,11 +327,11 @@ def test_a_retried_cheap_attempt_is_not_an_escalation(repo, home, monkeypatch, t
     assert lane["escalated"] is False
     assert result.escalation == {
         "lanes": 1,
-        "cheap_ok": 0,
+        "cheap_ok": 1,
         "escalated": 0,
         "rate": 0.0,
         # Both dispatches are the cheap attempt; none of it is escalation spend.
-        "cascade_usd": 0.01,
+        "cascade_usd": 0.03,
         "escalated_usd": 0.0,
     }
 

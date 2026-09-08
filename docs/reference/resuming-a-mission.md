@@ -61,3 +61,15 @@ paid attempts stay in the budget as usual. A receipt written before conductor
 recorded digests has none to check, so it is trusted on its paths exactly as
 before and the resume notes that it was trusted on path only.
 
+A recorded digest requires readable bytes: an unreadable file or a null path
+does not downgrade that check to legacy path-only trust. A missing repository
+also refuses reuse when a commit or branch must be checked. For an existing
+repository, two `GIT_UNRUN` results still retain the receipt with a note;
+this compatibility policy avoids repeat payment under machine load, but it
+does not establish that the Git check passed.
+
+Resume re-reads each dispatch's cost from its run receipt. A cancelled run
+with no price retains `unknown_cost_dispatches` without becoming a
+budget-blocking unpriced failure. A timeout receives the same classification
+on resume as it did live. Recovered attempt summaries retain these markers
+if the run receipt subsequently becomes unavailable.

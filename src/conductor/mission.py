@@ -153,6 +153,8 @@ from .attempts import (
 from .attempts import (
     _validate_on as _validate_on,
 )
+from .budget import budget_cost as budget_cost
+from .budget import unpriced_dispatch
 from .errors import error_kind
 from .fleets import DispatchRefused, Spec, supports_schema_flag
 from .graph import (
@@ -1719,26 +1721,6 @@ def _human_lane(
 # --- running ----------------------------------------------------------------
 
 
-def budget_cost(value: object) -> float | None:
-    """`value` as a dollar figure the budget may add, or None.
-
-    A cost that is not a finite, non-negative number is not evidence about
-    the budget, and adding it destroys the running total: `spent` becomes
-    NaN and every `spent >= max` comparison after it is False, or a negative
-    figure shrinks `spent` and buys more dispatches. Both turn the budget
-    off silently, and `json` round-trips `NaN` and `Infinity` happily.
-
-    This guard lived only inside `Ledger.add`, so the live mission was
-    protected and the resume seed, which reads the same receipts back off
-    disk, was not (2026-09-08 review). `spend._number` refuses the same
-    values on the reporting side; one rule now serves all three.
-    """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) and number >= 0 else None
-
-
 class Ledger:
     """Dollars spent so far, shared across lanes.
 
@@ -1824,11 +1806,12 @@ class Ledger:
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)
-            elif (
-                result.spawned
-                and not result.interrupted
-                and not result.cancelled
-                and not getattr(result, "timed_out", False)
+            elif unpriced_dispatch(
+                spawned=result.spawned,
+                interrupted=result.interrupted,
+                cancelled=result.cancelled,
+                timed_out=getattr(result, "timed_out", False),
+                cost_usd=cost,
             ):
                 # A timeout is a run conductor stopped, the same state
                 # interrupted already carves out: not evidence about the
@@ -1853,11 +1836,14 @@ class Ledger:
                 self.unknown_cost += 1
         self._publish()
 
-    def seed(self, spent_usd: float, unpriced_dispatches: int) -> None:
+    def seed(
+        self, spent_usd: float, unpriced_dispatches: int, *, unknown_cost_dispatches: int = 0
+    ) -> None:
         """Start a resumed mission from spend already present on disk."""
         with self._lock:
             self.spent = float(spent_usd)
             self.unpriced = int(unpriced_dispatches)
+            self.unknown_cost = int(unknown_cost_dispatches)
         self._publish()
 
     def add_child(self, cost_usd: float, unpriced_dispatches: int) -> None:
@@ -2967,6 +2953,7 @@ class _ResumePlan:
     # yet rolled up -- built by `_resume_plan_child`, applied to the fresh
     # ledger right after it is seeded.
     children_rollups: list[tuple[float, int]] = field(default_factory=list)
+    unknown_cost_dispatches: int = 0
 
 
 def _json_object(path: Path) -> dict | None:
@@ -3374,6 +3361,13 @@ def _human_lane_result(mission: Mission, lane: Lane, mission_dir: Path) -> LaneR
 def _run_receipt_spend(
     base: Path, previous: dict[str, LaneResult], prior_result: dict | None
 ) -> tuple[float, int]:
+    spent, unpriced, _ = _run_receipt_accounting(base, previous, prior_result)
+    return spent, unpriced
+
+
+def _run_receipt_accounting(
+    base: Path, previous: dict[str, LaneResult], prior_result: dict | None
+) -> tuple[float, int, int]:
     """Price prior dispatches once from their authoritative run receipts."""
     lane_dicts = [
         {
@@ -3397,6 +3391,7 @@ def _run_receipt_spend(
 
     spent = 0.0
     unpriced = 0
+    unknown_cost = 0
     # Lane receipts retain the attempt summaries for auditability, but spend
     # reads run receipts so moving attempts under previous_attempts cannot
     # count the same paid dispatch twice.
@@ -3418,19 +3413,25 @@ def _run_receipt_spend(
             # (2026-09-08 review). Cursor is the live case -- it reports
             # usage once, after the run, so a mid-dispatch cancel is
             # spawned, unpriced, and cancelled.
-            if (
-                receipt.get("spawned") is True
-                and receipt.get("interrupted") is not True
-                and receipt.get("cancelled") is not True
+            if unpriced_dispatch(
+                spawned=receipt.get("spawned") is True,
+                interrupted=receipt.get("interrupted") is True,
+                cancelled=receipt.get("cancelled") is True,
+                timed_out=receipt.get("timed_out") is True,
+                cost_usd=cost,
             ):
                 unpriced += 1
+            elif receipt.get("spawned") is True and receipt.get("cancelled") is True:
+                unknown_cost += 1
         else:
             summary_cost = budget_cost(summary.get("cost_usd"))
             if summary_cost is not None:
                 spent += summary_cost
             elif summary.get("unpriced") is True:
                 unpriced += 1
-    return spent, unpriced
+            elif summary.get("cost_unknown") is True:
+                unknown_cost += 1
+    return spent, unpriced, unknown_cost
 
 
 def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
@@ -3693,7 +3694,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             if not rerun and _resolve_is_trusted(mission, prior_result, notes=notes)
             else "rerun"
         )
-    spent, unpriced = _run_receipt_spend(base, previous, prior_result)
+    spent, unpriced, unknown_cost = _run_receipt_accounting(base, previous, prior_result)
     return _ResumePlan(
         previous=previous,
         kept=kept,
@@ -3707,6 +3708,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         unpriced_dispatches=unpriced + accounting_unknown,
         accounting_unknown=accounting_unknown,
         children_rollups=children_rollups,
+        unknown_cost_dispatches=unknown_cost,
     )
 
 
@@ -3940,7 +3942,10 @@ def _execute_mission(
     chain = _ReceiptChain(mission_dir, mission_id, base)
 
     ledger = Ledger(mission.max_cost_usd)
-    ledger.seed(resume.spent_usd, resume.unpriced_dispatches)
+    ledger.seed(
+        resume.spent_usd, resume.unpriced_dispatches,
+        unknown_cost_dispatches=resume.unknown_cost_dispatches,
+    )
     # E10 second spec: every child rolled up on any resume so far -- not
     # just a fresh one this resume's own `_build_resume_plan` just
     # discovered -- re-seeded every time, the same way `_run_receipt_spend`
@@ -4325,11 +4330,12 @@ def _execute_mission(
                 )
                 summary["error"] = cancel_reason
                 summary["failure"] = cancel_reason
-            summary["unpriced"] = (
-                result.spawned
-                and not result.interrupted
-                and not result.cancelled
-                and summary.get("cost_usd") is None
+            summary["unpriced"] = unpriced_dispatch(
+                spawned=result.spawned,
+                interrupted=result.interrupted,
+                cancelled=result.cancelled,
+                timed_out=result.timed_out,
+                cost_usd=summary.get("cost_usd"),
             )
             # Same third state Ledger.add records as unknown_cost: a
             # cancelled run with no figure is not unpriced (blocker /
@@ -6604,10 +6610,11 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
     if result.escalation:
         esc = result.escalation
         label = _cascade_label(mission.cascade) if mission.cascade else ""
+        cheap = "unknown" if esc["cascade_usd"] is None else f"${_usd(esc['cascade_usd'])}"
+        after = "unknown" if esc["escalated_usd"] is None else f"${_usd(esc['escalated_usd'])}"
         lines.append(
             f"- Cascade: {esc['cheap_ok']} of {esc['lanes']} lanes passed on {label}; "
-            f"{esc['escalated']} escalated (${_usd(esc['cascade_usd'])} on the cheap attempts, "
-            f"${_usd(esc['escalated_usd'])} after)"
+            f"{esc['escalated']} escalated ({cheap} on the cheap attempts, {after} after)"
         )
     if result.errors:
         parts = ", ".join(f"{kind} x{count}" for kind, count in sorted(result.errors.items()))

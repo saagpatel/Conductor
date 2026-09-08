@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import attest
+from .budget import budget_cost, unpriced_dispatch
 from .errors import KINDS
 from .fleets import TAINT_SHELL_MODES, Spec
 from .graph import MissionInvalid
@@ -360,6 +361,14 @@ def _attempt(fields: dict, *, where: str, on: object = None) -> Attempt:
     for key in ("isolate", "no_op_ok"):
         if fields.get(key) is not None and not isinstance(fields[key], bool):
             raise MissionInvalid(f"{where}: {key} must be true or false")
+    timeout = fields.get("timeout")
+    if timeout is not None and (
+        isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0
+    ):
+        raise MissionInvalid(f"{where}: timeout must be a positive whole number of seconds")
+    for key in ("cap_usd", "cap_grace_usd"):
+        if isinstance(fields.get(key), bool):
+            raise MissionInvalid(f"{where}: {key} must be a number, not a boolean")
     # D5: named here so a typo is a load-time refusal on the lane rather than
     # a DispatchRefused after the mission has already started paying.
     if fields.get("taint_shell") is not None and fields["taint_shell"] not in TAINT_SHELL_MODES:
@@ -561,10 +570,15 @@ def _parse_retry(raw_retry: object) -> dict | None:
         1 <= attempts_raw <= 5
     ):
         raise MissionInvalid("retry.attempts must be an integer from 1 to 5")
+    backoff_raw = raw_retry.get("backoff_s", 0)
+    if isinstance(backoff_raw, bool):
+        raise MissionInvalid("retry.backoff_s must be a finite number, not a boolean")
     try:
-        backoff_s = float(raw_retry.get("backoff_s", 0))
+        backoff_s = float(backoff_raw)
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"retry.backoff_s must be a number: {exc}") from exc
+    if not math.isfinite(backoff_s):
+        raise MissionInvalid("retry.backoff_s must be finite")
     if backoff_s < 0:
         raise MissionInvalid("retry.backoff_s must be at least 0")
     return {"kinds": list(kinds_raw), "attempts": attempts_raw, "backoff_s": backoff_s}
@@ -613,21 +627,42 @@ def _escalation_summary(mission: Mission, lane_results: list[LaneResult]) -> dic
     names = {lane.name for lane in _cascade_target_lanes(mission)}
     targeted = [lr for lr in lane_results if lr.name in names]
     lanes_n = len(targeted)
-    cheap_ok = sum(1 for lr in targeted if lr.attempts and lr.attempts[0].get("ok") is True)
     escalated = sum(1 for lr in targeted if lr.escalated)
-    cascade_usd = sum(lr.attempts[0].get("cost_usd") or 0.0 for lr in targeted if lr.attempts)
-    escalated_usd = sum(
-        sum(a.get("cost_usd") or 0.0 for a in escalation_attempts(lr.attempts))
-        for lr in targeted
-        if lr.escalated
-    )
+    cheap_ok = 0
+    costs: dict[str, list[float]] = {"cascade": [], "escalated": []}
+    unknown = {"cascade": 0, "escalated": 0}
+    for lr in targeted:
+        if not lr.attempts:
+            continue
+        cheap_id = lr.attempts[0].get("run_id")
+        cheap_passed = False
+        seen: set[str] = set()
+        for index, entry in enumerate(lr.attempts):
+            run_id = entry.get("run_id")
+            if isinstance(run_id, str):
+                if run_id in seen:
+                    continue
+                seen.add(run_id)
+            is_cheap = index == 0 or (
+                cheap_id is not None and entry.get("retry_of") == cheap_id
+            )
+            phase = "cascade" if is_cheap else "escalated"
+            cheap_passed |= is_cheap and entry.get("ok") is True
+            cost = budget_cost(entry.get("cost_usd"))
+            if cost is not None:
+                costs[phase].append(cost)
+            elif entry.get("spawned") is not False:
+                unknown[phase] += 1
+        cheap_ok += cheap_passed
+    cascade_usd = None if unknown["cascade"] else round(sum(costs["cascade"]), 6)
+    escalated_usd = None if unknown["escalated"] else round(sum(costs["escalated"]), 6)
     return {
         "lanes": lanes_n,
         "cheap_ok": cheap_ok,
         "escalated": escalated,
         "rate": round(escalated / lanes_n, 3) if lanes_n else None,
-        "cascade_usd": round(cascade_usd, 6),
-        "escalated_usd": round(escalated_usd, 6),
+        "cascade_usd": cascade_usd,
+        "escalated_usd": escalated_usd,
     }
 
 
@@ -703,9 +738,16 @@ def _artifact_bytes_match(
     digest, and is trusted on its paths as before with a note saying so."""
     for kind, recorded in _artifact_paths(result):
         actual = _artifact_digest(recorded)
-        if actual is None:
-            continue
         expected = digests.get(kind)
+        if actual is None:
+            if expected is not None:
+                if notes is not None:
+                    notes.append(
+                        f"lane '{lane_name}': {kind} bytes cannot be read for its recorded "
+                        "digest; not trusted"
+                    )
+                return False
+            continue
         if expected is None:
             if notes is not None:
                 notes.append(
@@ -831,6 +873,11 @@ def _trusted_lane(
     # E26: the repository this receipt's commits actually landed in, not
     # necessarily the mission's default.
     repo = result.cwd or mission.cwd
+    if (result.tip_sha and result.tip_sha != result.base_sha) or lane.branch:
+        if not Path(repo).is_dir():
+            if notes is not None:
+                notes.append(f"lane '{lane.name}': repository is missing; not trusted")
+            return False
     if result.tip_sha and result.tip_sha != result.base_sha:
         commit = _git_answer(repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
         if commit is None:
@@ -955,11 +1002,9 @@ def _attempt_from_run_receipt(run_id: str, receipt: dict) -> dict:
     `LaneResult` keeps it out of the kept set; this stub must not grow
     enough to satisfy `_trusted_lane` (no answer artifacts, and the last
     attempt is not a complete spawned-ok record of a finished lane)."""
-    from . import mission as mission_mod
-
     attempt: dict = {"run_id": run_id}
     usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
-    cost = mission_mod.budget_cost(usage.get("cost_usd"))
+    cost = budget_cost(usage.get("cost_usd"))
     if cost is not None:
         attempt["cost_usd"] = cost
     duration = receipt.get("duration_s")
@@ -972,6 +1017,15 @@ def _attempt_from_run_receipt(run_id: str, receipt: dict) -> dict:
         attempt["duration_s"] = float(duration)
     if isinstance(receipt.get("spawned"), bool):
         attempt["spawned"] = receipt["spawned"]
+    attempt["unpriced"] = unpriced_dispatch(
+        spawned=receipt.get("spawned") is True,
+        interrupted=receipt.get("interrupted") is True,
+        cancelled=receipt.get("cancelled") is True,
+        timed_out=receipt.get("timed_out") is True,
+        cost_usd=cost,
+    )
+    if receipt.get("spawned") is True and receipt.get("cancelled") is True and cost is None:
+        attempt["cost_unknown"] = True
     if isinstance(receipt.get("fleet"), str):
         attempt["fleet"] = receipt["fleet"]
     return attempt

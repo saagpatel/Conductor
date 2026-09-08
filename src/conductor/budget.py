@@ -48,6 +48,7 @@ timed-out Codex dispatch would land in the ledger as `cost_usd: null`.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -64,6 +65,42 @@ from .outputs import (
 )
 
 POLL_S = 2.0
+
+
+def budget_cost(value: object) -> float | None:
+    """`value` as a dollar figure the budget may add, or None.
+
+    A cost that is not a finite, non-negative number is not evidence about
+    the budget, and adding it destroys the running total: `spent` becomes
+    NaN and every `spent >= max` comparison after it is False, or a negative
+    figure shrinks `spent` and buys more dispatches. Both turn the budget
+    off silently, and `json` round-trips `NaN` and `Infinity` happily.
+
+    This guard lived only inside `Ledger.add`, so the live mission was
+    protected and the resume seed, which reads the same receipts back off
+    disk, was not (2026-09-08 review). `spend._number` independently refuses
+    the same values on the reporting side; this rule serves live and resume
+    accounting.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def unpriced_dispatch(
+    *, spawned: bool, interrupted: bool = False, cancelled: bool = False,
+    timed_out: bool = False, cost_usd: object = None,
+) -> bool:
+    """One budget-blocking rule for live, resumed, and recovered dispatches.
+
+    A conductor stop does not establish a price; it also must not acquire
+    a new budget-blocking failure simply because the mission was resumed.
+    """
+    return (
+        spawned and not interrupted and not cancelled and not timed_out
+        and budget_cost(cost_usd) is None
+    )
 
 
 @dataclass

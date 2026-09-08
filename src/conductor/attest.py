@@ -23,6 +23,10 @@ import secrets
 import time
 from pathlib import Path
 
+from .verify import gate_passed, gate_summary
+
+_gate_passed_from_result = gate_passed
+
 PAYLOAD_TYPE = "application/vnd.conductor.receipt+json"
 
 _KEY_BYTES = 32
@@ -181,50 +185,15 @@ def file_sha256(path: str | Path) -> str | None:
         return None
 
 
-def _gate_passed_from_result(tests: dict | None, surface: dict | None) -> bool:
-    """Mirror of runner._gate_passed, kept here so attest does not import runner."""
-    clean = (surface or {}).get("clean_gate") or {}
-    counted = clean if clean.get("ran") else tests
-    if not counted or not counted.get("ran"):
-        return True
-    return (
-        counted.get("exit_code") == 0
-        and not counted.get("timed_out")
-        and not counted.get("interrupted")
-    )
-
-
 def _gate_summary_from_result(result_data: dict, command: str | None) -> dict:
-    """Rebuild the signed `gate` block from result.json's tests/test_surface.
-
-    This mirrors `runner._gate_summary` and must keep mirroring it: `runner`
-    imports this module, so the shared shape cannot live in one place without
-    a cycle. `passed` is None when no gate ran -- the same truthfulness rule
-    `_gate_summary` states -- and a change to either function that is not made
-    to the other makes every signed statement disagree with its own
-    `result.json` (2026-09-08: two lanes changed one side each and 13 attest
-    and export tests failed on the merged tree).
-    """
-    tests_dict = result_data.get("tests")
-    surface_state = result_data.get("test_surface")
-    clean = (surface_state or {}).get("clean_gate") or {}
-    if clean.get("ran"):
-        counted, label = clean, "clean"
-    elif isinstance(tests_dict, dict) and tests_dict.get("ran"):
-        counted, label = tests_dict, "own"
-    else:
-        counted, label = None, "none"
-    return {
-        "command": command,
-        "counted": label,
-        "exit_code": counted.get("exit_code") if isinstance(counted, dict) else None,
-        "passed": None
-        if label == "none"
-        else _gate_passed_from_result(
-            tests_dict if isinstance(tests_dict, dict) else None,
-            surface_state if isinstance(surface_state, dict) else None,
-        ),
-    }
+    """Read the signed gate through the same interpreter used at dispatch."""
+    tests = result_data.get("tests")
+    surface = result_data.get("test_surface")
+    return gate_summary(
+        tests if isinstance(tests, dict) else None,
+        surface if isinstance(surface, dict) else None,
+        command,
+    )
 
 
 def verify_run_attestation(

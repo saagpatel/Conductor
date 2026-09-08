@@ -39,8 +39,8 @@ Standing policy alongside the table:
   Flash and Grok 4.6 review cold in parallel, Sonnet fixes on the build's
   thread. `conductor shape a` writes it; `--opus-review` adds Opus 5 as a
   third reviewer, `--adversarial` adds a lane whose deliverable is a failing
-  test. Caps follow `AGENTS.md` rule 2, and the launcher raises a build or fix
-  cap that the forecast warns is low to the forecast p80.
+  test. Caps follow `AGENTS.md` rule 2, and the launcher raises every warned
+  lane's cap to the forecast p80 rounded up to a whole dollar.
 - **Reviewers carry no quota.** Every review, judge, and collate prompt says
   an empty answer is complete; the template is in `AGENTS.md`.
 - **Shelved, not to be re-proposed without the operator raising it:** the

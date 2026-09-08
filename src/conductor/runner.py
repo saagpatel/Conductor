@@ -86,6 +86,8 @@ from .verify import (
 from .verify import (
     Verdict as GitVerdict,
 )
+from .verify import gate_passed as _gate_passed
+from .verify import gate_summary as _gate_summary
 
 TAIL_LINES = 20
 GATE_TIMEOUT = 900
@@ -1196,25 +1198,6 @@ def _check_deliverable_validator(
     )
 
 
-def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
-    """Whether the counted gate ran and did not fail.
-
-    True when nothing ran: that means "not failed", and it is what
-    commit-blocking still uses (an adversarial lane skips both gates by
-    construction; `reproduce_blocks_commit` is what gates it). The signed
-    statement must not repeat this as "passed" -- see `_gate_summary`.
-    """
-    clean = (surface or {}).get("clean_gate") or {}
-    counted = clean if clean.get("ran") else tests
-    if not counted or not counted.get("ran"):
-        return True
-    return (
-        counted.get("exit_code") == 0
-        and not counted.get("timed_out")
-        and not counted.get("interrupted")
-    )
-
-
 def _already_failed_dispatch(
     timed_out: bool,
     error: str | None,
@@ -1236,33 +1219,6 @@ def _already_failed_dispatch(
         or output.error
         or output.status == INCOMPLETE
     )
-
-
-def _gate_summary(
-    tests_dict: dict | None, surface_state: dict | None, test_command: str | None
-) -> dict:
-    """Which gate run counted for this dispatch, and its verdict, in the
-    shape the signed receipt carries (A5's `gate` block).
-
-    `passed` is None when no gate ran (`counted: "none"`), True/False when
-    one did. That is a truthfulness fix on the receipt, not a policy
-    change: `_gate_passed` still returns True when nothing ran, so this
-    does not block a commit. `reproduce_blocks_commit`, not this boolean,
-    is what gates a fix or adversarial lane.
-    """
-    clean = (surface_state or {}).get("clean_gate") or {}
-    if clean.get("ran"):
-        counted, label = clean, "clean"
-    elif tests_dict and tests_dict.get("ran"):
-        counted, label = tests_dict, "own"
-    else:
-        counted, label = None, "none"
-    return {
-        "command": test_command,
-        "counted": label,
-        "exit_code": counted.get("exit_code") if counted else None,
-        "passed": None if label == "none" else _gate_passed(tests_dict, surface_state),
-    }
 
 
 def _commit_bounds(

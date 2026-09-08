@@ -2911,3 +2911,29 @@ basetemp. Exit codes were captured separately; both were 0.
 
 The 19 inherited review findings remain separate from this release; they
 are not represented as fixed by the version bump.
+
+
+<a id="r-0.103.0"></a>
+## Receipt 2026-09-08: ownership corrections shipped as v0.103.0
+
+The [ownership evaluation](../review/2026-09-08-owner-evaluation.md) records the
+pre-edit structural assessment, all 19 open finding dispositions, and verification.
+Forecasts now select the declared builder, disclose unknown-price history, exclude
+known auxiliary effects, and apply inherited caps and generated names correctly.
+Cascade totals include retries and preserve unknown costs. Resume checks recorded
+digests and missing repositories, keeps recovered uncertainty, and preserves
+cancelled unknown-price counts. Live and resumed budget classification share a rule;
+execution and attestation share one gate interpreter. Existing call signatures remain
+usable; the optional seed parameter defaults to the previous behavior.
+
+No new conductor mission or vendor probe was dispatched. Direct helper sessions used
+existing accounts; their combined charge was not measured, so no zero-cost or total
+cost claim is made. Corpus receipts and unrelated working-tree changes were preserved.
+
+Validation: ruff exit 0; 2,145 tests passed on Python 3.14.7 and again on the supported
+minimum Python 3.12.13, both with the parallel loadgroup gate and external basetemp.
+The new regressions produced 25 behavioral failures against v0.101.0 source, including
+the release-layout fix shipped in v0.102.0; preservation cases stayed green. The initial
+full gate had two wording-compatibility failures, corrected before the passing rerun.
+Full dispositions and verification limits are in the evaluation. This release follows
+the separate wave 18 release, v0.102.0 (`815518a`).

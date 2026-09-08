@@ -170,13 +170,15 @@ touching for that alone (see "What a fixture holds").
 Before anything dispatches, `conductor shape a` (and `run_mission` itself,
 on a launch, a resume, and a dry run alike) compares each lane's cap
 against what the same vendor and pipeline stage has actually cost on this
-machine: `forecast.history` groups every priced, non-dry-run receipt under
-`$CONDUCTOR_HOME/runs` by `(vendor, stage)`, the same way `conductor
-report`'s vendor-and-stage rows do, and `forecast.forecast` reads each
-lane's own first-attempt cap against that history's 80th percentile
-(nearest-rank method) with a floor of three runs -- one unlucky run must
-never read as a trend, so a lane with fewer than three comparable runs on
-record gets no percentiles and no warning. A lane warns when it has a cap,
+machine: `forecast.history` groups priced, non-dry-run receipts under
+`$CONDUCTOR_HOME/runs` by `(vendor, stage)`, excluding known auxiliary
+collate, judge-order, and resolver dispatches. Standalone dispatches remain
+eligible. `forecast.forecast` reads the declared primary attempt's vendor
+and cap, skipping a prepended cheap cascade, against that history's 80th
+percentile (nearest-rank method), with a floor of three runs. With three or
+four priced samples, p80 is the maximum: the three-run floor is a sample threshold, not outlier
+protection. Fewer than three priced samples yields no percentile or numeric
+cap warning. A lane warns when it has a cap,
 at least three runs of history, and that cap sits under the 80th
 percentile:
 
@@ -193,11 +195,19 @@ into the result's `notes`. Human and script lanes carry no cost history
 worth comparing and are skipped. A golden replay runs in a home with no
 run history at all, so its forecast is always empty.
 
+Each lane row also counts `unpriced_runs`, `estimated_runs`, and
+`zero_cost_runs`. Missing prices produce a separate warning even with no
+priced samples, so an all-unpriced history differs from no history. Estimates
+and valid zero-dollar receipts remain in the percentile sample. These counts
+make data quality visible; they cannot detect a confidently wrong recorded
+price. Use `conductor reprice` to repair known parser drift first.
+Timezone-naive `since` values in the Python API mean UTC, as in spend reporting.
+
 The warning used to be where it stopped, and on three launches running the
 lead answered it the same way by hand: raise the build lane's `cap_usd` to
 the p80 and the mission's `max_cost_usd` by the same difference before
 launching. `conductor shape a` now does that itself (F17). Every lane the
-forecast warns about, the fix lane as much as the build, gets its cap
+forecast warns about, including review lanes, gets its cap
 raised to the p80 rounded up to the next whole dollar, and the mission
 budget rises by the same amount. Each raise prints its own line:
 
@@ -215,3 +225,6 @@ figure. `--no-forecast-cap` declines the raise: the caps stay at their rule
 2 figures, the warning prints as before, and the `caps` block still carries
 the p80 that was turned down.
 
+The Python `apply_caps` API also matches generated lane names and inherited
+mission caps. Reapplying the same forecast preserves the original arithmetic
+and does not increase the budget a second time.

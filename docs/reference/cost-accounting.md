@@ -28,9 +28,13 @@ is `null` on a `"reported"` figure (the fleet's own number, not the table's)
 and on an unpriced run.
 
 Token conventions are normalized first: `input_tokens` excludes cache reads
-on every fleet (OpenAI and Google count them inside the input figure and are
-split out), and `output_tokens` includes reasoning (Antigravity's separate
-`thinking_tokens` are folded in, as Google bills them).
+on every fleet. Codex includes them in its input figure, so they are split
+out. The observed Cursor and Antigravity CLI streams already report uncached
+input separately; subtracting cache reads again undercounted their spend.
+`output_tokens` includes reasoning (Antigravity's separate `thinking_tokens`
+are folded in). These are CLI stream conventions, not assumptions about
+the vendors' other APIs; see the
+[corpus measurements](../research/2026-09-08-stream-shapes-from-the-receipt-corpus.md).
 
 Measured on 2026-09-03, a one-line answer to "what is this README for":
 codex/luna $0.0037, antigravity $0.0228, cursor/composer-2.5 $0.0131, and
@@ -279,6 +283,13 @@ Two refusals, which are the point of the command:
    changed; never let a price-table revision walk backwards through stored
    history.
 
+Repricing updates run receipts, not previously written mission reports or
+their embedded attempt summaries. Those snapshots retain the accounting
+basis recorded when the mission ran. `conductor spend`, `conductor report`,
+forecasting, and resume budget seeding read current run receipts; use these
+for current totals. Historical snapshots can therefore disagree with a
+repriced run without implying that the current ledger counted it twice.
+
 When it writes, it rewrites only the `usage` token counters,
 `usage.total_tokens`, and -- where `cost_basis == "estimated"` --
 `usage.cost_usd` and `usage.price`. Verdicts, `ok`, commit state, `cost_basis`,
@@ -463,4 +474,3 @@ code with no source (as the test suite does) takes no file lock.
 
 Salvage is never automated: a kept worktree still needs a lead to gate it,
 read it, and commit it by hand before any review or fix mission runs against it.
-
