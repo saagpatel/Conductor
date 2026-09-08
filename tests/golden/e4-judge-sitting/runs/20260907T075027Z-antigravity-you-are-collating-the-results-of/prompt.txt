@@ -88,9 +88,14 @@ index ed94d44..e72c0d9 100644
 
 ## Conductor ranking verdict
 
-Which lane's result is strongest: cand-grok, cand-composer?
+Candidates, in the order shown: cand-grok, cand-composer.
+
+Compare them on correctness, whether tests pass, and whether the change does what the spec asked -- not on style or naming. If one candidate is stronger on that bar, set strongest to its name. If they are equivalent or none meets the bar, set strongest to "none". Either answer is complete.
 
 A score from 1 to 10 per lane is welcome and optional.
 
+reason must cite a file and line or a hunk from the diff; a claim with no citation is dropped.
+
 Your final answer must be exactly one JSON object matching this schema:
-{"additionalProperties":false,"properties":{"reason":{"type":"string"},"scores":{"additionalProperties":false,"properties":{"cand-composer":{"maximum":10,"minimum":1,"type":"integer"},"cand-grok":{"maximum":10,"minimum":1,"type":"integer"}},"type":"object"},"strongest":{"enum":["cand-grok","cand-composer"],"type":"string"}},"required":["strongest","reason"],"type":"object"}
+{"additionalProperties":false,"properties":{"reason":{"description":"Cite a file and line or a hunk from the diff; a claim with no citation is dropped.","type":"string"},"scores":{"additionalProperties":false,"properties":{"cand-composer":{"maximum":10,"minimum":1,"type":"integer"},"cand-grok":{"maximum":10,"minimum":1,"type":"integer"}},"type":"object"},"strongest":{"enum":["cand-grok","cand-composer","none"],"type":"string"}},"required":["strongest","reason"],"type":"object"}
+Write that object once and end there: no example, no restatement of the schema, and no second copy of the object after it. Put the entire ranking in this reply.
