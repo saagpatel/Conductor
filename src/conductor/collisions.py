@@ -121,7 +121,9 @@ def touched_files(patch: str) -> list[str]:
     `diff --git a/<p> b/<p>` headers, quoted or not. A rename's old and new
     paths both count; an add or a delete names the same path on both sides."""
     paths: set[str] = set()
-    for line in patch.splitlines():
+    # Git records end at LF; splitlines also splits valid Unicode path bytes
+    # (NEL, line separator and paragraph separator) when quotePath is false.
+    for line in patch.split("\n"):
         if not line.startswith(_DIFF_GIT_PREFIX):
             continue
         sides = _header_paths(line[len(_DIFF_GIT_PREFIX) :])
@@ -158,7 +160,7 @@ def _parse_conflicts(stdout: str) -> list[str] | None:
     exit-1 run, or None when `stdout` is not the shape that command writes on
     a real conflict (an invalid ref writes its complaint to stderr instead
     and leaves stdout empty)."""
-    lines = stdout.splitlines()
+    lines = stdout.split("\n")
     if not lines or not lines[0].strip():
         return None
     conflicts: list[str] = []
