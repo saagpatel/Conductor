@@ -136,3 +136,36 @@ def test_scrub_guard_is_told_about_every_repository_a_mission_named(tmp_path: Pa
 
     assert scrub_guard(work) == [], "the guard has no way to know about an unnamed path"
     assert scrub_guard(work, extra=[(other, "mission cwd 2")]) != []
+
+
+def test_find_key_material_refuses_an_unreadable_file(tmp_path: Path):
+    """A file the scan could not read is a file it could not clear."""
+    key = bytes(range(32))
+    locked = tmp_path / "locked.bin"
+    locked.write_bytes(b"x")
+    locked.chmod(0)
+    try:
+        with pytest.raises(export.ExportError, match="cannot read locked.bin"):
+            export._find_key_material(tmp_path, key)
+    finally:
+        locked.chmod(0o644)
+
+
+def test_scrub_guard_checks_the_home_the_caller_passed(tmp_path: Path, monkeypatch):
+    """The guard used to always needle `conductor_home()` from the
+    environment. `export(home=other)` placeholders that other tree; the
+    leak backstop has to check the same one. Callers that pass nothing
+    still get the environment default."""
+    env_home = tmp_path / "env-conductor"
+    env_home.mkdir()
+    monkeypatch.setenv("CONDUCTOR_HOME", str(env_home))
+    used_home = tmp_path / "used-conductor"
+    used_home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "note.txt").write_text(f"see {used_home} for receipts\n")
+
+    assert scrub_guard(work) == [], "the environment home is not in the bundle"
+    findings = scrub_guard(work, home=used_home)
+    assert findings != []
+    assert any("conductor home" in finding for finding in findings)

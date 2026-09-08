@@ -106,9 +106,10 @@ _TOKEN_PREFIX_RE = re.compile(
 # where `key:` and `secret:` are a dict literal or a type annotation, so the
 # rule redacted golden fixtures and its guard side failed four committed
 # ones. Bundle `.json` files are already covered by `_scrub_json_value`,
-# which redacts by key name; the gap is `answer.txt`, `prompt.txt`,
-# `diff.patch`, and the logs under `--logs`. Closing it needs a value-shape
-# test (entropy, or a vendor prefix) rather than a name test.
+# which redacts by field name (see `_json_key_is_secret`); the gap is
+# `answer.txt`, `prompt.txt`, `diff.patch`, and the logs under `--logs`.
+# Closing it needs a value-shape test (entropy, or a vendor prefix) rather
+# than a name test.
 # `--api-key VALUE`, `--token=VALUE`: the shape a command line uses.
 _FLAG_SECRET_RE = re.compile(
     r"(--[A-Za-z0-9-]*(?:" + "|".join(_SECRET_KEY_WORDS) + r")[A-Za-z0-9-]*)([=\s]+)(\S{8,})",
@@ -201,16 +202,58 @@ def scrub_text(text: str, replacements: list[tuple[str, str]]) -> str:
     return _redact_secrets(text)
 
 
+# Split `api_key`, `apiKey`, `API_KEY` into components so a JSON field name
+# can be judged as a whole identifier, not a substring. `keyboard` is one
+# word; `apiKey` is `api` + `Key`.
+_FIELD_NAME_COMPONENT_RE = re.compile(
+    r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
+)
+# TOKEN / SECRET / PASSWORD as a field-name component are secret-shaped.
+# KEY is too generic as a whole name -- `prices.py` puts the matched price
+# table entry under `"key"`, and a verdict checklist criterion uses it as an
+# id -- so it only counts as a component of a longer name (`api_key`,
+# `apiKey`, `private_key`). Substring matches (`keyboard`, `monkey`,
+# `keywords`) are left alone.
+_SECRET_FIELD_WORDS = frozenset({"token", "secret", "password"})
+
+
+def _json_key_is_secret(key: str) -> bool:
+    """True when a JSON *field name* is a secret identifier.
+
+    A key-name rule is a heuristic either way; this is the narrowest one
+    that still redacts `api_key` / `token` / `password` and leaves a field
+    literally named `key` (and `keyboard` / `monkey` / `keywords`) alone.
+
+    Inverse gap, left open: a dict re-keys its children, so
+    `{"token": {"value": "hunter2"}}` is not redacted while
+    `{"token": "hunter2"}` is. Closing it by inheriting the parent name
+    would re-widen this rule: every nested field under `usage.tokens`
+    would redact. A mapping whose own keys are not secret-shaped is
+    judged on those keys, not the parent's.
+    """
+    components: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", key):
+        if chunk:
+            components.extend(_FIELD_NAME_COMPONENT_RE.findall(chunk) or [chunk])
+    lowered = [c.lower() for c in components]
+    if any(c in _SECRET_FIELD_WORDS for c in lowered):
+        return True
+    return "key" in lowered and len(lowered) > 1
+
+
 def _scrub_json_value(
     value: object, replacements: list[tuple[str, str]], *, key: str | None = None
 ):
     if isinstance(value, str):
-        if key is not None and any(word.lower() in key.lower() for word in _SECRET_KEY_WORDS):
+        if key is not None and _json_key_is_secret(key):
             return "<redacted>"
         return scrub_text(value, replacements)
     if isinstance(value, dict):
         # F8: keys too -- a cross-repo mission's `overlap.files` is keyed by
         # `<repository>:<path>` (E19), and a key is as much a path as a value.
+        # Children are judged on their own field names, not the parent's:
+        # inheriting a secret-shaped parent into a nested object is the
+        # inverse of `_json_key_is_secret`'s narrowing, and is left open.
         return {
             scrub_text(k, replacements): _scrub_json_value(v, replacements, key=k)
             for k, v in value.items()
@@ -294,7 +337,12 @@ def _mask_base64_runs(line: str) -> str:
     return _MASKABLE_B64_RE.sub(mask, line)
 
 
-def scrub_guard(path: str | Path, *, extra: list[tuple[str, str]] | None = None) -> list[str]:
+def scrub_guard(
+    path: str | Path,
+    *,
+    extra: list[tuple[str, str]] | None = None,
+    home: str | Path | None = None,
+) -> list[str]:
     """Every occurrence in a fixture directory of the user's home path, the
     conductor home, any of `extra`'s (path, label) pairs, or any of the
     scrub's secret patterns, as `file:line: <pattern name>`, including one
@@ -304,13 +352,21 @@ def scrub_guard(path: str | Path, *, extra: list[tuple[str, str]] | None = None)
     E19: `extra` lets a caller that knows a mission's own repository paths
     (a cross-repo mission's, say) check for them too -- `scrub_guard` itself
     has no way to recover a real path from an already-scrubbed fixture, so it
-    cannot find one it is not told about."""
+    cannot find one it is not told about.
+
+    `home` is the conductor home the caller actually used (export's `home`
+    argument, golden.record's `home`). When omitted, the environment default
+    (`conductor_home()`) is the needle, which is right for callers that
+    pass nothing and wrong for `export(home=other, ...)` -- the leak
+    backstop has to check the tree the bundle was built from, not a
+    different tree the environment happens to name."""
     from .paths import conductor_home
 
     path = Path(path)
+    conductor = Path(home) if home is not None else conductor_home()
     patterns: list[tuple[str, str]] = [
         (str(Path.home()), "user home"),
-        (str(conductor_home()), "conductor home"),
+        (str(conductor), "conductor home"),
         *(extra or []),
     ]
     findings: list[str] = []
@@ -683,7 +739,7 @@ def record(
         # F8: the guard is part of `record`, not a separate step an operator
         # remembers to run -- the first cross-repo fixture carried a real
         # repository path in a JSON key that only the guard would have seen.
-        leaks = scrub_guard(work, extra=extra_pairs)
+        leaks = scrub_guard(work, extra=extra_pairs, home=home)
         if leaks:
             raise GoldenError(
                 f"{mission_dir.name}: fixture would leak: " + "; ".join(leaks[:8])
