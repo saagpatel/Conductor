@@ -542,10 +542,10 @@ class Mission:
     # derived like `depth`, never set by a mission file.
     parent: dict | None = None
     # E10 second spec: load-derived like `depth`/`parent`, never set by a
-    # mission file -- true only when `_launch_plan_child` clamped this
-    # child's own `max_cost_usd` down to its parent's remaining ledger at
-    # launch time (a child under a budgetless parent runs under its own
-    # cap, unclamped, and this stays false).
+    # mission file -- true when `_launch_plan_child` took this child's
+    # `max_cost_usd` as the lesser of its own and the parent's remaining
+    # ledger at launch, whether or not that lowered it. A child under a
+    # budgetless parent runs under its own cap and this stays false.
     budget_from_parent: bool = False
 
     def validate(self) -> None:
