@@ -1524,6 +1524,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report without writing (default)",
     )
+    p_reprice.add_argument(
+        "--fleet",
+        choices=sorted(FLEETS),
+        help="only inspect receipts from this fleet",
+    )
     p_reprice.add_argument("--json", action="store_true")
     p_reprice.set_defaults(func=cmd_reprice)
 

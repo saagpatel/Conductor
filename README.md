@@ -408,9 +408,10 @@ linked from [Reference](#reference).
   numbers, computed from the same receipts
 - `conductor reprice`: re-parse every stored receipt's own stdout with the
   current parser and report what a parser convention change moved; `--dry-run`
-  is the default and `--apply` archives the corpus before writing. It never
-  recomputes a `reported` cost and never touches a receipt whose token counters
-  did not move; see "Cost accounting"
+  is the default and `--apply` archives the corpus before writing. Optional
+  `--fleet NAME` limits the pass to one fleet's receipts. It never recomputes a
+  `reported` cost and never touches a receipt whose token counters did not
+  move; see "Cost accounting"
 - `conductor gc`: plan safe worktree, `conductor/*` branch, and stale
   port-claim cleanup; pass `--apply` to execute it
 - `conductor attest MISSION_ID`: verify a mission's signed receipt chain on

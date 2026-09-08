@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices
+from .fleets import FLEETS
 from .outputs import Usage, parse
 from .paths import conductor_home
 from .report import _print_section
@@ -44,6 +45,7 @@ SKIP_DRY_RUN = "dry_run"
 SKIP_NO_USAGE = "no_usage"
 SKIP_NO_PARSED_USAGE = "no_parsed_usage"
 SKIP_TOKENS_UNCHANGED = "tokens_unchanged"
+SKIP_FLEET_MISMATCH = "fleet_mismatch"
 
 SKIP_REASONS = (
     SKIP_UNREADABLE,
@@ -52,6 +54,8 @@ SKIP_REASONS = (
     SKIP_NO_PARSED_USAGE,
     SKIP_TOKENS_UNCHANGED,
 )
+
+FILTERED_SKIP_REASONS = (*SKIP_REASONS, SKIP_FLEET_MISMATCH)
 
 _LARGEST = 10
 
@@ -130,6 +134,18 @@ class Move:
         }
 
 
+def _skip_dict(fleet_filter: str | None) -> dict[str, int]:
+    reasons = FILTERED_SKIP_REASONS if fleet_filter is not None else SKIP_REASONS
+    return {reason: 0 for reason in reasons}
+
+
+def _validate_fleet_filter(fleet: str | None) -> None:
+    if fleet is not None and fleet not in FLEETS:
+        raise ValueError(
+            f"unknown fleet '{fleet}'. Known: {', '.join(sorted(FLEETS))}"
+        )
+
+
 @dataclass
 class Summary:
     """What a reprice pass scanned, skipped, and would move (or did)."""
@@ -137,9 +153,8 @@ class Summary:
     scanned: int = 0
     apply: bool = False
     archive: str | None = None
-    skipped: dict[str, int] = field(
-        default_factory=lambda: {reason: 0 for reason in SKIP_REASONS}
-    )
+    fleet: str | None = None
+    skipped: dict[str, int] = field(default_factory=lambda: _skip_dict(None))
     moves: list[Move] = field(default_factory=list)
 
     @property
@@ -164,7 +179,7 @@ class Summary:
                 move.run_id,
             ),
         )[:_LARGEST]
-        return {
+        payload: dict[str, object] = {
             "scanned": self.scanned,
             "moved": len(self.moves),
             "apply": self.apply,
@@ -175,6 +190,9 @@ class Summary:
             "new_cost_usd": round(new_cost, 6),
             "largest": [move.to_dict() for move in largest],
         }
+        if self.fleet is not None:
+            payload["fleet"] = self.fleet
+        return payload
 
 
 def _counter(value: object) -> int:
@@ -263,7 +281,7 @@ def _new_cost(
     return estimated, prices.basis(model)
 
 
-def _plan_move(run_dir: Path) -> Move | str:
+def _plan_move(run_dir: Path, *, fleet_filter: str | None = None) -> Move | str:
     """A Move, or the skip reason that kept this receipt off the moved set.
 
     Refusal 2 lives here: identical token counters return
@@ -274,6 +292,8 @@ def _plan_move(run_dir: Path) -> Move | str:
     if isinstance(loaded, str):
         return loaded
     raw, fleet = loaded
+    if fleet_filter is not None and fleet != fleet_filter:
+        return SKIP_FLEET_MISMATCH
     stdout = _read_stdout(run_dir / "stdout.log")
     if stdout is None:
         return SKIP_UNREADABLE
@@ -340,13 +360,15 @@ def reprice(
     *,
     apply: bool = False,
     now: datetime | None = None,
+    fleet: str | None = None,
 ) -> Summary:
     """Scan `$CONDUCTOR_HOME/runs` and report or rewrite parser-moved usage."""
-    summary = Summary(apply=apply)
+    _validate_fleet_filter(fleet)
+    summary = Summary(apply=apply, fleet=fleet, skipped=_skip_dict(fleet))
     planned: list[Move] = []
     for run_dir in _candidate_runs(home):
         summary.scanned += 1
-        outcome = _plan_move(run_dir)
+        outcome = _plan_move(run_dir, fleet_filter=fleet)
         if isinstance(outcome, str):
             summary.skipped[outcome] += 1
             continue
@@ -363,6 +385,8 @@ def reprice(
 def _print_summary(summary: Summary) -> None:
     payload = summary.to_dict()
     action = "rewritten" if summary.apply else "would move"
+    if summary.fleet is not None:
+        print(f"fleet filter  {summary.fleet}")
     print(
         f"scanned {summary.scanned}  {action} {len(summary.moves)}"
         f"  skipped {summary.skipped_total}"
@@ -440,7 +464,11 @@ def _print_summary(summary: Summary) -> None:
 
 def cmd_reprice(args: argparse.Namespace) -> int:
     """Dry-run the ledger correction, or apply it after an explicit flag."""
-    summary = reprice(conductor_home(), apply=bool(getattr(args, "apply", False)))
+    summary = reprice(
+        conductor_home(),
+        apply=bool(getattr(args, "apply", False)),
+        fleet=getattr(args, "fleet", None),
+    )
     if args.json:
         print(json.dumps(summary.to_dict(), indent=2))
     else:

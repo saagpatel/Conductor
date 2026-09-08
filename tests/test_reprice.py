@@ -6,9 +6,12 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from conductor import prices
 from conductor.cli import main
 from conductor.outputs import parse
+from conductor.reprice import reprice
 
 
 def _cursor_stdout(*, input_tokens: int, output_tokens: int, cache_read: int) -> str:
@@ -65,6 +68,22 @@ def _claude_stdout(
     if cost_usd is not None:
         payload["total_cost_usd"] = cost_usd
     return json.dumps(payload)
+
+
+def _antigravity_stdout(*, input_tokens: int, output_tokens: int) -> str:
+    return json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "ok",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            },
+        }
+    )
 
 
 def _write_run(
@@ -473,3 +492,266 @@ def test_reprice_nothing_found_is_exit_zero(home: Path, monkeypatch, capsys):
     payload = _json_output(capsys)
     assert payload["scanned"] == 0
     assert payload["moved"] == 0
+    assert "fleet" not in payload
+    assert "fleet_mismatch" not in payload["skipped"]
+
+
+def test_reprice_unfiltered_summary_has_no_fleet_filter_keys(home: Path, monkeypatch, capsys):
+    stdout = _cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000)
+    _write_run(
+        home,
+        "20260903T000000Z-cursor-compat",
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=stdout,
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--json")
+    assert "fleet" not in payload
+    assert "fleet_mismatch" not in payload["skipped"]
+
+
+def test_reprice_rejects_an_unknown_api_fleet_before_scanning(home: Path):
+    home.mkdir(parents=True)
+    with pytest.raises(ValueError, match="unknown fleet 'bogus'"):
+        reprice(home, fleet="bogus")
+
+
+def test_reprice_cli_rejects_an_unknown_fleet(home: Path, monkeypatch):
+    home.mkdir(parents=True)
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    with pytest.raises(SystemExit):
+        main(["reprice", "--fleet", "bogus"])
+
+
+def test_reprice_fleet_filter_moves_only_the_selected_fleet(home: Path, monkeypatch, capsys):
+    agy_id = "20260908T000000Z-antigravity-moving"
+    cursor_id = "20260908T010000Z-cursor-moving"
+    agy_stdout = _antigravity_stdout(input_tokens=200, output_tokens=20)
+    cursor_stdout = _cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000)
+    _write_run(
+        home,
+        agy_id,
+        fleet="antigravity",
+        model="gemini-3.7-flash",
+        stdout=agy_stdout,
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 20,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 20,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    _write_run(
+        home,
+        cursor_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=cursor_stdout,
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--json")
+    assert payload["fleet"] == "antigravity"
+    assert payload["scanned"] == 2
+    assert payload["moved"] == 1
+    assert payload["skipped"]["fleet_mismatch"] == 1
+    agy_fleet = payload["fleets"]["antigravity"]
+    assert agy_fleet["receipts"] == 1
+    assert agy_fleet["input_tokens"] == 200
+    assert agy_fleet["output_tokens"] == 0
+    cursor_usage = json.loads((home / "runs" / cursor_id / "result.json").read_text())["usage"]
+    assert cursor_usage["input_tokens"] == 0
+
+
+def test_reprice_fleet_filter_skips_other_fleets_before_reading_stdout(
+    home: Path, monkeypatch, capsys
+):
+    """Excluded stdout must not be parsed: invalid cursor bytes stay unread."""
+    run_id = "20260908T020000Z-cursor-excluded"
+    directory = _write_run(
+        home,
+        run_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout="this is not cursor json and would be no_parsed_usage if read",
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    before = (directory / "result.json").read_bytes()
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--json")
+    assert payload["scanned"] == 1
+    assert payload["moved"] == 0
+    assert payload["skipped"]["fleet_mismatch"] == 1
+    assert payload["skipped"]["no_parsed_usage"] == 0
+    assert (directory / "result.json").read_bytes() == before
+
+
+def test_reprice_fleet_filter_dry_run_preserves_matching_and_excluded_bytes(
+    home: Path, monkeypatch, capsys
+):
+    agy_id = "20260908T030000Z-antigravity-dry"
+    cursor_id = "20260908T040000Z-cursor-dry"
+    agy_dir = _write_run(
+        home,
+        agy_id,
+        fleet="antigravity",
+        model="gemini-3.7-flash",
+        stdout=_antigravity_stdout(input_tokens=50, output_tokens=5),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 5,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    cursor_dir = _write_run(
+        home,
+        cursor_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    agy_before = (agy_dir / "result.json").read_bytes()
+    cursor_before = (cursor_dir / "result.json").read_bytes()
+    payload = _reprice(
+        home, monkeypatch, capsys, "--fleet", "antigravity", "--dry-run", "--json"
+    )
+    assert payload["apply"] is False
+    assert payload["moved"] == 1
+    assert payload["archive"] is None
+    assert (agy_dir / "result.json").read_bytes() == agy_before
+    assert (cursor_dir / "result.json").read_bytes() == cursor_before
+
+
+def test_reprice_fleet_filter_apply_rewrites_only_matching_receipts(
+    home: Path, monkeypatch, capsys
+):
+    agy_id = "20260908T050000Z-antigravity-apply"
+    cursor_id = "20260908T060000Z-cursor-apply"
+    _write_run(
+        home,
+        agy_id,
+        fleet="antigravity",
+        model="gemini-3.7-flash",
+        stdout=_antigravity_stdout(input_tokens=80, output_tokens=8),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 8,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 8,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+        extra={"note": "agy-pre-write"},
+    )
+    _write_run(
+        home,
+        cursor_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+        extra={"note": "cursor-pre-write"},
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--apply", "--json")
+    assert payload["moved"] == 1
+    archive = payload["archive"]
+    assert isinstance(archive, str)
+    with tarfile.open(archive, "r:gz") as tar:
+        names = set(tar.getnames())
+        assert f"runs/{agy_id}/result.json" in names
+        assert f"runs/{cursor_id}/result.json" in names
+        agy_file = tar.extractfile(f"runs/{agy_id}/result.json")
+        cursor_file = tar.extractfile(f"runs/{cursor_id}/result.json")
+        assert agy_file is not None and cursor_file is not None
+        archived_agy = json.loads(agy_file.read())
+        archived_cursor = json.loads(cursor_file.read())
+    assert archived_agy["usage"]["input_tokens"] == 0
+    assert archived_cursor["usage"]["input_tokens"] == 0
+    on_disk_agy = json.loads((home / "runs" / agy_id / "result.json").read_text())
+    on_disk_cursor = json.loads((home / "runs" / cursor_id / "result.json").read_text())
+    assert on_disk_agy["usage"]["input_tokens"] == 80
+    assert on_disk_agy["note"] == "agy-pre-write"
+    assert on_disk_cursor["usage"]["input_tokens"] == 0
+    assert on_disk_cursor["note"] == "cursor-pre-write"
+
+
+def test_reprice_fleet_filter_empty_selection_is_exit_zero(home: Path, monkeypatch, capsys):
+    _write_run(
+        home,
+        "20260908T070000Z-cursor-only",
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--json")
+    assert payload["fleet"] == "antigravity"
+    assert payload["scanned"] == 1
+    assert payload["moved"] == 0
+    assert payload["skipped"]["fleet_mismatch"] == 1
+    assert sum(payload["skipped"].values()) == 1

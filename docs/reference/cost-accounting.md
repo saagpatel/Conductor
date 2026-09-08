@@ -273,6 +273,26 @@ timestamped `runs-receipts.backup-<UTC>.tgz` beside the runs directory.
 `--json` emits the same summary as a machine-readable object. Exit 0 whether
 or not anything moved; nothing found is a correct and expected result.
 
+Optional `--fleet NAME` limits the pass to receipts whose stored `fleet` field
+matches one of the registry names (`conductor fleets`). Readable receipts from
+other fleets are skipped as `fleet_mismatch` before their `stdout.log` is read
+or parsed; `scanned` still counts every candidate run directory. The filtered
+summary names the fleet in text output and includes a top-level `fleet` field
+and `skipped.fleet_mismatch` in JSON. An unfiltered pass omits those keys.
+`--apply --fleet NAME` archives the full receipt corpus as usual, but rewrites
+only the matching planned moves.
+
+Examples:
+
+```bash
+# Audit what the antigravity parser correction would move, without touching
+# cursor or claude receipts.
+conductor reprice --fleet antigravity
+
+# Apply only antigravity corrections after the usual full-corpus archive.
+conductor reprice --fleet antigravity --apply
+```
+
 Two refusals, which are the point of the command:
 
 1. A `cost_basis: "reported"` cost is never recomputed. The vendor printed a
