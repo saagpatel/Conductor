@@ -170,6 +170,7 @@ def write_dispositions_schema(base_dir: Path) -> Path:
     through `cmd_shape_a`'s prompt-writing dance (`--inline` skips that, not
     this) or a salvage follow-on's `emit()`."""
     path = Path(base_dir) / "dispositions.schema.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(DISPOSITIONS_SCHEMA, indent=2) + "\n")
     return path
 
@@ -586,6 +587,7 @@ def write_evidence_schema(base_dir: Path) -> Path:
     dispositions schema, so the build lane's `deliverable.schema` path
     resolves wherever the mission is launched from."""
     path = Path(base_dir) / "evidence.schema.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(EVIDENCE_SCHEMA, indent=2) + "\n")
     return path
 
@@ -594,6 +596,7 @@ def write_shape_schemas(base_dir: Path) -> tuple[Path, Path]:
     """Both schema files a Shape A mission's deliverables name, beside the
     mission file: `dispositions.schema.json` (fix lane) and
     `evidence.schema.json` (build lane)."""
+    Path(base_dir).mkdir(parents=True, exist_ok=True)
     return write_dispositions_schema(base_dir), write_evidence_schema(base_dir)
 
 
