@@ -1,6 +1,6 @@
 # F15: the Shape C findings, fixed as two Shape A missions
 
-Date: 2026-09-07. Release 0.58.0. Roadmap item F15 (`docs/ROADMAP-2026-11.md`). Findings source:
+Date: 2026-09-07. Release 0.58.0. Roadmap item F15 (`docs/archive/roadmaps-closed.md`, Phase F). Findings source:
 `docs/research/2026-09-07-f9-shape-b-c.md`, Opus 5's cold review of the F3, F1, and F2 build
 commits, verified on bytes.
 

@@ -409,7 +409,7 @@ The gap is interaction coverage and independent expected results, not raw test c
 
 Fake fleets prove state transitions, not provider permissions. F12's recorded planner failure
 is the example: a fake read lane could write the deliverable that real Claude plan mode
-refused (`docs/ROADMAP-2026-11.md`, “A read lane's deliverable has never worked live on
+refused (`docs/archive/roadmaps-closed.md`, “A read lane's deliverable has never worked live on
 Claude”). Add separately authorized small adapter drills keyed by CLI version/capability.
 Ordinary unit and golden checks must never reach paid adapters.
 
@@ -450,7 +450,7 @@ transplant after model work; describe before/after behavior evidence, not guaran
 chronology. The development command should also consistently name external basetemp.
 
 The brief's no-live-receipt assertions are stale against later Phase F evidence.
-`docs/ROADMAP-2026-11.md:37-63` and fixtures `f11-unattended-read-notify`,
+`docs/archive/roadmaps-closed.md:704-730` and fixtures `f11-unattended-read-notify`,
 `e7-human-lane-answered`, `e10-plan-lane-continued` record real foreign-repo unattended work
 and scratch human/child flows. They do not establish a successful real-work planner child,
 natural scheduler firing, or current human acceptance. The failed core-guard planner is
@@ -552,7 +552,7 @@ Read in full:
   accounting/report, and golden groups, not only nearby tests. The brief's approximate
   module count was not used as the inventory.
 - All three scripts: release.py, prose_gate.py, notify-hub.py, 522 lines.
-- All ROADMAP-2026-09/10/11.md and RESET-2026-09.md, including historical/dropped sections.
+- All of `docs/archive/roadmaps-closed.md` (then `ROADMAP-2026-09/10/11.md`) and `RESET-2026-09.md`, including historical/dropped sections.
 - All three requested research reports: 2026-09-07-f9-shape-b-c.md,
   2026-09-07-f15-shape-c-fixes.md, 2026-09-07-consumer-anti-slop.md.
 

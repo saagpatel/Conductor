@@ -61,7 +61,7 @@ refuted. Below: only where the verification sharpened, narrowed, or extended the
 - **D22.** Real git emits the quoted form for tabs and non-ASCII names by default; this repo's
   paths are all ASCII.
 - **D23.** Docs only. The receipt's own `cost_usd` is 1.53167; the $1.63 recurs in
-  `RESET-2026-09.md:547,552` and `ROADMAP-2026-11.md:36,57`.
+  `docs/archive/receipts-2026-09.md:2132,2137` and `docs/archive/roadmaps-closed.md:703,724`.
 
 ## Doc claims checked by the lead
 

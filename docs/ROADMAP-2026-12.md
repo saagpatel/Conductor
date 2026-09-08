@@ -1,6 +1,6 @@
 # conductor: Phase G, hardening from the outside review
 
-Written 2026-09-07, the day Phase F closed (`docs/ROADMAP-2026-11.md`) and GPT-6 Astra's peer
+Written 2026-09-07, the day Phase F closed (`docs/archive/roadmaps-closed.md`) and GPT-6 Astra's peer
 review came back (`docs/review/2026-09-07-astra-notes.md`, verified by the lead in
 `docs/review/2026-09-07-lead-verification.md`: 23 defects and 6 weaknesses checked, all
 standing, seven worse than written). The review's verdict, which the lead shares: keep the

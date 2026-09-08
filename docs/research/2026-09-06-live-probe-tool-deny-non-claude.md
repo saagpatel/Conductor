@@ -4,7 +4,7 @@ Date: 2026-09-06. Binaries: `agy` 1.1.27, `cursor-agent` 2026.09.02-c22c1a3. Scr
 repository under the session scratchpad (one seed commit, two files); `<scratch>` below.
 Spend: under $0.10 across six runs (Grok 4.6 and Gemini 3.7 Flash at low effort).
 
-Question, from `docs/ROADMAP-2026-10.md` E21: D2 recorded that "no other fleet exposes a
+Question, from `docs/archive/roadmaps-closed.md` (Phase E) item E21: D2 recorded that "no other fleet exposes a
 tool deny list headless" and D3 recorded that `agy --agent` fails open and Cursor has no
 persona flag. Is there any headless allow or deny mechanism under a different name?
 

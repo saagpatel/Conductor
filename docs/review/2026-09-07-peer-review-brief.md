@@ -53,9 +53,10 @@ differ.
 | `notify.py`, `ports.py`, `prompts.py`, `paths.py` | notifications, per-lane ports, prompt fragments, paths |
 | `scripts/` | `release.py`, `prose_gate.py`, `notify-hub.py` |
 | `tests/golden/` | eleven recorded fixtures |
-| `docs/ROADMAP-2026-09.md` to `-11.md` | three roadmap phases, each with its dropped table |
-| `docs/RESET-2026-09.md` | every release's receipt (cost, shape, what the reviewers found) |
-| `docs/research/` | dated research and live-probe reports with URLs and receipts |
+| `docs/archive/roadmaps-closed.md` | three closed roadmap phases (D, E, F), each with its dropped table |
+| `docs/RESET-2026-09.md` | September reset and the wave index; full receipts in `docs/archive/receipts-2026-09.md` |
+| `docs/research/` | live dated research and live-probe reports with URLs and receipts |
+| `docs/archive/research-shelved/` | shelved-lane receipts (OpenCode, Ollama, pi, local models) |
 
 ## Where the project stands
 
