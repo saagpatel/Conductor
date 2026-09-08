@@ -1433,9 +1433,12 @@ never conjures a mission directory); salvage is the lead's own act, not a
 lane's, so it never extends the mission's signed receipt chain.
 
 Once the lead has read the diff and committed it in the kept worktree by
-hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,
-rule 2, and `--ceiling none|default|H,D` for the follow-on mission's E9
-rolling-spend ceiling, same default and meaning as `shape a --ceiling`)
+hand, `--emit PATH` (with `--ceiling none|default|H,D` for the follow-on
+mission's E9 rolling-spend ceiling, same default and meaning as
+`shape a --ceiling`; `--items` and `--modules` are required by the CLI but
+size only `build_cap`, and a follow-on mission has no build lane, so today
+they change nothing about what it emits -- its fix cap comes from
+`USD_FIX_BASE`, findings, the scheduler tax and the Claude summary alone)
 writes a follow-on mission there: `shape.shape_a_followon`, the
 same Shape A shape as `conductor shape a` except there is no build lane --
 the kept worktree, already at the lead's commit, is the mission's `cwd`
@@ -2140,12 +2143,17 @@ the mission actually being attested and the position it actually sits at,
 and, for a link with a run, that the run's own `attestation.json` still
 matches that recorded hash and still agrees with `result.json` and
 `diff.patch`. It prints one JSON object naming every link's verdict and
-problems, exits 0 when every link verifies, 1 when one does not, and 3 when
-the mission, its chain, or the signing key does not exist.
+problems, exits 0 only when the chain's whole state is `verified`, 1 for
+every other state -- a chain whose every link verifies but which is
+truncated (`partial`) or has nothing to be measured against (`unrecorded`)
+exits 1 too -- and 3 when the mission, its chain, or the signing key does
+not exist.
 
 A valid prefix of a chain is not a complete mission, so the report also
-carries a `state`: `verified`, `partial`, `empty`, `missing`, `malformed`,
-or `failed`. `all([])` is True, so an emptied `links` list and a chain with
+carries a `state`: `verified`, `unrecorded`, `partial`, `empty`, `missing`,
+`malformed`, or `failed`. `unrecorded` is every link verifying while
+`result.json` recorded no chain to compare against, so completeness was
+never checked; it is never `verified`. `all([])` is True, so an emptied `links` list and a chain with
 its tail lopped off both used to verify with nothing, or almost nothing,
 checked; the mission's own `result.json` records `chain: {"links", "head"}`,
 and a chain whose length or head disagrees with that record is `partial`,
@@ -2830,7 +2838,10 @@ The report has seven sections, in this order:
 - **Reviewer precision**: per reviewer vendor, over missions that have both
   a `stage: review` lane whose verdict parsed and a `stage: fix` lane that
   recorded dispositions (see below): findings written, and how many of
-  them the fix lane marked fixed, refused, already true, or wording-only.
+  them the fix lane marked fixed, refused, already true, or wording-only,
+  plus `unparsed`, the review lanes on that vendor whose verdict line did
+  not parse at all (F15 item 2; the same column the finding-rate table
+  carries, counted here per vendor).
   `precision` is `fixed / (fixed + refused)`, blank under three total
   dispositions -- not enough to read as a rate. D20: a disposition is
   counted once per finding it names. Entries are keyed by (mission,
@@ -2879,7 +2890,9 @@ The report has seven sections, in this order:
   over the subset with an evidence map, the cost per landed item. A
   merged mission without a map is in the first pair of figures and out of
   the division, so it neither inflates nor deflates the rate. `--json`
-  carries the same three columns per mission and the sum as `landed`.
+  carries the same three columns per mission -- the `merged` column is
+  emitted under its field name `landed_ok`, beside the `landed` count the
+  table's own line sums.
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
   and fix stages, the runs killed at their cap). D21: a cap loss is

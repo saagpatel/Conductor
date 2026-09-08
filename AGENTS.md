@@ -197,7 +197,8 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   Traps: over-verifies when told to verify (remove "double-check" instructions), expands scope,
   over-delegates to subagents, narrates. Keep thinking on and lower effort instead of disabling
   thinking (thinking off leaks tool calls as plain text that poison the transcript).
-- Sonnet 5: a quarter of Opus's price, more agentic by default, **literal**: it does exactly the
+- Sonnet 5: two fifths of Opus's price ($2/$10 against $5/$25 per million, `prices.py`), more
+  agentic by default, **literal**: it does exactly the
   stated scope and follows "be conservative" to the letter. State scope explicitly. Under-thinks
   at `low` on anything non-trivial; raise effort rather than prompt around it. Temperature and
   manual thinking budgets return 400.
