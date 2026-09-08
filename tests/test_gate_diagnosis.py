@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from conductor import runner as runner_mod
 from conductor.errors import error_kind
+from conductor.fleets import Spec
 from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import Result
 
@@ -186,3 +188,48 @@ def test_an_interrupted_or_timed_out_clean_gate_keeps_its_own_message_and_kind(
 
     assert result.failure() == f"clean gate {label}"
     assert error_kind(result) == "gate"
+
+
+def test_a_clean_gate_transplant_failure_is_not_reported_as_exited_1(
+    repo, home, fake_fleet, monkeypatch, git_out
+):
+    """`_git_failure` sets `ran: True, exit_code: 1, infra_error: True` so a
+    caller can tell a broken transplant from a failed gate command. The
+    clean-gate call site used to uncommit with `why="gate failed"` and
+    `Result.failure()` read `clean gate exited 1` -- the lie `uncommit`'s
+    `why` exists to prevent -- while `infra_error: true` sat on the same
+    receipt. A broken transplant proved nothing either way, so the commit
+    does not land, and the surfaces that report it say the gate could not
+    run.
+    """
+    _seed_conftest(repo)
+    base = git_out(repo, "rev-parse", "HEAD")
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "printf '# fleet override\\n' >> tests/conftest.py; echo work > app.txt",
+        ]
+    )
+
+    def boom(cwd, **kw):
+        return runner_mod._git_failure(
+            "git worktree add failed: boom", worktree=kw["worktree"]
+        )
+
+    monkeypatch.setattr(runner_mod, "_clean_gate", boom)
+    result = runner_mod.dispatch(
+        Spec(fleet="claude", prompt="x", cwd=str(repo), mode="write"),
+        home=home,
+        test_command="true",
+        commit_message="feat: attempted",
+    )
+    assert result.test_surface["clean_gate"]["infra_error"] is True
+    assert result.failure() == "clean gate could not run: git worktree add failed: boom"
+    assert "exited 1" not in (result.failure() or "")
+    assert result.ok is False
+    assert result.commit is not None
+    assert result.commit["committed"] is False
+    assert "clean gate could not run" in result.commit["reason"]
+    assert "gate failed" not in result.commit["reason"]
+    assert git_out(repo, "rev-parse", "HEAD") == base
