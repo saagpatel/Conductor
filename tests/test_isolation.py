@@ -187,3 +187,53 @@ def test_a_no_op_isolated_write_leaves_no_branch_behind(repo, home, fake_fleet, 
     assert result.isolation["branch"] == ""
     assert result.summary()["branch"] is None
     assert git_out(repo, "branch", "--list", "conductor/*") == ""
+
+
+def test_a_release_that_cannot_read_head_keeps_the_worktree(repo, home, monkeypatch):
+    """`release` took `rev-parse`'s stdout without its exit code. A
+    `rev-parse` that did not run answers "", which is never equal to the
+    `base_sha` that is always set here, so a clean no-op lane was reported as
+    "commits remain on the branch" and its `tip_sha` went onto the receipt as
+    "" for a caller to merge."""
+    iso = worktrees.create(str(repo), "probe-head", home / "worktrees")
+    assert iso.active is True
+    real = worktrees.git_run
+
+    def failing(cwd, *args, **kwargs):
+        if args[:2] == ("rev-parse", "HEAD"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: not a git repository")
+        return real(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(worktrees, "git_run", failing)
+
+    released = worktrees.release(iso)
+
+    assert released.kept is True
+    assert released.tip_sha == ""
+    assert "could not read its HEAD" in released.reason
+    assert "commits remain" not in released.reason
+
+
+def test_a_branch_that_could_not_be_deleted_is_not_reported_as_deleted(
+    repo, home, monkeypatch
+):
+    """A clean no-op lane deletes its branch as litter. `branch -D`'s exit
+    code was never read, so lock contention or a branch checked out elsewhere
+    left it in the repository under a receipt saying it was deleted."""
+    iso = worktrees.create(str(repo), "probe-branch", home / "worktrees")
+    assert iso.active is True
+    real = worktrees.git_run
+
+    def failing(cwd, *args, **kwargs):
+        if args[:2] == ("branch", "-D"):
+            return subprocess.CompletedProcess(args, 1, "", "error: branch is checked out")
+        return real(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(worktrees, "git_run", failing)
+
+    released = worktrees.release(iso)
+
+    assert released.kept is False
+    assert released.branch == "conductor/probe-branch"
+    assert "branch kept" in released.reason
+    assert "branch deleted" not in released.reason

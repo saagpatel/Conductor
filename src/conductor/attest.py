@@ -210,6 +210,16 @@ def verify_run_attestation(
     if statement is None:
         problems.append(f"run '{run_id}': attestation signature: {reason}")
         return problems, None
+    if statement.get("run_id") != run_id:
+        # The signature proves the statement was written by conductor, not
+        # that it was written about THIS run. Without this, a valid
+        # attestation copied from another run's directory verifies here, and
+        # the `attestation_sha256` link check only catches it when the
+        # mission link happens to carry that digest (2026-09-08 review).
+        problems.append(
+            f"run '{run_id}': attestation is signed for run "
+            f"'{statement.get('run_id')}'"
+        )
     taint = statement.get("taint")
     try:
         result_data = json.loads((run_dir / "result.json").read_text())
@@ -390,7 +400,7 @@ def evaluate_chain(
         problems.append("chain head does not match the head recorded in result.json")
     if problems:
         return outcome("partial", rows, head)
-    if expected_links is None and expected_head is None:
+    if expected_links is None or expected_head is None:
         # Every link verifies, but nothing said how many links there should
         # have been, so a chain with its tail lopped off is indistinguishable
         # from a whole one. Reporting `verified` here claimed a completeness
@@ -401,6 +411,9 @@ def evaluate_chain(
         # with N links and no `result.json` at all, which is exactly the case
         # D7 and D8 were written for (probed 2026-09-08: truncate the chain,
         # delete result.json, and a two-link mission verified on one link).
+        # `or`, not `and` (2026-09-08 review): with one of the two recorded
+        # and the other missing, the check that was skipped is the one nobody
+        # ran, and returning `verified` claimed both.
         problems.append("result.json records no chain; completeness was not checked")
         return outcome("unrecorded", rows, head)
     return outcome("verified", rows, head)
