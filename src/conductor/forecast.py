@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import report as report_mod
+from .fleets import model_vendor
 
 if TYPE_CHECKING:
     from .mission import Mission
@@ -109,7 +110,7 @@ def forecast(mission: Mission, home: Path, *, since: datetime | None = None) -> 
         if lane.human or lane.script:
             continue
         primary = lane.attempts[0]
-        vendor = report_mod._vendor(primary.fleet, primary.model or "")
+        vendor = model_vendor(primary.fleet, primary.model)
         stage = lane.stage
         costs = hist.get((vendor, stage), [])
         runs = len(costs)

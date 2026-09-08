@@ -163,6 +163,22 @@ def test_forecast_names_an_unstaged_lane_as_unstaged_not_none(home: Path):
     assert "None" not in warning
 
 
+def test_forecast_resolves_a_lane_with_no_model_to_the_fleet_default_vendor(home: Path):
+    """A lane that omits `model` takes the fleet default at dispatch. Grouping
+    it by the fleet name (`_vendor(..., "")`) misses every receipt that
+    lane writes, which is keyed by the default model's vendor."""
+    _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage="build")
+    mission = _mission([_lane("build", model=None, cap_usd=5.0, stage="build")])
+    fc = forecast(mission, home)
+    lane_fc = fc.lanes[0]
+    assert lane_fc.vendor == "anthropic"
+    assert lane_fc.runs == 5
+    assert lane_fc.warn is True
+    assert fc.warnings == [
+        "lane 'build': cap $5.00 is under the $8.00 80th percentile of 5 anthropic build runs"
+    ]
+
+
 def test_forecast_skips_human_and_script_lanes(home: Path):
     _seed(home, [5.0, 6.0, 7.0, 8.0, 9.0], stage="build")
     mission = _mission(
