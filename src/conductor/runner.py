@@ -1143,7 +1143,23 @@ def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str
 # (agy's own init event is the only inventory of what actually ran; the
 # probe's tool list was not exhaustive -- see the comment above
 # TAINT_AGY_DENIED_TOOLS in fleets.py).
-_TAINT_AGY_UNCOVERED_SUBSTRINGS = ("subagent", "mcp", "web", "url", "message", "schedule", "inbox")
+_TAINT_AGY_UNCOVERED_SUBSTRINGS = (
+    "subagent",
+    "mcp",
+    "web",
+    "url",
+    "message",
+    "schedule",
+    "inbox",
+    # 2026-09-08 review: this net used a `startswith("browser_")` test beside
+    # these substrings, and the recorded init event names four browser tools
+    # that spell it the other way round (`click_browser_pixel`,
+    # `list_browser_pages`, `capture_browser_*`). A substring catches every
+    # spelling, which is the point of a fail-closed net.
+    "browser",
+    "notebook",  # a kernel is a code-execution surface beside the shell
+    "command_input",  # stdin to a process the shell started
+)
 # Every PreToolUse matcher `fleets.taint_hook_files` writes, in the order it
 # writes them; the preflight requires each one back by name. D5: the same
 # names in both shell modes -- `run_command` is always matched, and only the
@@ -1224,8 +1240,7 @@ def _uncovered_agy_tools(tools: list[str]) -> list[str]:
     return [
         name
         for name in tools
-        if name not in denied
-        and (name.startswith("browser_") or any(s in name for s in _TAINT_AGY_UNCOVERED_SUBSTRINGS))
+        if name not in denied and any(s in name for s in _TAINT_AGY_UNCOVERED_SUBSTRINGS)
     ]
 
 
