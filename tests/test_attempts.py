@@ -627,5 +627,56 @@ def test_read_previous_lanes_recovers_runs_when_the_lane_receipt_was_never_writt
     assert unknown == 0
     assert "review" not in previous
     assert [item["run_id"] for item in previous["build"].attempts] == ["r-spent"]
+    assert previous["build"].cost_usd == 1.5
+    assert previous["build"].ok is False
     assert any("no lane receipt" in note and "recovered 1 run" in note for note in notes)
     assert attempts_mod._read_previous_lanes is _read_previous_lanes
+
+
+def test_an_unverifiable_resume_does_not_rewrite_the_snapshot_that_made_it_so(
+    repo, home, monkeypatch, tmp_path
+):
+    """A resume that cannot verify the budget must not replace the evidence
+    that made it unverifiable with a well-formed empty snapshot. Item 4
+    recovers run ids when they sit on disk; this is the case they do not."""
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: ["sh", "-c", f"printf '%s\\n' {shlex.quote(_ok_envelope(0.25))}"],
+    )
+    mission = mission_from_dict(
+        {
+            "cwd": str(repo),
+            "max_cost_usd": 1,
+            "lanes": [{"name": "a", "fleet": "claude", "prompt": "A"}],
+        },
+        base_dir=tmp_path,
+    )
+    first = run_mission(mission, home=home)
+    mission_dir = Path(first.mission_dir)
+    snapshot = json.loads((mission_dir / "result.json").read_text())
+    run_id = first.lanes[0]["attempts"][0]["run_id"]
+    (mission_dir / "lanes" / "a.json").write_text(
+        json.dumps(
+            {
+                "name": "a",
+                "ok": True,
+                "future_field": "newer conductor",
+                "attempts": [],
+                "previous_attempts": [],
+            }
+        )
+    )
+    hidden = home / "runs-hidden" / run_id
+    hidden.parent.mkdir(parents=True)
+    (home / "runs" / run_id).rename(hidden)
+
+    resumed = run_mission(
+        Mission.from_snapshot(json.loads((mission_dir / "mission.json").read_text())),
+        home=home,
+        resume_dir=mission_dir,
+    )
+    assert resumed.budget["unverifiable"] is True
+    on_disk = json.loads((mission_dir / "result.json").read_text())
+    assert on_disk["lanes"][0]["attempts"][0]["run_id"] == run_id
+    assert on_disk == snapshot

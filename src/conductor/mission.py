@@ -2858,6 +2858,11 @@ class _ResumePlan:
     notes: list[str] = field(default_factory=list)
     spent_usd: float = 0.0
     unpriced_dispatches: int = 0
+    # Count of lane receipts that could not be parsed and from which no run
+    # ids were salvageable, even from disk. Folded into `unpriced_dispatches`
+    # so `Ledger.blocker()` refuses to start anything; kept separate so a
+    # resume that cannot verify does not rewrite the snapshot that made it so.
+    accounting_unknown: int = 0
     # E10 second spec: every (cost_usd, unpriced_dispatches) a plan lane's
     # already-launched child earned but this resume's own receipt had not
     # yet rolled up -- built by `_resume_plan_child`, applied to the fresh
@@ -3010,12 +3015,42 @@ def _release_lock(lock: Path, owner: str | None) -> bool:
     running mission's directory to a third process -- and a lock that cannot
     be read is not proven to be anyone's, so neither is removed. False says
     the file was left alone, which is never an error here: the caller's own
-    claim is over either way."""
+    claim is over either way.
+
+    There is no compare-and-unlink syscall. The owner check and the removal
+    are one rename of one directory entry: the file is moved to a unique
+    tombstone, then re-read. If it is still ours, the tombstone is deleted
+    and the original path is empty. If it is not ours, it is linked back,
+    unless a new lock has already been published at the original path --
+    `os.link` fails rather than replacing that live lock, the same way
+    `_publish_lock` never steals one.
+
+    What this does not cover: a crash after the rename and before the
+    tombstone unlink leaves the lock path empty (equivalent to a completed
+    release) and an orphan tombstone; a third publication that lands in
+    the restore window after we renamed a file that was no longer ours
+    cannot put that file back at the original path. Those leftover files
+    are not a second live holder of `running.json`.
+    """
     current = _json_object(lock)
     if current is None or current.get("owner") != owner:
         return False
+    tombstone = lock.parent / f".{lock.name}.{os.getpid()}.{uuid.uuid4().hex}.releasing"
     try:
-        lock.unlink()
+        os.rename(lock, tombstone)
+    except FileNotFoundError:
+        return False
+    moved = _json_object(tombstone)
+    if moved is None or moved.get("owner") != owner:
+        try:
+            os.link(tombstone, lock)
+        except (FileExistsError, FileNotFoundError):
+            pass
+        else:
+            tombstone.unlink(missing_ok=True)
+        return False
+    try:
+        tombstone.unlink()
     except FileNotFoundError:
         pass
     return True
@@ -3557,6 +3592,7 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
         spent_usd=spent,
         notes=notes,
         unpriced_dispatches=unpriced + accounting_unknown,
+        accounting_unknown=accounting_unknown,
         children_rollups=children_rollups,
     )
 
@@ -3628,22 +3664,33 @@ def run_mission(
     # unanswered pause never claims the lock and blocks a later, answered
     # resume. A dry run rehearses without needing or recording an answer.
     #
+    # The refusal sits before the lock; the write sits after it. Refusing an
+    # unanswered pause must not claim the directory and block a later
+    # answered resume. Recording the answer is the opposite: it is consumed
+    # by the resume that acts on it, so a SIGINT'd process still holding
+    # `running.json` must not leave `pause.json` answered while `stop_answer`
+    # only ever lived in this process's memory.
+    #
     # D1: `pause_answer` is the record of *which* pause this resume answered
     # -- its `kind` and its `lane`. `stop_answer` stays what it always was
     # (set only on a stop), but a `continue` is now carried too, because one
     # answer may resolve only the one lane the pause it answers names.
     stop_answer: dict | None = None
     pause_answer: dict | None = None
+    pending_pause: dict | None = None
     if resume_dir is not None and not dry_run:
-        pause_path = mission_dir / "pause.json"
         pause_doc = read_pause(mission_dir)
         if pause_doc is not None and pause_doc.get("answer") is None:
             if pause_doc.get("kind") == "human":
-                stop_answer = _answer_human_pause(
-                    mission, mission_dir, pause_path, pause_doc, answer=answer,
-                    answer_file=answer_file, answered_at=datetime.now(UTC).isoformat(),
-                )
-                pause_answer = {"kind": "human", "lane": pause_doc.get("lane")}
+                if answer is not None and answer_file is not None:
+                    raise MissionInvalid("--answer and --answer-file are mutually exclusive")
+                if answer == "continue":
+                    raise MissionInvalid("a human lane needs an answer")
+                if answer is None and answer_file is None:
+                    raise MissionInvalid(
+                        f"mission is paused: {pause_doc.get('question')}; "
+                        "resume with --answer TEXT, --answer-file PATH, or --answer stop"
+                    )
             else:
                 if answer_file is not None:
                     raise MissionInvalid("--answer-file only applies to a human lane pause")
@@ -3654,12 +3701,7 @@ def run_mission(
                     )
                 if answer not in ("continue", "stop"):
                     raise MissionInvalid(f"--answer must be 'continue' or 'stop', got {answer!r}")
-                resolved = record_pause_answer(
-                    pause_path, pause_doc, answer, answered_at=datetime.now(UTC).isoformat()
-                )
-                pause_answer = resolved
-                if answer == "stop":
-                    stop_answer = resolved
+            pending_pause = pause_doc
         elif answer is not None or answer_file is not None:
             raise MissionInvalid(f"mission '{mission_id}' is not paused")
 
@@ -3677,6 +3719,37 @@ def run_mission(
                 base, mission.source, mission_id
             )
             lock_notes.extend(source_notes)
+        if pending_pause is not None:
+            # After the lock, before `_build_resume_plan`: a human lane's
+            # answer file is what the plan trusts, so the write must land
+            # before the keep/rerun decision. `_check_branches` can still
+            # raise after this; the running-lock race this moves past is
+            # the one that left `pause.json` answered with no process
+            # holding `stop_answer`.
+            pause_path = mission_dir / "pause.json"
+            answered_at = datetime.now(UTC).isoformat()
+            if pending_pause.get("kind") == "human":
+                stop_answer = _answer_human_pause(
+                    mission,
+                    mission_dir,
+                    pause_path,
+                    pending_pause,
+                    answer=answer,
+                    answer_file=answer_file,
+                    answered_at=answered_at,
+                )
+                pause_answer = {"kind": "human", "lane": pending_pause.get("lane")}
+            else:
+                if answer not in ("continue", "stop"):
+                    raise MissionInvalid(
+                        f"--answer must be 'continue' or 'stop', got {answer!r}"
+                    )
+                resolved = record_pause_answer(
+                    pause_path, pending_pause, answer, answered_at=answered_at
+                )
+                pause_answer = resolved
+                if answer == "stop":
+                    stop_answer = resolved
         if resume_dir is None:
             (mission_dir / "mission.json").write_text(
                 json.dumps(mission.to_dict(), indent=2)
@@ -4967,7 +5040,14 @@ def _execute_mission(
         else []
     )
     if pause_park is not None:
-        pass  # C2: a parked mission runs no collate, kept or fresh.
+        # Parking starts nothing new. Keep the already-paid collate on the
+        # snapshot so `_run_receipt_spend` still prices it -- spend.effects
+        # reads `collate`, `collate.orders`, and `previous_collates`. The
+        # interrupt path preserves via previous_collates because it takes
+        # the rerun branch; this path did not rerun, so the live record
+        # stays the live record, not a superseded one.
+        prior_collate = (resume.prior_result or {}).get("collate")
+        collate_out = dict(prior_collate) if isinstance(prior_collate, dict) else None
     elif mission.collate and resume.collate == "kept":
         prior_collate = (resume.prior_result or {}).get("collate")
         collate_out = dict(prior_collate) if isinstance(prior_collate, dict) else None
@@ -5002,7 +5082,11 @@ def _execute_mission(
         else []
     )
     if pause_park is not None:
-        pass  # consistent with the collate: a parked mission starts nothing new
+        # Consistent with the collate: a parked mission starts nothing new
+        # and loses nothing already paid for. spend.effects reads `resolve`
+        # and `previous_resolves`.
+        prior_resolve = (resume.prior_result or {}).get("resolve")
+        resolve_out = dict(prior_resolve) if isinstance(prior_resolve, dict) else None
     elif mission.resolve is not None and resume.resolve == "kept":
         prior_resolve = (resume.prior_result or {}).get("resolve")
         resolve_out = dict(prior_resolve) if isinstance(prior_resolve, dict) else None
@@ -5234,8 +5318,20 @@ def _execute_mission(
         children_cost_usd=round(children_cost_usd, 6),
         children_unpriced_dispatches=children_unpriced,
     )
-    report_path.write_text(_report(mission, result, lane_results))
-    (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+    # A rehearsal of an existing mission must not overwrite the receipt it
+    # is rehearsing: `gc._mission_awaiting_resume` reads `paused` from
+    # `result.json`, and a dry-run resume used to put `paused: null,
+    # dry_run: true` over a parked mission so the next `gc --apply` deleted
+    # the parked lanes' worktrees. A resume that could not salvage any run
+    # ids (`accounting_unknown`) must not replace that evidence with a
+    # well-formed empty snapshot -- item 4 recovers the ids from disk when
+    # they are there, and this guard is for the case they are not.
+    persist_receipt = not (dry_run and is_resume) and not (
+        is_resume and resume.accounting_unknown > 0
+    )
+    if persist_receipt:
+        report_path.write_text(_report(mission, result, lane_results))
+        (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     if mission.notify and not dry_run and pause_park is None and "end" in mission.notify["events"]:
         _emit(
             {
@@ -5254,8 +5350,9 @@ def _execute_mission(
                 ],
             }
         )
-        report_path.write_text(_report(mission, result, lane_results))
-        (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+        if persist_receipt:
+            report_path.write_text(_report(mission, result, lane_results))
+            (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 
 

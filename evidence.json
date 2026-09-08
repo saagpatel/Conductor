@@ -1,0 +1,79 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": ["src/conductor/mission.py"],
+      "tests": [
+        "tests/test_pause.py::test_dry_run_resume_does_not_overwrite_a_parked_missions_receipt",
+        "tests/test_mission_resume.py::test_resume_refusals_stale_lock_cli_and_mission_listing"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/ruff check src tests; env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "A dry-run resume does not write result.json or report.md; gc._mission_awaiting_resume still sees the parked receipt."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": ["src/conductor/mission.py"],
+      "tests": [
+        "tests/test_pause.py::test_pause_answer_is_not_recorded_until_the_running_lock_is_held"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "Refusal of an unanswered pause stays before the running lock; the pause.json write happens after the lock and before _build_resume_plan so a human lane's answer file is visible to the keep/rerun decision."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": ["src/conductor/mission.py"],
+      "tests": [
+        "tests/test_mission_resume.py::test_parking_a_resume_keeps_the_prior_collate_and_its_dollars"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "On pause_park, collate and resolve keep the prior live records; spend.effects still reads collate, collate.orders, previous_collates, resolve, and previous_resolves."
+    },
+    {
+      "item": 4,
+      "status": "built",
+      "files": ["src/conductor/attempts.py"],
+      "tests": [
+        "tests/test_resume_budget.py::test_a_stale_lane_receipt_still_recovers_later_runs_on_disk",
+        "tests/test_resume_budget.py::test_a_lane_receipt_and_its_run_are_not_double_counted"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "_run_receipts_for_lane always runs; extra run ids are unioned onto the receipt. _run_receipt_spend keys by run_id so the already-named run is not paid twice."
+    },
+    {
+      "item": 5,
+      "status": "built",
+      "files": ["src/conductor/attempts.py"],
+      "tests": [
+        "tests/test_resume_budget.py::test_recovered_attempts_carry_duration_so_occupied_and_the_lane_row_agree",
+        "tests/test_resume_budget.py::test_a_missing_lane_receipt_still_seeds_spend_from_the_run_on_disk"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "Synthesized attempts carry cost_usd, duration_s, spawned, and fleet from the run receipt; LaneResult.ok stays False so _trusted_lane still refuses the stub."
+    },
+    {
+      "item": 6,
+      "status": "built",
+      "files": ["src/conductor/attempts.py", "src/conductor/mission.py"],
+      "tests": [
+        "tests/test_resume_budget.py::test_an_unreadable_receipt_recovers_run_ids_from_disk_instead_of_going_unknown",
+        "tests/test_attempts.py::test_an_unverifiable_resume_does_not_rewrite_the_snapshot_that_made_it_so"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "Item 4's disk scan already recovers ids when runs exist; when they do not, accounting_unknown skips rewriting result.json so the next resume still sees the prior snapshot."
+    },
+    {
+      "item": 7,
+      "status": "built",
+      "files": ["src/conductor/mission.py"],
+      "tests": [
+        "tests/test_mission_resume.py::test_release_lock_does_not_unlink_a_lock_it_no_longer_owns",
+        "tests/test_mission_resume.py::test_a_published_lock_is_whole_and_owner_bound"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w11b",
+      "note": "Rename-then-verify: the lock is moved to a tombstone, re-read, and deleted only if it still carries owner. A crash after rename leaves the path empty; a third publication in the restore window cannot put a stolen file back. Those leftover files are not a second live holder of running.json."
+    }
+  ]
+}

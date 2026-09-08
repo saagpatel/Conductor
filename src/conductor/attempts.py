@@ -47,6 +47,7 @@ and neither test's patch target needed to change.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -914,7 +915,10 @@ def _run_receipts_for_lane(
     The lane receipt is written only when a lane ends, so a hard-killed
     mission can leave `runs/<id>/result.json` with no `lanes/<name>.json`.
     Those runs are the authority for spend; dry-run receipts are skipped
-    (they spawned nothing).
+    (they spawned nothing). The same scan runs when a lane receipt *is*
+    present: a receipt that predates later runs on disk is just as much a
+    gap as a missing one. `_run_receipt_spend` dedupes by `run_id`, so
+    unioning recovered runs onto an existing receipt cannot double-count.
     """
     from . import mission as mission_mod
 
@@ -936,6 +940,73 @@ def _run_receipts_for_lane(
     return found
 
 
+def _run_ids_in_lane(result: LaneResult) -> set[str]:
+    ids: set[str] = set()
+    for attempt in (*result.previous_attempts, *result.attempts):
+        run_id = attempt.get("run_id")
+        if isinstance(run_id, str):
+            ids.add(run_id)
+    return ids
+
+
+def _attempt_from_run_receipt(run_id: str, receipt: dict) -> dict:
+    """The fields a synthesized attempt can honestly carry from the run
+    receipt that proved this lane already spent. `ok=False` on the
+    `LaneResult` keeps it out of the kept set; this stub must not grow
+    enough to satisfy `_trusted_lane` (no answer artifacts, and the last
+    attempt is not a complete spawned-ok record of a finished lane)."""
+    from . import mission as mission_mod
+
+    attempt: dict = {"run_id": run_id}
+    usage = receipt.get("usage") if isinstance(receipt.get("usage"), dict) else {}
+    cost = mission_mod.budget_cost(usage.get("cost_usd"))
+    if cost is not None:
+        attempt["cost_usd"] = cost
+    duration = receipt.get("duration_s")
+    if (
+        isinstance(duration, int | float)
+        and not isinstance(duration, bool)
+        and math.isfinite(duration)
+        and duration >= 0
+    ):
+        attempt["duration_s"] = float(duration)
+    if isinstance(receipt.get("spawned"), bool):
+        attempt["spawned"] = receipt["spawned"]
+    if isinstance(receipt.get("fleet"), str):
+        attempt["fleet"] = receipt["fleet"]
+    return attempt
+
+
+def _fold_recovered_runs(
+    result: LaneResult,
+    recovered: list[tuple[str, dict]],
+    notes: list[str],
+    lane_name: str,
+    why: str,
+) -> int:
+    """Append run receipts this lane's own record did not name. Returns how
+    many new run ids were added. `_run_receipt_spend` keys by `run_id`, so
+    a run that already appears on the receipt is skipped rather than paid
+    twice."""
+    known = _run_ids_in_lane(result)
+    added = 0
+    for run_id, receipt in recovered:
+        if run_id in known:
+            continue
+        extra = _attempt_from_run_receipt(run_id, receipt)
+        result.attempts.append(extra)
+        known.add(run_id)
+        added += 1
+        cost = extra.get("cost_usd")
+        if isinstance(cost, int | float) and not isinstance(cost, bool):
+            result.cost_usd += float(cost)
+    if added:
+        result.ok = False
+        result.kept = False
+        notes.append(f"lane '{lane_name}': {why.format(n=added)}")
+    return added
+
+
 def _read_previous_lanes(
     mission_dir: Path, mission: Mission, *, base: Path | None = None
 ) -> tuple[dict[str, LaneResult], list[str], int]:
@@ -947,43 +1018,50 @@ def _read_previous_lanes(
     mission_id = mission_dir.name
     for lane in mission.lanes:
         raw = mission_mod._json_object(mission_dir / "lanes" / f"{lane.name}.json")
+        recovered = (
+            _run_receipts_for_lane(base, mission_id, lane.name) if base is not None else []
+        )
         if raw is None:
             # Absence of a lane receipt is not itself unverifiable: the lane
             # may never have started. It is only a gap when a run on disk
-            # says this lane already spent.
-            if base is None:
-                continue
-            recovered = _run_receipts_for_lane(base, mission_id, lane.name)
+            # says this lane already spent. The same rule runs when a
+            # receipt is present but stale -- see the fold below.
             if not recovered:
                 continue
-            run_ids = list(dict.fromkeys(run_id for run_id, _receipt in recovered))
-            previous[lane.name] = mission_mod.LaneResult(
-                name=lane.name,
-                ok=False,
-                attempts=[{"run_id": run_id} for run_id in run_ids],
+            stub = mission_mod.LaneResult(name=lane.name, ok=False)
+            _fold_recovered_runs(
+                stub,
+                recovered,
+                notes,
+                lane.name,
+                "no lane receipt; recovered {n} run(s) from disk for spend",
             )
-            notes.append(
-                f"lane '{lane.name}': no lane receipt; recovered {len(run_ids)} "
-                f"run(s) from disk for spend"
-            )
+            previous[lane.name] = stub
             continue
+        salvaged_from_unreadable = False
+        unreadable_exc: Exception | None = None
         try:
             previous[lane.name] = mission_mod.LaneResult.from_dict(raw)
         except (TypeError, ValueError) as exc:
-            salvaged = _salvage_previous_lane(lane, raw)
-            previous[lane.name] = salvaged
-            run_ids = [
-                attempt.get("run_id")
-                for attempt in [*salvaged.previous_attempts, *salvaged.attempts]
-                if isinstance(attempt.get("run_id"), str)
-            ]
+            salvaged_from_unreadable = True
+            unreadable_exc = exc
+            previous[lane.name] = _salvage_previous_lane(lane, raw)
+        _fold_recovered_runs(
+            previous[lane.name],
+            recovered,
+            notes,
+            lane.name,
+            "lane receipt predates {n} run(s) on disk; recovered for spend",
+        )
+        if salvaged_from_unreadable:
+            run_ids = _run_ids_in_lane(previous[lane.name])
             if not run_ids:
                 accounting_unknown += 1
                 accounting = "no run ids were salvageable; budget marked unverifiable"
             else:
-                accounting = f"salvaged {len(set(run_ids))} run id(s) for spend and history"
+                accounting = f"salvaged {len(run_ids)} run id(s) for spend and history"
             notes.append(
-                f"lane '{lane.name}': previous receipt unreadable ({exc}); "
+                f"lane '{lane.name}': previous receipt unreadable ({unreadable_exc}); "
                 f"lane will rerun and {accounting}"
             )
     return previous, notes, accounting_unknown
