@@ -117,7 +117,8 @@ def checklist_contract(criteria: list[Criterion]) -> str:
         f"{schema}\n"
         "Return one criteria entry per checklist item in the given order. Each evidence value "
         "must cite a file and line or a hunk from the diff, or say 'no evidence'. Set verdict "
-        "to pass only when every criterion is ok."
+        "to pass only when every criterion is ok. Write that object once and end there: no "
+        "example, no restatement of the schema, and no second copy of the object after it."
     )
 
 
@@ -160,6 +161,18 @@ def _answer_object(text: str) -> tuple[dict | None, str | None]:
             # so a malformed verdict is still reported as malformed rather
             # than as "no JSON at all".
             shaped = [obj for obj in objects if _VERDICT_KEYS <= set(obj)]
+            # Two verdict-shaped objects that disagree are not a parse
+            # problem conductor can rule on: picking the first or the last
+            # is a coin flip dressed as a rule, and the answer was paid for
+            # either way. Refuse and say so. Identical repeats (a model that
+            # echoes its own answer) still resolve, so nothing that passes
+            # today starts failing.
+            distinct = {json.dumps(obj, sort_keys=True, default=str) for obj in shaped}
+            if len(distinct) > 1:
+                return None, (
+                    f"the answer carries {len(distinct)} different verdict objects; "
+                    "conductor cannot tell which is the judgment"
+                )
             return (shaped or objects)[-1], None
         return None, "answer contains no valid JSON object"
     if not isinstance(raw, dict):

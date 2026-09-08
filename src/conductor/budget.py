@@ -54,7 +54,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import prices
-from .outputs import Usage, agy_step_usage, claude_stream_usage, json_line, usage_from_codex
+from .outputs import (
+    Usage,
+    agy_step_usage,
+    claude_stream_usage,
+    json_line,
+    usable_int,
+    usage_from_codex,
+)
 
 POLL_S = 2.0
 
@@ -282,8 +289,14 @@ class _CodexRollout:
     def _less_baseline(self, total: dict) -> dict:
         if not self._baseline:
             return total
+        # `usable_int`, not `int(... or 0)`: this reads Codex's own rollout
+        # file, `json.loads` accepts bare NaN and Infinity, and `int()` on
+        # either raises inside the watcher's poll loop -- the one place that
+        # is meant to fail closed rather than crash (2026-09-08 review). A
+        # bool is not a token count either.
         return {
-            key: max(0, int(total.get(key) or 0) - int(self._baseline.get(key) or 0))
+            key: max(0, (usable_int(total.get(key)) or 0)
+                     - (usable_int(self._baseline.get(key)) or 0))
             for key in _CODEX_USAGE_KEYS
         }
 

@@ -691,3 +691,53 @@ def test_readme_documents_signed_lane_receipts():
     assert "mode 700" in section and "mode 600" in section
     assert "docs/ROADMAP-2026-09.md" in section and "item A5" in section
     assert "draft-marques-asqav-compliance-receipts" in section
+
+
+def test_an_attestation_signed_for_another_run_does_not_verify(
+    repo, home, monkeypatch, tmp_path
+):
+    """The signature proves conductor wrote the statement, not that it wrote
+    it about THIS run. `attestation_sha256` on the mission link catches a
+    swap when the link carries one; an older link that does not is what this
+    check is for, so it is exercised with an empty link statement."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    review_run_id = result.lanes[1]["attempts"][-1]["run_id"]
+    assert build_run_id != review_run_id
+    key = attest.receipt_key(home)
+
+    # A valid, correctly signed attestation -- for the other run.
+    swapped = (home / "runs" / review_run_id / "attestation.json").read_text()
+    (home / "runs" / build_run_id / "attestation.json").write_text(swapped)
+
+    problems, _taint = attest.verify_run_attestation(home, build_run_id, {}, key)
+
+    assert any(
+        f"attestation is signed for run '{review_run_id}'" in problem
+        for problem in problems
+    ), problems
+
+
+def test_a_chain_recording_only_one_of_the_two_completeness_figures_is_not_verified(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """`expected_links is None AND expected_head is None` meant that with one
+    figure recorded and the other missing, the check nobody ran was skipped
+    and the chain still reported `verified` -- which `land` merges on."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    assert main(["attest", result.mission_id]) == 0
+    capsys.readouterr()
+
+    result_path = Path(result.mission_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    chain = data.get("chain")
+    assert isinstance(chain, dict) and chain.get("head")
+    chain.pop("head")
+    result_path.write_text(json.dumps(data))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    assert out["state"] == "unrecorded"

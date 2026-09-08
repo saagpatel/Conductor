@@ -103,6 +103,7 @@ from .attempts import (
     _trusted_lane,
     _validate_human_attempt,
     _validate_script_attempt,
+    escalation_attempts,
 )
 from .attempts import (
     _BREAKER_KEYS as _BREAKER_KEYS,
@@ -4138,7 +4139,9 @@ def _execute_mission(
             if dry_run or (result.ok and result.gate_passed):
                 out.ok = True
                 break
-        out.escalated = len(out.attempts) > 1 and out.attempts[0].get("ok") is not True
+        out.escalated = bool(escalation_attempts(out.attempts)) and (
+            out.attempts[0].get("ok") is not True
+        )
         if out.ok and lane.branch and not dry_run:
             # The lane's commits are the deliverable; give them the name the
             # mission asked for. A lane that landed nothing has no branch of

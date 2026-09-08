@@ -45,6 +45,7 @@ from .fleets import (
     Spec,
     build_agy_hooks_argv,
     build_argv,
+    claude_can_edit,
     cli_version,
     taint_agy_denied_tools,
     taint_agy_matchers,
@@ -216,6 +217,12 @@ class Result:
     # read lane with a declared `deliverable` (see `fleets._build_claude`).
     permission_mode: str | None = None
     restricted: bool = False
+    # Whether a structured-output flag was on the argv (`--json-schema` for
+    # claude and antigravity, `--output-schema` for codex; cursor refuses
+    # one). Recorded so `golden._recorded_contract` can compare it: it was
+    # listed in `_CONTRACT_KEYS` but no receipt carried it, so every fixture
+    # reported it uncomparable (2026-09-08 review).
+    structured: bool = False
     # Settings digest (third drill pass, 2026-09-07):
     # `{"checked": bool, "modified": [<relative path>]}` -- whether this
     # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
@@ -2251,6 +2258,13 @@ def dispatch(
         if "--permission-mode" in argv:
             permission_mode = argv[argv.index("--permission-mode") + 1]
         restricted_flag = "--restricted" in argv
+    # 2026-09-08 review: `golden._CONTRACT_KEYS` lists `schema`, and
+    # `_requested_contract` always sets it, but no receipt carried the fact,
+    # so every fixture reported it uncomparable and turning structured output
+    # on or off for a lane was never a difference. Read off the real argv,
+    # like the two above, and fleet-agnostic: claude and antigravity spell it
+    # `--json-schema`, codex `--output-schema`, cursor refuses it outright.
+    structured_flag = "--json-schema" in argv or "--output-schema" in argv
     if tainted_agy:
         # E21: needs this run's own directory, which no Spec field carries;
         # appended here rather than threaded into build_argv's signature (see
@@ -2294,6 +2308,7 @@ def dispatch(
             prompt_versions=prompt_versions,
             permission_mode=permission_mode,
             restricted=restricted_flag,
+            structured=structured_flag,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -2412,10 +2427,17 @@ def dispatch(
         # Settings digest (third drill pass, 2026-09-07):
         # hashed here, beside the bytes baseline and before the spawn, so
         # a lane that edits its own permission policy mid-run is measured
-        # against what it started from. Only a claude write lane: a read lane
-        # runs in plan mode, which cannot edit these files, and a denial there
-        # is already a note rather than a failure.
-        settings_checked = spec.fleet == "claude" and spec.mode == "write"
+        # against what it started from.
+        #
+        # Every claude lane that can edit files at all, not only a write lane
+        # (2026-09-08 review). The old condition rested on "a read lane runs
+        # in plan mode, which cannot edit these files", and that is false for
+        # a restricted read lane: F12 puts `restricted: true` AND every read
+        # lane with a declared deliverable on `--permission-mode acceptEdits`,
+        # which Edits and Writes. Shape A's evidence lanes are exactly that
+        # shape, and one could name `.claude/settings.local.json` as its
+        # deliverable, where even the read-only byte check exempts it.
+        settings_checked = claude_can_edit(spec)
         settings_before = _settings_digests(spec.cwd) if settings_checked else {}
         try:
             surface_before = test_surface(spec.cwd, spec.test_surface) if before.is_repo else None
@@ -2814,9 +2836,8 @@ def dispatch(
         # Commit before the Git verdict is taken, so it describes the state
         # the caller is actually left with.
         commit: CommitOutcome | None = None
-        if (
-            commit_message
-            and not forbid_touched
+        commit_allowed = (
+            not forbid_touched
             and not timed_out
             and error is None
             and exit_code == 0
@@ -2829,7 +2850,8 @@ def dispatch(
             # committed under a receipt that says the run failed -- the
             # branch and the verdict disagreeing about the same run.
             and output.status != INCOMPLETE
-        ):
+        )
+        if commit_message and commit_allowed:
             # F15 mission 2 item 3: a deliverable declared `commit: false` is
             # a receipt, not source -- excluded from the harness's own
             # commit (it is still checked on the filesystem and copied to
@@ -2852,6 +2874,20 @@ def dispatch(
                 sha=self_commit,
                 reason="the fleet committed its own work",
             )
+            if not commit_allowed:
+                # 2026-09-08 review: the guard above stopped conductor from
+                # committing a failed run's work, but the adoption right
+                # here ran unconditionally, so a fleet that committed its
+                # own bytes and then timed out, exited non-zero, or cut its
+                # stream short landed them anyway. The undo blocks below do
+                # not catch it either: `_gate_passed` reads a gate that
+                # never ran as nothing to fail, so a failure caught before
+                # the gate left a `committed: true` sha on a receipt that
+                # says the run failed -- and `worktrees.release` keeps the
+                # branch, so land and salvage read those bytes as landed.
+                commit = uncommit(
+                    spec.cwd, commit, before.head, why="the run failed before the gate"
+                )
 
         # F3: a read lane's own gate and the clean gate re-check bytes a build
         # lane already gated. Decided on the bytes comparison taken here, before
@@ -3099,6 +3135,19 @@ def dispatch(
                 git_verdict.notes.append(
                     "budget watcher saw no running usage; cap checked after the run"
                 )
+            # 2026-09-08 review: the cap verdict is only known here, after
+            # the commit decision. A run that crossed its cap between the
+            # last watcher poll and its own exit -- and every cursor lane,
+            # which has no in-run watcher at all -- was committed and only
+            # then receipted as over budget, so the branch and the verdict
+            # disagreed about the same run. `unpriced` is the same case:
+            # `Result.failure` fails it closed as an unenforced cap, and it
+            # kept its commit too. Undone, not discarded: the work stays
+            # staged, so a kept worktree still holds it for salvage.
+            settled = budget.to_dict()
+            if commit and commit.committed and (settled["exceeded"] or settled["unpriced"]):
+                why = "over budget" if settled["exceeded"] else "cap unenforced"
+                commit = uncommit(spec.cwd, commit, before.head, why=why)
 
         # Teardown runs after the gate and the commit decision, ok or not: the
         # work is already judged, so its own outcome is a note, never a reason
@@ -3313,6 +3362,7 @@ def dispatch(
         permission_denials=list(output.permission_denials),
         permission_mode=permission_mode,
         restricted=restricted_flag,
+        structured=structured_flag,
         settings=settings_state,
     )
     if result.spawned:

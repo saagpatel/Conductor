@@ -124,7 +124,18 @@ def release(iso: Isolation) -> Isolation:
         return iso
     status = git_run(iso.worktree, "status", "--porcelain", timeout=GIT_TIMEOUT)
     dirty = status.returncode != 0 or bool(status.stdout.strip())
-    head = git_run(iso.worktree, "rev-parse", "HEAD", timeout=GIT_TIMEOUT).stdout.strip()
+    # The exit code, not just the output: a `rev-parse` that did not run
+    # returns an empty stdout, and an empty `head` is never equal to a
+    # `base_sha` that is always set here, so a clean no-op lane was reported
+    # as "commits remain on the branch" and its `tip_sha` went onto the
+    # receipt as "" for a caller to merge (2026-09-08 review).
+    rev = git_run(iso.worktree, "rev-parse", "HEAD", timeout=GIT_TIMEOUT)
+    if rev.returncode != 0 or not rev.stdout.strip():
+        iso.kept = True
+        detail = rev.stderr.strip() or f"exit {rev.returncode}"
+        iso.reason = f"worktree kept: could not read its HEAD: {detail}"
+        return iso
+    head = rev.stdout.strip()
     iso.tip_sha = head
     iso.clean = not dirty
     if dirty:
@@ -140,7 +151,14 @@ def release(iso: Isolation) -> Isolation:
     if head == iso.base_sha:
         # Clean and still at the base: nothing landed, so a branch would only
         # be litter. A no-op lane leaves no trace but its run directory.
-        git_run(iso.repo, "branch", "-D", iso.branch, timeout=GIT_TIMEOUT)
+        deleted = git_run(iso.repo, "branch", "-D", iso.branch, timeout=GIT_TIMEOUT)
+        if deleted.returncode != 0:
+            # Lock contention, or a branch checked out somewhere else. Saying
+            # "branch deleted" about a branch still in the repository is the
+            # receipt disagreeing with the bytes (2026-09-08 review).
+            detail = deleted.stderr.strip() or f"exit {deleted.returncode}"
+            iso.reason = f"worktree removed; no commits landed, branch kept: {detail}"
+            return iso
         iso.branch = ""
         iso.reason = "worktree removed; no commits landed, branch deleted"
         return iso

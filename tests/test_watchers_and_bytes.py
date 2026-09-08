@@ -9,6 +9,8 @@ fix.
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -266,10 +268,8 @@ def test_a_trailing_non_verdict_object_does_not_displace_the_verdict():
     metadata or usage blob printed after the judgment was parsed as the
     judgment. The last VERDICT-SHAPED object wins now.
 
-    A trailing object that is itself verdict-shaped -- a filled-in example
-    pasted under the real answer -- is still read as the answer, and cannot be
-    told apart from one by shape alone. That one is an open question for the
-    operator, not something to guess at here.
+    A trailing object that is itself verdict-shaped and DIFFERENT is refused
+    outright; see the two tests below.
     """
     from conductor.verdicts import Criterion, parse_verdict
 
@@ -286,6 +286,59 @@ def test_a_trailing_non_verdict_object_does_not_displace_the_verdict():
     assert verdict.passed is False
     assert verdict.invalid is None
     assert verdict.summary == "a is broken"
+
+
+def test_two_differing_verdict_objects_are_refused_rather_than_picked_between():
+    """A model that answers and then pastes a filled-in example writes two
+    verdict-shaped objects. Neither "first wins" nor "last wins" is a rule,
+    only a coin flip, so conductor refuses and says why."""
+    from conductor.verdicts import Criterion, parse_verdict
+
+    criteria = [Criterion("a", "Is a satisfied?")]
+    answer = (
+        '{"verdict":"fail","criteria":[{"id":"a","ok":false,"evidence":"x.py:1"}],'
+        '"summary":"a is broken"}\n\n'
+        "For reference, a passing answer looks like:\n"
+        '{"verdict":"pass","criteria":[{"id":"a","ok":true,"evidence":"x.py:1"}],'
+        '"summary":"all good"}\n'
+    )
+
+    verdict = parse_verdict(answer, criteria)
+
+    assert verdict.invalid == (
+        "the answer carries 2 different verdict objects; "
+        "conductor cannot tell which is the judgment"
+    )
+    assert verdict.passed is False
+
+
+def test_an_answer_that_repeats_one_identical_verdict_object_still_parses():
+    """The refusal is about disagreement, not repetition: a model that echoes
+    its own answer verbatim has said one thing, and a paid judgment is not
+    thrown away for it."""
+    from conductor.verdicts import Criterion, parse_verdict
+
+    criteria = [Criterion("a", "Is a satisfied?")]
+    one = (
+        '{"verdict":"pass","criteria":[{"id":"a","ok":true,"evidence":"x.py:1"}],'
+        '"summary":"a holds"}'
+    )
+    answer = f"Here is my verdict:\n{one}\n\nRestating it:\n{one}\n"
+
+    verdict = parse_verdict(answer, criteria)
+
+    assert verdict.invalid is None
+    assert verdict.passed is True
+    assert verdict.summary == "a holds"
+
+
+def test_the_checklist_contract_forbids_a_second_copy_of_the_answer():
+    """The refusal above only helps if the prompt asked for one object."""
+    from conductor.verdicts import Criterion, checklist_contract
+
+    contract = checklist_contract([Criterion("a", "Is a satisfied?")])
+
+    assert "no second copy of the object" in contract
 
 
 def test_an_answer_whose_only_object_is_malformed_is_still_reported_malformed():
@@ -332,3 +385,96 @@ def test_a_cut_short_stream_is_not_committed(tmp_path: Path):
     gate = source.split("commit: CommitOutcome | None = None", 1)[1].split("\n        ):", 1)[0]
     assert "not output.error" in gate
     assert "output.status != INCOMPLETE" in gate
+
+
+def _head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_a_self_commit_does_not_survive_a_run_that_failed_before_the_gate(
+    repo, home, fake_fleet
+):
+    """The commit gate stopped conductor from committing a failed run's work,
+    but the self-commit adoption right after it ran unconditionally, so a
+    fleet that committed its own bytes and then exited non-zero landed them
+    anyway. The undo blocks below it do not catch this: `_gate_passed` reads
+    a gate that never ran as nothing to fail, so the receipt said the run
+    failed while carrying a real committed sha, and `worktrees.release` keeps
+    the branch. Same class as the D15 truncated-stream case.
+    """
+    from conductor.fleets import Spec
+    from conductor.runner import dispatch
+
+    head_before = _head(repo)
+    fake_fleet(
+        ["sh", "-c", "echo work > new.txt && git add -A && git commit -qm 'agent work' && exit 1"]
+    )
+
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write"),
+        home=home,
+        commit_message="feat: x",
+    )
+
+    assert result.ok is False
+    assert result.failure() == "exit code 1"
+    assert result.commit["committed"] is False
+    assert "the run failed before the gate" in result.commit["reason"]
+    # The branch is back where it started; the work is still in the tree.
+    assert _head(repo) == head_before
+    assert (repo / "new.txt").read_text() == "work\n"
+
+
+def _cost_envelope(cost: float) -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "done",
+            "usage": {"inputTokens": 10, "outputTokens": 5},
+            "total_cost_usd": cost,
+        },
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("cost", "why"),
+    [(9.99, "over budget"), (None, "cap unenforced")],
+)
+def test_a_run_that_failed_its_cap_does_not_keep_its_commit(repo, home, fake_fleet, cost, why):
+    """`budget.settle` is the cap verdict, and it runs AFTER the commit
+    decision. The wait loop re-checks the breaker with `final=True` for
+    exactly this reason -- a runaway must not evade the ceiling by exiting in
+    the same poll tick -- but the watcher has no such re-check, and a cursor
+    lane has no in-run watcher at all. So a run that crossed its cap was
+    committed and only then receipted as over budget: the branch and the
+    verdict disagreeing about the same run.
+
+    `unpriced` is the same case. `Result.failure` fails it closed as an
+    unenforced cap, and it kept its commit too.
+    """
+    from conductor.fleets import Spec
+    from conductor.runner import dispatch
+
+    head_before = _head(repo)
+    body = "echo work > new.txt"
+    if cost is not None:
+        body += f"; printf '%s\\n' {shlex.quote(_cost_envelope(cost))}"
+    fake_fleet(["sh", "-c", body])
+
+    result = dispatch(
+        Spec(fleet="claude", prompt="p", cwd=str(repo), mode="write", cap_usd=0.10),
+        home=home,
+        commit_message="feat: x",
+    )
+
+    assert result.ok is False
+    assert result.commit["committed"] is False
+    assert result.commit["reason"].startswith(why)
+    assert _head(repo) == head_before
+    # Undone, not discarded: a kept worktree still holds the work for salvage.
+    assert (repo / "new.txt").read_text() == "work\n"

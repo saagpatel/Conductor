@@ -433,12 +433,14 @@ _EVERY_GENERATION_ORDER: list[tuple[str, str, str | None, str | None, bool]] = [
     ("run-final", "attempt", "build", "build", False),
     ("run-prev-attempt", "attempt", "fix", "fix", True),
     ("run-attempt", "attempt", "fix", "fix", False),
-    ("run-prev-collate", "collate", None, None, True),
+    # The live collate before the superseded ones, matching `resolve` and
+    # `previous_resolves` below (2026-09-08 review).
     ("run-collate", "collate", None, None, False),
     ("run-order-1", "order", None, None, False),
     ("run-order-2", "order", None, None, False),
     ("run-judge-order-1", "order", None, None, False),
     ("run-judge-order-2", "order", None, None, False),
+    ("run-prev-collate", "collate", None, None, True),
     ("run-resolve", "resolve", None, None, False),
     ("run-prev-resolve-1", "resolve", None, None, True),
     ("run-prev-resolve-2", "resolve", None, None, True),
@@ -453,6 +455,26 @@ def test_effects_walks_every_generation_of_key_in_encounter_order():
     assert all(isinstance(e, Effect) for e in found)
     expected_ids = {row[0] for row in _EVERY_GENERATION_ORDER}
     assert mission_run_ids(_every_generation_snapshot()) == expected_ids
+
+
+def test_a_collate_kept_across_a_resume_is_not_read_as_superseded():
+    """`previous_collates` was walked before `collate`, and first occurrence
+    wins, so a collate run appearing in both -- a collate kept across a
+    resume -- was permanently marked superseded. `resolve` and
+    `previous_resolves` already had the opposite, correct order."""
+    snapshot = {
+        "collate": {"run_id": "run-c"},
+        "previous_collates": [{"run_id": "run-c"}, {"run_id": "run-older"}],
+        "resolve": {"run_id": "run-r"},
+        "previous_resolves": [{"run_id": "run-r"}],
+    }
+
+    by_id = {e.run_id: e for e in effects(snapshot)}
+
+    assert by_id["run-c"].superseded is False
+    assert by_id["run-older"].superseded is True
+    # The shape that was already right, asserted beside it.
+    assert by_id["run-r"].superseded is False
 
 
 def test_report_scan_missions_join_names_every_effect_from_one_snapshot(home: Path):

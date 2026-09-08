@@ -104,6 +104,24 @@ def test_rolling_spend_sums_the_right_windows_and_counts_unpriced_and_free(home:
     assert spend.unpriced_day == 1
 
 
+def test_a_receipt_stamped_in_the_future_is_outside_both_windows(home: Path):
+    """The window had a lower bound only, so a receipt stamped ahead of now --
+    clock drift on the machine that wrote it, or a hand-edited stamp -- was
+    ahead of `day_ago` and `hour_ago` alike and counted in both windows for
+    as long as it sat in `runs/`. A run in the future is not in the last
+    sixty minutes."""
+    now = datetime(2026, 1, 10, 12, 0, 0, tzinfo=UTC)
+    _receipt(home, f"{_stamp(now - timedelta(minutes=30))}-claude-real", cost=2.0)
+    _receipt(home, f"{_stamp(now + timedelta(hours=3))}-claude-future", cost=99.0)
+
+    spend = rolling_spend(home, now=now)
+
+    assert spend.hour_usd == 2.0
+    assert spend.day_usd == 2.0
+    assert spend.runs_hour == 1
+    assert spend.runs_day == 1
+
+
 def test_rolling_spend_on_an_empty_home_is_all_zero(home: Path):
     spend = rolling_spend(home)
     assert spend == rolling_spend(home)

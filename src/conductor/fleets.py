@@ -1034,14 +1034,35 @@ def build_argv(spec: Spec) -> list[str]:
     return _BUILDERS[spec.fleet](spec, model)
 
 
+def claude_restricted(spec: Spec) -> bool:
+    """F12: a read lane with a declared deliverable gets the same shape as an
+    explicit `restricted: true` -- a plan lane's own file is exactly this
+    case, and the live gap it closes is real: a plan lane on plain `plan`
+    mode can write nothing but its own plan.md, so the first live planner
+    lane (2026-09-07) wrote the mission into its plan file instead of the
+    declared deliverable path.
+
+    Exported because it decides `--permission-mode acceptEdits`, which is a
+    lane that can Edit and Write: `runner` reads it to know whether the
+    settings digest must be taken (2026-09-08 review).
+    """
+    return spec.mode == "read" and (spec.restricted or spec.deliverable is not None)
+
+
+def claude_can_edit(spec: Spec) -> bool:
+    """Whether this claude lane's permission mode lets it write files at all.
+
+    `bypassPermissions` on a write lane and `acceptEdits` on a restricted
+    read lane both do; plain `plan` mode does not. The settings drill turns
+    on exactly this: `.claude/settings.json` is a file, Claude Code
+    hot-reloads it for the next subagent, and a project `permissions.deny`
+    rule is therefore not a boundary for any lane that can edit it.
+    """
+    return spec.fleet == "claude" and (spec.mode == "write" or claude_restricted(spec))
+
+
 def _build_claude(spec: Spec, model: str) -> list[str]:
-    # F12: a read lane with a declared deliverable gets the same shape as an
-    # explicit `restricted: true` -- a plan lane's own file is exactly this
-    # case, and the live gap it closes is real: a plan lane on plain `plan`
-    # mode can write nothing but its own plan.md, so the first live planner
-    # lane (2026-09-07) wrote the mission into its plan file instead of the
-    # declared deliverable path.
-    restricted = spec.mode == "read" and (spec.restricted or spec.deliverable is not None)
+    restricted = claude_restricted(spec)
     argv = [
         "claude",
         "-p",

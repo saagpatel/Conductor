@@ -1055,6 +1055,36 @@ def test_check_reports_a_recording_the_replay_never_dispatched(repo, home, monke
     ), diffs
 
 
+def test_check_reports_structured_output_turned_on_since_the_recording(
+    repo, home, monkeypatch, tmp_path
+):
+    """`schema` was in `_CONTRACT_KEYS` and `_requested_contract` always set
+    it, but no receipt carried the fact, so `_recorded_contract` omitted it
+    and every fixture reported it uncomparable. Turning structured output on
+    for a lane was never a difference. `runner.dispatch` now records the
+    argv flag as `structured`."""
+    fake_fleets(monkeypatch, {"claude": say("ok", 0.01)})
+    raw = {
+        "prompt": "read it",
+        "cwd": str(repo),
+        "lanes": [{"name": "r", "fleet": "claude", "mode": "read"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+    fixture = golden.record(Path(result.mission_dir), tmp_path / "fixture", home=home)
+    notes: list[str] = []
+    assert golden.check(fixture, notes=notes) == []
+    assert not any("schema" in line for line in notes), notes
+
+    schema = tmp_path / "verdict-schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    _edit_snapshot_attempt(fixture, "r", schema=str(schema))
+
+    diffs = golden.check(fixture)
+    assert any(
+        "contract schema: recorded False, replayed True" in line for line in diffs
+    ), diffs
+
+
 def test_a_contract_field_the_recording_lacks_is_a_note_not_a_difference(
     repo, home, monkeypatch, tmp_path
 ):

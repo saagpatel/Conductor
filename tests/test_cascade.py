@@ -6,6 +6,7 @@ summarized on the mission result.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -259,6 +260,102 @@ def test_cascade_escalation_across_two_lanes(repo, home, monkeypatch, tmp_path, 
     assert main(["missions"]) == 0
     rows_out = json.loads(capsys.readouterr().out)
     assert rows_out[0]["escalation"] == result.escalation
+
+
+def test_a_retried_cheap_attempt_is_not_an_escalation(repo, home, monkeypatch, tmp_path):
+    """A transient failure retried on the same vendor is not an escalation.
+
+    `dispatch_one` appends a summary per dispatch and a retry is a dispatch,
+    so `len(attempts) > 1` counted a rate-limited cheap attempt that then
+    succeeded on its own retry as having escalated. Nothing escalated: the
+    lane never reached its own fleet, and AGENTS.md rule B3 quotes this rate.
+    """
+    counter = tmp_path / "cascade-count"
+    counter.write_text("0")
+    transport = (
+        '{"type":"result","subtype":"error_during_execution","is_error":true,'
+        '"result":"","error":"ECONNRESET while streaming",'
+        '"usage":{"inputTokens":3,"outputTokens":1},"total_cost_usd":0.01}'
+    )
+    script = (
+        f"n=$(cat {counter}); n=$((n + 1)); echo $n > {counter}\n"
+        f"if [ \"$n\" -eq 1 ]; then printf '%s\\n' {shlex.quote(transport)}; exit 1; fi\n"
+        f"echo cheap > cheap.txt\nprintf '%s\\n' {shlex.quote(envelope('cheap', 0.02))}\n"
+    )
+
+    def fake_build(spec):
+        assert spec.fleet == "cursor", "the lane must never reach its own fleet"
+        return ["sh", "-c", script]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+
+    raw = {
+        "cwd": str(repo),
+        "mode": "write",
+        "commit": "feat: x",
+        "cascade": {"fleet": "cursor"},
+        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 0},
+        "lanes": [{"name": "a", "fleet": "claude", "prompt": "do the thing"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+
+    lane = result.lanes[0]
+    assert lane["ok"] is True
+    assert [a["attempt"] for a in lane["attempts"]] == ["cursor", "cursor"]
+    assert lane["escalated"] is False
+    assert result.escalation == {
+        "lanes": 1,
+        "cheap_ok": 0,
+        "escalated": 0,
+        "rate": 0.0,
+        # Both dispatches are the cheap attempt; none of it is escalation spend.
+        "cascade_usd": 0.01,
+        "escalated_usd": 0.0,
+    }
+
+
+def test_a_retry_of_the_cheap_attempt_is_not_counted_as_escalation_spend(
+    repo, home, monkeypatch, tmp_path
+):
+    """The other half of the same bug: on a lane that DID escalate, summing
+    `attempts[1:]` charged the cheap attempt's own retry to `escalated_usd`,
+    so the cascade looked more expensive to escalate than it was."""
+    counter = tmp_path / "cascade-count"
+    counter.write_text("0")
+    transport = (
+        '{"type":"result","subtype":"error_during_execution","is_error":true,'
+        '"result":"","error":"ECONNRESET while streaming",'
+        '"usage":{"inputTokens":3,"outputTokens":1},"total_cost_usd":0.01}'
+    )
+    cheap = (
+        f"n=$(cat {counter}); n=$((n + 1)); echo $n > {counter}\n"
+        f"if [ \"$n\" -eq 1 ]; then printf '%s\\n' {shlex.quote(transport)}; exit 1; fi\n"
+        f"printf '%s\\n' {shlex.quote(envelope('no good', 0.03))}\nexit 1\n"
+    )
+
+    def fake_build(spec):
+        if spec.fleet == "cursor":
+            return ["sh", "-c", cheap]
+        real = envelope("real", 0.20)
+        return ["sh", "-c", f"echo real > real.txt\nprintf '%s\\n' {shlex.quote(real)}"]
+
+    monkeypatch.setattr(runner_mod, "build_argv", fake_build)
+
+    raw = {
+        "cwd": str(repo),
+        "mode": "write",
+        "commit": "feat: x",
+        "cascade": {"fleet": "cursor"},
+        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 0},
+        "lanes": [{"name": "a", "fleet": "claude", "prompt": "do the thing"}],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+
+    lane = result.lanes[0]
+    assert [a["attempt"] for a in lane["attempts"]] == ["cursor", "cursor", "claude"]
+    assert lane["escalated"] is True
+    # The retry ($0.03) belongs to the cheap attempt, not to escalating.
+    assert result.escalation["escalated_usd"] == 0.2
 
 
 # Flaked once under `-n auto` on 2026-09-07 (first launch red, gw8, full

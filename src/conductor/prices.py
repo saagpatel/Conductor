@@ -72,6 +72,26 @@ class Price:
     # entry prices, so a stale or wrong override is visible on the run it
     # affected rather than only in prices.json itself.
     source: str = "default"
+    # A vendor whose rate steps up once the prompt passes a threshold, and
+    # charges the WHOLE request at the higher rate rather than only the
+    # tokens past the line: xAI doubles Grok 4.6 above 200K prompt tokens
+    # ($2/$6 to $4/$12), and it can cross mid-run. Priced flat, a long
+    # review is estimated at half what it cost and is judged against a cap
+    # it has already passed (2026-09-08 review; AGENTS.md "Grok 4.6").
+    # `long_context` is the same dataclass at the higher rate, so a table
+    # can nest one step; a second step would nest again.
+    long_context_tokens: int | None = None
+    long_context: Price | None = None
+
+    def tier(self, prompt_tokens: int) -> Price:
+        """The rate this request actually bills at, given its prompt size."""
+        if (
+            self.long_context is not None
+            and self.long_context_tokens is not None
+            and prompt_tokens > self.long_context_tokens
+        ):
+            return self.long_context.tier(prompt_tokens)
+        return self
 
     def cost(
         self,
@@ -80,6 +100,11 @@ class Price:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> float:
+        # Everything the vendor counts as prompt: fresh input, cache reads,
+        # and cache writes alike.
+        rate = self.tier(input_tokens + cache_read_tokens + cache_write_tokens)
+        if rate is not self:
+            return rate.cost(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
         per_m = (
             input_tokens * self.input
             + output_tokens * self.output
@@ -127,7 +152,15 @@ DEFAULT_PRICES: dict[str, Price] = {
     # discount, so cached input bills at the full input rate. Both draw from
     # a subscription's included usage before per-token billing applies, so
     # these are list-price equivalents, not necessarily marginal cost.
-    "cursor-grok-4.6": Price(2.00, 6.00, 0.50, 0.0, "xAI list rate; <200K context"),
+    "cursor-grok-4.6": Price(
+        2.00,
+        6.00,
+        0.50,
+        0.0,
+        "xAI list rate; doubles above 200K prompt tokens",
+        long_context_tokens=200_000,
+        long_context=Price(4.00, 12.00, 1.00, 0.0, "xAI list rate; >200K prompt tokens"),
+    ),
     "composer-2.5": Price(
         0.50,
         2.50,

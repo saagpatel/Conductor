@@ -188,3 +188,35 @@ def test_finite_helpers_refuse_booleans_and_non_numbers():
         assert prices.finite_nonnegative(bad) is False
     assert prices.finite_positive(0) is False and prices.finite_nonnegative(0) is True
     assert prices.finite_positive(0.5) is True
+
+
+def test_grok_bills_the_whole_request_at_the_long_context_rate_above_200k():
+    """xAI doubles Grok 4.6 above 200K prompt tokens, and charges the whole
+    request at the higher rate. Priced flat, a long review was estimated at
+    half what it cost, so its cap was judged against the wrong band."""
+    under = estimate(
+        "cursor-grok-4.6-hard",
+        input_tokens=100_000,
+        output_tokens=10_000,
+        table=DEFAULT_PRICES,
+    )
+    over = estimate(
+        "cursor-grok-4.6-hard",
+        input_tokens=300_000,
+        output_tokens=10_000,
+        table=DEFAULT_PRICES,
+    )
+    assert under == round(100_000 * 2.00 / 1e6 + 10_000 * 6.00 / 1e6, 6)
+    # Every token at the doubled rate, not only the 100K past the line.
+    assert over == round(300_000 * 4.00 / 1e6 + 10_000 * 12.00 / 1e6, 6)
+
+
+def test_cache_reads_count_toward_the_long_context_threshold():
+    """The threshold is on the prompt, and a cache read is prompt: 150K fresh
+    input plus 100K of cache read is a 250K prompt, not a 150K one."""
+    price = DEFAULT_PRICES["cursor-grok-4.6"]
+    assert price.tier(150_000) is price
+    assert price.tier(250_000) is price.long_context
+    assert price.cost(150_000, 0, cache_read_tokens=100_000) == round(
+        150_000 * 4.00 / 1e6 + 100_000 * 1.00 / 1e6, 6
+    )
