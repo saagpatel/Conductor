@@ -259,15 +259,38 @@ def test_a_landed_mission_with_an_unpriced_run_reports_no_per_item_figure(home: 
 def test_a_windowed_report_reports_no_per_item_figure(home: Path):
     """`--since` bounds which runs reach a mission row, but `merged` and
     `items` are read from the mission's whole life: dividing the one by the
-    other is not a rate."""
+    other is not a rate. The flag is per mission: a window that actually
+    excluded a snapshot run blanks the figure."""
     from conductor.spend import _parse_bound
 
     _landed_mission(home, "20260101T000000Z-m-p", cost=4.0, items=[1, 2], land=[MERGED])
+    _write_receipt(
+        home,
+        "20251201T000000Z-m-p-early",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="fix",
+        lane="fix",
+        mission="20260101T000000Z-m-p",
+        cost=1.0,
+    )
+    path = home / "missions" / "20260101T000000Z-m-p" / "result.json"
+    raw = json.loads(path.read_text())
+    raw["lanes"].append(
+        {
+            "name": "fix",
+            "stage": "fix",
+            "attempts": [{"run_id": "20251201T000000Z-m-p-early"}],
+        }
+    )
+    path.write_text(json.dumps(raw))
 
     whole = report(home)
-    assert next(r for r in whole.missions).usd_per_item() is not None
+    whole_row = next(r for r in whole.missions if r.mission == "20260101T000000Z-m-p")
+    assert whole_row.to_dict()["windowed"] is False
+    assert whole_row.to_dict()["usd_per_item"] == "2.50"
 
-    windowed = report(home, since=_parse_bound("2020-01-01", "--since"))
+    windowed = report(home, since=_parse_bound("2026-01-01", "--since"))
     row = next(r for r in windowed.missions if r.mission == "20260101T000000Z-m-p")
 
     assert row.items == 2
@@ -275,10 +298,49 @@ def test_a_windowed_report_reports_no_per_item_figure(home: Path):
     assert row.usd_per_item() is None
     assert row.to_dict()["windowed"] is True
     assert row.to_dict()["usd_per_item"] is None
-    whole_row = next(r for r in whole.missions if r.mission == "20260101T000000Z-m-p")
-    assert whole_row.to_dict()["windowed"] is False
-    assert whole_row.to_dict()["usd_per_item"] == "2.00"
     assert windowed.landed.to_dict()["usd_per_item"] is None
+
+
+def test_a_since_that_cuts_nothing_still_reports_per_item(home: Path):
+    """`conductor report --since 2020-01-01` over 2026 receipts used to
+    stamp `windowed` on every row and blank rule 2's figure even when the
+    window excluded nothing."""
+    from conductor.spend import _parse_bound
+
+    _landed_mission(home, "20260101T000000Z-m-p", cost=4.0, items=[1, 2], land=[MERGED])
+
+    rpt = report(home, since=_parse_bound("2020-01-01", "--since"))
+    row = next(r for r in rpt.missions if r.mission == "20260101T000000Z-m-p")
+
+    assert row.items == 2
+    assert row.landed_ok == 1
+    assert row.windowed is False
+    assert row.to_dict()["usd_per_item"] == "2.00"
+    assert rpt.landed.to_dict()["usd_per_item"] == "2.00"
+
+
+def test_a_mission_whose_snapshot_run_count_cannot_be_determined_is_windowed(
+    home: Path,
+):
+    """No snapshot means the mission's run count is unknown. Unknown is
+    not "not windowed": the figure is refused rather than divided."""
+    from conductor.spend import _parse_bound
+
+    _write_receipt(
+        home,
+        "20260101T000000Z-orphan",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="orphan-no-snapshot",
+        cost=4.0,
+    )
+    rpt = report(home, since=_parse_bound("2020-01-01", "--since"))
+    row = next(r for r in rpt.missions if r.mission == "orphan-no-snapshot")
+    assert row.windowed is True
+    unbounded = report(home)
+    orphan = next(r for r in unbounded.missions if r.mission == "orphan-no-snapshot")
+    assert orphan.windowed is False
 
 
 def test_a_parked_mission_is_neither_ok_nor_failed_and_is_out_of_vendor_totals(home: Path):
@@ -411,3 +473,38 @@ def test_a_pause_that_already_has_an_answer_is_a_finished_sitting(home: Path):
     assert row.ok is False
     assert row.unfinished is False
     assert rpt.vendor_stage[0].runs == 1
+
+
+def test_non_finite_wall_figures_are_blank_not_nan(home: Path):
+    """NaN and inf pass `isinstance(..., float)` and used to reach
+    `WallClockRow`, where `busy()`/`stretch()` became NaN and `json.dumps`
+    wrote a bare NaN."""
+    _write_mission(
+        home,
+        "m-nan",
+        name="mission-nan",
+        ok=True,
+        lanes=[],
+        wall={
+            "wall_s": float("nan"),
+            "paused_s": float("inf"),
+            "gate_s": float("-inf"),
+            "lanes_s": 400.0,
+            "idle_s": -1.0,
+            "occupied_s": 1200.0,
+            "critical_path_s": 900.0,
+            "lead_s": 1.0,
+            "concurrency": 2,
+        },
+    )
+    row = report(home).wall_clock[0]
+    assert row.wall_s is None
+    assert row.paused_s is None
+    assert row.gate_s is None
+    assert row.lanes_s == 400.0
+    assert row.idle_s is None
+    assert row.occupied_s == 1200.0
+    assert row.busy() is None
+    dumped = json.dumps(row.to_dict(), allow_nan=False)
+    assert "NaN" not in dumped
+    assert "Infinity" not in dumped

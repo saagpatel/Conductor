@@ -60,6 +60,18 @@ _WALL_FIGURES = (
 )
 
 
+def _receipt_number(value: object) -> float | None:
+    """One rule for a number read off a receipt: a real, finite,
+    non-negative number, else blank. NaN and inf pass `isinstance(...,
+    float)` and poison every mean, median, and JSON dump."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
 def _wall_figures(wall: dict | None) -> dict[str, float | int | None]:
     """F2: one mission's `wall` block, as `WallClockRow`'s own keyword
     arguments -- every figure blank (never 0) on a receipt that predates
@@ -67,8 +79,7 @@ def _wall_figures(wall: dict | None) -> dict[str, float | int | None]:
     out: dict[str, float | int | None] = {}
     for key in _WALL_FIGURES:
         value = wall.get(key) if isinstance(wall, dict) else None
-        numeric = isinstance(value, int | float) and not isinstance(value, bool)
-        out[key] = float(value) if numeric else None
+        out[key] = _receipt_number(value)
     # F15 item 6: an int, not a float, and blank (not 0) on a receipt that
     # predates this field -- `WallClockRow.busy` reads that blank as "unknown
     # concurrency", never as 1.
@@ -127,8 +138,10 @@ class Run(_SpendRun):
     # coercing the unknown to it pulled every mean and median toward zero
     # (2026-09-08 review).
     duration_s: float | None = None
-    # F2: the receipt's own `usage.input_tokens` -- the "cache" column's
-    # denominator, cache_read_tokens (already on spend.Run) over this.
+    # F2: the receipt's own `usage.input_tokens` -- uncached input, one
+    # term of `cache_pct`'s denominator (uncached input + cache reads +
+    # cache writes). Dividing reads by this alone was the discarded first
+    # shape and printed millions of percent.
     input_tokens: int = 0
     kind: str | None = None
     mode: str | None = None
@@ -249,12 +262,17 @@ def _scan_missions(
             # F2: None on a receipt that predates the wall block -- the
             # report lists that mission with blanks, never skips it.
             "wall": raw.get("wall") if isinstance(raw.get("wall"), dict) else None,
+            # Unique run ids `spend.effects` named on this snapshot -- the
+            # count `_build_report` compares to in-window rows to decide
+            # whether `--since`/`--until` actually cut this mission.
+            "runs": 0,
         }
         for effect in spend.effects(raw):
             if effect.kind == "attempt":
                 join.setdefault(effect.run_id, (mission, effect.lane, effect.stage))
             else:
                 join.setdefault(effect.run_id, (mission, None, None))
+            meta[mission]["runs"] += 1
         for lane_raw in lane_list:
             if not isinstance(lane_raw, dict):
                 continue
@@ -397,25 +415,17 @@ def _read_run(path: Path, join: dict[str, tuple[str, str | None, str | None]]) -
             mission, lane, stage = joined
 
     duration = raw.get("duration_s")
-    duration_s: float | None = None
-    if isinstance(duration, int | float) and not isinstance(duration, bool):
-        number = float(duration)
-        # NaN and inf both survive `isinstance`, and json round-trips both;
-        # either one poisons `statistics.mean` for the whole group.
-        if math.isfinite(number) and number >= 0:
-            duration_s = number
+    duration_s = _receipt_number(duration)
     gate_passed = _runner_gate_passed(raw.get("tests"), raw.get("test_surface"))
     gate_ran = _gate_ran(raw.get("tests"), raw.get("test_surface"))
 
     usage = raw.get("usage")
     raw_input_tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
-    input_tokens = 0
-    if isinstance(raw_input_tokens, int | float) and not isinstance(raw_input_tokens, bool):
-        # A vendor that reports the count as a JSON float used to read as 0,
-        # which drops it out of `cache_pct`'s denominator and inflates the
-        # hit rate -- the very error that column was rewritten to avoid.
-        if math.isfinite(raw_input_tokens) and raw_input_tokens >= 0:
-            input_tokens = int(raw_input_tokens)
+    parsed_input = _receipt_number(raw_input_tokens)
+    # A vendor that reports the count as a JSON float used to read as 0,
+    # which drops it out of `cache_pct`'s denominator and inflates the
+    # hit rate -- the very error that column was rewritten to avoid.
+    input_tokens = int(parsed_input) if parsed_input is not None else 0
 
     budget = raw.get("budget")
     grace_used: Decimal | None = None
@@ -695,9 +705,13 @@ class MissionRow:
     # Runs of this mission that spawned but carried no price. `cost_usd` is
     # then a lower bound, not the mission's cost (2026-09-08 review).
     unpriced_runs: int = 0
-    # True when `--since`/`--until` narrowed the runs that reached this row.
-    # `landed_ok` and `items` are read from the mission's own directory, over
-    # its whole life, so dividing a windowed cost by them is not a rate.
+    # True when `--since`/`--until` actually excluded one or more of this
+    # mission's snapshot runs. `landed_ok` and `items` are read from the
+    # mission's own directory, over its whole life, so dividing a
+    # windowed cost by them is not a rate. A command that passed a window
+    # which cut nothing is not windowed. A mission whose snapshot run
+    # count cannot be determined is windowed -- unknown is not "the
+    # window holds the whole mission".
     windowed: bool = False
     # True when the mission is parked (`paused` without an `answer`) or
     # interrupted: neither passed nor failed, so `ok` is None and the
@@ -843,7 +857,9 @@ class Rules:
     that stage's capped runs. The three cohorts are kept apart because a run
     killed at its cap usually never reaches its gate, and counting "no gate
     ran" as passed read not-checked as green -- rule 10's dollar is about a
-    run that had already earned its verdict."""
+    run that had already earned its verdict. `cap_losses["grace"][stage]`
+    answers the same question the same way: `"n/a"` when the stage has no
+    Claude run, else `{"used_usd", "runs"}`."""
 
     review: list[dict[str, object]]
     cap_losses: dict[str, object]
@@ -878,6 +894,11 @@ class Report:
     # against a finding.
     dispositions_duplicate: int = 0
     dispositions_unmatched: int = 0
+    # A review lane whose last attempt has no `run_id`, so it cannot join
+    # to an in-window run row. Counted rather than scored or dropped: the
+    # sitting cannot be placed in this window, and the two tables still
+    # agree about sittings they could measure.
+    review_sittings_unjoined: int = 0
     # Review item 2: the aggregate behind the Missions table's per-mission
     # `usd_per_item`.
     landed: LandedRow = field(default_factory=LandedRow)
@@ -892,6 +913,7 @@ class Report:
             "dispositions_malformed": self.dispositions_malformed,
             "dispositions_duplicate": self.dispositions_duplicate,
             "dispositions_unmatched": self.dispositions_unmatched,
+            "review_sittings_unjoined": self.review_sittings_unjoined,
             "missions": [row.to_dict() for row in self.missions],
             "landed": self.landed.to_dict(),
             "rules": self.rules.to_dict(),
@@ -939,12 +961,22 @@ def _matched_confidence(items: object, index: object) -> int | None:
     return None
 
 
-def _matches_a_finding(items: object, index: object) -> bool:
+def _matches_a_finding(
+    items: object, index: object, *, findings: object = None
+) -> bool:
     """D20: whether a disposition's `index` names a finding the review lane
-    actually parsed. A review lane with no parsed `items` at all (a receipt
-    that predates them) cannot answer the question, so every disposition
-    against it still counts -- the check applies only where there is
-    something to match against."""
+    actually parsed.
+
+    A parsed lane reporting zero findings can answer: that index names
+    nothing, so the disposition is unmatched. A review lane with no parsed
+    `items` at all (a receipt that predates them, `findings` unknown or
+    positive with an empty list) cannot answer the question, so every
+    disposition against it still counts -- the check applies only where
+    there is something to match against. `findings` defaults to None so
+    the existing two-argument call still means "cannot tell, count it".
+    """
+    if findings == 0:
+        return False
     if not isinstance(items, list) or not items:
         return True
     return any(
@@ -963,6 +995,48 @@ def _review_sitting_stopped(info: dict, stopped_ids: set[str]) -> bool:
     """
     run_id = info.get("run_id")
     return isinstance(run_id, str) and run_id in stopped_ids
+
+
+def _review_sitting_excluded(
+    info: dict,
+    stopped_ids: set[str],
+    in_window_ids: set[str],
+    *,
+    windowed: bool = False,
+) -> bool:
+    """Whether precision should skip this review lane for this report.
+
+    Stopped sittings are out, as before. Under a window, a lane whose
+    `run_id` is absent or does not join to an in-window row is out too --
+    finding rate only walks in-window rows, so scoring the snapshot's
+    whole `review_lanes` map would make the two tables disagree. Callers
+    that pass no window keep the unwindowed snapshot join (a missing
+    `run_id` still scores, matching receipts that predate the field).
+    """
+    if _review_sitting_stopped(info, stopped_ids):
+        return True
+    if not windowed:
+        return False
+    run_id = info.get("run_id")
+    return not (isinstance(run_id, str) and run_id in in_window_ids)
+
+
+def _mission_windowed(snapshot_runs: object, kept: int, *, windowed: bool) -> bool:
+    """Whether this mission's cost is a windowed lower bound.
+
+    `windowed` here is the command flag (`--since`/`--until` was passed).
+    A mission is windowed only when that window excluded one or more of
+    its snapshot runs, or when the snapshot's run count cannot be
+    determined -- unknown is not "not windowed". `skipped_unwindowable`
+    is the global count of receipts whose directory name is not a run
+    stamp; a snapshot that named one of those has a higher run count
+    than the in-window rows, so this returns True.
+    """
+    if not windowed:
+        return False
+    if type(snapshot_runs) is not int:
+        return True
+    return snapshot_runs > kept
 
 
 def _unique_dispositions(
@@ -1078,10 +1152,17 @@ def _build_report(
     disposition_counts = {"duplicate": 0, "unmatched": 0}
     # Finding rate skips a run conductor stopped; precision joins the
     # snapshot's last attempt to that same receipt so the two tables name
-    # the same sittings.
+    # the same sittings. Under a window the join is to in-window rows,
+    # not the snapshot's whole `review_lanes` map.
     stopped_review_ids = {
         r.run_id for r in rows if (r.interrupted or r.cancelled) and r.stage == REVIEW_STAGE
     }
+    in_window_ids = {r.run_id for r in rows}
+    kept_by_mission: dict[str, int] = {}
+    for run in rows:
+        if run.mission is not None:
+            kept_by_mission[run.mission] = kept_by_mission.get(run.mission, 0) + 1
+    review_sittings_unjoined = 0
     for name, mission_row in missions.items():
         meta = mission_meta.get(name, {})
         mission_row.ok = meta.get("ok") if isinstance(meta.get("ok"), bool) else None
@@ -1097,13 +1178,21 @@ def _build_report(
         items = meta.get("items")
         known = isinstance(items, int) and not isinstance(items, bool)
         mission_row.items = items if known else None
-        mission_row.windowed = windowed
+        mission_row.windowed = _mission_windowed(
+            meta.get("runs"), kept_by_mission.get(name, 0), windowed=windowed
+        )
         if mission_row.unfinished:
             continue
 
         review_lanes = meta.get("review_lanes")
         review_lanes = review_lanes if isinstance(review_lanes, dict) else {}
         fix_dispositions = meta.get("fix_dispositions")
+        if windowed:
+            for info in review_lanes.values():
+                if _review_sitting_stopped(info, stopped_review_ids):
+                    continue
+                if not isinstance(info.get("run_id"), str):
+                    review_sittings_unjoined += 1
         # W7: no fix lane recorded dispositions on this mission (no fix lane
         # at all, or one that ran without a `dispositions` list) -- every
         # parsed review lane here would otherwise vanish from the precision
@@ -1117,21 +1206,27 @@ def _build_report(
                 # lane just as on one whose dispositions named other lanes.
                 if info.get("unparsed") or not info.get("findings"):
                     continue
-                if _review_sitting_stopped(info, stopped_review_ids):
+                if _review_sitting_excluded(
+                    info, stopped_review_ids, in_window_ids, windowed=windowed
+                ):
                     continue
                 row = precision.setdefault(
                     info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"])
                 )
                 row.undispositioned += 1
             continue
-        if not review_lanes:
-            continue
+        # A mission with dispositions and no review lane still walks the
+        # disposition loop below -- those names cannot join, and
+        # `dispositions_unknown_lane` exists so they are counted instead of
+        # vanishing silently (a salvage follow-on, a build-and-fix mission).
         # F1 item 4: only a mission with both a review lane whose verdict
         # parsed and a fix lane that recorded dispositions (even an empty
         # list -- the field's presence is what "with dispositions" means)
         # joins a disposition's named reviewer lane back to its vendor.
         for info in review_lanes.values():
-            if _review_sitting_stopped(info, stopped_review_ids):
+            if _review_sitting_excluded(
+                info, stopped_review_ids, in_window_ids, windowed=windowed
+            ):
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
             if info.get("unparsed"):
@@ -1155,7 +1250,9 @@ def _build_report(
             if info is None:
                 dispositions_unknown_lane += 1
                 continue
-            if _review_sitting_stopped(info, stopped_review_ids):
+            if _review_sitting_excluded(
+                info, stopped_review_ids, in_window_ids, windowed=windowed
+            ):
                 continue
             if info.get("unparsed"):
                 continue
@@ -1164,7 +1261,11 @@ def _build_report(
             # counted as unmatched and left out of every per-vendor tally, so
             # `fixed` can never exceed `findings` (a `corrected_rate` above
             # 1.0 was reachable from one bad index alone).
-            if not _matches_a_finding(info.get("items"), item.get("index")):
+            if not _matches_a_finding(
+                info.get("items"),
+                item.get("index"),
+                findings=info.get("findings") if not info.get("unparsed") else None,
+            ):
                 disposition_counts["unmatched"] += 1
                 continue
             row = precision.setdefault(info["vendor"], ReviewerPrecisionRow(vendor=info["vendor"]))
@@ -1194,7 +1295,9 @@ def _build_report(
         for lane_name, info in review_lanes.items():
             if info.get("unparsed") or not info.get("findings"):
                 continue
-            if _review_sitting_stopped(info, stopped_review_ids):
+            if _review_sitting_excluded(
+                info, stopped_review_ids, in_window_ids, windowed=windowed
+            ):
                 continue
             if lane_name in dispositioned_lanes:
                 continue
@@ -1204,8 +1307,9 @@ def _build_report(
     precision_rows = sorted(precision.values(), key=lambda r: r.vendor)
     # F15 item 3: every fix lane's own `dispositions_malformed` count, summed
     # across the same missions the rest of this report's tables are scoped
-    # to -- independent of whether that mission has a review lane at all,
-    # unlike `dispositions_unknown_lane` above.
+    # to -- independent of whether that mission has a review lane at all.
+    # `dispositions_unknown_lane` now walks the same missions: a disposition
+    # that cannot join is counted even when the mission has no review lane.
     dispositions_malformed = sum(
         meta.get("fix_dispositions_malformed", 0)
         for name, meta in mission_meta.items()
@@ -1270,6 +1374,10 @@ def _build_report(
         ]
         if not matches:
             cap_losses[stage] = "n/a"
+            # Same question the cohort beside it answers: a stage with no
+            # Claude run at all reads `n/a`, never `0.00` / `runs 0`, so a
+            # missing stage is never mistaken for a clean one.
+            grace[stage] = "n/a"
         else:
             # D21: a cap loss is only rule 10's case when a gate actually ran
             # and passed. A watcher-killed run never gets that far, and
@@ -1291,11 +1399,11 @@ def _build_report(
                 # these cap misses.
                 cohort["unmatched_vendor_runs"] = unmatched_vendor_runs
             cap_losses[stage] = cohort
-        grace_total = sum((r.grace_used for r in matches if r.grace_used), Decimal("0"))
-        grace[stage] = {
-            "used_usd": _money(grace_total),
-            "runs": sum(1 for r in matches if r.finished_in_band),
-        }
+            grace_total = sum((r.grace_used for r in matches if r.grace_used), Decimal("0"))
+            grace[stage] = {
+                "used_usd": _money(grace_total),
+                "runs": sum(1 for r in matches if r.finished_in_band),
+            }
     cap_losses["grace"] = grace
 
     # F2: one row per mission this report included -- every mission on disk
@@ -1318,6 +1426,7 @@ def _build_report(
         dispositions_malformed=dispositions_malformed,
         dispositions_duplicate=disposition_counts["duplicate"],
         dispositions_unmatched=disposition_counts["unmatched"],
+        review_sittings_unjoined=review_sittings_unjoined,
         missions=mission_rows,
         landed=landed,
         rules=Rules(review=review_rules, cap_losses=cap_losses),
@@ -1497,6 +1606,7 @@ def _print_report(rpt: Report) -> None:
         f"  |  malformed disposition lines: {rpt.dispositions_malformed}"
         f"  |  duplicate dispositions: {rpt.dispositions_duplicate}"
         f"  |  dispositions naming no reported finding: {rpt.dispositions_unmatched}"
+        f"  |  review sittings unjoined: {rpt.review_sittings_unjoined}"
     )
     print()
     _print_section(
@@ -1606,7 +1716,11 @@ def _print_report(rpt: Report) -> None:
         "  rule 10: grace band usage (E24)",
         ("stage", "used_usd", "runs finished in band"),
         [
-            (stage, info["used_usd"], _cell(info["runs"]))
+            (
+                stage,
+                info["used_usd"] if isinstance(info, dict) else _cell(info),
+                _cell(info["runs"]) if isinstance(info, dict) else _cell(info),
+            )
             for stage, info in (rpt.rules.cap_losses.get("grace") or {}).items()
         ],
     )

@@ -263,12 +263,17 @@ def test_report_reviewer_finding_rate_excludes_unparsed_from_rate(home: Path):
     assert row.rate() is None
 
 
-def _review_lane(name: str, *, fleet: str, model: str, findings: int) -> dict:
+def _review_lane(
+    name: str, *, fleet: str, model: str, findings: int, run_id: str | None = None
+) -> dict:
+    attempt: dict[str, object] = {"fleet": fleet, "model": model}
+    if run_id is not None:
+        attempt["run_id"] = run_id
     return {
         "name": name,
         "stage": "review",
         "review": {"verdict": "findings", "findings": findings},
-        "attempts": [{"fleet": fleet, "model": model}],
+        "attempts": [attempt],
     }
 
 
@@ -1323,6 +1328,7 @@ def test_report_json_key_order(home: Path, monkeypatch, capsys):
         "dispositions_malformed",
         "dispositions_duplicate",
         "dispositions_unmatched",
+        "review_sittings_unjoined",
         "missions",
         "landed",
         "rules",
@@ -1995,3 +2001,266 @@ def test_readme_documents_cost_per_landed_item():
     assert "AGENTS.md rule 2" in section
     assert "items_cost_usd" in section
     assert "fully priced, unwindowed" in section
+
+
+def test_precision_under_a_window_scores_only_in_window_review_sittings(home: Path):
+    """Finding rate walks in-window run rows; precision used to walk the
+    snapshot's whole `review_lanes` map. Under `--since`, a review before
+    the boundary was scored as a completed sitting in precision only."""
+    from conductor.spend import _parse_bound
+
+    old_id = "20251201T000000Z-review"
+    directory = _write_receipt(
+        home,
+        old_id,
+        fleet="cursor",
+        model="cursor-grok-4.6-medium",
+        stage="review",
+        lane="review-grok",
+        mode="read",
+        mission="m-win",
+        answer_path=str(home / "runs" / old_id / "answer.txt"),
+    )
+    (directory / "answer.txt").write_text("FINDINGS: 2\n")
+    _write_receipt(
+        home,
+        "20260115T000000Z-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-win",
+    )
+    _write_mission(
+        home,
+        "m-win",
+        name="mission-win",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-grok",
+                fleet="cursor",
+                model="cursor-grok-4.6-medium",
+                findings=2,
+                run_id=old_id,
+            ),
+            _fix_lane(
+                [{"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r"}]
+            ),
+        ],
+    )
+
+    whole = report(home)
+    assert next(r for r in whole.reviewer_finding_rate if r.vendor == "xai").findings == 2
+    assert next(r for r in whole.reviewer_precision if r.vendor == "xai").findings == 2
+
+    windowed = report(home, since=_parse_bound("2026-01-01", "--since"))
+    assert not [r for r in windowed.reviewer_finding_rate if r.vendor == "xai"]
+    assert not [r for r in windowed.reviewer_precision if r.vendor == "xai"]
+    assert windowed.review_sittings_unjoined == 0
+
+
+def test_an_interrupted_review_outside_the_window_is_not_scored_in_precision(
+    home: Path,
+):
+    """`stopped_review_ids` is built from in-window rows. An interrupted
+    review before the boundary was not in that set, so its partial
+    `answer.txt` was scored as a completed sitting -- the case the
+    finding-rate comment refuses."""
+    from conductor.spend import _parse_bound
+
+    old_id = "20251201T000000Z-int"
+    directory = _write_receipt(
+        home,
+        old_id,
+        fleet="cursor",
+        model="cursor-grok-4.6-medium",
+        stage="review",
+        lane="review-grok",
+        mode="read",
+        mission="m-int-win",
+        answer_path=str(home / "runs" / old_id / "answer.txt"),
+    )
+    (directory / "answer.txt").write_text("FINDINGS: 3\n")
+    path = directory / "result.json"
+    raw = json.loads(path.read_text())
+    raw["interrupted"] = True
+    path.write_text(json.dumps(raw))
+    _write_receipt(
+        home,
+        "20260115T000000Z-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-int-win",
+    )
+    _write_mission(
+        home,
+        "m-int-win",
+        name="mission-int-win",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-grok",
+                fleet="cursor",
+                model="cursor-grok-4.6-medium",
+                findings=3,
+                run_id=old_id,
+            ),
+            _fix_lane(
+                [{"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r"}]
+            ),
+        ],
+    )
+    windowed = report(home, since=_parse_bound("2026-01-01", "--since"))
+    assert not [r for r in windowed.reviewer_finding_rate if r.vendor == "xai"]
+    assert not [r for r in windowed.reviewer_precision if r.vendor == "xai"]
+
+
+def test_a_review_lane_with_no_run_id_is_unjoined_under_a_window(home: Path):
+    """`run_id` exists to join a lane back to its run receipt. Absent, the
+    sitting cannot be placed in the window; counted, not scored."""
+    from conductor.spend import _parse_bound
+
+    _write_receipt(
+        home,
+        "20260115T000000Z-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="m-unjoined",
+    )
+    _write_mission(
+        home,
+        "m-unjoined",
+        name="mission-unjoined",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-grok", fleet="cursor", model="cursor-grok-4.6-medium", findings=2
+            ),
+            _fix_lane(
+                [{"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r"}]
+            ),
+        ],
+    )
+    unbounded = report(home)
+    assert next(r for r in unbounded.reviewer_precision if r.vendor == "xai").findings == 2
+    assert unbounded.review_sittings_unjoined == 0
+
+    windowed = report(home, since=_parse_bound("2020-01-01", "--since"))
+    assert windowed.review_sittings_unjoined == 1
+    assert not [r for r in windowed.reviewer_precision if r.vendor == "xai"]
+
+
+def test_a_disposition_against_a_zero_findings_lane_is_unmatched(home: Path):
+    """A modern NO_FINDINGS lane stores `items: []` and `findings: 0`,
+    the same bytes as a legacy receipt that predates `items`. The
+    fallback treated both as "cannot tell, count the disposition", so a
+    fixer naming `finding 1` against zero findings landed on the vendor
+    row while `findings` stayed 0."""
+    from conductor.report import _matches_a_finding
+
+    assert _matches_a_finding([], 1) is True
+    assert _matches_a_finding([], 1, findings=0) is False
+    assert _matches_a_finding([], 1, findings=1) is True
+
+    _write_receipt(
+        home,
+        "20260101T000000Z-d20z-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="d20z",
+    )
+    _write_mission(
+        home,
+        "d20z",
+        name="mission-d20z",
+        ok=True,
+        lanes=[
+            _review_lane(
+                "review-gemini", fleet="antigravity", model="gemini-3.7-flash", findings=0
+            ),
+            _fix_lane(
+                [{"lane": "review-gemini", "index": 1, "disposition": "fixed", "reason": "r1"}]
+            ),
+        ],
+    )
+    rpt = report(home)
+    row = next(r for r in rpt.reviewer_precision if r.vendor == "google")
+    assert row.findings == 0
+    assert row.fixed == 0
+    assert rpt.dispositions_unmatched == 1
+    assert row.corrected_rate() is None
+
+
+def test_dispositions_on_a_mission_with_no_review_lane_are_counted(home: Path):
+    """A salvage follow-on / build-and-fix mission has a fix lane and no
+    review lane. Every disposition it wrote names a lane that is not a
+    review lane on its own mission -- the case `dispositions_unknown_lane`
+    exists to count. The `if not review_lanes: continue` used to skip the
+    only loop that increments it."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-salvage-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+        mission="salvage-followon",
+    )
+    _write_mission(
+        home,
+        "salvage-followon",
+        name="salvage-followon",
+        ok=True,
+        lanes=[
+            _fix_lane(
+                [
+                    {"lane": "review-grok", "index": 1, "disposition": "fixed", "reason": "r1"},
+                    {
+                        "lane": "review-gemini",
+                        "index": 1,
+                        "disposition": "refused",
+                        "reason": "r2",
+                    },
+                ]
+            ),
+        ],
+    )
+    rpt = report(home)
+    assert rpt.dispositions_unknown_lane == 2
+    assert rpt.reviewer_precision == []
+
+
+def test_grace_is_n_a_when_a_stage_has_no_claude_run(home: Path, monkeypatch, capsys):
+    """A stage with no Claude run at all used to print `used_usd 0.00,
+    runs 0` beside a cap-loss cohort that correctly said `n/a`."""
+    _write_receipt(
+        home,
+        "20260101T000000Z-claude-build",
+        fleet="claude",
+        model="claude-sonnet-5",
+        stage="build",
+    )
+    rpt = report(home)
+    assert rpt.rules.cap_losses["fix"] == "n/a"
+    assert rpt.rules.cap_losses["grace"]["fix"] == "n/a"
+    assert rpt.rules.cap_losses["grace"]["build"] == {"used_usd": "0.00", "runs": 0}
+
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["report"]) == 0
+    printed = capsys.readouterr().out
+    assert "rule 10: grace band usage (E24)" in printed
+    assert "n/a" in printed
+
+
+def test_input_tokens_comment_names_the_three_term_cache_denominator():
+    """The field comment described the discarded shape (reads over
+    uncached input alone) as current. `cache_pct` divides by uncached
+    input plus cache reads plus cache writes."""
+    text = (Path(__file__).parents[1] / "src" / "conductor" / "report.py").read_text()
+    assert "# denominator, cache_read_tokens (already on spend.Run) over this." not in text
+    start = text.index("# F2: the receipt's own `usage.input_tokens`")
+    comment = text[start : text.index("input_tokens: int = 0")]
+    assert "uncached" in comment
+    assert "cache writes" in comment or "cache write" in comment
