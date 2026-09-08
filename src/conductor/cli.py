@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import os
 import shutil
 import signal
@@ -96,10 +97,74 @@ def cmd_fleets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mission_id(text: str) -> str:
+    """An argparse `type` for a mission id, which every command that takes
+    one joins straight onto `<home>/missions/`.
+
+    Nothing refused a path-shaped id, so `../other` reached a directory
+    outside the missions folder -- attest, salvage, land, golden record and
+    export alike (2026-09-08 review). One path segment, and not a relative
+    one; `graph.is_lane_name` guards a lane name the same way.
+    """
+    if not text or Path(text).name != text or text in {".", ".."}:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a mission id: it must be a single path segment"
+        )
+    return text
+
+
+def _positive_int(text: str) -> int:
+    """An argparse `type` for a count that must be at least 1.
+
+    `type=int` alone let `--limit -1` through, and `entries[:-1]` is a valid
+    end-relative slice: the listing quietly became "every entry except the
+    oldest" under a heading that says recent N (2026-09-08 review).
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {value}")
+    return value
+
+
+def _nonneg_float(text: str) -> float:
+    """An argparse `type` for a finite number that must be zero or more.
+
+    `float()` accepts "nan" and "inf", and NaN fails every comparison it is
+    asked, so a `< 0` check downstream passes it straight through to
+    `timedelta` (ValueError) or to a cap that can never fire.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"must be a finite number, got {text!r}")
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be zero or more, got {value}")
+    return value
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     prompt = args.prompt
     if args.prompt_file:
-        prompt = Path(args.prompt_file).read_text()
+        if prompt:
+            # The error below says "or", and the file silently won: a
+            # dispatch could run a different prompt than the one on the
+            # command line (2026-09-08 review).
+            print(
+                "error: give a prompt argument or --prompt-file, not both", file=sys.stderr
+            )
+            return 2
+        try:
+            # Wrapped the way --verdict-file and --agent-file below already
+            # are: a typo in a path is ordinary bad input, not a traceback.
+            prompt = Path(args.prompt_file).read_text()
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"error: prompt file unreadable: {exc}", file=sys.stderr)
+            return 2
     if not prompt:
         print("error: give a prompt argument or --prompt-file", file=sys.stderr)
         return 2
@@ -324,7 +389,17 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 }
             )
             continue
-        data = json.loads(result_file.read_text())
+        try:
+            data = json.loads(result_file.read_text())
+        except (OSError, ValueError):
+            # A truncated receipt is a crashed run, not a reason to fail the
+            # listing: `spend` and `report` already skip one (2026-09-08
+            # review). The row says so rather than tracebacking.
+            rows.append({"mission_id": path.name, "status": "unreadable"})
+            continue
+        if not isinstance(data, dict) or "mission_id" not in data:
+            rows.append({"mission_id": path.name, "status": "unreadable"})
+            continue
         collisions = data.get("collisions")
         resolve = data.get("resolve")
         if resolve is None:
@@ -619,7 +694,14 @@ def cmd_runs(args: argparse.Namespace) -> int:
                 continue
             rows.append({"run_id": path.name, "status": "incomplete"})
             continue
-        data = json.loads(result_file.read_text())
+        try:
+            data = json.loads(result_file.read_text())
+        except (OSError, ValueError):
+            rows.append({"run_id": path.name, "status": "unreadable"})
+            continue
+        if not isinstance(data, dict) or not {"run_id", "fleet", "model"} <= set(data):
+            rows.append({"run_id": path.name, "status": "unreadable"})
+            continue
         git_verdict = data.get("git_verdict")
         if not isinstance(git_verdict, dict):
             legacy = data.get("verdict")
@@ -939,7 +1021,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch.add_argument("--effort", default="standard", choices=EFFORTS)
     p_dispatch.add_argument("--mode", default="read", choices=MODES)
     p_dispatch.add_argument("--cwd", default=".", help="the fleet's working directory")
-    p_dispatch.add_argument("--timeout", type=int, help="seconds; per-mode default otherwise")
+    p_dispatch.add_argument(
+    "--timeout", type=_positive_int, help="seconds; per-mode default otherwise"
+)
     p_dispatch.add_argument(
         "--stall-timeout",
         type=int,
@@ -1181,7 +1265,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_shape_a.add_argument(
         "--cap-grace-usd",
-        type=float,
+        type=_nonneg_float,
         default=shape.USD_CLAUDE_GRACE,
         help=f"grace band on the build and fix (claude) lanes and the review-grok (cursor "
         f"read) lane (E24/F5); 0 disables it, ceiling ${CAP_GRACE_CEILING_USD:.2f} "
@@ -1279,7 +1363,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_shape_a.set_defaults(func=cmd_shape_a)
 
     p_missions = sub.add_parser("missions", help="list recent missions")
-    p_missions.add_argument("--limit", type=int, default=20)
+    p_missions.add_argument("--limit", type=_positive_int, default=20)
     p_missions.set_defaults(func=cmd_missions)
 
     p_verify = sub.add_parser("verify", help="inspect repo state, optionally run a gate")
@@ -1288,19 +1372,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.set_defaults(func=cmd_verify)
 
     p_runs = sub.add_parser("runs", help="list recent dispatches")
-    p_runs.add_argument("--limit", type=int, default=20)
+    p_runs.add_argument("--limit", type=_positive_int, default=20)
     p_runs.set_defaults(func=cmd_runs)
 
     p_gc = sub.add_parser("gc", help="plan safe worktree and conductor-branch cleanup")
     p_gc.add_argument("--repo", action="append", default=[], metavar="PATH")
-    p_gc.add_argument("--older-than", type=float, default=0, metavar="HOURS")
+    p_gc.add_argument("--older-than", type=_nonneg_float, default=0, metavar="HOURS")
     p_gc.add_argument("--apply", action="store_true")
     p_gc.set_defaults(func=cmd_gc)
 
     p_attest = sub.add_parser(
         "attest", help="verify a mission's signed receipt chain on bytes"
     )
-    p_attest.add_argument("mission_id", metavar="MISSION_ID")
+    p_attest.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
     p_attest.set_defaults(func=cmd_attest)
 
     p_salvage = sub.add_parser(
@@ -1308,7 +1392,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="gate a mission lane's kept worktree by hand (AGENTS.md rule 6), and "
         "optionally emit the follow-on review-and-fix mission",
     )
-    p_salvage.add_argument("mission_id", metavar="MISSION_ID")
+    p_salvage.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
     p_salvage.add_argument("--lane", required=True, help="the kept lane's name")
     p_salvage.add_argument(
         "--emit", metavar="PATH", help="write a follow-on mission file here; needs a green gate"
@@ -1344,7 +1428,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="F7: merge a lane's branch, gate the merged head, run golden check, and "
         "attest the mission -- the lead's own act, never run inside a mission",
     )
-    p_land.add_argument("mission_id", metavar="MISSION_ID")
+    p_land.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
     p_land.add_argument("--lane", required=True, help="the lane whose branch lands")
     p_land.add_argument(
         "--checkout", help="repo to merge into (default: the lane's own repository)"
@@ -1368,7 +1452,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_golden_record = golden_sub.add_parser(
         "record", help="record a finished mission under CONDUCTOR_HOME as an offline fixture"
     )
-    p_golden_record.add_argument("mission_id", metavar="MISSION_ID")
+    p_golden_record.add_argument("mission_id", metavar="MISSION_ID", type=_mission_id)
     p_golden_record.add_argument("--out", required=True, metavar="DIR")
     p_golden_record.add_argument(
         "--max-bytes", type=int, default=golden.DEFAULT_MAX_BYTES, metavar="N"
@@ -1389,7 +1473,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser(
         "export", help="export a scrubbed, manifest-checked receipt bundle for a mission (E13)"
     )
-    p_export.add_argument("mission_id", nargs="?", metavar="MISSION_ID")
+    p_export.add_argument(
+    "mission_id", nargs="?", metavar="MISSION_ID", type=_mission_id
+)
     p_export.add_argument("--out", metavar="DIR", help="write the bundle here")
     p_export.add_argument("--logs", action="store_true", help="include stdout.log/stderr.log")
     p_export.add_argument(
