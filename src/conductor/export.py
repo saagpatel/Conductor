@@ -230,20 +230,48 @@ def _copy_scrubbed(
     return original_sha, hashlib.sha256(final_bytes).hexdigest(), len(final_bytes)
 
 
+def _is_symlinked(path: Path, root: Path) -> bool:
+    """True when `path`, or any directory between it and `root`, is a symlink.
+
+    2026-09-08 review: `rglob` does not descend a directory symlink, but it
+    does list a *file* symlink, and `is_file()` and `read_bytes()` both follow
+    it -- so a link planted in a mission subdirectory was inlined into the
+    bundle under an innocent relative name, with whatever it pointed at as its
+    content. Conductor never writes a link into a mission or run directory, so
+    one found here is skipped rather than followed.
+    """
+    current = path
+    while True:
+        if current.is_symlink():
+            return True
+        if current == root or current.parent == current:
+            return False
+        current = current.parent
+
+
 def _find_key_material(work: Path, key: bytes) -> str | None:
     """The first bundle file, relative to `work`, that carries the receipt
     key itself -- as raw bytes, as hex, or as base64 -- or None on a clean
     bundle. The key signs every receipt; it must never travel with a bundle
     that ships to a reader outside this machine, whatever shape it hides in.
     """
-    hex_form = key.hex()
-    b64_form = base64.b64encode(key).decode("ascii")
+    # 2026-09-08 review: only lowercase hex and standard-alphabet base64 were
+    # searched, so the same key uppercased, urlsafe-encoded, or unpadded shipped
+    # clean. Every form is cheap to add and the scan runs once per export.
+    forms = {
+        key.hex(),
+        key.hex().upper(),
+        base64.b64encode(key).decode("ascii"),
+        base64.b64encode(key).decode("ascii").rstrip("="),
+        base64.urlsafe_b64encode(key).decode("ascii"),
+        base64.urlsafe_b64encode(key).decode("ascii").rstrip("="),
+    }
     for file in sorted(p for p in work.rglob("*") if p.is_file()):
         raw = file.read_bytes()
         if key in raw:
             return str(file.relative_to(work))
         text = raw.decode("utf-8", errors="ignore")
-        if hex_form in text or b64_form in text:
+        if any(form in text for form in forms):
             return str(file.relative_to(work))
     return None
 
@@ -402,7 +430,7 @@ def export(
                 continue
             mission_subdirs_present.append(name)
             for file in sorted(p for p in src_dir.rglob("*") if p.is_file()):
-                if file.name in _SKIP_NAMES:
+                if file.name in _SKIP_NAMES or _is_symlinked(file, mission_dir):
                     continue
                 copy_one(file, file.relative_to(mission_dir))
 
@@ -414,7 +442,7 @@ def export(
                 continue
             for name in run_files:
                 src = run_dir / name
-                if src.is_file():
+                if src.is_file() and not _is_symlinked(src, run_dir):
                     copy_one(src, Path("runs") / run_id / name)
                     if name not in run_files_present:
                         run_files_present.append(name)
@@ -569,6 +597,13 @@ def check(bundle_dir: str | Path) -> CheckResult:
 
     files_checked = 0
     for relpath, meta in sorted(files_meta.items()):
+        # 2026-09-08 review: a `files` entry that is not an object reached
+        # `meta.get` and raised AttributeError out of `check`, so a malformed
+        # bundle produced a traceback instead of the problem list a reader is
+        # promised. Every malformed shape is a problem, never an exception.
+        if not isinstance(meta, dict):
+            problems.append(f"{relpath}: manifest entry is not an object")
+            continue
         path = _resolve_in_bundle(bundle_dir, relpath)
         if path is None:
             problems.append(f"{relpath}: path escapes the bundle")
@@ -602,6 +637,7 @@ def check(bundle_dir: str | Path) -> CheckResult:
 
     links_checked = 0
     previous_sha: str | None = None
+    statement_run_ids: dict[int, object] = {}
     for position, link in enumerate(links):
         if not isinstance(link, dict):
             problems.append(f"receipts/chain.json link {position}: malformed entry")
@@ -615,7 +651,7 @@ def check(bundle_dir: str | Path) -> CheckResult:
             previous_sha = recorded_sha
             continue
         link_meta = files_meta.get(link_relpath)
-        if link_meta is None:
+        if not isinstance(link_meta, dict):
             problems.append(f"{link_relpath}: not listed in manifest.json")
             previous_sha = recorded_sha
             continue
@@ -670,10 +706,11 @@ def check(bundle_dir: str | Path) -> CheckResult:
                 f"'{statement_mission}', the manifest names '{manifest_mission_id}'"
             )
         run_id = statement.get("run_id")
+        statement_run_ids[position] = run_id
         if isinstance(run_id, str):
             attestation_relpath = f"runs/{run_id}/attestation.json"
             attestation_meta = files_meta.get(attestation_relpath)
-            if attestation_meta is None:
+            if not isinstance(attestation_meta, dict):
                 problems.append(
                     f"{link_relpath}: run '{run_id}' has no {attestation_relpath} in the bundle"
                 )
@@ -682,6 +719,52 @@ def check(bundle_dir: str | Path) -> CheckResult:
                     f"{attestation_relpath}: original sha256 disagrees with the link statement"
                 )
         previous_sha = recorded_sha
+
+    # 2026-09-08 review: `check` read `receipts/chain.json` and never looked at
+    # `manifest["chain"]`, so a manifest could claim `state: verified` with
+    # `verified_at_export: true` over a chain the bundle does not contain, or
+    # list links that disagree with chain.json, and still check clean. Those
+    # fields are the only account of the export-time verification a remote
+    # reader gets, and once the key is absent they are unsigned prose; the
+    # least `check` owes is that they agree with the files that did travel.
+    chain_meta = manifest.get("chain")
+    if not isinstance(chain_meta, dict):
+        problems.append("manifest.json 'chain' field is malformed")
+    else:
+        manifest_links = chain_meta.get("links")
+        manifest_links = manifest_links if isinstance(manifest_links, list) else []
+        if len(manifest_links) != len(links):
+            problems.append(
+                f"manifest.json records {len(manifest_links)} chain link(s), "
+                f"receipts/chain.json holds {len(links)}"
+            )
+        for position, entry in enumerate(manifest_links):
+            if position >= len(links) or not isinstance(entry, dict):
+                continue
+            link = links[position]
+            if isinstance(link, dict) and entry.get("index") != link.get("index"):
+                problems.append(
+                    f"manifest.json chain link {position}: index {entry.get('index')!r} "
+                    f"disagrees with receipts/chain.json {link.get('index')!r}"
+                )
+            # The run id lives in the signed statement, never in the link
+            # entry, so it is compared against the payload decoded above --
+            # and only for a link whose payload actually decoded.
+            if position in statement_run_ids and entry.get("run_id") != statement_run_ids[position]:
+                problems.append(
+                    f"manifest.json chain link {position}: run_id {entry.get('run_id')!r} "
+                    f"disagrees with the link statement {statement_run_ids[position]!r}"
+                )
+        if chain_meta.get("verified_at_export") is True and not links:
+            problems.append(
+                "manifest.json claims the chain was verified at export, "
+                "but the bundle carries no chain links"
+            )
+        verified_flag = chain_meta.get("verified_at_export")
+        if chain_meta.get("state") == "verified" and verified_flag is not True:
+            problems.append(
+                "manifest.json chain state is 'verified' but verified_at_export is not true"
+            )
 
     return CheckResult(
         ok=not problems, problems=problems, files_checked=files_checked, links_checked=links_checked
