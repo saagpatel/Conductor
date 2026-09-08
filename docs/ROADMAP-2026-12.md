@@ -50,6 +50,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | post-baseline hardening wave 2: gc salvage sources and bare repos, the export scrubber and bundle check, the resume budget, nine fail-closed negative tests, fourteen doc claims | 0.86.0 | seven cold-review lanes (Grok 4.6, Gemini 3.8 Flash), one Sonnet subagent; lead verified and fixed | $5.40 |
 | post-baseline hardening wave 3: land's ungated-merge shortcut, the mission budget's grace band, six report figures that read as zero, the plan child's launch clamp, five tests that pinned nothing | 0.87.0 | six cold-review lanes (Grok 4.6, Gemini 3.8 Flash); lead verified and fixed | $5.42 |
 | post-baseline hardening wave 4: a cut-short stream's work committed under a failed receipt, a cancelled lane settled against a rerun winner, three breaker limits, three git calls that did not answer, an unpriced setup failure read as a cap | 0.88.0 | six cold-review lanes (Grok 4.6, Gemini 3.8 Flash); lead verified and fixed | $4.70 |
+| post-baseline hardening wave 5: a self-commit surviving a failed run, a cap verdict that landed after the commit, an attestation not bound to its run, the settings digest missing every restricted read lane, Grok's 200K price cliff | 0.89.0 | seven cold-review lanes (Grok 4.6, Gemini 3.8 Flash); lead verified and fixed | $5.14 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
