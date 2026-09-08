@@ -325,6 +325,7 @@ def test_resumed_codex_thread_counts_only_usage_after_spawn(tmp_path, monkeypatc
 # --- D11: the retry loop goes through the ledger too --------------------------
 
 
+@pytest.mark.xdist_group(name="serial")
 def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
     repo, home, monkeypatch, tmp_path
 ):
@@ -333,6 +334,20 @@ def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
     outer attempt walk stops but the same-attempt retry loop used to dispatch
     straight past it. One lane lands unpriced while another sits in its retry
     backoff; the retry must consult the same gate the outer walk does.
+
+    The backoff is deliberately long relative to how fast the `silent` lane
+    lands. Both lanes are submitted together, but each one's worktree is
+    created first and the two contend on the same repository, so the second
+    dispatch's start can slip a second or more behind the first. At the
+    original `backoff_s: 2` that slip decided the test: `silent` had to land
+    unpriced inside `flaky`'s first backoff or `flaky` retried once before
+    the ledger could refuse, and the assertions below then failed on
+    `counter == "2"`. Measured 2026-09-08: three failures in five runs
+    standalone. The invariant held in every one of them (the retry was still
+    refused, at retry 2 instead of retry 1); it was the timing this test
+    pinned that did not hold, so the fix is margin here, not a weaker
+    assertion. Serial for the same reason: under `-n auto` the contention it
+    is sensitive to is worse.
     """
     counter = tmp_path / "flaky-dispatches"
     counter.write_text("0")
@@ -364,7 +379,7 @@ def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
         "mode": "read",
         "concurrency": 2,
         "max_cost_usd": 5.0,
-        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 2},
+        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 8},
         "lanes": [
             {"name": "flaky", "fleet": "claude"},
             {"name": "silent", "fleet": "cursor"},
