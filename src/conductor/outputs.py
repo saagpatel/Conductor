@@ -16,17 +16,37 @@ while the same reply on antigravity moved ~14K input tokens. Startup overhead,
 not the work, dominates short dispatches.
 
 Token convention after normalization, which prices.py relies on:
-  * `input_tokens` is uncached input only; `cache_read_tokens` sits beside it.
-    Anthropic reports it that way natively. OpenAI (`cached_input_tokens`)
-    and Google (`cache_read_tokens`) count cached tokens inside the input
-    figure, so those are subtracted out. Cursor's `cacheReadTokens` is
-    assumed to follow the same inside-the-input convention; every live run
-    so far reported zero, so the assumption has not yet cost anything.
+  * `input_tokens` is billed input sitting beside `cache_read_tokens`, not a
+    total that already contains it. Anthropic reports uncached input natively
+    (a Claude envelope with `input_tokens: 2` beside
+    `cache_read_input_tokens: 27539` is the common shape; subtracting would
+    zero it). OpenAI documents `cached_input_tokens` as nested inside
+    `input_tokens`, so the codex path still subtracts. Google
+    (`cache_read_tokens`) and Cursor (`cacheReadTokens`) send cache beside
+    input: measured 2026-09-08 against every result envelope under
+    `~/.conductor/runs` (fleet from the sibling `result.json`), 139 of 142
+    cursor envelopes and 98 of 116 antigravity envelopes have cache_read
+    greater than input_tokens -- a quantity nested inside another cannot
+    exceed it -- and all 116 antigravity envelopes that carry
+    `total_tokens` satisfy `total_tokens == input_tokens + output_tokens`
+    exactly, never plus `cache_read_tokens`. The previous inside-the-input
+    subtraction for those two fleets zeroed billed input on essentially
+    every run and is gone. The same single rule applies when cache_read
+    happens to be <= input_tokens (two cursor, six antigravity envelopes):
+    that is the only shape where nesting is arithmetically possible, but it
+    is the same API as the 139/98 that prove cache sits outside, not a
+    second convention.
   * `output_tokens` includes reasoning. OpenAI counts reasoning inside
     `output_tokens` and reports the reasoning share separately; Antigravity
     reports `thinking_tokens` beside `output_tokens` and Google bills them at
     the output rate, so they are added in. `thinking_tokens` is kept as an
     informational breakdown in both cases.
+  * `Usage.total_tokens` is conductor's sum of input, output, cache_read, and
+    cache_write -- every counter we record -- not a copy of a vendor
+    `total_tokens` field. Antigravity's own total is input+output only, so
+    conductor's total exceeds it by the cache counters. Cursor does not
+    report a total. Claude and Codex totals agree with this sum once nested
+    cache (codex) has been split out.
 """
 
 from __future__ import annotations
@@ -123,9 +143,10 @@ def usable_int(value: object) -> int | None:
     if isinstance(value, float) and not (math.isfinite(value) and value.is_integer()):
         return None
     if value < 0:
-        # No meter counts backwards, and a negative `cache_read_tokens` is
-        # subtracted from input on the cursor and antigravity paths, which
-        # turns it into extra billed input in the estimate (2026-09-08).
+        # No meter counts backwards. A negative used to be subtracted from
+        # input on the cursor and antigravity paths (extra billed input);
+        # those paths no longer subtract, but a negative is still not a
+        # token count.
         return None
     return int(value)
 
@@ -229,16 +250,7 @@ def claude_init_event(text: str) -> dict | None:
     docs/research/2026-09-06-live-probe-inline-agents.md), so the init event
     is the only env-independent evidence that an inline agent was applied.
     """
-    try:
-        raw: object = json.loads(text)
-    except json.JSONDecodeError:
-        raw = None
-    events = (
-        [event for event in raw if isinstance(event, dict)]
-        if isinstance(raw, list)
-        else [event for event in map(json_line, text.splitlines()) if event is not None]
-    )
-    for event in events:
+    for event in _json_objects(text):
         if event.get("type") == "system" and event.get("subtype") == "init":
             return event
     return None
@@ -264,22 +276,39 @@ def agy_init_event(text: str) -> dict | None:
 
 
 def claude_said(events: list[dict]) -> str:
-    """Text Claude completed before a stream was cut short."""
+    """Text Claude completed before a stream was cut short.
+
+    Claude Code emits one assistant event per content block, all sharing
+    one `message.id`. `claude_stream_usage` (below) keeps the last usage
+    per id because usage is a message-level meter restated on every
+    event; summing those copies would overprice a kill. Text is the
+    opposite: the first event is almost always a `thinking` block with
+    no text, so first-wins drops the paid answer. Blocks are concatenated
+    in stream order. A later event with the same id and the same content
+    list is a lifecycle copy of that message and is skipped, so a genuine
+    repeat does not duplicate the answer. An event with no `message.id`
+    and no `uuid` is not a repeat of anything and always contributes.
+    """
     parts: list[str] = []
-    seen: set[str] = set()
+    seen: dict[str, set[tuple]] = {}
     for event in events:
         if event.get("type") != "assistant":
             continue
         message = event.get("message")
         identity = message.get("id") if isinstance(message, dict) else None
         identity = identity or event.get("uuid")
-        if isinstance(identity, str) and identity:
-            if identity in seen:
-                continue
-            seen.add(identity)
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             continue
+        snapshot = tuple(
+            (block.get("type"), block.get("text")) if isinstance(block, dict) else None
+            for block in content
+        )
+        if isinstance(identity, str) and identity:
+            already = seen.setdefault(identity, set())
+            if snapshot in already:
+                continue
+            already.add(snapshot)
         for block in content:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"].strip())
@@ -295,16 +324,7 @@ def claude_stream_usage(text: str) -> Usage | None:
     """
     messages: dict[str, dict] = {}
     anonymous: list[dict] = []
-    try:
-        raw: object = json.loads(text)
-    except json.JSONDecodeError:
-        raw = None
-    events = (
-        [event for event in raw if isinstance(event, dict)]
-        if isinstance(raw, list)
-        else [event for event in map(json_line, text.splitlines()) if event is not None]
-    )
-    for event in events:
+    for event in _json_objects(text):
         if event.get("type") != "assistant":
             continue
         message = event.get("message")
@@ -401,10 +421,29 @@ def _parse_cursor(text: str) -> FleetOutput:
     )
 
 
+def _json_objects(text: str) -> list[dict]:
+    """A JSON array of objects, otherwise one object per line.
+
+    Claude Code without user settings prints the whole event list as one
+    JSON array (measured 2026-09-03). JSONL streams fail `json.loads` and
+    fall through to per-line parse. A single JSON object is not an array,
+    so it also falls through -- matching `claude_init_event`.
+    """
+    try:
+        raw: object = json.loads(text)
+    except json.JSONDecodeError:
+        raw = None
+    if isinstance(raw, list):
+        return [event for event in raw if isinstance(event, dict)]
+    return [event for event in map(json_line, text.splitlines()) if event is not None]
+
+
 def _last_stream_id(text: str, key: str) -> str | None:
-    """The last non-empty identity in a JSONL stream or wrapped result."""
+    """The last non-empty identity in a JSONL stream, JSON array, or
+    wrapped result. Last non-empty wins; a nested `result` dict is
+    consulted the same way as the event itself."""
     found: str | None = None
-    for event in (ev for ev in map(json_line, text.splitlines()) if ev is not None):
+    for event in _json_objects(text):
         candidates = [event]
         if isinstance(event.get("result"), dict):
             candidates.append(event["result"])
@@ -557,8 +596,34 @@ def _usage_from_envelope(fleet: str, payload: dict, notes: list[str]) -> Usage |
     return usage
 
 
-def usage_from_raw(fleet: str, raw: dict, *, notes: list[str] | None = None) -> Usage:
-    """One fleet's raw usage object, normalized to the convention above."""
+_TOKEN_KEYS = (
+    "input_tokens",
+    "inputTokens",
+    "output_tokens",
+    "outputTokens",
+    "cache_read_input_tokens",
+    "cache_read_tokens",
+    "cacheReadTokens",
+    "cache_creation_input_tokens",
+    "cache_write_tokens",
+    "cacheWriteTokens",
+    "thinking_tokens",
+    "reasoning_tokens",
+    "reasoningTokens",
+)
+
+
+def usage_from_raw(fleet: str, raw: dict, *, notes: list[str] | None = None) -> Usage | None:
+    """One fleet's raw usage object, normalized to the convention above.
+
+    A dict that carries no usable token counter and no usable cost is no
+    usage, not a zeroed Usage: `_int` maps a missing key to 0, and pricing
+    those zeros records the run as $0.00. Drawn here rather than in
+    `_usage_from_envelope` or `claude_stream_usage` because every raw
+    dict -- envelope, folded stream, agy steps -- passes through this
+    function; `_int` itself must keep returning 0 for a missing field
+    when some other field is present.
+    """
     input_tokens = _int(raw, "input_tokens", "inputTokens")
     output_tokens = _int(raw, "output_tokens", "outputTokens")
     cache_read = _int(raw, "cache_read_input_tokens", "cache_read_tokens", "cacheReadTokens")
@@ -566,12 +631,9 @@ def usage_from_raw(fleet: str, raw: dict, *, notes: list[str] | None = None) -> 
     thinking = _int(raw, "thinking_tokens", "reasoning_tokens", "reasoningTokens")
 
     if fleet == "antigravity":
-        # Google counts cached tokens inside the prompt count and bills
-        # thinking as output.
-        input_tokens = max(0, input_tokens - cache_read)
+        # Google bills thinking as output. Cache sits beside input (see
+        # the module docstring); do not subtract it.
         output_tokens += thinking
-    elif fleet == "cursor":
-        input_tokens = max(0, input_tokens - cache_read)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -588,6 +650,8 @@ def usage_from_raw(fleet: str, raw: dict, *, notes: list[str] | None = None) -> 
             usage.cost_usd = reported
             usage.cost_basis = "reported"
         break
+    if usage.cost_usd is None and not any(usable_int(raw.get(k)) is not None for k in _TOKEN_KEYS):
+        return None
     return usage
 
 

@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from conductor.outputs import INCOMPLETE, parse
+from conductor.outputs import INCOMPLETE, _last_stream_id, parse, usage_from_raw
 
 CLAUDE = (
     '{"duration_api_ms":1730,"stop_reason":"end_turn","result":"PONG",'
@@ -174,14 +174,18 @@ def test_camel_case_usage_is_normalized():
     assert out.usage.cost_basis is None
 
 
-def test_cursor_cache_reads_are_captured_and_split_out_of_input():
+def test_cursor_cache_reads_sit_beside_input():
+    """Cursor's cacheReadTokens sits beside inputTokens, not inside it.
+    Measured shape: cacheReadTokens exceeds inputTokens on 139 of 142
+    result envelopes; subtracting would record billed input as 0."""
     env = (
         '{"type":"result","result":"ok","session_id":"cursor-s",'
-        '"usage":{"inputTokens":1000,"outputTokens":10,"cacheReadTokens":400}}'
+        '"usage":{"inputTokens":215915,"outputTokens":10,"cacheReadTokens":4765056}}'
     )
     out = parse("cursor", env)
-    assert out.usage.input_tokens == 600
-    assert out.usage.cache_read_tokens == 400
+    assert out.usage.input_tokens == 215915
+    assert out.usage.cache_read_tokens == 4765056
+    assert out.usage.total_tokens == 215915 + 10 + 4765056
 
 
 def test_snake_case_usage_is_normalized():
@@ -262,14 +266,19 @@ def test_antigravity_timeout_is_an_error_not_an_empty_success():
     assert out.usage.thinking_tokens == 195
 
 
-def test_antigravity_cache_reads_are_split_out_of_input():
+def test_antigravity_cache_reads_sit_beside_input():
+    """Google's cache_read_tokens sits beside input_tokens. Measured:
+    98 of 116 result envelopes have cache_read > input, and every
+    envelope carrying total_tokens has total == input + output."""
     env = (
-        '{"status":"SUCCESS","response":"ok","usage":{"input_tokens":1000,'
-        '"output_tokens":10,"thinking_tokens":0,"cache_read_tokens":400}}'
+        '{"status":"SUCCESS","response":"ok","usage":{"input_tokens":105785,'
+        '"output_tokens":10,"thinking_tokens":0,"cache_read_tokens":473657,'
+        '"total_tokens":105795}}'
     )
     out = parse("antigravity", env)
-    assert out.usage.input_tokens == 600
-    assert out.usage.cache_read_tokens == 400
+    assert out.usage.input_tokens == 105785
+    assert out.usage.cache_read_tokens == 473657
+    assert out.usage.total_tokens == 105785 + 10 + 473657
 
 
 def test_cursor_is_error_is_surfaced():
@@ -414,7 +423,9 @@ def test_a_bare_nan_usage_figure_is_dropped_not_raised():
 
 def test_a_non_integral_usage_figure_is_dropped_rather_than_truncated():
     out = parse("claude", '{"type":"result","usage":{"output_tokens":7.5}}')
-    assert out.usage.output_tokens == 0
+    # 7.5 is not a token count, and with no other usable counter this is
+    # no usage -- not a zeroed Usage whose output_tokens looks like 0 or 7.
+    assert out.usage is None
 
 
 def test_a_nan_in_a_cut_short_claude_stream_still_prices_the_rest():
@@ -459,3 +470,111 @@ def test_a_cut_short_agy_stream_is_marked_incomplete():
     out = parse("antigravity", stream)
     assert out.status == INCOMPLETE and out.error is None and out.parsed is True
     assert out.notes and "without a result event" in out.notes[0]
+
+
+def test_claude_said_assembles_text_across_blocks_of_one_message():
+    """Claude Code emits one assistant event per content block, same
+    message.id. The first is a thinking block with no text; first-wins
+    used to keep that and drop the paid answer."""
+    stream = "\n".join(
+        [
+            '{"type":"system","subtype":"init","session_id":"cut-short"}',
+            '{"type":"assistant","session_id":"cut-short","message":{'
+            '"id":"msg_011CemyMrJ3eU1fCtc8vrLQU","content":['
+            '{"type":"thinking","thinking":""}]}}',
+            '{"type":"assistant","session_id":"cut-short","message":{'
+            '"id":"msg_011CemyMrJ3eU1fCtc8vrLQU","content":['
+            '{"type":"text","text":"I\'ll start by reading the key files '
+            'to understand the existing structu"}]}}',
+            '{"type":"assistant","session_id":"cut-short","message":{'
+            '"id":"msg_011CemyMrJ3eU1fCtc8vrLQU","content":['
+            '{"type":"tool_use","name":"Bash","id":"toolu_1"}]}}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.error == "claude stream ended without a result event"
+    assert out.answer == (
+        "I'll start by reading the key files to understand the existing structu"
+    )
+
+
+def test_claude_said_does_not_duplicate_an_identical_repeated_message():
+    stream = "\n".join(
+        [
+            '{"type":"assistant","message":{"id":"msg_repeat","content":['
+            '{"type":"text","text":"the answer"}]}}',
+            '{"type":"assistant","message":{"id":"msg_repeat","content":['
+            '{"type":"text","text":"the answer"}]}}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.answer == "the answer"
+
+
+def test_claude_said_keeps_anonymous_events():
+    stream = "\n".join(
+        [
+            '{"type":"assistant","message":{"content":['
+            '{"type":"text","text":"first"}]}}',
+            '{"type":"assistant","message":{"content":['
+            '{"type":"text","text":"second"}]}}',
+        ]
+    )
+    out = parse("claude", stream)
+    assert out.answer == "first\n\nsecond"
+
+
+def test_an_empty_usage_object_is_no_usage_not_zero_usage():
+    assert usage_from_raw("claude", {}) is None
+    out = parse("claude", '{"type":"result","result":"ok","usage":{}}')
+    assert out.usage is None
+
+
+def test_unusable_stream_usage_is_no_usage_not_zero_usage():
+    stream = (
+        '{"type":"assistant","message":{"id":"m1","usage":{},'
+        '"content":[{"type":"text","text":"hi"}]}}'
+    )
+    out = parse("claude", stream)
+    assert out.answer == "hi"
+    assert out.usage is None
+
+
+def test_an_empty_usage_object_still_keeps_a_reported_cost():
+    env = '{"type":"result","result":"ok","usage":{},"total_cost_usd":0.05}'
+    out = parse("claude", env)
+    assert out.usage is not None
+    assert out.usage.cost_usd == 0.05
+    assert out.usage.cost_basis == "reported"
+    assert out.usage.input_tokens == 0 and out.usage.output_tokens == 0
+
+
+def test_last_stream_id_reads_a_json_array_transcript():
+    text = json.dumps(
+        [
+            {"type": "system", "subtype": "init", "session_id": "array-session"},
+            {
+                "type": "assistant",
+                "session_id": "array-session",
+                "message": {
+                    "id": "m1",
+                    "content": [{"type": "text", "text": "partial"}],
+                },
+            },
+        ]
+    )
+    out = parse("claude", text)
+    assert out.error == "claude stream ended without a result event"
+    assert out.session_id == "array-session"
+    assert out.answer == "partial"
+
+
+def test_last_stream_id_last_non_empty_wins_including_nested_result():
+    text = json.dumps(
+        [
+            {"session_id": "first", "type": "assistant"},
+            {"session_id": "", "type": "assistant"},
+            {"type": "assistant", "result": {"session_id": "nested-last"}},
+        ]
+    )
+    assert _last_stream_id(text, "session_id") == "nested-last"
