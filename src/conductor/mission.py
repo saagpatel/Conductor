@@ -4678,7 +4678,11 @@ def _execute_mission(
                     conflict_pairs.extend(group_out["pairs"])
                     repo_conflict_files = group_out["files"]
                     for path, pairs in repo_conflict_files.items():
-                        conflict_files.setdefault(path, []).extend(pairs)
+                        # Multi-repo top-level hotspots are `<cwd>:`-prefixed;
+                        # `_collision_lines` looks conflict pairs up by that
+                        # same key. A single-repository mission stays bare.
+                        key = f"{repo}:{path}" if len(all_repos) > 1 else path
+                        conflict_files.setdefault(key, []).extend(pairs)
 
                 repo_hotspots = sorted(set(repo_overlap["hotspots"]) | set(repo_conflict_files))
                 groups_out.append(
@@ -5057,7 +5061,12 @@ def _check_branches(
         remotes = git_run(repo, "remote").stdout.split()
         refs = [f"refs/heads/{lane.branch}"] + [f"refs/remotes/{r}/{lane.branch}" for r in remotes]
         for ref in refs:
-            current = git_run(repo, "rev-parse", "--verify", "--quiet", ref)
+            current = _git_answer(repo, "rev-parse", "--verify", "--quiet", ref)
+            if current is None:
+                raise MissionInvalid(
+                    f"lane '{lane.name}': git could not confirm whether branch "
+                    f"'{lane.branch}' exists in {repo} ({ref})"
+                )
             if current.returncode != 0:
                 continue
             old = previous.get(lane.name)
@@ -5247,9 +5256,12 @@ def _collisions_for_cwd(collisions: dict | None, cwd: str) -> dict | None:
     conflicts = collisions.get("conflicts") or {}
     pairs = [pair for pair in conflicts.get("pairs") or [] if set(pair["lanes"]) <= lane_set]
     files: dict[str, list[list[str]]] = {}
+    prefix = f"{cwd}:"
     for path, path_pairs in (conflicts.get("files") or {}).items():
         kept = [pair for pair in path_pairs if set(pair) <= lane_set]
         if kept:
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
             files[path] = kept
     return {
         "overlap": group["overlap"],
