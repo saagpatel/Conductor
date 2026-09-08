@@ -698,6 +698,44 @@ def test_cap_usd_cascades_and_a_lane_can_tighten_it(tmp_path: Path):
         mission_from_dict({**raw, "cap_usd": "lots"}, base_dir=tmp_path)
 
 
+def test_collate_judge_and_resolve_cap_usd_refuse_a_boolean(tmp_path: Path):
+    """`float(True)` is 1.0, so `"cap_usd": true` silently became a $1.00
+    cap. `max_cost_usd` eight lines below already refuses this."""
+    two_sinks = [
+        {"name": "a", "fleet": "codex", "mode": "write", "prompt": "A"},
+        {"name": "b", "fleet": "claude", "mode": "write", "prompt": "B"},
+    ]
+    with pytest.raises(MissionInvalid, match="collate cap_usd must be a positive finite number"):
+        mission_from_dict(
+            {
+                "prompt": "x",
+                "lanes": [{"fleet": "codex"}],
+                "collate": {"fleet": "claude", "cap_usd": True},
+            },
+            base_dir=tmp_path,
+        )
+    with pytest.raises(
+        MissionInvalid, match=r"collate judges\[0\] cap_usd must be a positive finite number"
+    ):
+        mission_from_dict(
+            {
+                "prompt": "x",
+                "lanes": two_sinks,
+                "collate": {
+                    "fleet": "antigravity",
+                    "rank": True,
+                    "judges": [{"fleet": "antigravity", "cap_usd": True}],
+                },
+            },
+            base_dir=tmp_path,
+        )
+    with pytest.raises(MissionInvalid, match="resolve cap_usd must be a positive finite number"):
+        mission_from_dict(
+            {"prompt": "x", "lanes": two_sinks, "resolve": {"fleet": "claude", "cap_usd": True}},
+            base_dir=tmp_path,
+        )
+
+
 def test_what_remains_of_the_mission_budget_caps_the_next_dispatch(
     repo, home, monkeypatch, tmp_path
 ):

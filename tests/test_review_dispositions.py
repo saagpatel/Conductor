@@ -230,6 +230,19 @@ def test_lane_result_from_dict_refuses_a_malformed_disposition_entry():
         LaneResult.from_dict(raw)
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_lane_result_from_dict_refuses_a_non_finite_cost(bad):
+    """`value < 0` is False for NaN and infinity, so a rehydrated receipt
+    could carry `cost_usd: NaN`. `budget_cost` already refuses those."""
+    with pytest.raises(ValueError, match="cost_usd must be a non-negative number"):
+        LaneResult.from_dict({"name": "a", "ok": True, "cost_usd": bad})
+
+
+def test_lane_result_from_dict_still_admits_a_zero_cost():
+    lane = LaneResult.from_dict({"name": "a", "ok": True, "cost_usd": 0})
+    assert lane.cost_usd == 0.0
+
+
 # --- F15 mission 2 item 2: valid_disposition_entry and the deliverable ------
 
 

@@ -176,7 +176,7 @@ from .graph import (
 from .graph import (
     _template_refs as _template_refs,
 )
-from .prices import finite_positive
+from .prices import finite_nonnegative, finite_positive
 from .runner import (
     Result,
     _slug,
@@ -896,6 +896,15 @@ class Mission:
             # attempt) here and let the mission-level cascade re-derive it
             # fresh against the real primary below, reproducing it exactly.
             cascaded = raw_lane["cascaded"]
+            # A cascaded lane stores the cascade attempt at checked[0] and
+            # the real primary at checked[1]; the non-empty-list check above
+            # is not enough, and indexing blindly raised IndexError on a
+            # one-attempt snapshot instead of MissionInvalid.
+            if cascaded and len(checked) < 2:
+                raise MissionInvalid(
+                    f"mission snapshot lane {index} cascaded needs a cascade "
+                    "attempt and a primary"
+                )
             primary_attempt, fallback_attempts = (
                 (checked[1], checked[2:]) if cascaded else (checked[0], checked[1:])
             )
@@ -1282,6 +1291,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 if "fleet" not in raw_judge:
                     raise MissionInvalid(f"collate judges[{idx}] needs a fleet")
                 judge_cap = raw_judge.get("cap_usd", cap)
+                judge_cap_usd = _parse_usd(judge_cap, f"collate judges[{idx}] cap_usd")
                 try:
                     judges.append(
                         Judge(
@@ -1289,11 +1299,12 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                             model=raw_judge.get("model"),
                             effort=str(raw_judge.get("effort", "standard")),
                             timeout=raw_judge.get("timeout"),
-                            cap_usd=float(judge_cap) if judge_cap is not None else None,
+                            cap_usd=judge_cap_usd,
                         )
                     )
                 except (TypeError, ValueError) as exc:
                     raise MissionInvalid(f"collate judges[{idx}]: {exc}") from exc
+        collate_cap_usd = _parse_usd(cap, "collate cap_usd")
         try:
             collate = Collate(
                 fleet=str(raw_collate["fleet"]),
@@ -1303,7 +1314,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
                 schema=str((base_dir / str(schema)).expanduser().resolve()) if schema else None,
                 instructions=str(raw_collate.get("instructions") or DEFAULT_COLLATE_INSTRUCTIONS),
                 max_chars=int(raw_collate.get("max_chars", COLLATE_MAX_CHARS)),
-                cap_usd=float(cap) if cap is not None else None,
+                cap_usd=collate_cap_usd,
                 include_diffs=bool(raw_collate.get("include_diffs", True)),
                 rank=rank,
                 candidates=int(raw_collate.get("candidates", 0)),
@@ -1319,13 +1330,14 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
         if "fleet" not in raw_resolve:
             raise MissionInvalid("resolve needs a fleet")
         resolve_cap = raw_resolve.get("cap_usd", defaults.get("cap_usd"))
+        resolve_cap_usd = _parse_usd(resolve_cap, "resolve cap_usd")
         try:
             resolve = Resolve(
                 fleet=str(raw_resolve["fleet"]),
                 model=raw_resolve.get("model"),
                 effort=str(raw_resolve.get("effort", "standard")),
                 timeout=raw_resolve.get("timeout"),
-                cap_usd=float(resolve_cap) if resolve_cap is not None else None,
+                cap_usd=resolve_cap_usd,
                 commit=raw_resolve.get("commit"),
                 instructions=str(
                     raw_resolve.get("instructions") or DEFAULT_RESOLVE_INSTRUCTIONS
@@ -1400,6 +1412,26 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
     return mission
 
 
+def _parse_usd(value: object, where: str) -> float | None:
+    """An optional dollar figure, or None.
+
+    `float(True)` is 1.0, so a boolean is refused here the way
+    `max_cost_usd` is, before it looks like a real cap. NaN and infinity
+    are refused because they fail every comparison against a spend.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise MissionInvalid(f"{where} must be a positive finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MissionInvalid(f"{where} must be a number: {exc}") from exc
+    if not math.isfinite(number):
+        raise MissionInvalid(f"{where} must be a positive finite number")
+    return number
+
+
 def _parse_ceiling(raw_ceiling: object) -> dict | None:
     """E9: absent means both bounds are ceiling.py's module defaults; present
     means the mission states both explicitly, a number to override a bound or
@@ -1451,10 +1483,7 @@ def _parse_pause(raw_pause: object) -> dict | None:
         raise MissionInvalid("pause.before must be a list of lane names")
     before = list(before_raw) if before_raw else []
     spend_raw = raw_pause.get("spend_usd")
-    try:
-        spend_usd = float(spend_raw) if spend_raw is not None else None
-    except (TypeError, ValueError) as exc:
-        raise MissionInvalid(f"pause.spend_usd must be a number: {exc}") from exc
+    spend_usd = _parse_usd(spend_raw, "pause.spend_usd")
     if not before and spend_usd is None:
         raise MissionInvalid("pause needs 'before', 'spend_usd', or both")
     return {"before": before, "spend_usd": spend_usd}
@@ -1493,7 +1522,7 @@ def _parse_notify(raw_notify: object) -> dict | None:
         timeout = float(timeout_raw)
     except (TypeError, ValueError) as exc:
         raise MissionInvalid(f"notify.timeout must be a number: {exc}") from exc
-    if isinstance(timeout_raw, bool) or timeout <= 0:
+    if isinstance(timeout_raw, bool) or not finite_positive(timeout):
         raise MissionInvalid("notify.timeout must be positive")
     return {"command": command, "events": list(events_raw), "timeout": timeout}
 
@@ -2047,7 +2076,10 @@ class LaneResult:
             "tool_calls",
         ):
             value = raw.get(key, 0)
-            if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+            # `value < 0` admits NaN and infinity (every comparison with
+            # them is False), so a rehydrated receipt could carry
+            # `cost_usd: NaN`. `budget_cost` already refuses those.
+            if not finite_nonnegative(value):
                 raise ValueError(f"lane receipt {key} must be a non-negative number")
         for key in (
             "answer_path",
@@ -2334,8 +2366,8 @@ def _stamp_epoch(identifier: str) -> float | None:
 
 
 def _numeric(value: object) -> float | None:
-    """A real number, or None -- booleans are not numbers here."""
-    if isinstance(value, int | float) and not isinstance(value, bool):
+    """A finite real number, or None -- booleans are not numbers here."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
         return float(value)
     return None
 
