@@ -233,9 +233,12 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   pass `--log-file` and check the count (`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`).
   E21 builds taint enforcement on exactly this: `fleets.taint_hook_files` writes the hook plus a
   stdlib-only deny script into a tainted lane's worktree, and `runner.dispatch` refuses to trust
-  its own write -- it requires the log's "loaded N" count to match what it wrote and fails the run
-  as `taint hooks not enforced` if the init event's tool list still names something reaching
-  outside the worktree that no hook covered. F13 adds a cheaper, earlier check ahead of that one:
+  its own write -- it reads the log's "loaded N" count back and fails the run when it is zero (a
+  hooks file that did not parse), and fails it as `taint hooks not enforced` if the init event's
+  tool list still names something reaching outside the worktree that no hook covered. The count
+  itself is *not* compared against the number of matchers written; only the pre-spawn `/hooks`
+  preflight below checks the matchers by name, and only when it can spawn. README says this
+  correctly; this file claimed the stronger check until 2026-09-08. F13 adds a cheaper, earlier check ahead of that one:
   `-p "/hooks" --output-format stream-json` answers free in print mode (`num_turns: 0`, zero
   usage) and names every loaded hooks file with its `source` and `enabled` flag, so
   `runner.dispatch` runs it before the paid turn and fails the same way, before any spend, when

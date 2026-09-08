@@ -3011,10 +3011,14 @@ the actual cost, so grace draws on `max_cost_usd` like any other spend.
 Four progress breakers run beside the budget watcher in the same two-second
 poll loop:
 
-- the stall breaker kills a fleet whose `stdout.log` has not grown for 900
-  seconds by default (the gate's own default: a fleet running a long suite
-  inside one tool call is silent until it returns);
-- the loop breaker kills after 6 identical consecutive tool-call signatures;
+- the stall breaker kills a fleet whose `stdout.log` has not grown for 600
+  seconds by default (a fleet running a long suite inside one tool call is
+  silent until it returns, so the figure is sized for that). `conductor
+  dispatch --stall-timeout` and every mission lane both default to 600; the
+  900 on `Spec` itself is a dataclass default no CLI or mission path reaches;
+- the loop breaker kills after 6 identical consecutive tool-call signatures,
+  except a signature beginning `edit:` -- six identical file edits are a
+  legitimate pass over six files, not a loop;
 - the tool budget kills after more than the configured total tool calls, and
   is off by default;
 - the tool-idle breaker kills when no tool call has arrived for the configured
