@@ -443,3 +443,22 @@ def test_an_old_snapshot_backfills_ceiling(tmp_path, home):
     assert backfilled["ceiling"] is None
     reloaded = Mission.from_snapshot(backfilled)
     assert reloaded.ceiling is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_a_non_finite_ceiling_is_refused_at_load(tmp_path, bad):
+    """The guard was `value <= 0`, and NaN and Infinity answer False to every
+    comparison, so both loaded as the ceiling. `_check_ceiling`'s own
+    `hour_usd >= per_hour` is then never true either, so the rolling-spend
+    guardrail an unattended run leans on was off with no warning line. D14
+    refused exactly this shape for `cap_usd` and `max_cost_usd`; the ceiling
+    was left behind (2026-09-08 review)."""
+    with pytest.raises(MissionInvalid, match="positive, finite"):
+        _read_lane_mission(tmp_path, ceiling={"per_hour_usd": bad, "per_day_usd": 40.0})
+    with pytest.raises(MissionInvalid, match="positive, finite"):
+        _read_lane_mission(tmp_path, ceiling={"per_hour_usd": 4.0, "per_day_usd": bad})
+
+
+def test_a_finite_positive_ceiling_still_loads(tmp_path):
+    mission = _read_lane_mission(tmp_path, ceiling={"per_hour_usd": 4.0, "per_day_usd": 40.0})
+    assert mission.ceiling == {"per_hour_usd": 4.0, "per_day_usd": 40.0}
