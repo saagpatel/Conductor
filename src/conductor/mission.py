@@ -50,7 +50,7 @@ import tomllib
 import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
@@ -154,7 +154,7 @@ from .attempts import (
     _validate_on as _validate_on,
 )
 from .errors import error_kind
-from .fleets import DispatchRefused, Spec
+from .fleets import DispatchRefused, Spec, supports_schema_flag
 from .graph import (
     _ANY_BRACES,
     _LANE_NAME,
@@ -281,9 +281,10 @@ _RESOLVE_KEYS = {
 DEFAULT_COLLATE_INSTRUCTIONS = (
     "Compare the lane results above. State where they agree, where they disagree, "
     "and which lane's result is strongest and why, if one is. If they are equivalent "
-    "or none is usable, say so; either answer is complete. The order the lanes are "
-    "listed in carries no meaning. Put the entire comparison in this reply. Be "
-    "concrete and brief."
+    "or none is usable, say so; either answer is complete. State that judgment for "
+    "the candidates as listed, then again with the candidates in reverse order. If "
+    "the two judgments disagree, the comparison is inconclusive. Put the entire "
+    "comparison in this reply. Be concrete and brief."
 )
 COLLATE_MAX_CHARS = 8000
 # D1: the resolver's default instructions. "The strongest candidate above" is
@@ -1017,17 +1018,29 @@ class Mission:
         return mission
 
 
+# strongest value meaning no candidate meets the comparison bar. A valid
+# distinct outcome, not an invalid answer. Rank collate is always mode: read.
+_RANK_NONE = "none"
+
+
 def _rank_schema(lane_names: list[str]) -> dict:
     """The fleet-facing JSON Schema for a two-order ranking collate. `scores`
     (E4) is optional and never required -- a judge that only names a
-    strongest lane has still answered."""
+    strongest lane has still answered. `strongest` may be `"none"`: a judge
+    that finds no candidate usable has still answered."""
     return {
         "type": "object",
         "additionalProperties": False,
         "required": ["strongest", "reason"],
         "properties": {
-            "strongest": {"type": "string", "enum": list(lane_names)},
-            "reason": {"type": "string"},
+            "strongest": {"type": "string", "enum": [*lane_names, _RANK_NONE]},
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Cite a file and line or a hunk from the diff; a claim "
+                    "with no citation is dropped."
+                ),
+            },
             "scores": {
                 "type": "object",
                 "additionalProperties": False,
@@ -1046,22 +1059,35 @@ def _rank_contract(lane_names: list[str]) -> str:
     names = ", ".join(lane_names)
     return (
         "\n\n## Conductor ranking verdict\n\n"
-        f"Which lane's result is strongest: {names}?\n\n"
+        f"Candidates, in the order shown: {names}.\n\n"
+        "Compare them on correctness, whether tests pass, and whether the change "
+        "does what the spec asked -- not on style or naming. If one candidate is "
+        "stronger on that bar, set strongest to its name. If they are equivalent "
+        'or none meets the bar, set strongest to "none". Either answer is '
+        "complete.\n\n"
         "A score from 1 to 10 per lane is welcome and optional.\n\n"
+        "reason must cite a file and line or a hunk from the diff; a claim with "
+        "no citation is dropped.\n\n"
         "Your final answer must be exactly one JSON object matching this schema:\n"
         f"{schema}\n"
+        "Write that object once and end there: no example, no restatement of the "
+        "schema, and no second copy of the object after it. Put the entire ranking "
+        "in this reply.\n"
     )
 
 
 def _rank_schema_for(fleet: str, schema_path: str) -> str | None:
-    """F13: `--json-schema` on an antigravity read lane risks a second turn
-    that writes files (`fleets.Spec._validate_schema` refuses it outright).
-    `_rank_contract` already embeds the identical schema as prompt text and
-    `_parse_rank_answer` falls back to extracting embedded JSON
-    (`verdicts._answer_object`), so ranking on antigravity drops the flag
-    here instead of losing the only fleet outside claude and codex that can
-    judge without sharing a base lane's vendor."""
-    return None if fleet == "antigravity" else schema_path
+    """Drop the structured-output flag for fleets that cannot take it.
+
+    Cursor and script have no such flag; antigravity read mode refuses
+    `--schema` because a schema turn has written files on record. Rank
+    collate is always mode: read. `_rank_contract` already embeds the
+    identical schema as prompt text and `_parse_rank_answer` extracts
+    embedded JSON (`verdicts._answer_object`), so dropping the flag is
+    safe. Driven by `fleets.supports_schema_flag`, not a second copy of
+    the names.
+    """
+    return schema_path if supports_schema_flag(fleet, "read") else None
 
 
 def _write_temp_schema(schema: dict) -> str:
@@ -2786,9 +2812,25 @@ def _untrusted_output_label(lane: LaneResult) -> str:
 
 
 def _rendered_verdict(verdict: dict | None) -> str:
+    """Render a stored checklist verdict, or name why it cannot be read.
+
+    `(no verdict)` means the lane had none. `(malformed verdict)` means a
+    dict was present but could not be constructed -- extra keys, a missing
+    field, a truncated receipt. Those are different facts. Extra keys are
+    dropped so a newer `Verdict` field with a default still constructs
+    from an older stored dict, and an older conductor still constructs
+    from a dict that carries that field.
+    """
     if verdict is None:
         return "(no verdict)"
-    return render_verdict(ChecklistVerdict(**verdict))
+    if not isinstance(verdict, dict):
+        return "(malformed verdict)"
+    try:
+        known = {item.name for item in fields(ChecklistVerdict)}
+        filtered = {key: value for key, value in verdict.items() if key in known}
+        return render_verdict(ChecklistVerdict(**filtered))
+    except (TypeError, ValueError, AttributeError):
+        return "(malformed verdict)"
 
 
 def _tighter(*caps: float | None) -> float | None:
@@ -3407,10 +3449,20 @@ def _collate_is_trusted(mission_dir: Path, prior_result: dict | None) -> bool:
 
         if not two_run_ids(collate.get("orders")):
             return False
-        for judge in collate.get("judges") or []:
+        judges = collate.get("judges")
+        if not isinstance(judges, list):
+            return False
+        for judge in judges:
             if not isinstance(judge, dict) or not two_run_ids(judge.get("orders")):
                 return False
-        if not (isinstance(collate.get("strongest"), str) and bool(collate["strongest"])):
+        strongest = collate.get("strongest")
+        if isinstance(strongest, str) and strongest:
+            pass
+        elif strongest is None:
+            tally = collate.get("tally")
+            if not (isinstance(tally, dict) and tally.get("agreement") == "none"):
+                return False
+        else:
             return False
         return _collate_receipts_exist(mission_dir, _collate_named_run_ids(collate))
     answer = collate.get("answer_path")
@@ -5903,7 +5955,9 @@ def _parse_rank_answer(
     if missing:
         return None, None, f"missing field {missing[0]!r}", None
     strongest, reason = raw["strongest"], raw["reason"]
-    if not isinstance(strongest, str) or strongest not in names:
+    if not isinstance(strongest, str) or (
+        strongest != _RANK_NONE and strongest not in names
+    ):
         return None, None, f"unknown lane name {strongest!r}", None
     if not isinstance(reason, str):
         return None, None, "reason must be a string", None
@@ -5933,6 +5987,17 @@ def _sorted_votes(votes: dict[str, int]) -> list[tuple[str, int]]:
     return sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def _score_mean(values: list[int]) -> dict | None:
+    """A mean that says how many values it is over. Missing scores stay
+    missing -- never a zero. A candidate scored by fewer orders still
+    carries its mean; the `n` is what makes two means comparable, the same
+    shape `report.VendorStageRow` uses for unknown durations and tool calls.
+    """
+    if not values:
+        return None
+    return {"mean": sum(values) / len(values), "n": len(values)}
+
+
 def _build_rank_tally(
     names: list[str],
     all_orders: list[tuple[dict, dict]],
@@ -5941,30 +6006,35 @@ def _build_rank_tally(
     """E4: one row per judge (its forward and reverse pick, whether the two
     agree, and its mean score per candidate), a vote tally, and the overall
     agreement -- built once so the receipt, `tally.json`, and `tally.md` all
-    read the same numbers."""
+    read the same numbers. `"none"` is not a vote: every judge naming no
+    usable candidate is agreement `"none"`, not `"invalid"`."""
     votes: dict[str, int] = dict.fromkeys(names, 0)
+    none_votes = 0
     any_invalid = False
     judge_rows: list[dict] = []
     for j_idx, (forward, reverse) in enumerate(all_orders):
         if forward["invalid"] or reverse["invalid"]:
             any_invalid = True
         for record in (forward, reverse):
-            if record["strongest"] is not None:
-                votes[record["strongest"]] += 1
+            pick = record["strongest"]
+            if pick == _RANK_NONE:
+                none_votes += 1
+            elif pick is not None and pick in votes:
+                votes[pick] += 1
         agrees = (
             forward["invalid"] is None
             and reverse["invalid"] is None
             and forward["strongest"] == reverse["strongest"]
         )
         fleet, model = fleet_model_by_judge[j_idx]
-        scores_by_lane: dict[str, float | None] = {}
+        scores_by_lane: dict[str, dict | None] = {}
         for name in names:
             values = [
                 record["scores"][name]
                 for record in (forward, reverse)
                 if record.get("scores") and name in record["scores"]
             ]
-            scores_by_lane[name] = (sum(values) / len(values)) if values else None
+            scores_by_lane[name] = _score_mean(values)
         judge_rows.append(
             {
                 "judge": j_idx + 1,
@@ -5976,7 +6046,7 @@ def _build_rank_tally(
                 "scores": scores_by_lane,
             }
         )
-    mean_scores: dict[str, float | None] = {}
+    mean_scores: dict[str, dict | None] = {}
     for name in names:
         values = [
             record["scores"][name]
@@ -5984,17 +6054,21 @@ def _build_rank_tally(
             for record in (forward, reverse)
             if record.get("scores") and name in record["scores"]
         ]
-        mean_scores[name] = (sum(values) / len(values)) if values else None
+        mean_scores[name] = _score_mean(values)
+    n_answers = 2 * len(all_orders)
     total_votes = sum(votes.values())
     if any_invalid:
         agreement = "invalid"
-    elif total_votes > 0 and max(votes.values()) == total_votes:
+    elif none_votes == n_answers:
+        agreement = "none"
+    elif total_votes > 0 and max(votes.values()) == total_votes and none_votes == 0:
         agreement = "unanimous"
     else:
         agreement = "split"
     return {
         "candidates": list(names),
         "votes": votes,
+        "none_votes": none_votes,
         "judges": judge_rows,
         "agreement": agreement,
         "mean_scores": mean_scores,
@@ -6013,8 +6087,14 @@ def _tally_markdown(tally: dict) -> str:
         "|" + "|".join("---" for _ in header) + "|",
     ]
 
-    def score_cell(value: float | None) -> str:
-        return "" if value is None else f"{value:.1f}"
+    def score_cell(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict) and "mean" in value and "n" in value:
+            return f"{value['mean']:.1f} (n={value['n']})"
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return f"{value:.1f}"
+        return ""
 
     for row in tally["judges"]:
         cells = [
@@ -6056,9 +6136,38 @@ def _run_rank_collate(
     concurrency cap. Unanimity across every judge and both of its orders
     names a winner; any invalid order or any disagreement escalates instead
     of picking one. `lanes` is already whatever `candidates` left the judges
-    to see; the schema enum and every order cover only those lanes."""
+    to see; the schema enum and every order cover only those lanes. Fewer
+    than two candidates does not dispatch: one names that lane, zero fails
+    with no sitting."""
     omitted = omitted or []
-    candidate_names = [lane.name for lane in lanes] if col.candidates else None
+    names = [lane.name for lane in lanes]
+    candidate_names = names if col.candidates else None
+    if len(lanes) < 2:
+        if not lanes:
+            return {
+                "ok": False,
+                "error": "rank collate has no candidates to compare",
+                "cost_usd": None,
+                "rank": True,
+                "strongest": None,
+                "orders": [],
+                "judges": [],
+                "tally": None,
+                "candidates": candidate_names,
+                "tainted": tainted,
+            }
+        return {
+            "ok": True,
+            "error": None,
+            "cost_usd": None,
+            "rank": True,
+            "strongest": names[0],
+            "orders": [],
+            "judges": [],
+            "tally": None,
+            "candidates": candidate_names,
+            "tainted": tainted,
+        }
     judges: list[Collate | Judge] = [col, *col.judges]
     why = ledger.blocker()
     if why:
@@ -6074,7 +6183,6 @@ def _run_rank_collate(
             "candidates": candidate_names,
             "tainted": tainted,
         }
-    names = [lane.name for lane in lanes]
     schema_path = mission_dir / "collate-rank.schema.json"
     schema_path.write_text(json.dumps(_rank_schema(names), indent=2))
 
@@ -6248,6 +6356,11 @@ def _run_rank_collate(
     if tally["agreement"] == "unanimous":
         out["ok"] = True
         out["strongest"] = next(name for name, count in tally["votes"].items() if count > 0)
+        out["error"] = None
+        return out
+    if tally["agreement"] == "none":
+        out["ok"] = True
+        out["strongest"] = None
         out["error"] = None
         return out
     out["ok"] = False
