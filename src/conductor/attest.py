@@ -195,7 +195,16 @@ def _gate_passed_from_result(tests: dict | None, surface: dict | None) -> bool:
 
 
 def _gate_summary_from_result(result_data: dict, command: str | None) -> dict:
-    """Rebuild the signed `gate` block from result.json's tests/test_surface."""
+    """Rebuild the signed `gate` block from result.json's tests/test_surface.
+
+    This mirrors `runner._gate_summary` and must keep mirroring it: `runner`
+    imports this module, so the shared shape cannot live in one place without
+    a cycle. `passed` is None when no gate ran -- the same truthfulness rule
+    `_gate_summary` states -- and a change to either function that is not made
+    to the other makes every signed statement disagree with its own
+    `result.json` (2026-09-08: two lanes changed one side each and 13 attest
+    and export tests failed on the merged tree).
+    """
     tests_dict = result_data.get("tests")
     surface_state = result_data.get("test_surface")
     clean = (surface_state or {}).get("clean_gate") or {}
@@ -209,7 +218,9 @@ def _gate_summary_from_result(result_data: dict, command: str | None) -> dict:
         "command": command,
         "counted": label,
         "exit_code": counted.get("exit_code") if isinstance(counted, dict) else None,
-        "passed": _gate_passed_from_result(
+        "passed": None
+        if label == "none"
+        else _gate_passed_from_result(
             tests_dict if isinstance(tests_dict, dict) else None,
             surface_state if isinstance(surface_state, dict) else None,
         ),
