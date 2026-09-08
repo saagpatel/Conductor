@@ -1,7 +1,7 @@
 {
   "conductor_version": "0.55.0",
   "files": {
-    "expected.json": "fcd1a6deb89f11dddf4e0d02060dd5edef99c88d7de0971cd165f296a469cca0",
+    "expected.json": "08b6cac5356ee4e96c8f8578be701cf9a6a01a5b8c10ec7371ad5c70f818f82b",
     "lanes/cand-composer.json": "f5690a307029a78448c8dcb9e8c65b3bc480cb06efdc5cb64c496a3f24bb8e44",
     "lanes/cand-grok.json": "caafd3a0892ef12f28f7270d69d42742f08d1f3540203f0f620402e287b6def9",
     "mission.json": "818cdb34e09c00251ec87e29c254ff9794a1f3de1828881a48c43481a3b1d095",
@@ -10,12 +10,12 @@
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/answer.txt": "d75f6003e8a39d7a3912f193b3af12596aa5f71fbadbafc0ccbe61d6e5263b31",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/diff.patch": "e429498ce7a7561b4c5fa3a2cd51243d05849f75d5b4d9d32037aaa2c3fe635e",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/prompt.txt": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
-    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/result.json": "bba73f0650e6f9049eda66abf19a246a4e8b2170714bb93b27efb2784975a3cd",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/result.json": "69764c901fed762b02ff9a88102ea178839f4178574727d5e7503254301e8d28",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2/stdout.jsonl": "f02ed1d722aa372c97eea387b7c43b7f5fd42e241ffa3e791d378ae48041e4fc",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/answer.txt": "781ea842cecbc3c8b7b0cd1e2bb82e02980302aa5c21a4558b94ab3edbb67294",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/diff.patch": "3d642b725936dde53fba47a7ae5cce750efc4a73680b1033eab8395a208ce775",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/prompt.txt": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
-    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/result.json": "f3b60d21e8f95579d83a96cc068dcfbfa7a1ae8618184db1fad8aa3ae730f07f",
+    "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/result.json": "a4e074ccab9401d44ffd1e3f74db624e480f9f18418a97d9abbfd91f7d66b40f",
     "runs/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te/stdout.jsonl": "42a520217e28b815a8c302cfaaed65b2434fb373adebfae388dbe1295e67eab2",
     "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/answer.txt": "5ba8f3d20f5b81b26de20bd172d3885cfd3a80e7a8d5dd3bff1d71d148b98968",
     "runs/20260907T075027Z-antigravity-you-are-collating-the-results-of-2/prompt.txt": "b7e881f69cf11d31e665060f80b4955bc597d1e12b627506b392b528b21cace9",

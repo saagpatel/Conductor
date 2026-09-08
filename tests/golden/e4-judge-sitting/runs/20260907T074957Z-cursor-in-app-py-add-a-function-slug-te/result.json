@@ -82,14 +82,14 @@
     "reason": ""
   },
   "usage": {
-    "input_tokens": 0,
+    "input_tokens": 20321,
     "output_tokens": 1092,
     "cache_read_tokens": 45312,
     "cache_write_tokens": 0,
     "thinking_tokens": 0,
     "cost_usd": 0.029208,
     "cost_basis": "estimated",
-    "total_tokens": 46404
+    "total_tokens": 66725
   },
   "budget": {
     "cap_usd": 0.75,

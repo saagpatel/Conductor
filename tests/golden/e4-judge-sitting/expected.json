@@ -1,5 +1,5 @@
 {
-  "cache_hit_rate": 0.539,
+  "cache_hit_rate": 0.454,
   "collate": {
     "agreement": "unanimous",
     "error": null,
@@ -24,7 +24,7 @@
           "effort": "standard",
           "failure": null,
           "fleet": "cursor",
-          "input_tokens": 0,
+          "input_tokens": 19275,
           "kind": null,
           "mode": "write",
           "model": "composer-2.5",
@@ -36,7 +36,7 @@
           "retry": null,
           "retry_of": null,
           "session_id": "15248196-2c0a-4734-b273-ae0482319099",
-          "tokens": 38759,
+          "tokens": 58034,
           "tool_calls": 2
         }
       ],
@@ -61,7 +61,7 @@
           "effort": "cheap",
           "failure": null,
           "fleet": "cursor",
-          "input_tokens": 0,
+          "input_tokens": 20321,
           "kind": null,
           "mode": "write",
           "model": "cursor-grok-4.6-low",
@@ -73,7 +73,7 @@
           "retry": null,
           "retry_of": null,
           "session_id": "7297bffb-a582-4240-8c26-77ae512259e6",
-          "tokens": 46404,
+          "tokens": 66725,
           "tool_calls": 3
         }
       ],
