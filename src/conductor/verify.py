@@ -604,7 +604,7 @@ def run_tests(
         except OSError as exc:
             return TestOutcome(ran=True, tail=f"gate could not start: {exc}")
         # Import here to avoid runner -> verify -> runner at module load.
-        from .runner import _kill_live_group, _register_live_group
+        from .runner import KILL_WAIT_S, _kill_live_group, _reap_killed, _register_live_group
 
         _register_live_group(proc.pid)
         try:
@@ -625,8 +625,14 @@ def run_tests(
                     break
         finally:
             # Every exit path kills stragglers and unregisters before pid reuse.
+            # Bounded: an unbounded wait after SIGKILL hangs dispatch if the
+            # process never exits (D-state, a pid the group did not cover) --
+            # the same rule `_wait` already follows. A process that still
+            # does not exit leaves `returncode` None; the timeout/interrupt
+            # paths already receipt that as no clean exit, and a completed
+            # wait has already stored the code.
             _kill_live_group(proc.pid)
-            proc.wait()
+            _reap_killed(proc, timeout=KILL_WAIT_S)
         gate_duration = round(time.monotonic() - gate_started, 1)
         if timed_out:
             return TestOutcome(

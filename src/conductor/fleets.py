@@ -19,7 +19,6 @@ discipline, because the callers are unattended agent runs at 3am.
 from __future__ import annotations
 
 import json
-import math
 import re
 import shlex
 import shutil
@@ -778,6 +777,18 @@ class Spec:
             self._validate_cap()
         if self.cap_grace_usd is not None:
             self._validate_cap_grace()
+        # Same shapes `_breaker_value` refuses (bool, non-int, negative): a
+        # `timeout: true` became 1s, a float truncated, a negative or zero
+        # made `_wait`'s first remaining already <= 0 so conductor spawned,
+        # paid, and killed before a single poll. Unlike stall_timeout etc.,
+        # 0 does not disable -- it is an immediate kill -- so it is refused
+        # too. null still means the mode default.
+        if self.timeout is not None and (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, int)
+            or self.timeout <= 0
+        ):
+            raise DispatchRefused("timeout must be a positive whole number of seconds")
         for name, value in (
             ("stall_timeout", self.stall_timeout),
             ("loop_limit", self.loop_limit),
@@ -815,9 +826,10 @@ class Spec:
         operator override that dropped the model from the table would
         otherwise leave the dispatch uncapped without a word.
         """
-        # inf passes a plain "> 0" and no finite spend ever exceeds it, which
-        # would leave a watcher fleet uncapped with the flag still set.
-        if not (math.isfinite(self.cap_usd) and self.cap_usd > 0):
+        # `prices.finite_positive`: inf/NaN never fire, and True is not a
+        # dollar figure either (`True + 0.0` would put `--max-budget-usd 1`
+        # on a Claude argv and write `cap_usd: true` on the receipt).
+        if not prices.finite_positive(self.cap_usd):
             raise DispatchRefused("cap_usd must be a positive finite number")
         fleet = FLEETS[self.fleet]
         if fleet.cap == "native":
@@ -855,7 +867,7 @@ class Spec:
                 f"only: {self.fleet}'s cap mode is '{FLEETS[self.fleet].cap}', which has no "
                 "terminal message to finish and no post-hoc verdict to widen"
             )
-        if not (math.isfinite(self.cap_grace_usd) and self.cap_grace_usd > 0):
+        if not prices.finite_positive(self.cap_grace_usd):
             raise DispatchRefused("cap_grace_usd must be a positive finite number")
         if self.cap_grace_usd > CAP_GRACE_CEILING_USD:
             raise DispatchRefused(

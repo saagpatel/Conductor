@@ -814,3 +814,112 @@ def test_a_read_lane_with_a_deliverable_is_settings_checked(repo, home, fake_fle
     assert result.settings["checked"] is True
     assert result.settings["modified"] == [".claude/settings.local.json"]
     assert result.ok is False
+
+
+def test_a_bailed_run_receipts_the_argv_it_built(repo, home):
+    """Every `_bail` happens after argv construction, but `_refused_result`
+    used to leave `permission_mode`/`restricted`/`structured` at the
+    defaults, so the receipt disagreed with `argv.json` in the same
+    directory. Refusals before argv exists (tainted-agy isolation, write
+    on a non-git cwd, dirty-checkout commit, isolation-failed write) are
+    a different case and still default."""
+    result = dispatch(
+        spec_for(repo, mode="read", restricted=True, setup="false"),
+        home=home,
+    )
+    assert result.spawned is False
+    assert result.error.startswith("setup failed:")
+    argv = json.loads((Path(result.run_dir) / "argv.json").read_text())
+    assert "--restricted" in argv
+    assert result.restricted is True
+    assert result.permission_mode == argv[argv.index("--permission-mode") + 1]
+    assert result.structured is ("--json-schema" in argv or "--output-schema" in argv)
+
+
+def test_a_tainted_agy_refusal_still_carries_prompt_versions(repo, home):
+    """The tainted-antigravity pre-spawn refusal was the only
+    `_refused_result` in `dispatch` that dropped `prompt_versions`, so a
+    verdict/collate/rank lane's prompt provenance went to `{}`."""
+    result = dispatch(
+        spec_for(
+            repo,
+            fleet="antigravity",
+            taint=True,
+            mode="read",
+            verdict=[Criterion(id="c1", question="did the thing?")],
+        ),
+        home=home,
+        prompt_versions={"rank_contract": "v1"},
+    )
+    assert result.spawned is False
+    assert "taint on antigravity refused" in result.error
+    assert result.prompt_versions.get("rank_contract") == "v1"
+    assert "checklist_contract" in result.prompt_versions
+
+
+def test_parse_failure_carries_a_kill_that_already_happened(tmp_path):
+    """`_parse_failure_result` always settled `killed=False`, so a
+    cap-killed run that then tripped a parse bug was receipted as parse
+    and, on cursor, as unpriced -- `kind`, `budget`, and `_wait` all
+    disagreeing."""
+    from conductor.budget import Budget
+    from conductor.runner import _parse_failure_result
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    stdout = run_dir / "stdout.log"
+    stderr = run_dir / "stderr.log"
+    stdout.write_text("")
+    stderr.write_text("")
+    budget = Budget(cap_usd=1.0, enforcement="watcher")
+    result = _parse_failure_result(
+        ValueError("bad envelope"),
+        run_id="r1",
+        spec=spec_for(tmp_path),
+        model_id="claude-sonnet-5",
+        timeout=60,
+        run_dir=run_dir,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        exit_code=-9,
+        timed_out=False,
+        duration=1.0,
+        watcher=None,
+        budget=budget,
+        iso=None,
+        lane_env=None,
+        lane=None,
+        mission=None,
+        fleet_version=None,
+        prompt_versions=None,
+        killed=True,
+    )
+    assert result.error.startswith("parse failed:")
+    assert result.budget["exceeded"] is True
+    assert result.budget["unpriced"] is False
+
+    cursor_budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    timed = _parse_failure_result(
+        ValueError("bad envelope"),
+        run_id="r2",
+        spec=spec_for(tmp_path, fleet="cursor", model="composer-2.5"),
+        model_id="composer-2.5",
+        timeout=60,
+        run_dir=run_dir,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        exit_code=-9,
+        timed_out=True,
+        duration=60.0,
+        watcher=None,
+        budget=cursor_budget,
+        iso=None,
+        lane_env=None,
+        lane=None,
+        mission=None,
+        fleet_version=None,
+        prompt_versions=None,
+    )
+    assert timed.timed_out is True
+    assert timed.budget["unpriced"] is False
+    assert timed.budget["exceeded"] is False

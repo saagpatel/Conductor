@@ -16,9 +16,9 @@ from pathlib import Path
 import pytest
 
 from conductor import runner as runner_mod
-from conductor.budget import _Tail
+from conductor.budget import Budget, _Tail
 from conductor.fleets import DispatchRefused, Spec, build_argv
-from conductor.mission import mission_from_dict, run_mission
+from conductor.mission import Ledger, mission_from_dict, run_mission
 from conductor.outputs import INCOMPLETE, parse
 from conductor.runner import dispatch
 
@@ -265,6 +265,14 @@ def test_a_cap_conductor_cannot_enforce_is_refused_before_spawn(monkeypatch, tmp
         Spec(fleet="cursor", model="composer-2.5", prompt="x", cwd="/tmp", cap_usd=1.0).validate()
     # Claude Code caps itself; it needs no price from conductor.
     Spec(fleet="claude", model="sonnet", prompt="x", cwd="/tmp", cap_usd=1.0).validate()
+    # `True` is 1.0 under `math.isfinite and > 0`; `prices.finite_positive`
+    # exists so a bool is refused rather than silently capping at $1.
+    with pytest.raises(DispatchRefused, match="positive finite"):
+        Spec(fleet="claude", prompt="x", cwd="/tmp", cap_usd=True).validate()
+    with pytest.raises(DispatchRefused, match="positive finite"):
+        Spec(
+            fleet="claude", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=True
+        ).validate()
 
 
 # --- the tail ---------------------------------------------------------------
@@ -433,3 +441,33 @@ def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
     assert "budget unverifiable" in flaky["skipped"]
     assert "retry 1" in flaky["skipped"] and "not started" in flaky["skipped"]
     assert result.budget["unverifiable"] is True
+
+
+def test_a_timed_out_run_is_not_settled_as_an_unenforced_cap():
+    """Cursor has no in-run watcher, so a timed-out Grok lane has no figure.
+    `settle` used to flag that `unpriced`, which `failure()` reported ahead
+    of the timeout and `Ledger.add` counted into `blocker()`."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None, timed_out=True)
+    assert budget.unpriced is False
+    assert budget.exceeded is False
+    still_unpriced = Budget(cap_usd=1.5, enforcement="post-hoc")
+    still_unpriced.settle(None, killed=False, fleet_status=None)
+    assert still_unpriced.unpriced is True
+
+
+def test_ledger_a_timed_out_unpriced_run_does_not_halt_the_mission():
+    class _Timeout:
+        usage = None
+        spawned = True
+        interrupted = False
+        cancelled = False
+        timed_out = True
+
+    ledger = Ledger(max_cost_usd=5.0)
+    ledger.add(_Timeout())
+    state = ledger.to_dict()
+    assert state["spent_usd"] == 0.0
+    assert state["unpriced_dispatches"] == 0
+    assert state["unverifiable"] is False
+    assert ledger.blocker() is None

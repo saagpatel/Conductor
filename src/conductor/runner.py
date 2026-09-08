@@ -260,13 +260,21 @@ class Result:
             return self.error
         if self.budget and self.budget.get("exceeded"):
             return _over_budget(self.budget)
-        if self.budget and self.budget.get("unpriced"):
-            return "cap unenforced: the run came back unpriced"
+        # Same order as `errors.error_kind`: a timeout conductor watched is
+        # the cause, not an unenforced cap, even when the receipt still
+        # carries `budget.unpriced` (a cursor lane prices post-hoc and a
+        # timeout leaves no figure). Ranked ahead of unpriced so the two
+        # surfaces name the same run the same way.
         if self.timed_out:
             return f"timed out after {self.timeout}s"
-        if self.exit_code != 0:
-            return f"exit code {self.exit_code}"
+        if self.budget and self.budget.get("unpriced"):
+            return "cap unenforced: the run came back unpriced"
         # A fleet that says it failed is believed, whatever its exit code.
+        # `error_kind` classifies `fleet_error` before `exit` for the same
+        # reason: a live Claude/agy/cursor failure is usually both an
+        # envelope error and a non-zero exit, and a fallback written
+        # against `on: ["rate_limit"]` must see the same cause `failure()`
+        # reports.
         if self.fleet_error:
             return f"fleet reported: {self.fleet_error}"
         # D15: and a fleet that never said anything terminal did not finish.
@@ -275,6 +283,8 @@ class Result:
         # passes and the lane settles as ok on a turn that never ended.
         if self.fleet_status == INCOMPLETE:
             return "fleet stream ended without a terminal event"
+        if self.exit_code != 0:
+            return f"exit code {self.exit_code}"
         # F15: a vanished working tree is never ok, whatever the mode and
         # whatever the gate did or did not do with a directory that no
         # longer exists -- checked ahead of the gate below so a read lane
@@ -2238,6 +2248,7 @@ def dispatch(
             lane=lane,
             mission=mission,
             fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
         )
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
@@ -2443,6 +2454,9 @@ def dispatch(
             mission=mission,
             fleet_version=fleet_version,
             prompt_versions=prompt_versions,
+            permission_mode=permission_mode,
+            restricted=restricted_flag,
+            structured=structured_flag,
             taint_enforcement=(
                 {"preflight": taint_preflight} if taint_preflight is not None else None
             ),
@@ -2549,6 +2563,8 @@ def dispatch(
     # fleet's output, and a crash there must still leave a receipt.
     post_wait = False
     usage: Usage | None = None
+    output: FleetOutput | None = None
+    breaker_state: dict | None = None
     try:
         before = GitState.capture(spec.cwd)
         # Settings digest (third drill pass, 2026-09-07):
@@ -2716,7 +2732,7 @@ def dispatch(
         # Usage is priced here, before teardown and the rest of the
         # post-wait work, so a crash in those still has the fleet's own
         # figure to put on the receipt.
-        output: FleetOutput = parse_output(spec.fleet, _read(stdout_path))
+        output = parse_output(spec.fleet, _read(stdout_path))
         usage = _priced_usage(output.usage, watcher, model_id)
         resumed: dict | None = None
         resume_note: str | None = None
@@ -3248,8 +3264,10 @@ def dispatch(
                 usage.cost_usd if usage else None,
                 killed=capped or breaker_reason is not None,
                 # A cancel is not the cap firing either: another lane winning says
-                # nothing about this one's spend.
+                # nothing about this one's spend. A timeout is the same: conductor
+                # stopped the run, so a missing figure is not an unenforced cap.
                 interrupted=interrupted or cancelled,
+                timed_out=timed_out,
                 fleet_status=output.status,
             )
             if watcher is not None and watcher.usage is None:
@@ -3380,6 +3398,11 @@ def dispatch(
             mission=mission,
             fleet_version=fleet_version,
             prompt_versions=prompt_versions,
+            killed=capped or breaker_reason is not None,
+            interrupted=interrupted,
+            cancelled=cancelled,
+            breaker=breaker_state,
+            fleet_status=None if output is None else output.status,
         )
     except BaseException as exc:
         ports_mod.release(base, claimed_ports)
@@ -3414,6 +3437,11 @@ def dispatch(
                     mission=mission,
                     fleet_version=fleet_version,
                     prompt_versions=prompt_versions,
+                    killed=capped or breaker_reason is not None,
+                    interrupted=interrupted,
+                    cancelled=cancelled,
+                    breaker=breaker_state,
+                    fleet_status=None if output is None else output.status,
                 )
             except Exception:  # noqa: BLE001 - the interrupt is what matters
                 pass
@@ -3758,8 +3786,20 @@ def _refused_result(
     fleet_version: str | None = None,
     prompt_versions: dict[str, str] | None = None,
     taint_enforcement: dict | None = None,
+    permission_mode: str | None = None,
+    restricted: bool = False,
+    structured: bool = False,
 ) -> Result:
-    """A result for a dispatch conductor declined to spawn."""
+    """A result for a dispatch conductor declined to spawn.
+
+    `permission_mode` / `restricted` / `structured` are read off the argv
+    that was built, so a bailed run's receipt cannot disagree with the
+    `argv.json` in the same directory. Refusals that happen before argv
+    exists leave them at the defaults (null / false): the tainted-agy
+    isolation refusal, a write against a non-git cwd, a commit refused
+    because the shared checkout is dirty, and an isolation-failed write
+    (or tainted-agy) that never reached `build_argv`.
+    """
     return Result(
         run_id=run_id,
         fleet=spec.fleet,
@@ -3788,6 +3828,9 @@ def _refused_result(
         fleet_version=fleet_version,
         prompt_versions=dict(prompt_versions or {}),
         taint_enforcement=taint_enforcement,
+        permission_mode=permission_mode,
+        restricted=restricted,
+        structured=structured,
     )
 
 
@@ -3842,6 +3885,11 @@ def _parse_failure_result(
     fleet_version: str | None,
     prompt_versions: dict[str, str] | None,
     usage: Usage | None = None,
+    killed: bool = False,
+    interrupted: bool = False,
+    cancelled: bool = False,
+    breaker: dict | None = None,
+    fleet_status: str | None = None,
 ) -> Result:
     """D9: a receipt for a run that was paid for and then failed while its
     own output was being read.
@@ -3854,6 +3902,12 @@ def _parse_failure_result(
     $0.00 (prices.estimate). The full traceback goes to `parse-error.txt`
     beside the transcript; the one-line reason goes on the receipt, where
     `errors.error_kind` reads it as `parse`.
+
+    A cap-kill, stop, cancel, breaker trip, or timeout that already
+    happened is carried through rather than re-derived from nothing:
+    settle sees the same kill state `_wait` produced, so `kind` parse
+    is one more thing that happened to the run, not a replacement for
+    the cap/timeout/interrupt the process actually died of.
     """
     error = f"{PARSE_FAILURE_PREFIX}{type(exc).__name__}: {exc}"
     try:
@@ -3865,13 +3919,17 @@ def _parse_failure_result(
     usage = _priced_usage(usage, watcher, model_id)
     notes = [error, "receipt written after the run; the tree was not judged"]
     if usage is None or usage.cost_usd is None:
-        notes.append("no priced usage was recovered before the failure; this run is unpriced")
+        if not (killed or interrupted or cancelled or timed_out):
+            notes.append(
+                "no priced usage was recovered before the failure; this run is unpriced"
+            )
     if budget is not None:
         budget.settle(
             usage.cost_usd if usage is not None else None,
-            killed=False,
-            interrupted=False,
-            fleet_status=None,
+            killed=killed,
+            interrupted=interrupted or cancelled,
+            timed_out=timed_out,
+            fleet_status=fleet_status,
         )
     result = Result(
         run_id=run_id,
@@ -3896,7 +3954,11 @@ def _parse_failure_result(
         lane_env=lane_env,
         usage=usage.to_dict() if usage is not None else None,
         budget=budget.to_dict() if budget is not None else None,
+        breaker=breaker,
+        fleet_status=fleet_status,
         error=error,
+        interrupted=interrupted,
+        cancelled=cancelled,
         stage=spec.stage,
         lane=lane,
         mission=mission,

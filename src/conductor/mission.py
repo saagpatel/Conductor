@@ -1798,7 +1798,18 @@ class Ledger:
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)
-            elif result.spawned and not result.interrupted and not result.cancelled:
+            elif (
+                result.spawned
+                and not result.interrupted
+                and not result.cancelled
+                and not getattr(result, "timed_out", False)
+            ):
+                # A timeout is a run conductor stopped, the same state
+                # interrupted already carves out: not evidence about the
+                # cap, and not `unpriced` (which trips `blocker()` and
+                # halts the mission). `getattr` because some tests pass a
+                # duck-typed object that only names the fields `add` used
+                # before this carve-out.
                 self.unpriced += 1
             elif result.spawned and result.cancelled:
                 # The previous rule treated a cancelled unpriced run as

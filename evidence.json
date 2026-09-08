@@ -1,0 +1,82 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": [
+        "tests/test_errors.py::test_failure_and_error_kind_agree_when_the_fleet_failed_and_exited_nonzero",
+        "tests/test_errors.py::test_error_kind_from_a_live_rate_limited_claude_dispatch"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "failure() now ranks fleet_error before exit_code, matching error_kind."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": ["src/conductor/budget.py", "src/conductor/runner.py", "src/conductor/mission.py"],
+      "tests": [
+        "tests/test_budget.py::test_a_timed_out_run_is_not_settled_as_an_unenforced_cap",
+        "tests/test_budget.py::test_ledger_a_timed_out_unpriced_run_does_not_halt_the_mission",
+        "tests/test_errors.py::test_failure_names_a_timeout_ahead_of_an_unpriced_budget",
+        "tests/test_errors.py::test_an_unpriced_run_killed_by_its_timeout_is_timeout_not_cap"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "A conductor timeout is carved out of unpriced like interrupted; errors.capped still excludes timed_out."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": ["src/conductor/fleets.py"],
+      "tests": [
+        "tests/test_fleets.py::test_timeout_is_refused_the_way_breaker_ceilings_are",
+        "tests/test_fleets.py::test_timeouts_default_by_mode_and_are_never_zero"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "Spec.validate refuses bool, non-int, zero, and negative timeout before spawn."
+    },
+    {
+      "item": 4,
+      "status": "built",
+      "files": ["src/conductor/fleets.py"],
+      "tests": [
+        "tests/test_budget.py::test_a_cap_conductor_cannot_enforce_is_refused_before_spawn",
+        "tests/test_prices.py::test_finite_helpers_refuse_booleans_and_non_numbers"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "cap_usd and cap_grace_usd both use prices.finite_positive, so True is refused."
+    },
+    {
+      "item": 5,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_dispatch.py::test_a_bailed_run_receipts_the_argv_it_built"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "_bail copies permission_mode/restricted/structured off the built argv; pre-argv refusals stay default."
+    },
+    {
+      "item": 6,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_dispatch.py::test_a_tainted_agy_refusal_still_carries_prompt_versions"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "Every _refused_result in dispatch now passes prompt_versions, including the tainted-agy pre-spawn refusal."
+    },
+    {
+      "item": 7,
+      "status": "built",
+      "files": ["src/conductor/runner.py", "src/conductor/budget.py"],
+      "tests": ["tests/test_dispatch.py::test_parse_failure_carries_a_kill_that_already_happened"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "_parse_failure_result takes killed/interrupted/cancelled/breaker/timed_out through to settle and the Result."
+    },
+    {
+      "item": 8,
+      "status": "built",
+      "files": ["src/conductor/verify.py"],
+      "tests": ["tests/test_watchers_and_bytes.py::test_run_tests_reap_after_kill_is_bounded"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w12a",
+      "note": "run_tests reaps via _reap_killed; a process that still does not exit leaves returncode None and timed_out on the receipt."
+    }
+  ]
+}

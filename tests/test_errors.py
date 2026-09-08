@@ -466,8 +466,12 @@ def test_error_kind_from_a_live_rate_limited_claude_dispatch(repo, home, fake_fl
     )
     result = dispatch(spec_for(repo, mode="read"), home=home)
     assert result.ok is False
+    assert result.exit_code == 1
     assert result.fleet_error and "rate limit" in result.fleet_error.lower()
     assert error_kind(result) == "rate_limit"
+    # One run, one ranked cause: `failure()` used to return "exit code 1"
+    # while `kind` named `rate_limit`, so `on: ["rate_limit"]` missed it.
+    assert result.failure() == f"fleet reported: {result.fleet_error}"
     assert result.summary()["kind"] == "rate_limit"
     assert result.to_dict()["kind"] == "rate_limit"
 
@@ -764,3 +768,34 @@ def test_readme_error_kinds_code_block_matches_kinds_exactly():
     block = section.split("```\n", 1)[1].split("```", 1)[0]
     listed = tuple(block.replace(",", " ").split())
     assert listed == KINDS
+
+
+def test_failure_and_error_kind_agree_when_the_fleet_failed_and_exited_nonzero():
+    """A live Claude/agy/cursor failure is usually both an envelope error and
+    a non-zero exit. `error_kind` ranked the fleet text first; `failure()`
+    returned `exit code 1` as soon as `exit_code != 0` and never reached
+    `fleet_error`. A fallback on `rate_limit` then missed the run."""
+    result = _result(
+        exit_code=1,
+        fleet_error="Rate limit exceeded, please retry",
+        git_verdict={"checked": True, "no_op": True},
+    )
+    assert error_kind(result) == "rate_limit"
+    assert result.failure() == "fleet reported: Rate limit exceeded, please retry"
+    assert result.summary()["kind"] == "rate_limit"
+
+
+def test_failure_names_a_timeout_ahead_of_an_unpriced_budget():
+    """A cursor lane killed on its wall clock used to receipt `kind:
+    timeout` and `failure(): cap unenforced` because `unpriced` sat above
+    `timed_out` in `failure()` and `Budget.settle` treated a timeout as
+    still-running. Both surfaces now name the timeout."""
+    result = _result(
+        timed_out=True,
+        timeout=600,
+        budget={"unpriced": True, "cap_usd": 1.5, "observed_usd": None},
+    )
+    assert result.ok is False
+    assert error_kind(result) == "timeout"
+    assert result.failure() == "timed out after 600s"
+    assert capped(result) is False

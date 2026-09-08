@@ -18,7 +18,7 @@ import pytest
 from conductor.breakers import Breaker, _limit
 from conductor.collisions import _parse_conflicts, merge_conflicts
 from conductor.errors import TRANSPORT_PATTERNS, error_kind
-from conductor.verify import GitState, compare, same_repo
+from conductor.verify import GitState, compare, run_tests, same_repo
 
 
 def _codex_tool_line(call_id: str, command: str = "ls") -> str:
@@ -478,3 +478,30 @@ def test_a_run_that_failed_its_cap_does_not_keep_its_commit(repo, home, fake_fle
     assert _head(repo) == head_before
     # Undone, not discarded: a kept worktree still holds the work for salvage.
     assert (repo / "new.txt").read_text() == "work\n"
+
+
+def test_run_tests_reap_after_kill_is_bounded(tmp_path, monkeypatch):
+    """`run_tests` did the unbounded `proc.wait()` after `_kill_live_group`
+    that `_wait` was hardened against. A gate or teardown whose process
+    cannot be reaped then hung `dispatch` with no timeout and no stop-flag
+    escape. A process that still does not exit leaves `returncode` None;
+    the timeout path already receipts that as no clean exit (`timed_out`,
+    `exit_code` unset)."""
+    from conductor import runner as runner_mod
+
+    waits: list[float | None] = []
+    real_wait = subprocess.Popen.wait
+
+    def tracked_wait(self, timeout=None):
+        waits.append(timeout)
+        if timeout is None:
+            raise AssertionError("unbounded proc.wait() after kill")
+        return real_wait(self, timeout=timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", tracked_wait)
+    monkeypatch.setattr(runner_mod, "KILL_WAIT_S", 0.05)
+    outcome = run_tests(str(tmp_path), "sleep 60", timeout=0)
+    assert outcome.timed_out is True
+    assert outcome.exit_code is None
+    assert waits
+    assert waits[-1] == 0.05

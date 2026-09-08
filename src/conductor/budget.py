@@ -105,6 +105,7 @@ class Budget:
         killed: bool,
         fleet_status: str | None,
         interrupted: bool = False,
+        timed_out: bool = False,
     ) -> None:
         """The verdict, once the run is over and priced.
 
@@ -113,9 +114,12 @@ class Budget:
         A run that comes back with no figure at all was never capped by
         anything, and must not read as within budget; it is flagged
         `unpriced` and the runner fails it closed. A run conductor
-        interrupted was stopped by something other than its cap; it is not
-        over budget, and coming back unpriced is no evidence about the cap
-        either way.
+        interrupted, cancelled, or killed on its own timeout was stopped
+        by something other than its cap; it is not over budget, and coming
+        back unpriced is no evidence about the cap either way. A timeout
+        is not a cap (`errors.capped` excludes `timed_out`); it is the
+        same "conductor stopped this run" state `Ledger.add` already
+        carves out for interrupted and cancelled.
 
         E24: with `grace_usd` set, the real ceiling is `cap_usd + grace_usd`
         -- a run that finishes inside that band is not over budget and is
@@ -138,7 +142,9 @@ class Budget:
         prev_grace_used = self.grace_used
 
         self.observed_usd = cost_usd
-        self.unpriced = cost_usd is None and not killed and not interrupted
+        self.unpriced = (
+            cost_usd is None and not killed and not interrupted and not timed_out
+        )
         ceiling = (
             self.cap_usd
             if self.grace_usd is None or self.cap_usd is None

@@ -172,6 +172,18 @@ def test_timeouts_default_by_mode_and_are_never_zero():
     assert spec(mode="read").resolved_timeout() == 600
     assert spec(mode="write").resolved_timeout() == 1200
     assert spec(timeout=45).resolved_timeout() == 45
+    spec(timeout=45).validate()
+    spec(mode="read").validate()
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 1.5, "45"])
+def test_timeout_is_refused_the_way_breaker_ceilings_are(bad):
+    """`timeout` was the one lifecycle integer `Spec.validate` did not
+    type-check. `true` became 1, `0` made `_wait` kill before a poll, and
+    a float truncated. Same shapes `_breaker_value` refuses, plus zero
+    (zero does not disable a timeout; it is an immediate kill)."""
+    with pytest.raises(DispatchRefused, match="positive whole number"):
+        spec(timeout=bad).validate()
 
 
 def test_antigravity_print_timeout_follows_the_spec_not_its_5m_default():
