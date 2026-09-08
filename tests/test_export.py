@@ -11,7 +11,9 @@ against the mission's own files on disk, not against a fleet's prose.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -214,6 +216,48 @@ def test_bundle_holds_mission_and_run_files_without_logs_by_default(
     assert export_result.leaks == []
 
 
+def test_export_refuses_an_unreadable_file_as_export_error(repo, home, monkeypatch, tmp_path):
+    """`_copy_scrubbed` used to let `read_bytes` raise a bare OSError, so
+    cli.py (which catches only ExportError) printed a traceback of the
+    TemporaryDirectory path. A file we intended to copy cannot vanish into
+    `_OMITTED`; refuse, naming it."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    target = home / "missions" / result.mission_id / "report.md"
+    target.chmod(0)
+    try:
+        with pytest.raises(export.ExportError, match="cannot read report.md"):
+            export.export(home, result.mission_id, tmp_path / "bundle")
+    finally:
+        target.chmod(0o644)
+
+
+def test_a_top_level_mission_file_symlink_is_not_inlined_into_the_bundle(
+    repo, home, monkeypatch, tmp_path
+):
+    """The subdirectory loop already called `_is_symlinked`; `MISSION_TOP_FILES`
+    only tested `is_file()`, which follows a link. A write lane can replace
+    `tally.md` with a symlink to private prose; one rule for every file
+    the bundle copies."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    mission_dir = home / "missions" / result.mission_id
+    secret = tmp_path / "private-notes.txt"
+    secret.write_text("private prose the bundle must never carry\n")
+    tally = mission_dir / "tally.md"
+    tally.unlink(missing_ok=True)
+    tally.symlink_to(secret)
+
+    out = tmp_path / "bundle"
+    export.export(home, result.mission_id, out)
+
+    assert not (out / "tally.md").exists()
+    hits = [
+        str(path.relative_to(out))
+        for path in out.rglob("*")
+        if path.is_file() and "private prose" in path.read_text(errors="replace")
+    ]
+    assert hits == []
+
+
 def test_bundle_holds_logs_when_asked(repo, home, monkeypatch, tmp_path):
     result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
     build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
@@ -303,6 +347,12 @@ def test_manifest_lists_every_file_with_both_digests(repo, home, monkeypatch, tm
     assert manifest["chain"]["verified_at_export"] is True
     assert len(manifest["chain"]["links"]) == 2
     assert manifest["not_verifiable_here"] == ["signatures", "completeness"]
+    assert manifest["verifiable_here"] == [
+        "file digests",
+        "chain linkage",
+        "attestation claims",
+        "diff digest",
+    ]
     assert "manifest.json" not in manifest["files"]
 
     for relpath, meta in manifest["files"].items():
@@ -405,6 +455,7 @@ def test_export_lists_a_missing_run_directory_and_still_succeeds(
     assert export_result.scope["missing_run_dirs"] == ["fake-resolve-run"]
     assert not (out / "runs" / "fake-resolve-run").exists()
     assert (out / "runs" / "fake-order-run" / "result.json").is_file()
+    assert export.check(out).ok is True
 
 
 # --- conductor export --check -----------------------------------------
@@ -680,3 +731,123 @@ def test_check_refuses_a_chain_whose_statement_names_another_mission(
     checked = export.check(out)
     assert checked.ok is False
     assert any("names mission" in problem for problem in checked.problems)
+
+
+def test_check_fails_when_attestations_name_a_run_that_did_not_travel(
+    repo, home, monkeypatch, tmp_path
+):
+    """`check` cross-checked `manifest["chain"]` against chain.json and
+    never looked at `attestations` or `scope`. Deleting `runs/<id>/` for a
+    run named only in those fields, with its `files` entries dropped, still
+    returned `ok: true`."""
+    out = _export_bundle(repo, home, monkeypatch, tmp_path)
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    run_id = next(iter(manifest["attestations"]))
+    shutil.rmtree(out / "runs" / run_id)
+    for key in [name for name in list(manifest["files"]) if name.startswith(f"runs/{run_id}/")]:
+        del manifest["files"][key]
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    result = export.check(out)
+    assert result.ok is False
+    assert any(run_id in problem for problem in result.problems)
+
+
+def test_check_fails_when_a_diff_sha256_original_disagrees_with_the_attestation(
+    repo, home, monkeypatch, tmp_path
+):
+    """The attestation statement already carries `source_diff_sha256`.
+    The bundled diff is scrubbed, so the field to compare is
+    `sha256_original` -- confirmed on bytes on a fresh bundle before the
+    tamper."""
+    out = _export_bundle(repo, home, monkeypatch, tmp_path)
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    diff_key = next(key for key in manifest["files"] if key.endswith("/diff.patch"))
+    run_id = diff_key.split("/")[1]
+    envelope = json.loads((out / "runs" / run_id / "attestation.json").read_text())
+    statement = json.loads(base64.b64decode(envelope["payload"]))
+    assert statement["source_diff_sha256"] == manifest["files"][diff_key]["sha256_original"]
+
+    tampered = (out / diff_key).read_text() + "\ntampered\n"
+    (out / diff_key).write_text(tampered)
+    new_bytes = (out / diff_key).read_bytes()
+    manifest["files"][diff_key]["sha256"] = hashlib.sha256(new_bytes).hexdigest()
+    manifest["files"][diff_key]["bytes"] = len(new_bytes)
+    manifest["files"][diff_key]["sha256_original"] = hashlib.sha256(new_bytes).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    result = export.check(out)
+    assert result.ok is False
+    assert any("source_diff_sha256" in problem for problem in result.problems)
+
+
+def test_manifest_freeform_text_is_scrubbed_so_a_diagnostic_is_not_a_leak(
+    repo, home, monkeypatch, tmp_path
+):
+    """`manifest.json` skipped the scrubber. attest formats OSError strings
+    with the full path (`result.json unreadable: {exc}`), so a diagnostic
+    about an unreadable receipt under the conductor home made `scrub_guard`
+    refuse the export as a leak rather than ship a scrubbed diagnosis."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    real = attest.verify_run_attestation
+
+    def leaking(home_arg, run_id, link_statement, key):
+        problems, taint = real(home_arg, run_id, link_statement, key)
+        leaked = home_arg / "runs" / run_id / "result.json"
+        return (
+            [
+                *problems,
+                f"run '{run_id}': result.json unreadable: [Errno 13] "
+                f"Permission denied: '{leaked}'",
+            ],
+            taint,
+        )
+
+    monkeypatch.setattr(attest, "verify_run_attestation", leaking)
+    out = tmp_path / "bundle"
+    export.export(home, result.mission_id, out)
+    manifest_text = (out / "manifest.json").read_text()
+    assert str(home) not in manifest_text
+    assert "<home>" in manifest_text
+
+
+def test_truncated_mission_json_recovers_scrub_paths_from_result_json(
+    repo, home, monkeypatch, tmp_path
+):
+    """A truncated mission.json used to fall back to `{}`, so `cwd` was
+    None, `_extra_cwds` was empty, and `result.json`'s absolute repo paths
+    travelled. Recover them from result.json and record the degradation."""
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    mission_dir = home / "missions" / result.mission_id
+    (mission_dir / "mission.json").write_text("{not json")
+    out = tmp_path / "bundle"
+    export_result = export.export(home, result.mission_id, out)
+
+    assert export_result.scope["scrub"]["mission_json"] == "unparseable"
+    assert export_result.scope["scrub"]["cwd_from"] == "result.json"
+    hits = [
+        str(path.relative_to(out))
+        for path in out.rglob("*")
+        if path.is_file() and str(repo) in path.read_text(errors="replace")
+    ]
+    assert hits == [], f"the mission cwd survived into {hits}"
+    assert export.check(out).ok is True
+
+
+def test_scope_omitted_names_deliverable_prompt_sidecars_and_log_tails(
+    repo, home, monkeypatch, tmp_path
+):
+    out = _export_bundle(repo, home, monkeypatch, tmp_path)
+    omitted = json.loads((out / "manifest.json").read_text())["scope"]["omitted"]
+    joined = " ".join(omitted)
+    assert "deliverable" in joined
+    assert "verdict.json" in joined
+    assert "hooks-preflight.json" in joined
+    assert "parse-error.txt" in joined
+    assert "agy.log" in joined
+    assert "collate-prompt.txt" in joined
+    assert "resolve-prompt.txt" in joined
+    assert "`tail`" in joined
+    assert "tests.tail" in joined

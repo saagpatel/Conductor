@@ -95,6 +95,50 @@ def test_scrub_json_redacts_a_secret_shaped_key(tmp_path):
     assert scrubbed["note"] == "fine"
 
 
+def test_scrub_json_does_not_redact_a_field_literally_named_key():
+    """Substring-on-the-key-name redacted `usage.price.key` (the matched
+    price-table entry) and every verdict-checklist criterion id. A field
+    named `key` is not a secret identifier; `api_key` still is."""
+    obj = {
+        "usage": {"price": {"key": "claude-sonnet-5", "input": 2.0}},
+        "verdict": {"checklist": [{"key": "tests-pass", "ok": True}]},
+        "keyboard": "qwerty",
+        "monkey": "see",
+        "keywords": ["export"],
+    }
+    scrubbed = json.loads(golden.scrub_json_text(json.dumps(obj), []))
+    assert scrubbed["usage"]["price"]["key"] == "claude-sonnet-5"
+    assert scrubbed["verdict"]["checklist"][0]["key"] == "tests-pass"
+    assert scrubbed["keyboard"] == "qwerty"
+    assert scrubbed["monkey"] == "see"
+    assert scrubbed["keywords"] == ["export"]
+
+
+def test_scrub_json_still_redacts_token_secret_password_and_api_key():
+    obj = {
+        "token": "hunter2hunter2",
+        "access_token": "hunter2hunter2",
+        "apiKey": "hunter2hunter2",
+        "SECRET": "hunter2hunter2",
+        "password": "hunter2hunter2",
+        "private_key": "hunter2hunter2",
+    }
+    scrubbed = json.loads(golden.scrub_json_text(json.dumps(obj), []))
+    assert scrubbed == {name: "<redacted>" for name in obj}
+
+
+def test_scrub_json_does_not_inherit_a_secret_parent_key_into_a_nested_dict():
+    """A dict re-keys its children. Closing this by inheriting the parent
+    name would re-widen the field-name rule: every nested field under
+    `usage.tokens` would redact. Pin both directions."""
+    nested = json.loads(
+        golden.scrub_json_text(json.dumps({"token": {"value": "hunter2hunter2"}}), [])
+    )
+    assert nested["token"]["value"] == "hunter2hunter2"
+    flat = json.loads(golden.scrub_json_text(json.dumps({"token": "hunter2hunter2"}), []))
+    assert flat["token"] == "<redacted>"
+
+
 def test_scrub_guard_does_not_read_raw_base64_as_an_env_secret(tmp_path):
     """The base64 alphabet can spell "...KEY=" right before its padding; a
     plain-text scan of the raw run read that as an env secret (E13's export

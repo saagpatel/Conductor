@@ -85,9 +85,15 @@ _NOTE = (
 # `scope`, so a reader outside this machine knows the boundary of what was
 # checked without having to infer it from what is merely missing.
 _OMITTED = [
-    "stdout.log and stderr.log are omitted unless the export runs with --logs.",
+    "stdout.log and stderr.log are omitted unless the export runs with --logs; "
+    "their last 20 lines still travel in every bundled result.json as `tail` "
+    "(and nested `tests.tail` / validator tails) even without --logs.",
     "running.json and liveness.json are never included; they describe a mission "
     "or run still in progress, not a finished one.",
+    "run-level deliverable, verdict.json, hooks-preflight.json, parse-error.txt, "
+    "and agy.log are never copied.",
+    "mission-root collate-prompt.txt, collate-prompt-*.txt, and resolve-prompt.txt "
+    "are never copied.",
     "run directories named by a lane receipt, a chain link, or the mission's "
     "result.json snapshot but not found under runs/ are omitted.",
     "worktrees and branches are never included; only the diffs and patches "
@@ -208,8 +214,18 @@ def _copy_scrubbed(
     relpath: Path,
 ) -> tuple[str, str, int]:
     """Copy `src` to `dst` through the scrubber. Returns the original file's
-    sha256, the bundled file's sha256, and the bundled file's byte size."""
-    raw = src.read_bytes()
+    sha256, the bundled file's sha256, and the bundled file's byte size.
+
+    An unreadable source is an `ExportError` naming `relpath`, never a
+    traceback and never a silent skip: a bundle that omits a file it meant
+    to copy is the completeness problem `_OMITTED` exists to bound, and
+    `_OMITTED` is a declared class of files, not "whatever we failed to
+    read". Refusing keeps that list honest and tells the operator which
+    file to chmod or remount."""
+    try:
+        raw = src.read_bytes()
+    except OSError as exc:
+        raise ExportError(f"cannot read {relpath}") from exc
     original_sha = hashlib.sha256(raw).hexdigest()
     dst.parent.mkdir(parents=True, exist_ok=True)
     if src.suffix == ".json":
@@ -267,7 +283,13 @@ def _find_key_material(work: Path, key: bytes) -> str | None:
         base64.urlsafe_b64encode(key).decode("ascii").rstrip("="),
     }
     for file in sorted(p for p in work.rglob("*") if p.is_file()):
-        raw = file.read_bytes()
+        try:
+            raw = file.read_bytes()
+        except OSError as exc:
+            # A file this scan could not read is a file it could not clear.
+            # Skipping it would let key material hide behind a mode-000
+            # (or stale-mount) file the rest of the bundle never checked.
+            raise ExportError(f"cannot read {file.relative_to(work)}") from exc
         if key in raw:
             return str(file.relative_to(work))
         text = raw.decode("utf-8", errors="ignore")
@@ -298,6 +320,52 @@ def _lane_run_ids(mission_dir: Path) -> set[str]:
     return {effect.run_id for effect in spend.effects(lanes=lane_receipts)}
 
 
+def _load_json_object(path: Path) -> tuple[dict, str]:
+    """A JSON object from `path`, plus why it is empty when it is.
+
+    `ok` / `missing` / `unreadable` / `unparseable`. An unreadable file is
+    still a file `copy_one` will refuse (a file we intended to copy cannot
+    vanish into `_OMITTED`); this helper is for the scrub inputs we can
+    recover from elsewhere when the snapshot is merely truncated."""
+    if not path.is_file():
+        return {}, "missing"
+    try:
+        loaded = json.loads(path.read_text())
+    except OSError:
+        return {}, "unreadable"
+    except json.JSONDecodeError:
+        return {}, "unparseable"
+    if not isinstance(loaded, dict):
+        return {}, "unparseable"
+    return loaded, "ok"
+
+
+def _result_cwds(result_raw: dict) -> list[str]:
+    """Absolute repository paths `result.json` already recorded: the
+    mission's `cwd` if present, E19 `repositories`, each lane's own `cwd`,
+    and every attempt's. First-appearance order, duplicates dropped --
+    enough to rebuild the placeholder map when `mission.json` cannot."""
+    seen: list[str] = []
+
+    def add(value: object) -> None:
+        if isinstance(value, str) and value and value not in seen:
+            seen.append(value)
+
+    add(result_raw.get("cwd"))
+    repositories = result_raw.get("repositories")
+    if isinstance(repositories, list):
+        for item in repositories:
+            add(item)
+    for lane in result_raw.get("lanes") or []:
+        if not isinstance(lane, dict):
+            continue
+        add(lane.get("cwd"))
+        for attempt in lane.get("attempts") or []:
+            if isinstance(attempt, dict):
+                add(attempt.get("cwd"))
+    return seen
+
+
 # --- export ------------------------------------------------------------
 
 
@@ -324,22 +392,33 @@ def export(
         raise ExportError("receipt key is missing")
 
     snapshot_path = mission_dir / "mission.json"
-    mission_raw: dict = {}
-    if snapshot_path.is_file():
-        try:
-            loaded = json.loads(snapshot_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            mission_raw = loaded
-    cwd = mission_raw.get("cwd")
+    mission_raw, mission_json_status = _load_json_object(snapshot_path)
+
+    # result.json is loaded before the placeholder map so a truncated or
+    # missing mission.json cannot silently drop the cross-repo scrub:
+    # it already names `repositories` and each lane's `cwd` (mission.py).
+    result_path = mission_dir / "result.json"
+    result_raw, _result_status = _load_json_object(result_path)
+
+    cwd: str | None = None
+    extra_paths: list[str]
+    if mission_json_status == "ok":
+        raw_cwd = mission_raw.get("cwd")
+        cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd else None
+        extra_paths = _extra_cwds(mission_raw, cwd)
+        cwd_from = "mission.json"
+    else:
+        recovered = _result_cwds(result_raw)
+        cwd = recovered[0] if recovered else None
+        extra_paths = recovered[1:]
+        cwd_from = "result.json" if recovered else None
     # E19/E26: a cross-repo mission's lanes each declare their own `cwd`, and
     # only the mission's own was ever turned into a placeholder here, so
     # every other repository's absolute path travelled with the bundle --
     # and `scrub_guard`, which cannot recover a real path it was not told
     # about, passed it clean. `golden.record` has always paired them; export
     # now uses the same pairing for the scrub and for the guard that checks it.
-    extra_pairs = [(path, f"<cwd{2 + i}>") for i, path in enumerate(_extra_cwds(mission_raw, cwd))]
+    extra_pairs = [(path, f"<cwd{2 + i}>") for i, path in enumerate(extra_paths)]
     replacements = _placeholder_map(home=home, cwd=cwd, extra=extra_pairs)
     guard_extra = [(path, f"mission cwd {2 + i}") for i, (path, _) in enumerate(extra_pairs)]
     if isinstance(cwd, str) and cwd:
@@ -374,15 +453,8 @@ def export(
     # W9: `spend.mission_run_ids` already knows every run a mission paid
     # for, including a judge sitting's extra orders and a superseded
     # resolver that no lane attempt or chain link ever names on its own.
-    result_path = mission_dir / "result.json"
-    result_raw: dict = {}
-    if result_path.is_file():
-        try:
-            loaded_result = json.loads(result_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            loaded_result = None
-        if isinstance(loaded_result, dict):
-            result_raw = loaded_result
+    # result_raw was loaded above so the scrub could recover repository
+    # paths from it when mission.json could not be parsed.
 
     lane_run_ids = _lane_run_ids(mission_dir)
     chain_run_ids = {row["run_id"] for row in chain_rows if isinstance(row["run_id"], str)}
@@ -419,7 +491,11 @@ def export(
         mission_files_present: list[str] = []
         for name in MISSION_TOP_FILES:
             src = mission_dir / name
-            if src.is_file():
+            # The same symlink rule as MISSION_SUBDIRS and RUN_FILES: a
+            # write lane can replace `tally.md` with a link to a private
+            # file, `is_file()` follows it, and `_copy_scrubbed` would
+            # inline the target's bytes under the innocent name.
+            if src.is_file() and not _is_symlinked(src, mission_dir):
                 copy_one(src, Path(name))
                 mission_files_present.append(name)
 
@@ -480,6 +556,10 @@ def export(
             "mission_subdirs": mission_subdirs_present,
             "run_files": [name for name in run_files if name in run_files_present],
             "omitted": _OMITTED,
+            "scrub": {
+                "mission_json": mission_json_status,
+                "cwd_from": cwd_from,
+            },
         }
 
         manifest = {
@@ -497,10 +577,22 @@ def export(
             },
             "attestations": attestations_manifest,
             "scope": scope,
-            "verifiable_here": ["file digests", "chain linkage"],
+            "verifiable_here": [
+                "file digests",
+                "chain linkage",
+                "attestation claims",
+                "diff digest",
+            ],
             "not_verifiable_here": ["signatures", "completeness"],
             "note": _NOTE,
         }
+        # The one bundle file that used to skip the scrub: attest formats
+        # OSError strings with the full path (`link file unreadable: {exc}`,
+        # `result.json unreadable: {exc}`), so a chmod-000 receipt made
+        # `scrub_guard` report a home-path leak and refuse the export. The
+        # files' digests are already computed; the manifest itself is not in
+        # `files`, so scrubbing its free-form text here cannot shift them.
+        manifest = _scrub_json_value(manifest, replacements)
         (work / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
         key_leak = _find_key_material(work, key)
@@ -516,7 +608,7 @@ def export(
                 leaks=[f"{key_leak}: receipt key material"],
             )
 
-        leaks = scrub_guard(work, extra=guard_extra)
+        leaks = scrub_guard(work, extra=guard_extra, home=home)
         if leaks:
             shutil.rmtree(work)
             raise ExportError(f"export leaked: {leaks[0]}", leaks=leaks)
@@ -556,16 +648,38 @@ def _resolve_in_bundle(bundle_dir: Path, relpath: str) -> Path | None:
     return candidate
 
 
+def _dsse_statement(path: Path) -> tuple[dict | None, str | None]:
+    """The DSSE statement object at `path`, or `(None, reason)`."""
+    try:
+        envelope = json.loads(path.read_text())
+        statement = json.loads(base64.b64decode(envelope["payload"], validate=True))
+    except (
+        OSError,
+        TypeError,
+        KeyError,
+        ValueError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        return None, str(exc)
+    if not isinstance(statement, dict):
+        return None, "payload is not a statement object"
+    return statement, None
+
+
 def check(bundle_dir: str | Path) -> CheckResult:
     """Verify a bundle against its own `manifest.json`, reading nothing but
     the bundle: every listed file's digest and size, that no unlisted file
-    is present, and the receipt chain's linkage (index order, each link's
+    is present, the receipt chain's linkage (index order, each link's
     file hash against the manifest, each `previous` against the prior
     link's recorded hash, each link's run id against a matching
     `runs/<run id>/attestation.json`, and each link statement's own
-    `mission_id` against the manifest's). Never reads or verifies a
-    signature -- that needs the exporting machine's key, which never
-    travels with the bundle (see `manifest.json`'s own `note`)."""
+    `mission_id` against the manifest's), that `attestations` and `scope`
+    agree with the files that travelled, and that each run's
+    `diff.patch` `sha256_original` matches the attestation payload's
+    `source_diff_sha256`. Never reads or verifies a signature -- that
+    needs the exporting machine's key, which never travels with the
+    bundle (see `manifest.json`'s own `note`)."""
     bundle_dir = Path(bundle_dir)
     problems: list[str] = []
     manifest_path = bundle_dir / "manifest.json"
@@ -764,6 +878,122 @@ def check(bundle_dir: str | Path) -> CheckResult:
         if chain_meta.get("state") == "verified" and verified_flag is not True:
             problems.append(
                 "manifest.json chain state is 'verified' but verified_at_export is not true"
+            )
+
+    # Same argument as `manifest["chain"]`: once the key is absent,
+    # `attestations` and `scope` are unsigned prose. `check` does not
+    # re-verify a signature -- that is impossible from the bundle -- it
+    # verifies only that those claims agree with what travelled.
+    attestations_meta = manifest.get("attestations")
+    if not isinstance(attestations_meta, dict):
+        problems.append("manifest.json 'attestations' field is malformed")
+        attestations_meta = {}
+    else:
+        for run_id, entry in attestations_meta.items():
+            if not isinstance(run_id, str):
+                problems.append(f"manifest.json attestations: run id {run_id!r} is not a string")
+                continue
+            if not isinstance(entry, dict):
+                problems.append(
+                    f"manifest.json attestations {run_id}: entry is not an object"
+                )
+                continue
+            att_rel = f"runs/{run_id}/attestation.json"
+            if entry.get("verified_at_export") is True:
+                problems_field = entry.get("problems")
+                if problems_field:
+                    problems.append(
+                        f"manifest.json attestations {run_id}: verified_at_export is true "
+                        "but problems is not empty"
+                    )
+                if att_rel not in files_meta:
+                    problems.append(
+                        f"manifest.json attestations {run_id}: verified_at_export is true "
+                        f"but {att_rel} did not travel"
+                    )
+
+    runs_root = bundle_dir / "runs"
+    bundle_run_ids = (
+        {p.name for p in runs_root.iterdir() if p.is_dir()} if runs_root.is_dir() else set()
+    )
+    attested_ids = {run_id for run_id in attestations_meta if isinstance(run_id, str)}
+
+    scope_meta = manifest.get("scope")
+    missing_listed: list = []
+    if isinstance(scope_meta, dict):
+        missing_raw = scope_meta.get("missing_run_dirs")
+        if isinstance(missing_raw, list):
+            missing_listed = [item for item in missing_raw if isinstance(item, str)]
+        missing_set = set(missing_listed)
+        for run_id in attested_ids:
+            present = run_id in bundle_run_ids
+            listed_missing = run_id in missing_set
+            if present and listed_missing:
+                problems.append(
+                    f"manifest.json scope.missing_run_dirs names '{run_id}' "
+                    f"but runs/{run_id}/ is in the bundle"
+                )
+            elif not present and not listed_missing:
+                problems.append(
+                    f"manifest.json names run '{run_id}' in attestations "
+                    "but that run did not travel and is not in missing_run_dirs"
+                )
+        run_ids_meta = scope_meta.get("run_ids")
+        if isinstance(run_ids_meta, dict) and isinstance(run_ids_meta.get("total"), int):
+            claimed_total = run_ids_meta["total"]
+            accounted = len(bundle_run_ids) + len(missing_listed)
+            if claimed_total != accounted:
+                problems.append(
+                    f"manifest.json scope.run_ids.total is {claimed_total}, "
+                    f"the bundle holds {len(bundle_run_ids)} run directory(ies) "
+                    f"and lists {len(missing_listed)} missing"
+                )
+            if claimed_total != len(attested_ids):
+                problems.append(
+                    f"manifest.json scope.run_ids.total is {claimed_total}, "
+                    f"attestations names {len(attested_ids)}"
+                )
+        from_chain = run_ids_meta.get("from_chain") if isinstance(run_ids_meta, dict) else None
+        if isinstance(from_chain, int) and links:
+            chain_run_ids_observed = {
+                run_id for run_id in statement_run_ids.values() if isinstance(run_id, str)
+            }
+            if from_chain != len(chain_run_ids_observed):
+                problems.append(
+                    f"manifest.json scope.run_ids.from_chain is {from_chain}, "
+                    f"receipts/chain.json names {len(chain_run_ids_observed)} run id(s)"
+                )
+
+    # The run attestation statement carries `source_diff_sha256` of the
+    # unscrubbed diff.patch. Export scrubs the copy, so the field to
+    # compare is `sha256_original` -- the digest of the file as it was on
+    # the exporting machine, which is what the statement hashed.
+    for relpath, meta in files_meta.items():
+        parts = Path(relpath).parts
+        if len(parts) != 3 or parts[0] != "runs" or parts[2] != "attestation.json":
+            continue
+        if not isinstance(meta, dict):
+            continue
+        run_id = parts[1]
+        att_path = _resolve_in_bundle(bundle_dir, relpath)
+        if att_path is None or not att_path.is_file():
+            continue
+        statement, reason = _dsse_statement(att_path)
+        if statement is None:
+            problems.append(f"{relpath}: payload unreadable: {reason}")
+            continue
+        claimed = statement.get("source_diff_sha256")
+        diff_rel = f"runs/{run_id}/diff.patch"
+        diff_meta = files_meta.get(diff_rel)
+        if isinstance(diff_meta, dict):
+            if diff_meta.get("sha256_original") != claimed:
+                problems.append(
+                    f"{diff_rel}: sha256_original disagrees with the attestation "
+                    "source_diff_sha256"
+                )
+        elif claimed is not None:
+            problems.append(
+                f"{diff_rel}: attestation records a diff digest but the diff did not travel"
             )
 
     return CheckResult(
