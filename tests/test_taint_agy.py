@@ -481,6 +481,8 @@ def test_tainted_lane_writes_hooks_before_the_baseline_and_excludes_them(
     assert result.ok is True, result.failure()
     assert result.git_verdict["checked"] is True
     assert result.git_verdict["no_op"] is True
+    assert result.isolation["kept"] is False
+    assert result.isolation["clean"] is True
     assert not (Path(result.run_dir) / "diff.patch").exists()
 
     # The no-op verdict above is the proof the hook files stayed out of the
@@ -546,10 +548,12 @@ def test_matching_log_line_and_covered_tools_pass(repo, home, fake_fleet):
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is True, result.failure()
     te = result.taint_enforcement
-    assert te["hooks_written"] == HOOKS_WRITTEN
-    assert te["hooks_loaded"] == 1
+    assert te["matchers_written"] == HOOKS_WRITTEN
+    assert te["hook_files_loaded"] == 1
     assert te["preflight"]["matchers_missing"] == []
     assert te["uncovered"] == []
+    assert te["tools_checked"] is True
+    assert te["digests_checked"] is True
     assert set(te["tools_seen"]) == {*TAINT_AGY_DENIED_TOOLS, "list_dir"}
 
 
@@ -569,7 +573,7 @@ def test_zero_named_hooks_loaded_fails(repo, home, fake_fleet):
     assert error_kind(result) == "taint"
     assert "taint hooks not enforced" in result.error
     assert "did not parse" in result.error
-    assert result.taint_enforcement["hooks_loaded"] == 0
+    assert result.taint_enforcement["hook_files_loaded"] == 0
 
 
 def test_one_named_hook_for_many_matchers_is_the_passing_shape(repo, home, fake_fleet):
@@ -586,8 +590,8 @@ def test_one_named_hook_for_many_matchers_is_the_passing_shape(repo, home, fake_
     )
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is True, result.failure()
-    assert result.taint_enforcement["hooks_written"] == HOOKS_WRITTEN
-    assert result.taint_enforcement["hooks_loaded"] == 1
+    assert result.taint_enforcement["matchers_written"] == HOOKS_WRITTEN
+    assert result.taint_enforcement["hook_files_loaded"] == 1
 
 
 def test_missing_log_line_fails(repo, home, fake_fleet):
@@ -595,7 +599,7 @@ def test_missing_log_line_fails(repo, home, fake_fleet):
     result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
     assert result.ok is False
     assert error_kind(result) == "taint"
-    assert result.taint_enforcement["hooks_loaded"] is None
+    assert result.taint_enforcement["hook_files_loaded"] is None
 
 
 def test_uncovered_tool_fails(repo, home, fake_fleet):
@@ -791,6 +795,7 @@ def test_untouched_hook_files_record_their_digests_and_pass(repo, home, fake_fle
     assert result.ok is True, result.failure()
     te = result.taint_enforcement
     assert te["hooks_modified"] == []
+    assert te["digests_checked"] is True
     assert all(len(digest) == 64 for digest in te["hook_digests"].values())
 
 
@@ -945,12 +950,11 @@ def test_preflight_missing_a_matcher_fails_before_the_paid_turn(
 def test_preflight_finding_the_hooks_file_listed_but_disabled_fails_before_the_paid_turn(
     repo, home, fake_fleet, monkeypatch, tmp_path
 ):
-    """Would catch the deletion of `_is_our_hooks_file`'s `entry.get(
-    "enabled") is True` half: the file is ours (source matches) and every
-    matcher conductor wrote is named in its actions, but agy's own answer
-    says the file is not enabled -- `entry.get("enabled") is not True` must
-    still refuse the paid turn, not just a source mismatch or a missing
-    matcher."""
+    """Would catch the deletion of the enabled check on the written hooks
+    file: the file is ours (absolute source matches) and every matcher
+    conductor wrote is named in its actions, but agy's own answer says the
+    file is not enabled -- it must still refuse the paid turn, not just a
+    source mismatch or a missing matcher."""
 
     def _listed_but_disabled(cwd: str) -> list[str]:
         hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
@@ -1173,3 +1177,165 @@ def test_tracked_taint_hook_files_are_not_committed_onto_the_lane_branch(
     assert hooks_on_branch == original_hooks.strip()
     assert script_on_branch == original_script.strip()
     assert "new.txt" in git_out(repo, "ls-tree", "-r", "--name-only", branch)
+
+
+def test_preflight_refuses_a_foreign_hooks_json_that_only_shares_the_suffix(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """A decoy `.../.agents/hooks.json` enabled with the right matcher names
+    used to satisfy preflight (first suffix hit wins) even when it was not
+    the file `_write_taint_agy_hooks` just wrote."""
+    decoy = tmp_path / "other" / ".agents" / "hooks.json"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("{}")
+
+    def _decoy_only(cwd: str) -> list[str]:
+        hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
+        with open(hooks_path) as fh:
+            written = json.load(fh)["hooks"]["PreToolUse"]
+        actions = [
+            {
+                "event": "PreToolUse",
+                "matcher": entry["matcher"],
+                "type": "command",
+                "command": "true",
+            }
+            for entry in written
+        ]
+        return _hooks_preflight_argv(
+            [{"name": "hooks", "enabled": True, "source": str(decoy), "actions": actions}]
+        )(cwd)
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _decoy_only)
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert not marker.exists()
+
+
+def test_preflight_fails_closed_when_agy_reports_a_relative_hooks_source(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    def _relative_source(cwd: str) -> list[str]:
+        hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
+        with open(hooks_path) as fh:
+            written = json.load(fh)["hooks"]["PreToolUse"]
+        actions = [
+            {"event": "PreToolUse", "matcher": entry["matcher"], "type": "command", "command": "x"}
+            for entry in written
+        ]
+        return _hooks_preflight_argv(
+            [
+                {
+                    "name": "hooks",
+                    "enabled": True,
+                    "source": TAINT_AGY_HOOKS_REL,
+                    "actions": actions,
+                }
+            ]
+        )(cwd)
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _relative_source)
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert "could not compare source path" in result.error
+    assert not marker.exists()
+
+
+def test_an_unrecognised_tool_is_uncovered(repo, home, fake_fleet):
+    """Allowlist, not a substring net: `http_request` matches none of the
+    old fragments and is not a denied or edit tool, so it used to pass."""
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS, "http_request"],
+            extra_lines=[],
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert error_kind(result) == "taint"
+    assert result.taint_enforcement["uncovered"] == ["http_request"]
+    assert result.taint_enforcement["tools_checked"] is True
+
+
+def test_no_init_event_records_that_tools_were_not_checked(repo, home, fake_fleet):
+    home_q = shlex.quote(str(home))
+    run_dir = f"{home_q}/runs/$CONDUCTOR_RUN_ID"
+    log_q = shlex.quote(_passing_log_line())
+    result_event = json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "status": "SUCCESS",
+                "response": "ok",
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+        }
+    )
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            f"mkdir -p {run_dir} && printf '%s\\n' {log_q} > {run_dir}/agy.log && "
+            f"printf '%s\\n' {shlex.quote(result_event)}",
+        ]
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.taint_enforcement["tools_checked"] is False
+    assert result.taint_enforcement["uncovered"] == []
+    assert result.taint_enforcement["tools_seen"] == []
+
+
+def test_digest_check_that_did_not_run_says_so():
+    init_event = json.dumps(
+        {"event": "init", "conversation_id": "c1", "init": {"tools": [*TAINT_AGY_DENIED_TOOLS]}}
+    )
+    receipt, problem = runner_mod._taint_agy_enforcement(
+        hooks_written=HOOKS_WRITTEN,
+        stdout_text=init_event + "\n",
+        log_text=_passing_log_line(),
+    )
+    assert problem is None
+    assert receipt["digests_checked"] is False
+    assert receipt["hooks_modified"] == []
+    assert receipt["hook_digests"] == {}
+    assert "hooks_written" not in receipt
+    assert "hooks_loaded" not in receipt
+    assert receipt["matchers_written"] == HOOKS_WRITTEN
+    assert receipt["hook_files_loaded"] == 1
+
+
+def test_write_taint_agy_hooks_fails_when_a_file_cannot_be_hashed(repo, home, monkeypatch):
+    from conductor import worktrees
+    from conductor.runner import _write_taint_agy_hooks
+
+    iso = worktrees.create(str(repo), "hash-fail", home / "worktrees")
+    assert iso.active, iso.reason
+    monkeypatch.setattr(runner_mod, "_sha256_file", lambda path: None)
+    with pytest.raises(OSError, match="unreadable after write"):
+        _write_taint_agy_hooks(iso.worktree, iso)
+    worktrees.release(iso)

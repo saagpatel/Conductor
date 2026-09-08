@@ -292,6 +292,8 @@ def test_an_untracked_include_lands_in_the_worktree_and_stays_out_of_diff_and_co
     )
     assert result.ok is True
     assert result.lane_env["included"] == ["secret.env"]
+    assert result.isolation["kept"] is False
+    assert result.isolation["clean"] is True
     tree = git_out(repo, "ls-tree", "-r", "--name-only", result.isolation["branch"])
     assert "secret.env" not in tree
     assert "new.txt" in tree
@@ -360,6 +362,29 @@ def test_include_preserves_the_operators_global_excludes(
     tree = git_out(repo, "ls-tree", "-r", "--name-only", result.isolation["branch"])
     assert "operator-ignored.txt" not in tree
     assert "new.txt" in tree
+
+
+def test_a_kept_include_worktree_keeps_its_exclude_file(repo, home, fake_fleet, git_out):
+    """A worktree kept for salvage must still hide include paths and the
+    operator's excludes: git ignores a core.excludesFile that no longer
+    exists, so deleting it before release both dirties a clean include
+    lane and lets salvage commit those hidden files."""
+    (repo / "secret.env").write_text("TOKEN=abc\n")
+    fake_fleet(["sh", "-c", "echo leftover > leftover.txt"])
+    result = dispatch(
+        Spec(fleet="claude", prompt="inc", cwd=str(repo), mode="write", include=["secret.env"]),
+        isolate=True,
+        home=home,
+    )
+    assert result.isolation["kept"] is True
+    assert result.isolation["clean"] is False
+    exclude_file = home / "worktrees" / f"{result.run_id}-include-exclude"
+    assert exclude_file.is_file()
+    worktree = Path(result.isolation["worktree"])
+    status = git_out(worktree, "status", "--porcelain")
+    assert "secret.env" not in status
+    assert "leftover.txt" in status
+    assert "secret.env" in exclude_file.read_text()
 
 
 def test_include_without_isolation_is_a_note(repo, home, fake_fleet):

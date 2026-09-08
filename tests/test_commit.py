@@ -9,6 +9,7 @@ own. Leaving it to each vendor makes "did it commit?" a property of the vendor.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -133,3 +134,44 @@ def test_no_commit_requested_leaves_the_tree_alone(repo, tmp_path, monkeypatch):
     assert result.commit is None
     assert result.git_verdict["dirty_delta"] == 1
     assert result.git_verdict["commits_added"] == 0
+
+
+def test_over_budget_undo_restates_the_git_verdict(repo, tmp_path, monkeypatch):
+    """The deliverable undo recopies commits_added/files_changed/dirty_delta/
+    branch_after/branch_moved onto git_verdict; the budget undo used to
+    recapture `after` for `_commit_bounds` and stop, so a cursor lane that
+    committed then settled exceeded receipted both '1 commit added' and
+    'no commit landed'."""
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"usage":{"inputTokens":1000000,"outputTokens":1000000}}'
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "build_argv",
+        lambda spec: [
+            "sh",
+            "-c",
+            "echo work > w.txt && git add -A && git commit -qm work && "
+            f"printf '%s\\n' {shlex.quote(envelope)}",
+        ],
+    )
+    result = dispatch(
+        Spec(
+            fleet="cursor",
+            model="composer-2.5",
+            prompt="write then blow the cap",
+            cwd=str(repo),
+            mode="write",
+            cap_usd=1.0,
+        ),
+        isolate=True,
+        home=tmp_path / "home",
+    )
+    assert result.ok is False
+    assert result.budget["exceeded"] is True
+    assert result.commit["committed"] is False
+    assert result.tip_commit == result.base_commit
+    assert result.git_verdict["commits_added"] == 0
+    assert result.git_verdict["dirty_delta"] >= 1
+    assert any("over budget" in note for note in result.git_verdict["notes"])

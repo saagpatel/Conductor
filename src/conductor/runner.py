@@ -40,6 +40,7 @@ from .errors import PARSE_FAILURE_PREFIX, capped, error_kind
 from .fleets import (
     FLEETS,
     TAINT_AGY_DENIED_TOOLS,
+    TAINT_AGY_EDIT_TOOLS,
     TAINT_AGY_HOOKS_REL,
     DispatchRefused,
     Spec,
@@ -171,10 +172,14 @@ class Result:
     # D2: {"declared": True, "tools_denied": [...]} when spec.taint was set,
     # else None. Set by dispatch(), never inferred from anything a fleet said.
     taint: dict | None = None
-    # E21: {"hooks_written", "hooks_loaded", "tools_seen", "uncovered",
-    # "denied_calls"} when spec.taint was set on the antigravity fleet, else
-    # None. Set by dispatch() from the deny hook's own log and the stream's
-    # init event, never from anything the fleet claims about itself.
+    # E21: {"matchers_written", "hook_files_loaded", "tools_seen",
+    # "tools_checked", "uncovered", "denied_calls", "digests_checked",
+    # "hooks_modified", ...} when spec.taint was set on the antigravity
+    # fleet, else None. `matchers_written` counts PreToolUse matchers in the
+    # deny file; `hook_files_loaded` is agy's "loaded N named hooks" line,
+    # which counts hook *files*, not matchers -- do not compare the two
+    # (AGENTS.md). Set by dispatch() from the deny hook's own log and the
+    # stream's init event, never from anything the fleet claims about itself.
     taint_enforcement: dict | None = None
     # D3: {"name", "tools": [...] | None, "applied": True | False | None} when
     # spec.agent was set, else None. `applied` is asserted from the stream's
@@ -237,9 +242,12 @@ class Result:
     # Settings digest (third drill pass, 2026-09-07):
     # `{"checked": bool, "modified": [<relative path>]}` -- whether this
     # dispatch hashed `.claude/settings.json` and `.claude/settings.local.json`
-    # before and after the run (a claude write lane, never anything else), and
-    # which of them the run created, changed, or deleted. Conductor's own read
-    # of the bytes, never a fleet's word, like `taint_enforcement` above.
+    # at the repository toplevel before and after the run. Turns on for
+    # every lane `claude_can_edit` is true of (a write lane, and a
+    # restricted or deliverable read under acceptEdits), not only a write
+    # lane. After-the-fact: a lane that edits and restores the files before
+    # exit still receipts `modified: []`. Conductor's own read of the bytes,
+    # never a fleet's word, like `taint_enforcement` above.
     settings: dict = field(default_factory=lambda: {"checked": False, "modified": []})
 
     @property
@@ -1285,26 +1293,37 @@ def _agent_verdict(spec_agent: dict, init_event: dict | None) -> tuple[dict, str
     return receipt, None
 
 
-# E21: reaching-out name patterns the deny hook cannot name individually
-# (agy's own init event is the only inventory of what actually ran; the
-# probe's tool list was not exhaustive -- see the comment above
-# TAINT_AGY_DENIED_TOOLS in fleets.py).
-_TAINT_AGY_UNCOVERED_SUBSTRINGS = (
-    "subagent",
-    "mcp",
-    "web",
-    "url",
-    "message",
-    "schedule",
-    "inbox",
-    # 2026-09-08 review: this net used a `startswith("browser_")` test beside
-    # these substrings, and the recorded init event names four browser tools
-    # that spell it the other way round (`click_browser_pixel`,
-    # `list_browser_pages`, `capture_browser_*`). A substring catches every
-    # spelling, which is the point of a fail-closed net.
-    "browser",
-    "notebook",  # a kernel is a code-execution surface beside the shell
-    "command_input",  # stdin to a process the shell started
+# In-worktree tools from the recorded c5-review-fix init event (57 names)
+# that are neither denied nor edit-matched. A tool conductor has not
+# listed here, in TAINT_AGY_DENIED_TOOLS, or in TAINT_AGY_EDIT_TOOLS is
+# uncovered -- an allowlist, not a substring heuristic. The old substring
+# net (`browser`, `url`, `mcp`, ...) missed anything whose name did not
+# contain one of those fragments (`http_request`, `download`,
+# `computer_use`, a new write tool absent from TAINT_AGY_EDIT_TOOLS).
+_TAINT_AGY_IN_WORKTREE_TOOLS = frozenset(
+    {
+        "ask_custom_permission",
+        "ask_permission",
+        "ask_question",
+        "command_status",
+        "delete_knowledge",
+        "find_by_name",
+        "finish",
+        "grep_search",
+        "list_dir",
+        "list_permissions",
+        "list_resources",
+        "manage_task",
+        "read_resource",
+        "view_file",
+        "wait",
+        "wait_5_seconds",
+    }
+)
+_TAINT_AGY_CLEARED_TOOLS = (
+    frozenset(TAINT_AGY_DENIED_TOOLS)
+    | frozenset(TAINT_AGY_EDIT_TOOLS)
+    | _TAINT_AGY_IN_WORKTREE_TOOLS
 )
 # Every PreToolUse matcher `fleets.taint_hook_files` writes, in the order it
 # writes them; the preflight requires each one back by name. D5: the same
@@ -1326,16 +1345,35 @@ def _sha256_file(path: Path) -> str | None:
 
 # Settings digest (third drill pass, 2026-09-07):
 # the two files Claude Code reads a project's own permission policy from,
-# relative to the directory the fleet actually runs in. Both are checked even
-# when neither exists: a lane that creates one is the case that matters.
+# relative to the repository toplevel -- not a subdirectory cwd.
+# worktrees.mirror_path preserves a nested cwd, and Claude Code still
+# hot-reloads `<repo>/.claude/settings.json` for the next subagent.
+# Both are checked even when neither exists: a lane that creates one is
+# the case that matters.
+#
+# After-the-fact only: this proves the bytes at start and end differ or
+# do not. A lane that edits the files and restores them before exit still
+# receipts `modified: []`. It is not a preventive check.
 CLAUDE_SETTINGS_FILES: tuple[str, ...] = (".claude/settings.json", ".claude/settings.local.json")
 
 
+def _claude_project_root(cwd: str) -> str:
+    """The directory Claude Code reads project settings from: the git
+    toplevel when `cwd` is inside a repository, otherwise `cwd` itself."""
+    top = git_run(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        return cwd
+    root = top.stdout.strip()
+    return root or cwd
+
+
 def _settings_digests(cwd: str) -> dict[str, str | None]:
-    """The sha256 of each Claude settings file, or None where there is no
-    readable file. Absence is a value, not a gap: a lane that creates one of
-    these has changed the policy as surely as one that edits it."""
-    return {rel: _sha256_file(Path(cwd) / rel) for rel in CLAUDE_SETTINGS_FILES}
+    """The sha256 of each Claude settings file at the project root, or None
+    where there is no readable file. Absence is a value, not a gap: a lane
+    that creates one of these has changed the policy as surely as one that
+    edits it."""
+    root = _claude_project_root(cwd)
+    return {rel: _sha256_file(Path(root) / rel) for rel in CLAUDE_SETTINGS_FILES}
 
 
 def _settings_modified(cwd: str, before: dict[str, str | None]) -> list[str]:
@@ -1384,8 +1422,13 @@ def _write_taint_agy_hooks(
         worktree_rel = (prefix / rel_path).as_posix()
         written.append(worktree_rel)
         digest = _sha256_file(dest)
-        if digest is not None:
-            digests[rel_path] = digest
+        if digest is None:
+            # A file conductor could not hash after writing it is a failed
+            # write, not a file to quietly stop watching: the digest
+            # read-back is the check that the script in a writable worktree
+            # is still what conductor wrote.
+            raise OSError(f"taint hook file unreadable after write: {dest}")
+        digests[rel_path] = digest
         tracked = git_run(iso.worktree, "ls-files", "--error-unmatch", "--", worktree_rel)
         if tracked.returncode == 0:
             git_run(iso.worktree, "update-index", "--skip-worktree", "--", worktree_rel)
@@ -1405,12 +1448,15 @@ def _restore_tracked_taint_hooks(worktree: str, paths: list[str]) -> None:
 
 
 def _uncovered_agy_tools(tools: list[str]) -> list[str]:
-    denied = frozenset(TAINT_AGY_DENIED_TOOLS)
-    return [
-        name
-        for name in tools
-        if name not in denied and any(s in name for s in _TAINT_AGY_UNCOVERED_SUBSTRINGS)
-    ]
+    """Tools the init event named that conductor has not cleared.
+
+    Cleared means denied (the hook covers them), edit-matched (the hook
+    sees a worktree write), or in the recorded in-worktree allowlist.
+    A name conductor does not recognise is uncovered -- not a substring
+    heuristic that fails open on `http_request` / `download` /
+    `computer_use`.
+    """
+    return [name for name in tools if name not in _TAINT_AGY_CLEARED_TOOLS]
 
 
 def _denied_tool_error(event: dict) -> bool:
@@ -1463,20 +1509,48 @@ def _parse_agy_hooks_result(text: str) -> list[dict] | None:
     return None
 
 
-def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
+def _agy_hooks_source_path(source: object) -> Path | None:
+    """The absolute resolved path agy reported for a hooks file, or None
+    when it cannot be compared (missing, relative, or unresolvable).
+    Preflight fails closed on None rather than matching a suffix."""
+    if not isinstance(source, str) or not source:
+        return None
+    reported = Path(source)
+    if not reported.is_absolute():
+        return None
+    try:
+        return reported.resolve()
+    except OSError:
+        return None
+
+
+def _taint_agy_preflight(
+    cwd: str, run_dir: Path, *, hooks_path: str | None = None
+) -> tuple[dict, str | None]:
     """F13: before a tainted antigravity dispatch spawns its paid turn, query
     `/hooks` in print mode -- free, `num_turns: 0`, no model spend -- and
     require the deny hook file `taint_hook_files` just wrote to appear
-    enabled. Fails closed on a query that cannot be spawned, times out, or
-    answers with no such event; this is the first source of enforcement
-    evidence, the after-the-run 'loaded N named hooks' log-count check
-    (`_taint_agy_enforcement`) the second.
+    enabled. Compared by absolute path (the file conductor wrote), not by a
+    `.agents/hooks.json` suffix; a path agy reports that cannot be resolved
+    to an absolute location fails closed. Fails closed on a query that cannot
+    be spawned, times out, or answers with no such event; this is the first
+    source of enforcement evidence, the after-the-run 'loaded N named hooks'
+    log-count check (`_taint_agy_enforcement`) the second.
+
+    `hooks_path` is a keyword with a default so an older caller keeps
+    working: omitted, it is `<cwd>/.agents/hooks.json`.
 
     Returns the receipt's `taint_enforcement.preflight` dict and, when the
     hooks did not visibly hold, the text `dispatch()` folds into the run's
     `error` (prefixed `taint hooks not enforced:` so `errors.error_kind`
     still classifies it as `taint`).
     """
+    expected = Path(hooks_path) if hooks_path is not None else Path(cwd) / TAINT_AGY_HOOKS_REL
+    try:
+        expected = expected.resolve()
+    except OSError as exc:
+        detail = f"hooks preflight could not resolve the written hooks path: {exc}"
+        return {"ok": False, "loaded": [], "detail": detail}, detail
     argv = build_agy_hooks_argv(cwd)
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
         try:
@@ -1527,13 +1601,29 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
         detail = "hooks preflight returned no command_result event for '/hooks'"
         return {"ok": False, "loaded": [], "detail": detail}, detail
 
-    def _is_our_hooks_file(entry: dict) -> bool:
-        source = str(entry.get("source", ""))
-        return source.endswith(TAINT_AGY_HOOKS_REL) and entry.get("enabled") is True
-
-    match = next((entry for entry in hooks if _is_our_hooks_file(entry)), None)
+    ours: list[dict] = []
+    incomparable: list[object] = []
+    for entry in hooks:
+        resolved = _agy_hooks_source_path(entry.get("source"))
+        if resolved is None:
+            incomparable.append(entry.get("source"))
+            continue
+        if resolved == expected:
+            ours.append(entry)
+    if not ours:
+        if incomparable:
+            detail = (
+                f"hooks preflight could not compare source path(s) {incomparable!r} "
+                f"to the written file {str(expected)!r}"
+            )
+        else:
+            detail = (
+                f"hooks preflight did not find {str(expected)!r} enabled among {hooks}"
+            )
+        return {"ok": False, "loaded": hooks, "detail": detail}, detail
+    match = next((entry for entry in ours if entry.get("enabled") is True), None)
     if match is None:
-        detail = f"hooks preflight did not find {TAINT_AGY_HOOKS_REL!r} enabled among {hooks}"
+        detail = f"hooks preflight found {str(expected)!r} but it was not enabled"
         return {"ok": False, "loaded": hooks, "detail": detail}, detail
     # F10 anti-slop consumer (2026-09-07): agy's "loaded N named hooks" log
     # line counts hooks *files*, not matchers -- the whole deny file is one
@@ -1548,7 +1638,7 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
     missing = sorted(set(_TAINT_AGY_MATCHERS) - matchers)
     if missing:
         detail = (
-            f"hooks preflight loaded {TAINT_AGY_HOOKS_REL!r} without matcher(s) for "
+            f"hooks preflight loaded {str(expected)!r} without matcher(s) for "
             f"{', '.join(missing)}"
         )
         return {"ok": False, "loaded": hooks, "detail": detail, "matchers_missing": missing}, detail
@@ -1573,27 +1663,45 @@ def _taint_agy_enforcement(
     with defaults so an older caller (and every test that calls this
     directly) keeps working.
 
+    The receipt uses `matchers_written` (PreToolUse matchers in the deny
+    file, the `hooks_written` argument) and `hook_files_loaded` (agy's
+    "loaded N named hooks" line, which counts hook *files*). Those are
+    different units; AGENTS.md forbids comparing them.
+
+    `digests_checked` is true only when this function actually re-hashed
+    `hook_digests` against disk. `hooks_modified: []` with
+    `digests_checked: false` means the check did not run, not that the
+    files were unchanged. `tools_checked` is the same flag for the init
+    event's tool list: `uncovered: []` with `tools_checked: false` means
+    nothing was examined.
+
     Returns the receipt's `taint_enforcement` dict and, when the hooks did
     not visibly hold, the text `dispatch()` uses as the run's `error`."""
     init_event = agy_init_event(stdout_text)
     raw_tools = init_event.get("tools") if init_event is not None else None
-    tools_seen = list(raw_tools) if isinstance(raw_tools, list) else []
-    uncovered = _uncovered_agy_tools(tools_seen)
+    tools_checked = isinstance(raw_tools, list)
+    tools_seen = list(raw_tools) if tools_checked else []
+    uncovered = _uncovered_agy_tools(tools_seen) if tools_checked else []
     denied_calls = _count_denied_calls(stdout_text)
     log_match = _TAINT_AGY_LOG_RE.search(log_text)
-    hooks_loaded = int(log_match.group(1)) if log_match else None
+    hook_files_loaded = int(log_match.group(1)) if log_match else None
     modified: list[str] = []
-    if hook_digests and cwd is not None:
+    digests_checked = bool(hook_digests) and cwd is not None
+    if digests_checked and hook_digests is not None and cwd is not None:
         for rel_path, digest in sorted(hook_digests.items()):
             if _sha256_file(Path(cwd) / rel_path) != digest:
                 modified.append(rel_path)
     receipt = {
-        "hooks_written": hooks_written,
-        "hooks_loaded": hooks_loaded,
+        # Different nouns, different units: matchers in the deny file vs.
+        # hook files agy logged as loaded. Do not compare them.
+        "matchers_written": hooks_written,
+        "hook_files_loaded": hook_files_loaded,
         "tools_seen": tools_seen,
+        "tools_checked": tools_checked,
         "uncovered": uncovered,
         "denied_calls": denied_calls,
         "hook_digests": dict(hook_digests or {}),
+        "digests_checked": digests_checked,
         "hooks_modified": modified,
     }
     if modified:
@@ -1608,8 +1716,11 @@ def _taint_agy_enforcement(
     # read "loaded 1 named hooks from 1 hooks.json file(s)" for 30 matchers
     # and was wrongly failed against 30). Zero is the malformed-file signal
     # the live probe found; the per-matcher check is the preflight's.
-    if hooks_loaded < 1:
-        return receipt, f"agy loaded {hooks_loaded} named hook(s); the hooks file did not parse"
+    if hook_files_loaded < 1:
+        return (
+            receipt,
+            f"agy loaded {hook_files_loaded} named hook(s); the hooks file did not parse",
+        )
     if uncovered:
         return receipt, f"uncovered tool(s) reach outside the worktree: {', '.join(uncovered)}"
     return receipt, None
@@ -1635,15 +1746,30 @@ def _lane_receipt_statement(
     taint: dict | None,
     agent: dict | None,
     fleet_version: str | None = None,
+    taint_enforcement: dict | None = None,
+    settings: dict | None = None,
 ) -> dict:
-    """The statement A5 signs into `attestation.json`: what conductor can
-    check about this one dispatch without trusting the fleet's own report.
+    """The statement A5 signs into `attestation.json`.
 
-    `fleet_version` (E22) is a keyword with a default so an older caller
-    (and every existing test that builds this statement by hand) keeps
-    working unchanged; `conductor attest` verifies a statement missing it
-    the same as any other older receipt, since verification checks the
-    signature, not a fixed field set.
+    Conductor's own observation, byte-derived or hashed by conductor:
+    `source_diff_sha256`, the `test_surface` digests, `base_commit` /
+    `tip_commit`, `taint_enforcement`, `settings`, `gate`,
+    `reproduce_verdict`, `ok`, `error`. `taint_enforcement` and `settings`
+    are the two checks conductor makes with its own eyes; they are signed
+    even when the run already failed for an earlier reason.
+
+    Spec / dispatch configuration, not evidence the hooks held:
+    `fleet`, `model`, `mode`, `stage`, `cwd`, `taint` (the spec's request).
+
+    The fleet's own claim, signed as a claim not as evidence:
+    `agent` (including `agent.applied`, taken from the stream init event).
+
+    `fleet_version`, `taint_enforcement`, and `settings` are keywords with
+    defaults so an older caller (and every existing test that builds this
+    statement by hand) keeps working. `conductor attest` verifies a
+    statement missing the newer keys the same as any other older receipt:
+    a field the statement does not carry is not compared against
+    result.json.
     """
     test_surface = (
         {
@@ -1662,6 +1788,8 @@ def _lane_receipt_statement(
         "mode": mode,
         "stage": stage,
         "taint": taint,
+        "taint_enforcement": taint_enforcement,
+        "settings": settings,
         "agent": agent,
         "cwd": cwd,
         "base_commit": base_commit,
@@ -1675,6 +1803,32 @@ def _lane_receipt_statement(
         "error": error,
         "ended_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
+
+
+def _unlink_exclude_file_after_release(
+    exclude_file: Path | None, iso: worktrees.Isolation | None
+) -> None:
+    """Remove the worktree-scoped `core.excludesFile` only after
+    `worktrees.release` has judged the tree, and only when the worktree
+    is not kept.
+
+    Git silently ignores a `core.excludesFile` that does not exist, so
+    unlinking first makes every `include` path and every taint hook file
+    look like uncommitted dirt: `release` then keeps the worktree
+    (`kept: true`, `clean: false`) even though `git_verdict.no_op` was
+    captured while the rules still applied. A kept worktree a human will
+    later salvage still needs those rules, including the operator's
+    global excludes the file was seeded with -- otherwise salvage's
+    gate-and-commit can land conductor's deny hooks on the lane branch.
+
+    Call this after `worktrees.release`. `iso.kept` is None until then,
+    and a None kept-flag must not be treated as "not kept".
+    """
+    if exclude_file is None:
+        return
+    if iso is not None and iso.kept:
+        return
+    exclude_file.unlink(missing_ok=True)
 
 
 def _git_failure(detail: str, *, worktree: Path, patch_bytes: int = 0) -> dict:
@@ -2446,10 +2600,9 @@ def dispatch(
 
     def _release_lane_resources() -> None:
         ports_mod.release(base, claimed_ports)
-        if include_exclude_file is not None:
-            include_exclude_file.unlink(missing_ok=True)
         if iso is not None:
             worktrees.release(iso)
+        _unlink_exclude_file_after_release(include_exclude_file, iso)
 
     try:
         if isolate and not dry_run:
@@ -2581,10 +2734,9 @@ def dispatch(
 
     def _bail(error: str) -> Result:
         ports_mod.release(base, claimed_ports)
-        if include_exclude_file is not None:
-            include_exclude_file.unlink(missing_ok=True)
         if iso is not None:
             worktrees.release(iso)
+        _unlink_exclude_file_after_release(include_exclude_file, iso)
         result = _refused_result(
             run_id,
             spec,
@@ -3456,9 +3608,17 @@ def dispatch(
             if commit and commit.committed and (settled["exceeded"] or settled["unpriced"]):
                 why = "over budget" if settled["exceeded"] else "cap unenforced"
                 commit = uncommit(spec.cwd, commit, before.head, why=why)
-                # Same reason as the deliverable undo above: `after` predates
-                # this uncommit, and `_commit_bounds` reads its head.
+                git_verdict.notes.append(commit.reason)
+                # Same restatement as the deliverable undo above: `git_verdict`
+                # was built from the pre-undo tree, so without this the
+                # receipt says both "1 commit added" and "no commit landed".
                 after = GitState.capture(spec.cwd)
+                restated = compare(spec.cwd, before, after)
+                git_verdict.commits_added = restated.commits_added
+                git_verdict.files_changed = restated.files_changed
+                git_verdict.dirty_delta = restated.dirty_delta
+                git_verdict.branch_after = restated.branch_after
+                git_verdict.branch_moved = restated.branch_moved
 
         # Teardown runs after the gate and the commit decision, ok or not: the
         # work is already judged, so its own outcome is a note, never a reason
@@ -3533,10 +3693,9 @@ def dispatch(
                         git_verdict.branch_moved = restated.branch_moved
     except Exception as exc:  # noqa: BLE001 - D9 boundary, re-raised below
         ports_mod.release(base, claimed_ports)
-        if include_exclude_file is not None:
-            include_exclude_file.unlink(missing_ok=True)
         if iso is not None:
             worktrees.release(iso)
+        _unlink_exclude_file_after_release(include_exclude_file, iso)
         if not post_wait:
             # Nothing was paid for yet, or the failure is conductor's own
             # setup: unchanged, it propagates.
@@ -3577,10 +3736,9 @@ def dispatch(
         )
     except BaseException as exc:
         ports_mod.release(base, claimed_ports)
-        if include_exclude_file is not None:
-            include_exclude_file.unlink(missing_ok=True)
         if iso is not None:
             worktrees.release(iso)
+        _unlink_exclude_file_after_release(include_exclude_file, iso)
         if post_wait:
             # Paid: the Exception path already receipts via `_parse_failure_result`.
             # KeyboardInterrupt / SystemExit must too, then still propagate.
@@ -3619,8 +3777,6 @@ def dispatch(
         raise
 
     ports_mod.release(base, claimed_ports)
-    if include_exclude_file is not None:
-        include_exclude_file.unlink(missing_ok=True)
     if iso is not None:
         if (
             iso.active
@@ -3652,6 +3808,7 @@ def dispatch(
             git_verdict.notes.append(f"isolated on branch {iso.branch}; {iso.reason}")
         else:
             git_verdict.notes.append(f"isolation requested but not applied: {iso.reason}")
+    _unlink_exclude_file_after_release(include_exclude_file, iso)
     if lane_notes:
         git_verdict.notes.extend(lane_notes)
     git_verdict.notes.extend(_version_note(fleet_version))
@@ -3752,6 +3909,8 @@ def dispatch(
             ok=result.ok,
             error=result.failure(),
             taint=result.taint,
+            taint_enforcement=result.taint_enforcement,
+            settings=result.settings,
             agent=result.agent,
             fleet_version=fleet_version,
         )

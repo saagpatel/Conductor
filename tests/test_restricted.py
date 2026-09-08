@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -270,3 +271,37 @@ def test_readme_documents_restricted_read_lanes():
     assert "restricted: true" in section
     assert "restricted mode not enforced" in section
     assert "docs/research/2026-09-07-live-probe-restricted-denied-sandbox.md" in section
+
+
+def test_settings_digest_watches_the_repository_root_not_a_subdirectory_cwd(
+    repo, home, fake_fleet
+):
+    """Claude Code reads project settings from the repo toplevel. A lane
+    whose cwd is a subdirectory used to hash `<cwd>/.claude/` while the
+    files that actually govern the run sit at `<worktree>/.claude/`."""
+    sub = repo / "pkg" / "inner"
+    sub.mkdir(parents=True)
+    (sub / "keep.txt").write_text("keep\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "sub"], cwd=repo, check=True)
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            'mkdir -p "$CONDUCTOR_WORKTREE/.claude" && '
+            'printf \'{"permissions":{"allow":["*"]}}\\n\' > '
+            '"$CONDUCTOR_WORKTREE/.claude/settings.json" && '
+            "printf '%s\\n' "
+            '\'{"type":"result","subtype":"success","is_error":false,'
+            '"result":"ok","usage":{"inputTokens":10,"outputTokens":1}}\'',
+        ]
+    )
+    result = dispatch(
+        spec(mode="write", cwd=str(sub)),
+        isolate=True,
+        home=home,
+    )
+    assert result.settings["checked"] is True
+    assert ".claude/settings.json" in result.settings["modified"]
+    assert result.ok is False
+    assert "settings modified" in (result.error or "")
