@@ -16,6 +16,7 @@ from conductor.cli import LIVENESS_STALE_S, build_parser, main
 from conductor.fleets import DispatchRefused, Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def _line(value: dict) -> str:
@@ -443,8 +444,7 @@ def test_conductor_runs_reports_running_silent_and_incomplete(home, monkeypatch,
 
 
 def test_readme_documents_tool_idle_breaker_and_liveness():
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    section = readme.split("#### Breakers", 1)[1].split("## Commands", 1)[0]
+    section = doc_section("Per-dispatch caps")
     compact = " ".join(section.split())
 
     assert "tool-idle breaker" in compact
@@ -454,7 +454,7 @@ def test_readme_documents_tool_idle_breaker_and_liveness():
     assert "read lane thinking through a long review" in compact
     assert "off by default" in compact
 
-    assert "#### Liveness" in section
+    assert "### Liveness" in section
     assert "liveness.json" in compact
     assert "every poll tick" in compact
     for field in (

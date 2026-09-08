@@ -21,6 +21,7 @@ from conductor import golden
 from conductor.fleets import FLEETS, VENDORS, DispatchRefused, Spec, build_argv, model_vendor
 from conductor.mission import Attempt, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -520,8 +521,7 @@ def test_readme_script_lanes_section_shows_a_two_lane_mission_example():
     (a stage: build script lane feeding a stage: review model lane) is the
     part worth showing, since it is what makes a script lane useful inside
     a pipeline rather than standing alone."""
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Script lanes", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("### Script lanes")
     assert '"fleet": "script"' in section
     assert '"stage": "build"' in section
     assert '"stage": "review"' in section

@@ -22,6 +22,7 @@ from conductor.mission import (
     run_mission,
 )
 from conductor.spend import _collate_run_ids as spend_collate_run_ids
+from docs import doc_section
 
 
 def shell(output: str) -> list[str]:
@@ -378,8 +379,7 @@ def test_spend_collate_run_ids_returns_every_judges_run_ids():
 
 
 def test_readme_documents_judge_sittings():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("##### Judge sittings", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("##### Judge sittings")
     assert '"judges"' in section
     assert "collate.tally" in section
     assert "tally.json" in section

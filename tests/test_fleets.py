@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from conductor.fleets import FLEETS, DispatchRefused, Spec, build_argv
+from docs import doc_section
 
 
 def spec(**kw) -> Spec:
@@ -275,13 +276,12 @@ def test_a_broken_schema_file_is_refused_before_spawn(tmp_path):
 def _current_support_section() -> str:
     from pathlib import Path
 
-    readme = Path(__file__).parents[1] / "README.md"
-    text = readme.read_text()
-    head, section = text.split("\n## Current support\n", 1)
+    text = (Path(__file__).parents[1] / "README.md").read_text()
+    head, _section = text.split("\n## Current support\n", 1)
     # The matrix sits at the entry point: before "Why it exists", after the
     # one-line dispatch example and nothing else.
     assert "\n## " not in head
-    return section.split("\n## ", 1)[0]
+    return doc_section("Current support")
 
 
 def test_readme_current_support_matrix_names_every_fleet_and_model():

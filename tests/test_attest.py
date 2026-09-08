@@ -23,6 +23,7 @@ from conductor.cli import main
 from conductor.fleets import Spec
 from conductor.mission import Mission, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 # --- attest.py primitives ----------------------------------------------
 
@@ -689,8 +690,7 @@ def test_cli_attest_exits_3_when_the_key_is_missing(repo, home, monkeypatch, tmp
 
 
 def test_readme_documents_signed_lane_receipts():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("### Signed lane receipts", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("### Signed lane receipts")
     assert "attestation.json" in section
     assert "base_commit" in section and "tip_commit" in section
     assert "conductor attest MISSION_ID" in section

@@ -19,6 +19,7 @@ from conductor import runner as runner_mod
 from conductor.cli import main
 from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import Result
+from docs import doc_section
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -1025,8 +1026,7 @@ def test_recorded_human_lane_deliverable_replays_as_answered(repo, home, monkeyp
 
 
 def test_readme_documents_golden_missions():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("## Golden missions", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("## Golden missions")
     assert "docs/ROADMAP-2026-09.md" in section and "item C7" in section
     assert "<home>" in section and "<cwd>" in section and "<user>" in section
     assert "TOKEN" in section and "SECRET" in section and "KEY" in section and "PASSWORD" in section

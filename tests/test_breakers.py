@@ -15,6 +15,7 @@ from conductor.cli import build_parser, main
 from conductor.fleets import DispatchRefused, Spec
 from conductor.mission import mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def _digest(value: object) -> str:
@@ -528,8 +529,7 @@ def test_looping_mission_primary_falls_back_and_reports_tools_and_spend(
 
 
 def test_readme_documents_breaker_defaults_disabling_pricing_and_claude_streaming():
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    section = readme.split("#### Breakers", 1)[1].split("## Commands", 1)[0]
+    section = doc_section("#### Breakers")
     compact = " ".join(section.split())
     assert "900" in compact and "6 identical" in compact and "off by default" in compact
     assert "--stall-timeout 0" in compact and "--loop-limit 0" in compact

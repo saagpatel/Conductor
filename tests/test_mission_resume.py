@@ -18,6 +18,7 @@ from conductor.cli import build_parser, main
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, load_mission, mission_from_dict, run_mission
 from conductor.runner import clear_stop, request_stop
+from docs import doc_section
 
 
 @pytest.fixture(autouse=True)
@@ -867,8 +868,7 @@ def test_quorum_resume_tallies_a_kept_verdict_lane(
 
 
 def test_readme_documents_the_mission_resume_contract():
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    section = readme.split("### Resuming a mission", 1)[1].split("\n## ", 1)[0]
+    section = doc_section("### Resuming a mission")
     assert "conductor mission --resume MISSION_ID" in section
     assert "commit" in section and "branch" in section
     assert "max_cost_usd" in section and "across resumes" in section

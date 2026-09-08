@@ -18,6 +18,7 @@ import pytest
 
 from conductor.fleets import TAINT_DISALLOWED_TOOLS
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from docs import doc_section
 
 # --- load-time refusals -------------------------------------------------
 
@@ -334,10 +335,9 @@ def test_an_old_snapshot_without_untrusted_output_backfills_false(tmp_path):
 
 
 def test_readme_documents_untrusted_output():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "### Untrusted output: marking a lane's own output as a taint source", 1
-    )[1].split("\n## ", 1)[0]
+    section = doc_section(
+        "### Untrusted output: marking a lane's own output as a taint source"
+    )
     assert '"untrusted_output": true' in section
     assert "taint_from" in section
     assert "research" in section and "build" in section

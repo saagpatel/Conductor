@@ -20,6 +20,7 @@ from conductor.cli import build_parser, cmd_dispatch, main
 from conductor.fleets import DispatchRefused, Spec, build_argv
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 AGENT = {
     "name": "reviewer",
@@ -475,10 +476,7 @@ def test_agent_survives_a_snapshot_round_trip(tmp_path):
 
 
 def test_readme_documents_inline_agents():
-    readme = Path(__file__).parents[1] / "README.md"
-    raw_section = readme.read_text().split(
-        "### Inline agents: a persona per lane", 1
-    )[1].split("\n## ", 1)[0]
+    raw_section = doc_section("### Inline agents: a persona per lane")
     # Prose reflows across lines; collapse whitespace so a phrase that
     # happens to wrap mid-sentence still matches as one contiguous string.
     section = " ".join(raw_section.split())

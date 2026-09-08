@@ -19,6 +19,7 @@ from conductor.errors import error_kind
 from conductor.fleets import Spec
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -535,10 +536,9 @@ def test_stage_fix_mission_lane_carries_the_reproduce_block_into_its_lane_json(
 
 
 def test_readme_documents_lane_stages_policy_and_reproduce_before_fix():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "### Lane stages, reviewer policy, and reproduce before fix", 1
-    )[1].split("\n### ", 1)[0]
+    section = doc_section(
+        "### Lane stages, reviewer policy, and reproduce before fix"
+    )
     assert "`build`" in section and "`review`" in section and "`fix`" in section
     assert "policy allows" in section
     assert "71.6%" in section and "89.7%" in section

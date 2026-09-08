@@ -25,6 +25,7 @@ from conductor.errors import error_kind
 from conductor.fleets import DispatchRefused, Spec, build_argv
 from conductor.mission import LaneResult, Mission, _render, mission_from_dict, run_mission
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def spec(**kw) -> Spec:
@@ -1090,25 +1091,25 @@ def test_schema_type_as_a_list_does_not_crash_the_dispatch(repo, home, fake_flee
 
 
 def test_readme_documents_the_deliverable_validator_contract():
-    readme = Path(__file__).parents[1] / "README.md"
-    text = readme.read_text()
-    section = text.split("#### Validators", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("#### Validators")
     assert "{path}" in section
     assert "--deliverable-validator" in section
     assert "`accepted`" in section
     assert "`reproduced`" in section
     assert "`rejected`" in section
     assert "the reviewers' question, not the validator's" in section
-    reproduce_section = text.split("#### Reproduce before fix", 1)[1].split("\n#### ", 1)[0]
+    reproduce_section = doc_section("#### Reproduce before fix")
     assert "`validator`" in reproduce_section
 
 
 def test_readme_lists_deliverable_among_the_template_and_taint_surfaces():
-    readme = Path(__file__).parents[1] / "README.md"
-    text = readme.read_text()
-    templates_section = text.split("Prompt templates:", 1)[1].split("\n\n", 1)[0]
+    templates_section = (
+        doc_section("Thread reuse").split("Prompt templates:", 1)[1].split("\n\n", 1)[0]
+    )
     assert "{{lanes.<name>.deliverable}}" in templates_section
-    taint_section = text.split("Taint spreads forward", 1)[1].split("\n\n", 1)[0]
+    taint_section = (
+        doc_section("Taint").split("Taint spreads forward", 1)[1].split("\n\n", 1)[0]
+    )
     assert "deliverable" in taint_section
 
 

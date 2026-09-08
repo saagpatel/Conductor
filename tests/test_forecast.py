@@ -13,6 +13,7 @@ from pathlib import Path
 from conductor.cli import main
 from conductor.forecast import forecast, history
 from conductor.mission import Attempt, Lane, Mission, mission_from_dict, run_mission
+from docs import doc_section
 
 
 def _write_receipt(
@@ -270,8 +271,7 @@ def test_shape_a_prints_the_forecast_line(repo, home, monkeypatch, tmp_path, cap
 
 
 def test_readme_documents_cost_forecast():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split("#### Cost forecast", 1)[1].split("\n### ", 1)[0]
+    section = doc_section("#### Cost forecast")
     section = " ".join(section.split())  # the README wraps at 80 columns
     assert "nearest-rank method" in section
     assert "floor of three runs" in section

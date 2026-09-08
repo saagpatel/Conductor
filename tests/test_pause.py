@@ -27,6 +27,7 @@ from conductor.mission import (
     run_mission,
 )
 from conductor.runner import clear_stop, request_stop
+from docs import doc_section
 
 
 @pytest.fixture(autouse=True)
@@ -444,10 +445,7 @@ def test_conductor_missions_reports_paused_then_not(
 
 
 def test_readme_documents_the_pause_primitive():
-    readme = Path(__file__).parents[1] / "README.md"
-    raw_section = readme.read_text().split("### Pausing for the operator", 1)[1].split(
-        "\n## ", 1
-    )[0]
+    raw_section = doc_section("### Pausing for the operator")
     section = " ".join(raw_section.split())  # prose wraps lines; match across breaks
     assert '"pause": {"before": ["publish"], "spend_usd": 3}' in section
     assert "never a request a fleet's own output can make" in section

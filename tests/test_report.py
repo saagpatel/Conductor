@@ -10,6 +10,7 @@ from pathlib import Path
 from conductor.cli import main
 from conductor.report import ReviewerPrecisionRow, WallClockRow, report
 from conductor.runner import Result
+from docs import doc_section
 
 
 def _write_receipt(
@@ -697,8 +698,7 @@ def test_wall_clock_row_busy_is_blank_without_concurrency():
 
 
 def test_readme_documents_wall_clock_in_the_report_section():
-    readme = Path(__file__).parents[1] / "README.md"
-    raw_section = readme.read_text().split("#### Ledger report", 1)[1].split("\n### ", 1)[0]
+    raw_section = doc_section("#### Ledger report")
     section = " ".join(raw_section.split())
     assert "**Wall clock**" in section
     assert "launched_at" in section and "paused_s" in section and "idle_s" in section
@@ -1992,8 +1992,7 @@ def test_report_prints_no_merge_when_nothing_landed(home: Path, monkeypatch, cap
 
 
 def test_readme_documents_cost_per_landed_item():
-    readme = Path(__file__).parents[1] / "README.md"
-    raw_section = readme.read_text().split("#### Ledger report", 1)[1].split("\n### ", 1)[0]
+    raw_section = doc_section("#### Ledger report")
     section = " ".join(raw_section.split())
     assert "`merged`" in section and "`items`" in section and "`usd_per_item`" in section
     assert "evidence map" in section

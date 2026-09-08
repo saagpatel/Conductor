@@ -31,6 +31,7 @@ from conductor.mission import (
     run_mission,
 )
 from conductor.runner import dispatch
+from docs import doc_section
 
 
 def spec(**kw) -> Spec:
@@ -591,10 +592,7 @@ def test_taint_survives_a_snapshot_round_trip(tmp_path):
 
 
 def test_readme_documents_taint():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "### Taint: text from outside runs with less", 1
-    )[1].split("\n## ", 1)[0]
+    section = doc_section("### Taint: text from outside runs with less")
     assert '"taint": true' in section
     assert "taint_from" in section
     assert "--disallowedTools" in section

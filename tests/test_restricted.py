@@ -17,13 +17,13 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from conductor.fleets import TAINT_DISALLOWED_TOOLS, DispatchRefused, Spec, build_argv
 from conductor.mission import MissionInvalid, mission_from_dict
 from conductor.runner import dispatch
+from docs import doc_section
 
 DELIVERABLE = {"path": "child.json"}
 
@@ -260,10 +260,9 @@ def test_restricted_write_lane_is_refused_at_load(tmp_path):
 
 
 def test_readme_documents_restricted_read_lanes():
-    readme = Path(__file__).parents[1] / "README.md"
-    raw_section = readme.read_text().split(
-        "### Restricted read lanes: `--restricted` and `--permission-prompts none` (F12)", 1
-    )[1].split("\n## ", 1)[0]
+    raw_section = doc_section(
+        "### Restricted read lanes: `--restricted` and `--permission-prompts none` (F12)"
+    )
     section = " ".join(raw_section.split())
     assert "permission_denials" in section
     assert "kind `denied`" in section

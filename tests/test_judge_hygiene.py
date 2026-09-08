@@ -15,6 +15,7 @@ import pytest
 from conductor import runner as runner_mod
 from conductor.fleets import FLEETS, Spec, model_vendor
 from conductor.mission import Mission, MissionInvalid, mission_from_dict, run_mission
+from docs import doc_section
 
 
 def shell(output: str) -> list[str]:
@@ -445,10 +446,7 @@ def test_snapshot_round_trip_preserves_self_judging_and_rank(repo, home, tmp_pat
 
 
 def test_readme_documents_judge_hygiene():
-    readme = Path(__file__).parents[1] / "README.md"
-    section = readme.read_text().split(
-        "#### Judge hygiene: vendor span, self-judging, and ranking", 1
-    )[1].split("\n## ", 1)[0]
+    section = doc_section("#### Judge hygiene: vendor span, self-judging, and ranking")
     assert "at most three lanes" in section
     assert "dissent slot" in section
     assert "span at least two vendors" in section
