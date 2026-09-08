@@ -48,6 +48,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | F22 on a data deliverable: accepted and rejected read live; array schemas; a failed deliverable check undoes the commit | 0.84.0 | four scratch-repo dispatches; lead fixes | $0.30 |
 | F23 shape a --deliverable and --deliverable-validator: a document or data spec through the build, review, fix shape | 0.85.0 | lead build, dry-run launch on a research document | $0 |
 | post-baseline hardening wave 2: gc salvage sources and bare repos, the export scrubber and bundle check, the resume budget, nine fail-closed negative tests, fourteen doc claims | 0.86.0 | seven cold-review lanes (Grok 4.6, Gemini 3.8 Flash), one Sonnet subagent; lead verified and fixed | $5.40 |
+| post-baseline hardening wave 3: land's ungated-merge shortcut, the mission budget's grace band, six report figures that read as zero, the plan child's launch clamp, five tests that pinned nothing | 0.87.0 | six cold-review lanes (Grok 4.6, Gemini 3.8 Flash); lead verified and fixed | $5.42 |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten
