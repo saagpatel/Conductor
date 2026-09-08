@@ -360,3 +360,28 @@ def test_read_lanes_are_isolated_so_a_misbehaving_fleet_cannot_touch_the_checkou
     assert attempt["branch"] and attempt["worktree"]  # kept, with the leak in it
     assert git_out(repo, "status", "--porcelain") == ""
     assert not (repo / "leak.txt").exists()
+
+
+def test_signed_statement_does_not_say_the_gate_passed_when_none_ran(repo, home, fake_fleet):
+    """`_gate_passed` is True when nothing ran ("not failed"), and that is
+    still what commit-blocking uses. The signed statement used to repeat
+    that as `passed: true` with `counted: "none"`, so attestation.json
+    alone said a gate passed on a run where none ran. This is a
+    truthfulness fix on the receipt, not a policy change.
+    """
+    from conductor import attest
+
+    fake_fleet(["sh", "-c", "echo work > w.txt"])
+    result = dispatch(spec_for(repo, mode="write"), home=home)
+    assert result.ok is True, result.failure()
+    assert result.gate_passed is True
+    assert result.tests is None
+    summary = runner_mod._gate_summary(result.tests, result.test_surface, None)
+    assert summary["counted"] == "none"
+    assert summary["passed"] is None
+    assert result.attestation_path is not None
+    envelope = json.loads(Path(result.attestation_path).read_text())
+    statement, reason = attest.verify(envelope, attest.receipt_key(home))
+    assert reason is None
+    assert statement["gate"]["counted"] == "none"
+    assert statement["gate"]["passed"] is None

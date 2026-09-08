@@ -634,6 +634,26 @@ def _read_deliverable_only(
     return bool(changed) and changed == {deliverable_repo_path}
 
 
+def _hard_link_problem(st: os.stat_result, path: str) -> str | None:
+    """Refuse an inode with more than one name.
+
+    Rule: a lane that wants its product read has to write the bytes into
+    an inode that is not already reachable from another name. `st_nlink > 1`
+    is that fact, from the same `fstat` the digest already needs -- not
+    proof of malice (the other name might also sit in the worktree), but
+    `ln <outside> plan.json` is the W5 outcome a symlink no longer
+    produces: outside bytes hashed and copied as the lane's own. The path
+    is not what is wrong; re-resolving it would not close this.
+
+    Does not cover: a copy (`cp`, not `ln`) of outside bytes into a fresh
+    inode (that is writing the bytes); APFS clones (`st_nlink` stays 1);
+    an inode whose other names were unlinked before the check.
+    """
+    if st.st_nlink > 1:
+        return f"deliverable is a hard link: {path}"
+    return None
+
+
 def deliverable_path_problem(cwd: str | Path, path: str) -> str | None:
     """W5: why `<cwd>/<path>` may not be taken as a deliverable, or None
     when it may.
@@ -643,9 +663,10 @@ def deliverable_path_problem(cwd: str | Path, path: str) -> str | None:
     symlink where its product was meant to be: `plan.json -> ../secret`
     passed every later check and was copied into the run directory as the
     lane's own bytes. The rule here is the simplest one that closes it: no
-    symlink anywhere from the working tree down to the file itself, and the
-    resolved file still under the working tree. A lane that wants its
-    product read has to write the bytes.
+    symlink anywhere from the working tree down to the file itself, the
+    resolved file still under the working tree, and the file's inode not
+    shared (`st_nlink == 1`). A lane that wants its product read has to
+    write the bytes.
     """
     root = Path(cwd)
     try:
@@ -663,7 +684,13 @@ def deliverable_path_problem(cwd: str | Path, path: str) -> str | None:
         return f"deliverable missing: {path}"
     if resolved != root_resolved and root_resolved not in resolved.parents:
         return f"deliverable resolves outside the worktree: {path}"
-    return None
+    # Directories normally have nlink > 1 (`.` / `..` / children). Only the
+    # file itself is the product; lstat the worktree name, do not re-resolve.
+    try:
+        st = current.lstat()
+    except OSError:
+        return f"deliverable missing: {path}"
+    return _hard_link_problem(st, path)
 
 
 def copy_no_follow(src: Path, dst: Path) -> None:
@@ -698,13 +725,17 @@ DELIVERABLE_CHANGED = "deliverable changed after the gate ran"
 def _deliverable_sha256(cwd: str | Path, path: str) -> str | None:
     """W4: the deliverable's bytes, hashed without following a symlink (the
     same refusal `copy_no_follow` makes). None when the file cannot be read
-    at all, which for this purpose counts as "not the bytes we checked"."""
+    at all, or when its inode is shared (`st_nlink > 1`; see
+    `_hard_link_problem`), which for this purpose counts as "not the bytes
+    we checked"."""
     try:
         fd = os.open(str(Path(cwd) / path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return None
     digest = hashlib.sha256()
     try:
+        if _hard_link_problem(os.fstat(fd), path) is not None:
+            return None
         with open(fd, "rb", closefd=False) as source:
             while chunk := source.read(1024 * 1024):
                 digest.update(chunk)
@@ -728,20 +759,65 @@ def _capture_deliverable(
     exits; the gate that follows is an arbitrary shell command the spec
     names, and a gate (or a teardown) that rewrites the file would otherwise
     leave a receipt whose captured copy nobody judged. Returns the copy's
-    path and, when the bytes moved, the error that fails the run closed."""
+    path and, when the copy did not happen or the bytes moved, the error
+    that fails the run closed. A copy that raised is not a capture that
+    found nothing."""
     if state is None or not state.get("exists"):
         return None, None
     path = state["path"]
     now = _deliverable_sha256(cwd, path)
     if now is None or now != expected_sha:
-        return None, f"{DELIVERABLE_CHANGED}: {path}"
+        reason = f"{DELIVERABLE_CHANGED}: {path}"
+        _mark_deliverable_failed(state, reason)
+        return None, reason
     dest = run_dir / "deliverable"
     try:
         copy_no_follow(Path(cwd) / path, dest)
-    except OSError:
-        return None, None
+    except OSError as exc:
+        reason = f"deliverable copy failed: {path}: {exc}"
+        _mark_deliverable_failed(state, reason)
+        return None, reason
     state["sha256"] = now
     return str(dest), None
+
+
+def _mark_deliverable_failed(state: dict, reason: str) -> None:
+    """`deliverable.ok` is the deliverable's final verdict.
+
+    The pre-gate check sets it first. Three later checks -- the validator's
+    `DELIVERABLE_CHANGED` path, post-gate capture, and teardown rewrite --
+    used to fail the run via `error` while leaving `ok: true`, so one
+    receipt said the deliverable passed beside an error that named the
+    same file. Flip `ok` here rather than add a second field.
+    `Result.failure` still prefers `error`; the block must not contradict
+    it.
+    """
+    state["ok"] = False
+    state["reason"] = reason
+
+
+def _snapshot_deliverable_schema(spec: Spec) -> dict | None:
+    """The deliverable schema `Spec.validate` already parsed, re-read once
+    before spawn so `_check_deliverable` judges the declared contract.
+
+    Carrying the parsed object (not a path to re-read after the fleet
+    exits) is the rule. A write lane can rewrite a schema that lives next
+    to the mission YAML, outside the worktree; the post-run
+    `json.loads(Path(schema).read_text())` would then check a weaker
+    contract. A schema cannot legitimately change between load and check
+    within one dispatch -- the fleet has not started. Digest-and-compare
+    would refuse a rewrite; carrying the parsed object ignores a rewrite
+    and still checks what was declared, which is the stronger reading of
+    "the schema that is checked is the schema that was declared".
+    """
+    declared = spec.deliverable
+    if not declared or not declared.get("schema"):
+        return None
+    try:
+        parsed = json.loads(Path(declared["schema"]).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _teardown_drift(judged: GitState, now: GitState) -> str | None:
@@ -761,7 +837,9 @@ def _teardown_drift(judged: GitState, now: GitState) -> str | None:
     return "; ".join(parts) or None
 
 
-def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
+def _check_deliverable(
+    spec: Spec, *, dry_run: bool, declared_schema: dict | None = None
+) -> dict | None:
     """E1: a lane's product can be a file, not just its reply. Checked on
     the filesystem of the lane's actual working tree (its worktree when
     isolated; `spec.cwd` already points there by the time this is called),
@@ -845,21 +923,22 @@ def _check_deliverable(spec: Spec, *, dry_run: bool) -> dict | None:
             "ok": False,
             "reason": f"deliverable does not parse: {path}",
         }
-    try:
-        schema = json.loads(Path(schema_path).read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # D9: validated before the spawn; unreadable now means the file moved
-        # or was rewritten during the run, which is a failed check on this
-        # lane, not an exception on the thread that records what it cost.
+    # The schema that is checked is the schema that was declared: snapshotted
+    # before spawn and passed in. Do not re-read `schema_path` here -- a lane
+    # that rewrote that file would otherwise weaken its own contract. A
+    # schema cannot legitimately change between load and check within one
+    # dispatch. Missing snapshot (file vanished between validate and spawn,
+    # before the lane ran) is still a failed check, the D9 unreadable case.
+    if declared_schema is None:
         return {
             "path": path,
             "exists": True,
             "bytes": size,
             "parsed": True,
             "ok": False,
-            "reason": f"deliverable schema unreadable: {exc}",
+            "reason": "deliverable schema unreadable: declared schema missing at check time",
         }
-    problem = _schema_mismatch(data, schema)
+    problem = _schema_mismatch(data, declared_schema)
     if problem is not None:
         return {
             "path": path,
@@ -1037,6 +1116,7 @@ def _check_deliverable_validator(
     after_command = _validator_command(command, path)
 
     before_run: dict | None = None
+    before_absent = False
     if before.is_repo and before.head:
         # W5/E1's own rule for this path: declared relative to `spec.cwd`,
         # which need not be the repo toplevel, while `<rev>:<path>` git
@@ -1051,6 +1131,10 @@ def _check_deliverable_validator(
             before_run = _run_validator_command(
                 spec.cwd, before_command, GATE_TIMEOUT, env, stop=stop_requested
             )
+        else:
+            # No blob at `before.head:path`: a new file, not a base that
+            # passed. `_reproduce_receipt` must not read this as `accepted`.
+            before_absent = True
 
     after_run = _run_validator_command(
         spec.cwd, after_command, GATE_TIMEOUT, env, stop=stop_requested
@@ -1060,16 +1144,21 @@ def _check_deliverable_validator(
     now = _deliverable_sha256(spec.cwd, path)
     if now is None or now != deliverable_sha:
         error = f"{DELIVERABLE_CHANGED}: {path}"
+        _mark_deliverable_failed(deliverable_state, error)
 
     if not _validator_passed(after_run):
         verdict = "rejected"
     elif _validator_ran_and_failed(before_run):
         verdict = "reproduced"
+    elif before_absent and before_run is None:
+        # Third answer: there was no base to check. A before run that
+        # timed out or could not start still reads as `accepted` below --
+        # those attempted a base and produced no verdict.
+        verdict = "no-base"
     else:
-        # `before_run` is `None`, passed, or -- a before run that timed out
-        # or could not start -- never produced a verdict at all; none of
-        # those are evidence the base was broken, so this reads the same as
-        # "before passed or was None": nothing was demonstrated.
+        # `before_run` passed, or -- a before run that timed out or could
+        # not start -- never produced a verdict at all; none of those are
+        # evidence the base was broken.
         verdict = "accepted"
 
     if verdict == "rejected":
@@ -1090,6 +1179,13 @@ def _check_deliverable_validator(
 
 
 def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
+    """Whether the counted gate ran and did not fail.
+
+    True when nothing ran: that means "not failed", and it is what
+    commit-blocking still uses (an adversarial lane skips both gates by
+    construction; `reproduce_blocks_commit` is what gates it). The signed
+    statement must not repeat this as "passed" -- see `_gate_summary`.
+    """
     clean = (surface or {}).get("clean_gate") or {}
     counted = clean if clean.get("ran") else tests
     if not counted or not counted.get("ran"):
@@ -1105,7 +1201,14 @@ def _gate_summary(
     tests_dict: dict | None, surface_state: dict | None, test_command: str | None
 ) -> dict:
     """Which gate run counted for this dispatch, and its verdict, in the
-    shape the signed receipt carries (A5's `gate` block)."""
+    shape the signed receipt carries (A5's `gate` block).
+
+    `passed` is None when no gate ran (`counted: "none"`), True/False when
+    one did. That is a truthfulness fix on the receipt, not a policy
+    change: `_gate_passed` still returns True when nothing ran, so this
+    does not block a commit. `reproduce_blocks_commit`, not this boolean,
+    is what gates a fix or adversarial lane.
+    """
     clean = (surface_state or {}).get("clean_gate") or {}
     if clean.get("ran"):
         counted, label = clean, "clean"
@@ -1117,7 +1220,7 @@ def _gate_summary(
         "command": test_command,
         "counted": label,
         "exit_code": counted.get("exit_code") if counted else None,
-        "passed": _gate_passed(tests_dict, surface_state),
+        "passed": None if label == "none" else _gate_passed(tests_dict, surface_state),
     }
 
 
@@ -1766,6 +1869,26 @@ def _transplant_gate(
         git_run(root, "worktree", "remove", "--force", str(worktree), timeout=60)
 
 
+def _deliverable_is_document(path: str) -> bool:
+    """F19's exemption is for a document the gate would not run.
+
+    A path ending `.py`, or sitting under `src/`, is source (or a check)
+    the own/clean gate would execute or import. Those cannot satisfy this
+    rule -- declaring `src/conductor/foo.py` as the deliverable used to
+    skip the reproduce gate and land as the benign document case. A
+    `.json` / `.md` / `.txt` at the repo root still can. Does not classify
+    every non-Python source at the repository root (`app.c`); this
+    repository's gate runs Python.
+    """
+    posix = Path(path).as_posix()
+    name = posix.rsplit("/", 1)[-1]
+    if name.endswith(".py"):
+        return False
+    if posix == "src" or posix.startswith("src/"):
+        return False
+    return True
+
+
 def _reproduce_skip(verdict: str, reason: str) -> dict:
     """A reproduce receipt for a dispatch that never ran the reproduce gate."""
     return {
@@ -1838,13 +1961,18 @@ def _reproduce_receipt(
     moved = not compare(spec.cwd, before, GitState.capture(spec.cwd)).no_op
     if not moved:
         return _reproduce_skip("skipped", "the fleet made no changes"), None
-    # F19: a fix lane whose only write is its declared deliverable (Shape A's
+    # F19: a fix lane whose only write is its declared *document* (Shape A's
     # `dispositions.json` after three NO_FINDINGS reviews) changed no source
     # and no check, so there is nothing to reproduce and nothing to refuse;
     # it is the "changed nothing" case, not the "changed source without a
     # check" one. Live: the F18 fix lane answered NO_CHANGES with an empty
     # dispositions list and was failed here, kind `unknown` (2026-09-07).
+    # The exemption does not cover a source-file deliverable: the
+    # distinguishing fact is that a document fix has no test surface and
+    # does not touch source the gate would run, and a `.py` / `src/` path
+    # cannot satisfy that.
     deliverable_only = False
+    document_deliverable = False
     if spec.deliverable and before.head:
         changed = changed_paths_since(spec.cwd, before.head)
         # `changed_paths_since` names paths from the repository toplevel
@@ -1855,7 +1983,9 @@ def _reproduce_receipt(
         # matched and every document fix lane there fell through to the
         # transplant path and failed with "changed no tests" (2026-09-08
         # review).
-        deliverable_only = changed == [_repo_relative(spec.cwd, str(spec.deliverable["path"]))]
+        rel = _repo_relative(spec.cwd, str(spec.deliverable["path"]))
+        deliverable_only = changed == [rel]
+        document_deliverable = _deliverable_is_document(rel)
     # F22: checked ahead of the F19 skip below, which the same
     # `deliverable_only` condition would otherwise read as "nothing to
     # reproduce" whether or not a declared validator already spoke. A fix
@@ -1865,13 +1995,20 @@ def _reproduce_receipt(
     if spec.stage == "fix" and deliverable_validator is not None:
         verdict = deliverable_validator.get("verdict")
         surface_untouched = surface_state is None or not surface_state["touched"]
-        # Gated on `deliverable_only`, same as the `accepted` refusal right
-        # below: a validator that reproduced something on its own document
-        # is evidence about that document, not about an unrelated source
-        # edit riding along in the same diff. Without this, a fix lane could
-        # pair a validator-reproduced document fix with an untested source
-        # change and land both -- the source change checked by nothing.
-        if verdict == "reproduced" and surface_untouched and deliverable_only:
+        # Gated on `deliverable_only` and the document rule, same as the
+        # `accepted` refusal right below: a validator that reproduced
+        # something on its own document is evidence about that document, not
+        # about an unrelated source edit riding along in the same diff.
+        # Without this, a fix lane could pair a validator-reproduced
+        # document fix with an untested source change and land both -- the
+        # source change checked by nothing. A source-file deliverable falls
+        # through to the ordinary reproduce path instead of this shortcut.
+        if (
+            verdict == "reproduced"
+            and surface_untouched
+            and deliverable_only
+            and document_deliverable
+        ):
             before_tail = (deliverable_validator.get("before") or {}).get("tail") or ""
             return (
                 {
@@ -1885,12 +2022,20 @@ def _reproduce_receipt(
                 },
                 None,
             )
-        if verdict == "accepted" and deliverable_only:
+        if verdict == "accepted" and deliverable_only and document_deliverable:
             return (
                 _reproduce_skip("no-check", "validator passed on the base too"),
                 "fix without a reproducing check: validator passed on the base too",
             )
-    if deliverable_only:
+        # `no-base`: the deliverable did not previously exist, so the
+        # validator cannot show a before failure. That is not `accepted`.
+        # A new document still deserves the F19 skip (same as a new
+        # document with no validator); a new source file falls through.
+    if (
+        deliverable_only
+        and document_deliverable
+        and (surface_state is None or not surface_state["touched"])
+    ):
         return _reproduce_skip("skipped", "the fleet wrote only its declared deliverable"), None
     if spec.stage == "fix" and inherited_check:
         return (
@@ -2602,6 +2747,7 @@ def dispatch(
             else None
         )
 
+        declared_schema: dict | None = None
         with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
             proc: subprocess.Popen | None = None
             try:
@@ -2613,6 +2759,7 @@ def dispatch(
                     raise Interrupted(f"cancelled: {cancel_reason}; not spawned")
                 if stop_requested():
                     raise Interrupted("stop requested before the fleet was spawned")
+                declared_schema = _snapshot_deliverable_schema(spec)
                 proc = subprocess.Popen(
                     argv,
                     cwd=spec.cwd,
@@ -2884,7 +3031,9 @@ def dispatch(
         # receipt below, which reads a declared validator's verdict). A dry
         # run never reaches here (dispatch() returns earlier), so this is
         # always a real check.
-        deliverable_state = _check_deliverable(spec, dry_run=False)
+        deliverable_state = _check_deliverable(
+            spec, dry_run=False, declared_schema=declared_schema
+        )
         deliverable_path: str | None = None
         # W4: the check above is what decides `deliverable_state`, and it stays
         # here, before the gate. The bytes are only hashed now; the copy into
@@ -3056,10 +3205,12 @@ def dispatch(
         tests: TestOutcome | None = None
         # E16: an adversarial lane's own gate and the clean gate both fail by
         # construction (its deliverable is a test that fails on its own
-        # tree) -- neither runs here; `_gate_passed`/`_gate_summary` already
-        # read "nothing ran" as passed, so this alone never blocks the
-        # commit (`reproduce_blocks_commit`, above, is what actually gates
-        # it). test_policy is `allow` on every adversarial attempt (enforced
+        # tree) -- neither runs here; `_gate_passed` still reads "nothing
+        # ran" as not-failed so this alone never blocks the commit
+        # (`reproduce_blocks_commit`, above, is what actually gates it).
+        # `_gate_summary` records `passed: None` / `counted: "none"` on the
+        # signed statement so attestation.json does not say the gate passed.
+        # test_policy is `allow` on every adversarial attempt (enforced
         # at load), so the clean-gate block below is already skipped too.
         if (
             test_command
@@ -3110,13 +3261,31 @@ def dispatch(
                         "interrupted: stop requested during the clean gate; "
                         "process group killed"
                     )
+                elif clean_gate.get("infra_error"):
+                    # The transplant never ran the gate command. Same
+                    # distinction `_reproduce_receipt` draws: a nonzero
+                    # exit here is not evidence the gate failed. The
+                    # broken transplant proved nothing either way, so
+                    # the commit is taken back below (policy `clean`
+                    # requires this gate; we do not land unverified work)
+                    # with a why that is not "gate failed".
+                    if error is None:
+                        error = (
+                            "clean gate could not run: "
+                            + (clean_gate.get("tail") or "")
+                        )
 
         if commit and commit.committed and not _gate_passed(
             tests.to_dict() if tests else None, surface_state
         ):
             # A branch must never carry a commit that failed whichever gate
             # counts; the work stays staged in the tree for the kept worktree.
-            commit = uncommit(spec.cwd, commit, before.head)
+            # An infrastructure failure is not a failed gate: `uncommit`'s
+            # default `why="gate failed"` is the lie that docstring exists
+            # to prevent.
+            clean = (surface_state or {}).get("clean_gate") or {}
+            why = "clean gate could not run" if clean.get("infra_error") else "gate failed"
+            commit = uncommit(spec.cwd, commit, before.head, why=why)
         deliverable_failed = bool(deliverable_state) and deliverable_state.get("ok") is False
         if commit and commit.committed and deliverable_failed:
             # E1's check counts as a gate too: a missing, empty, unparsable,
@@ -3324,8 +3493,10 @@ def dispatch(
                     Path(deliverable_path).unlink(missing_ok=True)
                     deliverable_path = None
                     deliverable_state.pop("sha256", None)
+                    drift_reason = f"{DELIVERABLE_CHANGED}: {path}"
+                    _mark_deliverable_failed(deliverable_state, drift_reason)
                     if error is None:
-                        error = f"{DELIVERABLE_CHANGED}: {path}"
+                        error = drift_reason
                     if commit and commit.committed:
                         # `_capture_deliverable`'s own DELIVERABLE_CHANGED
                         # path uncommits; teardown rewriting the same file

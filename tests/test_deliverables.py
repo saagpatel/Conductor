@@ -242,7 +242,7 @@ def test_validator_before_is_none_when_the_deliverable_is_new(repo, home, fake_f
     validator = result.deliverable["validator"]
     assert validator["before"] is None
     assert validator["after"]["exit_code"] == 0
-    assert validator["verdict"] == "accepted"
+    assert validator["verdict"] == "no-base"
 
 
 def test_validator_that_hangs_past_the_gate_timeout_is_rejected(
@@ -622,16 +622,15 @@ def test_deliverable_non_json_under_schema_fails_to_parse(repo, home, fake_fleet
     assert result.failure() == "deliverable does not parse: record.json"
 
 
-def test_deliverable_schema_that_vanishes_during_the_run_fails(
+def test_deliverable_schema_that_vanishes_during_the_run_still_checks_the_declared_contract(
     repo, home, fake_fleet, tmp_path
 ):
-    """Would catch the deletion of `_check_deliverable`'s post-run "schema
-    unreadable" branch: `Spec.validate` reads the schema before spawn, but
-    `_check_deliverable` reads it again after the run to judge the
-    deliverable, and a schema file that moved or was deleted in between must
-    fail the lane rather than raise or silently skip the schema check."""
+    """The schema is snapshotted before spawn. Deleting it during the run
+    cannot drop the check or switch it to "unreadable": the declared
+    contract still applies. `{}` is missing required `name` on that
+    contract, whether or not the file is still on disk."""
     schema = tmp_path / "schema.json"
-    schema.write_text(json.dumps({"type": "object"}))
+    schema.write_text(json.dumps({"type": "object", "required": ["name"]}))
     fake_fleet(
         ["sh", "-c", f"printf '%s' '{{}}' > record.json && rm {shlex.quote(str(schema))}"]
     )
@@ -641,8 +640,9 @@ def test_deliverable_schema_that_vanishes_during_the_run_fails(
         ),
         home=home,
     )
-    assert result.failure() is not None
-    assert "deliverable schema unreadable" in result.failure()
+    assert result.failure() == (
+        "deliverable does not match schema: missing required property 'name'"
+    )
     assert result.deliverable["parsed"] is True
     assert result.deliverable["ok"] is False
 
@@ -899,6 +899,8 @@ def test_a_gate_that_rewrites_the_deliverable_fails_the_run(repo, home, fake_fle
     )
     assert result.ok is False
     assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.deliverable["ok"] is False
+    assert result.deliverable["reason"] == "deliverable changed after the gate ran: report.txt"
     assert result.deliverable_path is None
     assert not (Path(result.run_dir) / "deliverable").exists()
 
@@ -930,6 +932,8 @@ def test_a_teardown_that_rewrites_the_deliverable_fails_the_run(repo, home, fake
     )
     assert result.ok is False
     assert result.failure() == "deliverable changed after the gate ran: report.txt"
+    assert result.deliverable["ok"] is False
+    assert result.deliverable["reason"] == "deliverable changed after the gate ran: report.txt"
     assert result.deliverable_path is None
     assert result.cleanup_required is True
     assert not (Path(result.run_dir) / "deliverable").exists()
@@ -1204,3 +1208,146 @@ def test_a_validator_path_with_a_space_is_shell_quoted():
 
 def test_a_validator_command_without_the_placeholder_is_unchanged():
     assert runner_mod._validator_command("make lint", "docs/a.md") == "make lint"
+
+
+def test_deliverable_hard_linked_to_a_file_outside_the_worktree_fails(
+    repo, home, fake_fleet, tmp_path
+):
+    """A hard link satisfies every check W5 added for symlinks: `is_symlink`
+    is false, `resolve()` stays on the worktree name, and `O_NOFOLLOW` opens
+    the inode either way. `st_nlink > 1` is the fact those miss."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    fake_fleet(["sh", "-c", f"ln {shlex.quote(str(outside))} report.txt; echo '{_OK_ANSWER}'"])
+    result = dispatch(
+        spec_for(repo, mode="read", deliverable={"path": "report.txt"}), home=home
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable is a hard link: report.txt"
+    assert error_kind(result) == "deliverable"
+    assert result.deliverable["exists"] is False
+    assert result.deliverable_path is None
+    assert not (Path(result.run_dir) / "deliverable").exists()
+
+
+def test_a_rewritten_schema_file_cannot_weaken_the_declared_contract(
+    repo, home, fake_fleet, tmp_path
+):
+    """The schema lives next to the mission YAML, outside the worktree. A
+    write lane that rewrites it to `{"type": "object"}` and then produces
+    `{}` used to get `deliverable.ok: true` against the weakened file."""
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object", "required": ["name"]}))
+    weaken = json.dumps({"type": "object"})
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            f"printf '%s' '{{}}' > record.json && printf '%s' {shlex.quote(weaken)} > "
+            f"{shlex.quote(str(schema))}",
+        ]
+    )
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert result.failure() == (
+        "deliverable does not match schema: missing required property 'name'"
+    )
+    assert result.deliverable["ok"] is False
+
+
+def test_a_failed_deliverable_copy_fails_the_run_closed(repo, home, fake_fleet, monkeypatch):
+    """A copy `OSError` used to return `(None, None)`: no path, no error,
+    `deliverable.ok` still true, and the run stayed green."""
+    fake_fleet(["sh", "-c", "echo out > report.txt"])
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner_mod, "copy_no_follow", boom)
+    result = dispatch(
+        spec_for(repo, mode="write", deliverable={"path": "report.txt"}),
+        home=home,
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable copy failed: report.txt: disk full"
+    assert result.deliverable["ok"] is False
+    assert result.deliverable_path is None
+    assert not (Path(result.run_dir) / "deliverable").exists()
+
+
+def test_a_validator_that_rewrites_the_deliverable_flips_ok(repo, home, fake_fleet):
+    """The validator's `DELIVERABLE_CHANGED` path used to set `error` while
+    leaving `deliverable.ok` true."""
+    fake_fleet(["sh", "-c", "printf 'clean\\n' > doc.txt"])
+    result = dispatch(
+        spec_for(
+            repo,
+            mode="write",
+            deliverable={"path": "doc.txt", "validator": "printf 'tampered\\n' > {path}"},
+        ),
+        home=home,
+    )
+    assert result.ok is False
+    assert result.failure() == "deliverable changed after the gate ran: doc.txt"
+    assert result.deliverable["ok"] is False
+    assert result.deliverable["reason"] == "deliverable changed after the gate ran: doc.txt"
+
+
+def test_a_new_file_validator_on_a_fix_lane_is_not_accepted_as_passed_on_the_base(
+    repo, home, fake_fleet
+):
+    """A new-file document with a validator used to report `accepted`, then
+    F19 refused it with "validator passed on the base too" -- a base run
+    that never happened. Without a validator the same lane is F19-skipped
+    and allowed. `no-base` is the third answer; a new document still lands.
+    """
+    fake_fleet(["sh", "-c", "printf 'no problem words here\\n' > doc.txt"])
+    result = dispatch(
+        spec_for(
+            repo,
+            mode="write",
+            stage="fix",
+            deliverable={"path": "doc.txt", "validator": _TODO_GATE},
+        ),
+        home=home,
+        test_command="true",
+    )
+    assert result.deliverable["validator"]["before"] is None
+    assert result.deliverable["validator"]["verdict"] == "no-base"
+    assert result.reproduce["verdict"] == "skipped"
+    assert result.reproduce["tail"] == "the fleet wrote only its declared deliverable"
+    assert result.error is None
+    assert result.ok is True, result.failure()
+
+
+def test_a_fix_lane_cannot_skip_reproduce_by_declaring_a_source_file_deliverable(
+    repo, home, fake_fleet
+):
+    """F19 keyed only on "changed paths == deliverable path". A fix lane
+    that edits exactly `src/app.py` and declares that as the deliverable
+    used to skip as the benign document case."""
+    src = repo / "src"
+    src.mkdir()
+    (src / "app.py").write_text("old\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "src"], cwd=repo, check=True, capture_output=True)
+    fake_fleet(["sh", "-c", "printf 'new\\n' > src/app.py"])
+    result = dispatch(
+        spec_for(
+            repo,
+            mode="write",
+            stage="fix",
+            deliverable={"path": "src/app.py"},
+        ),
+        home=home,
+        test_command="true",
+        commit_message="fix: attempted",
+    )
+    assert result.reproduce["verdict"] == "no-check"
+    assert result.error == "fix without a reproducing check: no test-surface change"
+    assert result.ok is False
+    assert result.commit is None

@@ -1,0 +1,78 @@
+{
+  "items": [
+    {
+      "item": 1,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_deliverables.py::test_deliverable_hard_linked_to_a_file_outside_the_worktree_fails"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "Refuse st_nlink>1 on the deliverable inode (lstat in deliverable_path_problem, fstat in the digest). Does not cover cp of outside bytes, APFS clones, or unlinked other names."
+    },
+    {
+      "item": 2,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": [
+        "tests/test_deliverables.py::test_a_rewritten_schema_file_cannot_weaken_the_declared_contract",
+        "tests/test_deliverables.py::test_deliverable_schema_that_vanishes_during_the_run_still_checks_the_declared_contract"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "Carry the parsed schema snapshotted before spawn; do not re-read after the fleet exits. A schema cannot change between load and check within one dispatch."
+    },
+    {
+      "item": 3,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_deliverables.py::test_a_failed_deliverable_copy_fails_the_run_closed"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "copy_no_follow OSError returns the same fail-closed shape as a hash mismatch, not (None, None)."
+    },
+    {
+      "item": 4,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": [
+        "tests/test_deliverables.py::test_a_gate_that_rewrites_the_deliverable_fails_the_run",
+        "tests/test_deliverables.py::test_a_teardown_that_rewrites_the_deliverable_fails_the_run",
+        "tests/test_deliverables.py::test_a_validator_that_rewrites_the_deliverable_flips_ok"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "Flip deliverable.ok on all three later checks: validator DELIVERABLE_CHANGED, post-gate capture, teardown rewrite."
+    },
+    {
+      "item": 5,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": [
+        "tests/test_deliverables.py::test_validator_before_is_none_when_the_deliverable_is_new",
+        "tests/test_deliverables.py::test_a_new_file_validator_on_a_fix_lane_is_not_accepted_as_passed_on_the_base"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "No blob at before.head:path is verdict no-base, not accepted. A new document fix still F19-skips; the message is no longer 'passed on the base too'."
+    },
+    {
+      "item": 6,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_deliverables.py::test_a_fix_lane_cannot_skip_reproduce_by_declaring_a_source_file_deliverable"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "F19 skip requires a document the gate would not run: not *.py and not under src/, and no test-surface change. A source-file deliverable falls through to no-check."
+    },
+    {
+      "item": 7,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_gate_diagnosis.py::test_a_clean_gate_transplant_failure_is_not_reported_as_exited_1"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "Clean-gate infra_error sets error 'clean gate could not run' and uncommits with that why, not 'gate failed' / 'exited 1'. Commit does not land; a broken transplant proved nothing either way."
+    },
+    {
+      "item": 8,
+      "status": "built",
+      "files": ["src/conductor/runner.py"],
+      "tests": ["tests/test_evidence.py::test_signed_statement_does_not_say_the_gate_passed_when_none_ran"],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src pytest -q -p no:cacheprovider -n auto --dist loadgroup",
+      "note": "Truthfulness on the receipt, not a policy change: _gate_summary.passed is None when counted is none; _gate_passed still returns True so commit blocking is unchanged."
+    }
+  ]
+}
