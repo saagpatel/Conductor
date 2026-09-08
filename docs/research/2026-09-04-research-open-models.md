@@ -8,7 +8,7 @@ Date of research: 2026-09-04. All prices verified against the live OpenCode Zen 
 
 ## 0. The two name mysteries
 
-### "OX Alpha" = GLM-5.3-Flash. The operator's guess was close, though not exact.
+### "OX Alpha" = GLM-5.3-Flash. The operator's guess was right in substance.
 
 - Ox Alpha was an anonymous stealth model that appeared on OpenRouter and OpenCode on ~2026-08-20: 1,048,576-token context, text+image+video in, free for about a week. OpenCode's own announcement: "Ox Alpha (stealth model) is free for the next week - 1M Context - Multi-modal - Zero Data Retention". <https://x.com/opencode/status/2090544355824038300>
 - Routed as `stealth/ox-alpha` on OpenRouter and `x-preview-f-free` on OpenCode Zen. <https://aicatchup.com/news/ox-alpha-stealth-model-free-openrouter-opencode>
@@ -103,10 +103,7 @@ Zen lists `mimo-v2.5-free`. Xiaomi's MiMo-V2.5 was released 2026-04-22. I found 
 ### MiniMax M2.5 / M2.7 / M3: MiniMax, China. Open weights (community license, not MIT).
 
 - **M2.7**: ~230B total / **10B active**: "smallest active-parameter footprint in the tier-1 coding class". ~205K context on OpenRouter. Vendor: SWE-bench Pro 56.2, SWE-bench Multilingual 76.5, Multi-SWE-bench 52.7, Terminal-Bench 2.0 57.0, Toolathlon 46.3, GDPval-AA 50.0. **No vision.** <https://www.minimax.io/news/minimax-m27-en>, <https://arxiv.org/pdf/2605.26494>
-- **M3** (2026-06-01): 428B MoE, 1M context via MiniMax Sparse Attention (9x prefill speedup), natively multimodal. Vendor: SWE-Bench Pro 59.0, Terminal-Bench 2.1 66.0, MCP Atlas 74.2, SWE-bench Verified 80.5, BrowseComp 83.5. Reportedly trained entirely on Huawei Ascend 910B. Source:
-  ```
-  https://venturebeat.com/technology/minimax-m3-debuts-eclipsing-gpt-5-5-and-gemini-3-1-pro-on-key-benchmark-performance-for-just-5-10-of-the-cost
-  ```
+- **M3** (2026-06-01): 428B MoE, 1M context via MiniMax Sparse Attention (9x prefill speedup), natively multimodal. Vendor: SWE-Bench Pro 59.0, Terminal-Bench 2.1 66.0, MCP Atlas 74.2, SWE-bench Verified 80.5, BrowseComp 83.5. Reportedly trained entirely on Huawei Ascend 910B.
 - **Independent view is much less flattering:** Artificial Analysis v4.1 puts M3 at **44**, tied with DeepSeek V4 Pro and behind GLM-5.2's 51. LiveBench agentic: **40.66 agentic / 68.20 coding, last of the four open flagships measured.** The 59.0 SWE-bench Pro figure used **Claude Code scaffolding**, not a standardized harness.
 - **Prompting requirement that will silently wreck an agent loop:** the M2 series is an *interleaved-thinking* family. The model wraps reasoning in `<think>...</think>`, and **that content must be passed back verbatim in historical assistant turns or performance degrades.** OpenRouter also flags it as verbose and reasoning-heavy, inflating effective cost. <https://github.com/MiniMax-AI/MiniMax-M2>
 - **OpenCode evidence, and it is bad.** (1) `#43029`: **MiniMax-M3 silently finishes `stop` with only a reasoning part and no text or tool parts**: the agent "thinks and stops". Root cause identified by the reporter as OpenCode's stream→parts materializer dropping parts when reasoning arrives inside `delta.content` instead of `delta.reasoning_content`. Reproducible on demand. (2) The scaffolded ISO-Bench study found MiniMax-M2.1 "repeatedly outlined plans to use tools but never executed any tool calls, with logs containing near-identical phrases repeated thousands of times without any actions". Two generations back, but the same family and the same failure shape. (3) OpenCode has an open PR to **route MiniMax models to the Kimi agentic prompt** (#41032), i.e. the default prompt is known to be a poor fit. <https://github.com/anomalyco/opencode/issues/41032>, <https://arxiv.org/pdf/2602.19594>
@@ -230,7 +227,7 @@ Everything here is from the OpenCode issue tracker (`anomalyco/opencode`) unless
 11. Zen and Go expose identically-named models; picking the wrong one can **wedge a session permanently if it happens during compaction** (#42035).
 12. Reasoning-effort is not exposed for glm-5.3(-flash) on Zen (#46295), so you cannot dial cost the way you can on GPT/Claude.
 
-I searched for positive field reports and found almost none of citable quality: no substantive Reddit or Discord threads surfaced through search. **Stated as a gap: I have strong evidence on how these models fail in OpenCode and weak-to-no evidence on how often they succeed.**
+I searched for positive field reports and found practically none of citable quality: no substantive Reddit or Discord threads surfaced through search. **Stated as a gap: I have strong evidence on how these models fail in OpenCode and weak-to-no evidence on how often they succeed.**
 
 ---
 
