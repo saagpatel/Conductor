@@ -1006,6 +1006,96 @@ def _fold_recovered_runs(
         notes.append(f"lane '{lane_name}': {why.format(n=added)}")
     return added
 
+def _mission_runs_dir(mission_dir: Path) -> Path | None:
+    """`runs/` beside `missions/` in a conductor home, or None when
+    `mission_dir` is not that layout.
+
+    A keep-rule that authenticates a collate against run receipts needs
+    the same directory `_trusted_lane` reads via `base/runs`. Unit tests
+    that pass a bare temp path are not a conductor home, so there is
+    nothing to consult; the caller keeps whatever check does not need
+    receipts. A production resume whose `runs/` is present but a named
+    run is gone is the gc'd-receipt case, and that check fires.
+    """
+    if mission_dir.parent.name != "missions":
+        return None
+    runs = mission_dir.parent.parent / "runs"
+    return runs if runs.is_dir() else None
+
+
+def _collate_named_run_ids(collate: dict) -> list[str]:
+    """Every run_id a collate receipt names: a non-rank `run_id`, then
+    each order of the collate and of every extra judge."""
+    ids: list[str] = []
+    run_id = collate.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        ids.append(run_id)
+
+    def take(orders: object) -> None:
+        if not isinstance(orders, list):
+            return
+        for order in orders:
+            if (
+                isinstance(order, dict)
+                and isinstance(order.get("run_id"), str)
+                and order["run_id"]
+            ):
+                ids.append(order["run_id"])
+
+    take(collate.get("orders"))
+    for judge in collate.get("judges") or []:
+        if isinstance(judge, dict):
+            take(judge.get("orders"))
+    return list(dict.fromkeys(ids))
+
+
+def _collate_receipts_exist(mission_dir: Path, run_ids: list[str]) -> bool:
+    """Whether every named collate run still has a `result.json`.
+
+    Same class of evidence as a lane's tip still being in the object
+    database: a rank sitting whose judge directory was gc'd is not
+    current. When `mission_dir` is not under a conductor home there is
+    no `runs/` to consult, so this returns True and the JSON-shape
+    check stands alone.
+    """
+    runs = _mission_runs_dir(mission_dir)
+    if runs is None:
+        return True
+    return all((runs / run_id / "result.json").is_file() for run_id in run_ids)
+
+
+def _collate_bytes_match(mission_dir: Path, collate: dict) -> bool:
+    """Whether `collated.txt` still hashes to the collate run's answer.
+
+    `_artifact_matches` only says the file is where the receipt claims.
+    A rewrite in place keeps that path and would keep a stale collate
+    as current; hashing against the run's own answer is the digest
+    match `_trusted_lane` requires of a lane. No conductor `runs/`
+    (a unit test's bare path) means this class of evidence cannot be
+    evaluated and the caller keeps the path check.
+    """
+    runs = _mission_runs_dir(mission_dir)
+    if runs is None:
+        return True
+    run_id = collate.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    receipt_path = runs / run_id / "result.json"
+    if not receipt_path.is_file():
+        return False
+    try:
+        raw: object = json.loads(receipt_path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    recorded = raw.get("answer_path")
+    source = Path(recorded) if isinstance(recorded, str) else runs / run_id / "answer.txt"
+    expected = mission_dir / "collated.txt"
+    got = _artifact_digest(str(expected))
+    want = _artifact_digest(str(source))
+    return got is not None and want is not None and got == want
+
 
 def _read_previous_lanes(
     mission_dir: Path, mission: Mission, *, base: Path | None = None

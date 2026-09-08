@@ -80,6 +80,8 @@ def _write_mission(
     lanes: list[dict],
     collate: dict | None = None,
     wall: dict | None = None,
+    paused: dict | None = None,
+    interrupted: bool = False,
 ) -> None:
     mission_dir = home / "missions" / mission_id
     mission_dir.mkdir(parents=True)
@@ -88,6 +90,10 @@ def _write_mission(
         payload["collate"] = collate
     if wall is not None:
         payload["wall"] = wall
+    if paused is not None:
+        payload["paused"] = paused
+    if interrupted:
+        payload["interrupted"] = True
     (mission_dir / "result.json").write_text(json.dumps(payload))
 
 
