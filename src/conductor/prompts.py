@@ -2,12 +2,21 @@
 
 Conductor writes its own prompt text in five places: the collate and resolve
 defaults and the rank contract in `mission.py`, the verdict checklist
-contract in `verdicts.py`, and the Shape A texts (the build wrapper, four
-review/fix prompts, and the shared prefix) in `shape.py`. None of that text carried a version:
+contract in `verdicts.py`, and the Shape A texts in `shape.py` -- the build
+wrapper, six review/fix prompts (Gemini, Grok, Grok read-only, Opus,
+adversarial, and fix), and the shared prefix. None of that text carried a version:
 an edit to any of it changed what every future mission sends with no trace
 on a receipt. `prompt_versions()` fingerprints each one -- the first 12 hex
 characters of the sha256 of its text, rendered with a fixed sample input for
 the two that take one -- so an edit moves the id with no hand bump.
+
+Fragments in `shape.py` (REVIEW_TAIL, GATE_BLOCK, the `*_GATE_RUN` sentences,
+FIX_PROMPT_OPUS_BLOCK, FIX_PROMPT_ADVERSARIAL_BLOCK, FOLLOWON_FIX_OPENING,
+EVIDENCE_* and DELIVERABLE_* notes) are not catalogued on their own: they
+are folded into a fingerprinted constant, except FOLLOWON_FIX_OPENING,
+which rewrites the already-fingerprinted FIX_PROMPT opening for salvage.
+An edit to that opening does not move `shape_fix`. No other complete
+lane prompt in `shape.py` is missing from the map below.
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ def prompt_versions() -> dict[str, str]:
         "shape_grok_review": _id(shape_mod.GROK_REVIEW_PROMPT),
         "shape_grok_read_only": _id(shape_mod.GROK_READ_ONLY_PROMPT),
         "shape_opus_review": _id(shape_mod.OPUS_REVIEW_PROMPT),
+        "shape_adversarial": _id(shape_mod.ADVERSARIAL_PROMPT),
         "shape_fix": _id(shape_mod.FIX_PROMPT),
         "shape_build": _id(shape_mod.BUILD_PROMPT),
         "shape_prefix": _id(shape_mod._prefix(_SAMPLE_REPO, None)),

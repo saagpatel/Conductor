@@ -1,0 +1,56 @@
+{
+  "items": [
+    {
+      "item": "1",
+      "status": "built",
+      "files": ["src/conductor/shape.py"],
+      "tests": [
+        "tests/test_shape_prompts.py::test_adversarial_mission_tells_the_fixer_about_that_lane",
+        "tests/test_shape_prompts.py::test_adversarial_and_opus_review_compose_on_prompt_and_schema"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w13c tests/test_shape_prompts.py",
+      "note": "Followed the opus_review precedent: _adversarial_wording plus dispositions_schema(adversarial=), applied after _three_reviewer_wording so both flags compose. An adversarial-only finding is lane adversarial index 1 because that lane writes at most one test."
+    },
+    {
+      "item": "2",
+      "status": "built",
+      "files": ["src/conductor/prompts.py"],
+      "tests": [
+        "tests/test_shape_prompts.py::test_prompt_versions_fingerprints_the_adversarial_prompt_and_matches_the_inventory"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w13c tests/test_shape_prompts.py",
+      "note": "shape_adversarial added. Docstring inventory now matches the function: six review/fix prompts, build wrapper, prefix. FOLLOWON_FIX_OPENING is a rewrite fragment, not a catalog entry; no other complete lane prompt in shape.py was missing."
+    },
+    {
+      "item": "3",
+      "status": "built",
+      "files": ["src/conductor/shape.py"],
+      "tests": [
+        "tests/test_shape_prompts.py::test_adversarial_prompt_states_the_consequence_threshold_and_asks_for_a_citation"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w13c tests/test_shape_prompts.py",
+      "note": "ADVERSARIAL_PROMPT reuses REVIEW_TAIL's consequence bar, omit-style, and file-and-line citation. If you find stays conditional. FINDING:/FINDINGS: N not added."
+    },
+    {
+      "item": "4",
+      "status": "built",
+      "files": ["src/conductor/shape.py"],
+      "tests": [
+        "tests/test_shape_prompts.py::test_ports_reach_every_lane_that_runs_the_gate"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w13c tests/test_shape_prompts.py",
+      "note": "Every gate-running lane gets ports=N. ports.claim draws N distinct free ports per dispatch, so overlapping adversarial and suite-running Grok lanes get different CONDUCTOR_PORT_1 values, never the same numbers."
+    },
+    {
+      "item": "5",
+      "status": "built",
+      "files": ["src/conductor/shape.py"],
+      "tests": [
+        "tests/test_shape_prompts.py::test_build_prompt_with_no_gate_does_not_claim_there_is_one",
+        "tests/test_shape.py::test_a_prompt_with_no_gate_does_not_claim_there_is_one"
+      ],
+      "check": "env -u CONDUCTOR_LANE PYTHONPATH=src /Users/d/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp=$TMPDIR/w13c tests/test_shape_prompts.py tests/test_shape.py",
+      "note": "build_prompt routes through with_gate. BUILD_GATE_RUN extracted so an empty test strips the run-the-gate sentences. Other builders unchanged. Concatenated BUILD_PROMPT text is unchanged, so shape_build's id does not move."
+    }
+  ]
+}

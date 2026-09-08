@@ -95,6 +95,18 @@ FIX_GATE_RUN = (
     "--basetemp under $TMPDIR."
 )
 
+# Sentences `BUILD_PROMPT` uses to tell the model to run the named gate.
+# `with_gate` strips these when there is no command, the same way it
+# strips the other `*_GATE_RUN` constants.
+BUILD_GATE_RUN = (
+    "That is the gate the lead will run on your work, exactly as written. Run it the same "
+    "way, flags included, before you finish. When the gate is a test suite, the flags are "
+    "what make it take under a minute on this machine, and a serial run of the same suite "
+    "takes several times longer and proves nothing extra. When the gate is pytest, pass "
+    "--basetemp pointing to a directory under $TMPDIR so nothing is written inside this "
+    "working tree."
+)
+
 GROK_REVIEW_PROMPT = (
     "Review the change below against the spec. The change is applied in the current "
     "working directory; read whatever you need"
@@ -135,9 +147,12 @@ ADVERSARIAL_PROMPT = (
     "whatever you need.\n\n"
     + GATE_BLOCK
     + "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
-    "If you find a defect in the change against the spec, write one test that fails on the "
-    "current tree because of it -- in a new or existing test file -- and say what it proves. "
-    "Change nothing else: no source, no fix, just the test."
+    "If you find something that could cause incorrect behavior, a test failure, or a "
+    "misleading result in the change against the spec, including a spec item that is "
+    "missing or only partly implemented, write one test that fails on the current tree "
+    "because of it -- in a new or existing test file -- and say what it proves. For that "
+    "defect: file and line, what goes wrong, one sentence of consequence, your confidence "
+    "1-10. Omit pure style and naming. Change nothing else: no source, no fix, just the test."
     + ADVERSARIAL_GATE_RUN
     + " If nothing meets that bar, change nothing and reply exactly: NO_FINDINGS. Either "
     "answer is complete. Do not commit; the harness commits."
@@ -213,11 +228,68 @@ def _three_reviewer_wording(text: str) -> str:
     )
 
 
-def dispositions_schema(*, opus_review: bool = False) -> dict:
-    """`DISPOSITIONS_SCHEMA`, rewritten for three reviewers when `opus_review`."""
+# Appended by `_adversarial_wording` after the entry shape. Index 1 because
+# the adversarial lane writes at most one test, so there is one item, not a
+# numbered review list.
+ADVERSARIAL_DISPOSITION_NOTE = (
+    " An adversarial-only finding (the reviews said NO_FINDINGS; the adversarial "
+    'lane wrote a failing test) is one entry with lane "adversarial" and index 1: '
+    "that lane writes at most one test, so there is one item."
+)
+
+
+def _adversarial_wording(text: str) -> str:
+    """The same substitutions an `--adversarial` mission applies to the
+    fix prompt, used also on the dispositions schema description so the
+    fixer is not told that an adversarial-only finding needs no
+    disposition -- the identical problem `_three_reviewer_wording`
+    already solves for `--opus-review`. Applied after that rewrite so
+    the two flags compose: this function accepts both the two-reviewer
+    and three-reviewer forms."""
+    return (
+        text.replace(
+            '{"lane": "review-gemini", "review-grok", or "review-opus", "index": ',
+            '{"lane": "review-gemini", "review-grok", "review-opus", or "adversarial", "index": ',
+        )
+        .replace(
+            '{"lane": "review-gemini" or "review-grok", "index": ',
+            '{"lane": "review-gemini", "review-grok", or "adversarial", "index": ',
+        )
+        .replace(
+            "If every review says NO_FINDINGS or nothing reproduces",
+            "If every review says NO_FINDINGS and the adversarial lane says NO_FINDINGS, "
+            "or nothing reproduces",
+        )
+        .replace(
+            "If both reviews say NO_FINDINGS or nothing reproduces",
+            "If both reviews say NO_FINDINGS and the adversarial lane says NO_FINDINGS, "
+            "or nothing reproduces",
+        )
+        .replace(
+            "when every review said NO_FINDINGS",
+            "when every review said NO_FINDINGS and the adversarial lane said NO_FINDINGS",
+        )
+        .replace(
+            "when both reviews said NO_FINDINGS",
+            "when both reviews said NO_FINDINGS and the adversarial lane said NO_FINDINGS",
+        )
+        .replace(
+            "reviewer numbered",
+            "reviewer numbered, plus the adversarial lane's test when it wrote one",
+        )
+        .replace('"reason": <why>}.', '"reason": <why>}.' + ADVERSARIAL_DISPOSITION_NOTE)
+    )
+
+
+def dispositions_schema(*, opus_review: bool = False, adversarial: bool = False) -> dict:
+    """`DISPOSITIONS_SCHEMA`, rewritten for three reviewers when `opus_review`
+    and for the adversarial lane when `adversarial`. The adversarial rewrite
+    runs after the three-reviewer one so both flags compose."""
     description = DISPOSITIONS_SCHEMA["properties"]["dispositions"]["description"]
     if opus_review:
         description = _three_reviewer_wording(description)
+    if adversarial:
+        description = _adversarial_wording(description)
     return {
         "type": "object",
         "additionalProperties": False,
@@ -231,16 +303,25 @@ def dispositions_schema(*, opus_review: bool = False) -> dict:
     }
 
 
-def write_dispositions_schema(base_dir: Path, *, opus_review: bool = False) -> Path:
+def write_dispositions_schema(
+    base_dir: Path, *, opus_review: bool = False, adversarial: bool = False
+) -> Path:
     """`dispositions.json`'s schema is data, not a prompt: written beside
     the mission file (like `prompts/<lane>.md`) so `deliverable.schema` --
     always a path -- resolves to something real, whether the mission goes
     through `cmd_shape_a`'s prompt-writing dance (`--inline` skips that, not
     this) or a salvage follow-on's `emit()`. `opus_review` applies the same
-    three-reviewer rewrite `fix_prompt_with_opus` does."""
+    three-reviewer rewrite `fix_prompt_with_opus` does; `adversarial`
+    applies `_adversarial_wording` after that, so both flags compose."""
     path = Path(base_dir) / "dispositions.schema.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dispositions_schema(opus_review=opus_review), indent=2) + "\n")
+    path.write_text(
+        json.dumps(
+            dispositions_schema(opus_review=opus_review, adversarial=adversarial),
+            indent=2,
+        )
+        + "\n"
+    )
     return path
 
 # E16: appended to FIX_PROMPT, right after the two review blocks, only when
@@ -585,13 +666,8 @@ BUILD_CODE_RULES = (
 
 BUILD_PROMPT = (
     "Implement the spec below on this branch.\n\n"
-    "<gate>\n{gate}\n</gate>\n\n"
-    "That is the gate the lead will run on your work, exactly as written. Run it the same "
-    "way, flags included, before you finish. When the gate is a test suite, the flags are "
-    "what make it take under a minute on this machine, and a serial run of the same suite "
-    "takes several times longer and proves nothing extra. When the gate is pytest, pass "
-    "--basetemp pointing to a directory under $TMPDIR so nothing is written inside this "
-    "working tree."
+    + GATE_BLOCK
+    + BUILD_GATE_RUN
     + BUILD_CODE_RULES
     + "Before you finish, write an evidence map to a file named evidence.json at the "
     "repository root: a JSON object {\"items\": [...]}, one entry per spec item in the "
@@ -682,14 +758,16 @@ def write_evidence_schema(base_dir: Path) -> Path:
     return path
 
 
-def write_shape_schemas(base_dir: Path, *, opus_review: bool = False) -> tuple[Path, Path]:
+def write_shape_schemas(
+    base_dir: Path, *, opus_review: bool = False, adversarial: bool = False
+) -> tuple[Path, Path]:
     """Both schema files a Shape A mission's deliverables name, beside the
     mission file: `dispositions.schema.json` (fix lane) and
     `evidence.schema.json` (build lane)."""
     Path(base_dir).mkdir(parents=True, exist_ok=True)
-    return write_dispositions_schema(base_dir, opus_review=opus_review), write_evidence_schema(
-        base_dir
-    )
+    return write_dispositions_schema(
+        base_dir, opus_review=opus_review, adversarial=adversarial
+    ), write_evidence_schema(base_dir)
 
 
 def review_prompt_with_evidence(prompt: str) -> str:
@@ -772,6 +850,7 @@ def with_gate(prompt: str, test: str = "") -> str:
         .replace(GROK_GATE_RUN, "")
         .replace(ADVERSARIAL_GATE_RUN, "")
         .replace(FIX_GATE_RUN, "")
+        .replace(BUILD_GATE_RUN, "")
     )
     return stripped
 
@@ -807,8 +886,13 @@ def build_prompt(test: str, deliverable: str = "", validator: str = "") -> str:
     paragraph gives way to one naming the file and, when `validator` is set, the command
     conductor runs on it before and after, with `{path}` already substituted so the model
     can run the same command conductor will.
+
+    An empty `test` goes through `with_gate` like the other builders: the `<gate>` block
+    and every sentence that tells the model to run one are stripped, so the prompt
+    does not claim a gate exists. `shape_a` still refuses an empty test; this is the
+    public helper's rule when it is called without one.
     """
-    prompt = BUILD_PROMPT.replace("{gate}", test)
+    prompt = with_gate(BUILD_PROMPT, test)
     if not deliverable:
         return prompt
     start = "Before you finish, write an evidence map"
@@ -952,8 +1036,6 @@ def shape_a(
         build["deliverable"] = {"path": deliverable}
         if deliverable_validator:
             build["deliverable"]["validator"] = deliverable_validator
-    if ports:
-        build["ports"] = ports
     if caps.cap_grace_usd:
         build["cap_grace_usd"] = caps.cap_grace_usd
     adversarial_lane: dict | None = None
@@ -995,6 +1077,10 @@ def shape_a(
         # After the adversarial rewrite, so the Opus block lands between the
         # Grok block and the adversarial one: reviews first, then the test.
         fix_text = fix_prompt_with_opus(fix_text)
+    if adversarial:
+        # After the opus rewrite so `_adversarial_wording` sees either the
+        # two-reviewer or three-reviewer forms and composes with both.
+        fix_text = _adversarial_wording(fix_text)
     if deliverable:
         fix_text = fix_prompt_for_deliverable(fix_text, deliverable, deliverable_validator)
 
@@ -1066,6 +1152,22 @@ def shape_a(
     }
     if caps.cap_grace_usd:
         fix["cap_grace_usd"] = caps.cap_grace_usd
+    # `ports` is a count, not a port number. `ports.claim` draws N distinct
+    # free TCP ports per dispatch (bind 127.0.0.1:0, then O_CREAT|O_EXCL
+    # under CONDUCTOR_HOME/ports) so two lanes that overlap in time never
+    # share the same numbers. Every lane that runs the gate needs that env:
+    # build always, fix always, adversarial when present, and Grok only
+    # when it runs the suite. Gemini and Opus read only; a read-only Grok
+    # lane does not run the gate. Adversarial and suite-running Grok can
+    # overlap after build (concurrency 2, or 3 with opus); each claims
+    # its own N ports and exports CONDUCTOR_PORT_1.. independently.
+    if ports:
+        build["ports"] = ports
+        if adversarial_lane is not None:
+            adversarial_lane["ports"] = ports
+        if caps.grok_runs_suite:
+            review_grok["ports"] = ports
+        fix["ports"] = ports
     policy = {
         "build": {"vendors": ["anthropic"]},
         "review": {"vendors": ["google", "xai", "anthropic"] if opus_review else ["google", "xai"]},

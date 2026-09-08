@@ -1089,6 +1089,7 @@ def test_a_prompt_with_no_gate_does_not_claim_there_is_one():
         shape.grok_review_prompt(),
         shape.adversarial_prompt(""),
         shape.fix_prompt(""),
+        shape.build_prompt(""),
     ):
         assert "<gate>" not in assembled
         assert "{gate}" not in assembled
