@@ -133,3 +133,64 @@ def test_a_truncated_run_receipt_is_a_row_not_a_traceback(home: Path, monkeypatc
 
     rows = json.loads(capsys.readouterr().out)
     assert rows == [{"run_id": "20260101T000000Z-claude-x", "status": "unreadable"}]
+
+
+# --- shape a --out directory and bad paths -----------------------------------
+
+
+def test_shape_a_creates_parent_directory_for_out(
+    repo: Path, home: Path, monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = tmp_path / "spec.md"
+    spec.write_text("# widget\n\n1. one\n")
+    out = tmp_path / "nested" / "dir" / "mission.json"
+    assert not out.parent.exists()
+
+    code = main([
+        "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+        "--items", "1", "--modules", "1", "--out", str(out), "--inline",
+    ])
+    assert code == 0
+    assert out.is_file()
+    assert (out.parent / "dispositions.schema.json").is_file()
+    assert (out.parent / "evidence.schema.json").is_file()
+
+
+def test_shape_a_bad_out_path_is_clean_error_not_traceback(
+    repo: Path, home: Path, monkeypatch, tmp_path: Path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = tmp_path / "spec.md"
+    spec.write_text("# widget\n\n1. one\n")
+    blocker = tmp_path / "file_blocker"
+    blocker.write_text("not a directory")
+    bad_out = blocker / "child" / "mission.json"
+
+    code = main([
+        "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+        "--items", "1", "--modules", "1", "--out", str(bad_out),
+    ])
+    assert code == 3
+    err = capsys.readouterr().err
+    parsed = json.loads(err)
+    assert "invalid" in parsed
+
+
+def test_shape_a_out_is_directory_is_clean_error_not_traceback(
+    repo: Path, home: Path, monkeypatch, tmp_path: Path, capsys
+):
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    spec = tmp_path / "spec.md"
+    spec.write_text("# widget\n\n1. one\n")
+    out_dir = tmp_path / "already_a_dir"
+    out_dir.mkdir()
+
+    code = main([
+        "shape", "a", "--spec", str(spec), "--repo", str(repo), "--test", "true",
+        "--items", "1", "--modules", "1", "--out", str(out_dir), "--force",
+    ])
+    assert code == 3
+    err = capsys.readouterr().err
+    parsed = json.loads(err)
+    assert "invalid" in parsed

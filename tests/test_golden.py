@@ -1138,3 +1138,65 @@ def test_redaction_leaves_ordinary_prose_and_counts_alone():
     ):
         assert golden._pattern_hits(benign, []) == []
         assert golden._redact_secrets(benign) == benign
+
+
+# --- fixture corruption and path jail ---------------------------------------
+
+
+def test_corrupt_lane_json_raises_golden_error(repo, home, monkeypatch, tmp_path):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    lane_file = next((fixture / "lanes").glob("*.json"))
+    lane_file.write_text('{"name": "read", ')
+    with pytest.raises(golden.GoldenError) as excinfo:
+        golden.check(fixture)
+    assert "corrupt lane JSON" in str(excinfo.value)
+
+
+def test_lane_missing_name_raises_golden_error_and_cli_catches_it(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    lane_file = next((fixture / "lanes").glob("*.json"))
+    lane_file.write_text('{"attempts": []}')
+    with pytest.raises(golden.GoldenError) as excinfo:
+        golden.check(fixture)
+    assert "missing or invalid 'name'" in str(excinfo.value)
+
+    # CLI handles it without KeyError traceback:
+    code = main(["golden", "check", str(fixture)])
+    assert code == 1
+    assert "missing or invalid 'name'" in capsys.readouterr().out
+
+
+def test_corrupt_expected_json_raises_golden_error(repo, home, monkeypatch, tmp_path):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    (fixture / "expected.json").write_text('{"lanes": [')
+    with pytest.raises(golden.GoldenError) as excinfo:
+        golden.check(fixture)
+    assert "corrupt expected JSON" in str(excinfo.value)
+
+
+def test_corrupt_mission_json_in_replay_raises_golden_error(repo, home, monkeypatch, tmp_path):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    (fixture / "mission.json").write_text('{"lanes": [')
+    with pytest.raises(golden.GoldenError) as excinfo:
+        golden.replay(fixture, home=home, cwd=str(repo))
+    assert "corrupt mission JSON" in str(excinfo.value)
+
+
+def test_run_id_escaping_recordings_dir_raises_golden_error(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    fixture = _smoke_fixture(repo, home, monkeypatch, tmp_path)
+    lane_file = next((fixture / "lanes").glob("*.json"))
+    data = json.loads(lane_file.read_text())
+    data["attempts"] = [{"run_id": "../../escape", "fleet": "claude"}]
+    lane_file.write_text(json.dumps(data))
+
+    with pytest.raises(golden.GoldenError) as excinfo:
+        golden.check(fixture)
+    assert "escapes recordings directory" in str(excinfo.value)
+
+    code = main(["golden", "check", str(fixture)])
+    assert code == 1
+    assert "escapes recordings directory" in capsys.readouterr().out

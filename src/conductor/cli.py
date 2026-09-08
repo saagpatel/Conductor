@@ -959,7 +959,7 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
         if cap_raises:
             mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
             fc = forecast_mod.forecast(mission, conductor_home())
-    except (shape.ShapeInvalid, MissionInvalid) as exc:
+    except (shape.ShapeInvalid, MissionInvalid, OSError) as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
     print(f"shape {shape.SHAPE_VERSION}: {len(mission.lanes)} lanes, mission '{mission.name}'")
@@ -992,7 +992,11 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
     for prompt_name, version_id in sorted(prompts.prompt_versions().items()):
         print(f"  {prompt_name}: {version_id}")
     text = json.dumps(raw, indent=2) + "\n"
-    out.write_text(text)
+    try:
+        out.write_text(text)
+    except OSError as exc:
+        print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
+        return 3
     print(f"wrote {out}")
     if args.dry_run:
         result = run_mission(load_mission(out), home=conductor_home(), dry_run=True)
