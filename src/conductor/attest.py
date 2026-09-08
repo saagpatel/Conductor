@@ -28,6 +28,7 @@ PAYLOAD_TYPE = "application/vnd.conductor.receipt+json"
 _KEY_BYTES = 32
 _KEY_WAIT_S = 2.0
 _KEY_POLL_S = 0.001
+_MISSING_LINK_SHA = object()
 
 
 def pae(payload_type: str, payload: bytes) -> bytes:
@@ -166,15 +167,18 @@ def verify(envelope: dict, key: bytes) -> tuple[dict | None, str | None]:
 
 
 def file_sha256(path: str | Path) -> str | None:
-    """A file's content hash, or None when it does not exist."""
+    """A file's content hash, or None when it does not exist or cannot be read."""
     p = Path(path)
-    if not p.is_file():
+    try:
+        if not p.is_file():
+            return None
+        digest = hashlib.sha256()
+        with p.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
         return None
-    digest = hashlib.sha256()
-    with p.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def verify_run_attestation(
@@ -275,6 +279,7 @@ def attest_mission(home: Path, mission_id: str) -> dict:
         key=key,
         mission_id=mission_id,
         expected=recorded_chain(mission_dir),
+        mission_dir=mission_dir,
     )
     results = [
         {k: v for k, v in row.items() if k != "_statement"} for row in evaluation["rows"]
@@ -332,6 +337,7 @@ def evaluate_chain(
     mission_id: str | None = None,
     expected: dict | None = None,
     present: bool = True,
+    mission_dir: Path | None = None,
 ) -> dict:
     """One mission's receipt chain as a state rather than a bare boolean
     (D7, D8).
@@ -384,7 +390,9 @@ def evaluate_chain(
             f"chain.json names mission '{recorded_mission}', not '{mission_id}'"
         )
 
-    rows = verify_chain_links(chain, home=home, key=key, mission_id=mission_id)
+    rows = verify_chain_links(
+        chain, home=home, key=key, mission_id=mission_id, mission_dir=mission_dir
+    )
     head = rows[-1]["sha256"] if rows else None
     if not rows:
         problems.append("chain has no links")
@@ -420,7 +428,12 @@ def evaluate_chain(
 
 
 def verify_chain_links(
-    chain: dict, *, home: Path, key: bytes, mission_id: str | None = None
+    chain: dict,
+    *,
+    home: Path,
+    key: bytes,
+    mission_id: str | None = None,
+    mission_dir: Path | None = None,
 ) -> list[dict]:
     """The per-link verification loop `cmd_attest` runs: each link's
     signature, its place in the hash chain, and, for a link with a run, that
@@ -438,8 +451,30 @@ def verify_chain_links(
     another mission, or one whose links were reordered, chains cleanly on
     `previous` alone and reads as verified."""
     results: list[dict] = []
-    previous_sha: str | None = None
+    previous_sha: object = None
     links = chain.get("links") if isinstance(chain, dict) else None
+    # The jail root comes from what the caller asked about, never from
+    # chain.json: the file being verified does not get to say which directory
+    # it may be read from. `chain.get("mission_id")` is the last resort, and
+    # only as a bare directory name.
+    mission_root: Path | None = None
+    chain_mission = chain.get("mission_id") if isinstance(chain, dict) else None
+    effective_mission = mission_id
+    if effective_mission is None and mission_dir is None:
+        effective_mission = (
+            chain_mission
+            if isinstance(chain_mission, str)
+            and Path(chain_mission).name == chain_mission
+            and chain_mission not in {".", ".."}
+            else None
+        )
+    if effective_mission is not None:
+        mission_root = (Path(home) / "missions" / effective_mission).resolve()
+    elif mission_dir is not None:
+        mission_root = Path(mission_dir).resolve()
+    elif isinstance(chain, dict) and "links" in chain:
+        mission_root = (Path(home) / "missions").resolve()
+
     for position, entry in enumerate(links or []):
         index = entry.get("index") if isinstance(entry, dict) else None
         lane = entry.get("lane") if isinstance(entry, dict) else None
@@ -451,15 +486,35 @@ def verify_chain_links(
         actual_sha: str | None = None
         statement: dict | None = None
         link_path = Path(path_str) if isinstance(path_str, str) else None
-        if link_path is None or not link_path.is_file():
+        candidate: Path | None = None
+        if link_path is not None:
+            try:
+                candidate = (
+                    (mission_root / link_path).resolve()
+                    if not link_path.is_absolute() and mission_root is not None
+                    else link_path.resolve()
+                )
+            except OSError:
+                candidate = None
+
+        if candidate is None:
+            problems.append("link file missing")
+        elif mission_root is not None and not candidate.is_relative_to(mission_root):
+            problems.append("link path is outside the mission directory")
+        elif not candidate.is_file():
             problems.append("link file missing")
         else:
-            actual_sha = file_sha256(link_path)
-            if actual_sha != recorded_sha:
+            actual_sha = file_sha256(candidate)
+            if actual_sha is None:
+                problems.append("link file unreadable")
+            elif actual_sha != recorded_sha:
                 problems.append("link file sha256 does not match chain.json")
             try:
-                envelope = json.loads(link_path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
+                envelope = json.loads(candidate.read_text())
+            except OSError as exc:
+                envelope = None
+                problems.append(f"link file unreadable: {exc}")
+            except json.JSONDecodeError as exc:
                 envelope = None
                 problems.append(f"link file is not valid JSON: {exc}")
             if envelope is not None:
@@ -475,6 +530,13 @@ def verify_chain_links(
                             f"link is signed for mission {signed_mission!r}, "
                             f"not '{mission_id}'"
                         )
+                    signed_lane = statement.get("lane")
+                    if signed_lane != lane:
+                        problems.append(
+                            f"link is signed for lane {signed_lane!r}, "
+                            f"not {lane!r}"
+                        )
+
                     if statement.get("index") != position:
                         problems.append(
                             f"link is signed at index {statement.get('index')!r}, "
@@ -498,5 +560,8 @@ def verify_chain_links(
                 "_statement": statement,
             }
         )
-        previous_sha = actual_sha
+        if actual_sha is not None:
+            previous_sha = actual_sha
+        else:
+            previous_sha = _MISSING_LINK_SHA
     return results
