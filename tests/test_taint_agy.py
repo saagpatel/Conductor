@@ -190,6 +190,25 @@ def test_prefix_hook_allows_run_command_with_no_denied_prefix(prefix_hook_script
     assert _run_hook(prefix_hook_script, bypass) == {"decision": "allow"}
 
 
+def test_prefix_hook_denies_run_command_with_no_command_line(prefix_hook_script):
+    """Would catch the deletion of `_decide`'s `not isinstance(command, str)`
+    guard: under taint_shell='allow' `run_command` is not in DENIED_TOOLS, so
+    a missing `CommandLine` must still be denied as malformed rather than
+    falling through to `_shell_denied(None)` or an outright allow."""
+    out = _run_hook(prefix_hook_script, {"toolCall": {"name": "run_command", "args": {}}})
+    assert out["decision"] == "deny"
+    assert "malformed run_command" in out["reason"]
+
+
+def test_prefix_hook_denies_run_command_with_a_non_string_command_line(prefix_hook_script):
+    out = _run_hook(
+        prefix_hook_script,
+        {"toolCall": {"name": "run_command", "args": {"CommandLine": 123}}},
+    )
+    assert out["decision"] == "deny"
+    assert "malformed run_command" in out["reason"]
+
+
 @pytest.mark.parametrize("tool", TAINT_AGY_EDIT_TOOLS)
 def test_hook_denies_an_edit_tool_naming_the_policy_directory(hook_script, tool):
     """W1: the hook files sit in a writable worktree and are re-read on every
@@ -582,6 +601,26 @@ def test_uncovered_tool_fails(repo, home, fake_fleet):
     assert result.taint_enforcement["uncovered"] == ["browser_click"]
 
 
+def test_uncovered_tool_fails_when_browser_is_only_an_infix(repo, home, fake_fleet):
+    """2026-09-08 review's own fix: the net is a substring test, not
+    `name.startswith("browser_")`. Every other test here names a tool that
+    also happens to start with "browser_", so reverting to the narrower
+    startswith check would leave them all green; this one names a tool that
+    is uncovered only because "browser" appears mid-name."""
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS, "click_browser_new_surface"],
+            extra_lines=[],
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert error_kind(result) == "taint"
+    assert result.taint_enforcement["uncovered"] == ["click_browser_new_surface"]
+
+
 def test_uncovered_tool_fails_with_the_real_nested_init_event_shape(repo, home, fake_fleet):
     """Review finding (Grok, E21): a real `agy` init event nests its tool
     list under `init.tools`, not at the event's top level -- confirmed
@@ -888,6 +927,81 @@ def test_preflight_missing_a_matcher_fails_before_the_paid_turn(
     assert error_kind(result) == "taint"
     assert "without matcher(s) for search_web" in result.error
     assert result.taint_enforcement["preflight"]["matchers_missing"] == ["search_web"]
+    assert not marker.exists()
+
+
+def test_preflight_finding_the_hooks_file_listed_but_disabled_fails_before_the_paid_turn(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """Would catch the deletion of `_is_our_hooks_file`'s `entry.get(
+    "enabled") is True` half: the file is ours (source matches) and every
+    matcher conductor wrote is named in its actions, but agy's own answer
+    says the file is not enabled -- `entry.get("enabled") is not True` must
+    still refuse the paid turn, not just a source mismatch or a missing
+    matcher."""
+
+    def _listed_but_disabled(cwd: str) -> list[str]:
+        hooks_path = os.path.join(cwd, TAINT_AGY_HOOKS_REL)
+        with open(hooks_path) as fh:
+            written = json.load(fh)["hooks"]["PreToolUse"]
+        actions = [
+            {"event": "PreToolUse", "matcher": entry["matcher"], "type": "command", "command": "x"}
+            for entry in written
+        ]
+        return _hooks_preflight_argv(
+            [{"name": "hooks", "enabled": False, "source": hooks_path, "actions": actions}]
+        )(cwd)
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _listed_but_disabled)
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert "taint hooks not enforced" in result.error
+    assert not marker.exists()
+
+
+def test_preflight_no_command_result_event_fails_closed(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """Would catch the deletion of the `hooks is None` branch in
+    `_taint_agy_preflight`: a stream that answers with an init event and
+    exits clean but never emits a `/hooks` `command_result` event is a
+    different failure from one that answers with an empty hooks list (the
+    existing `test_preflight_finding_no_hooks_file_...` test) -- both must
+    still refuse the paid turn."""
+
+    def _no_command_result(cwd: str) -> list[str]:
+        init_event = json.dumps({"event": "init", "conversation_id": "c1", "init": {"tools": []}})
+        return ["sh", "-c", f"printf '%s\\n' {shlex.quote(init_event)}"]
+
+    monkeypatch.setattr(runner_mod, "build_agy_hooks_argv", _no_command_result)
+    marker = tmp_path / "paid-turn-called"
+    fake_fleet(
+        _agy_argv(
+            home,
+            log_line=_passing_log_line(),
+            tools=[*TAINT_AGY_DENIED_TOOLS],
+            extra_lines=[],
+            marker=marker,
+        )
+    )
+    result = dispatch(spec(cwd=str(repo)), home=home, isolate=True)
+    assert result.ok is False
+    assert result.spawned is False
+    assert error_kind(result) == "taint"
+    assert "no command_result event" in result.error
+    assert result.taint_enforcement["preflight"]["loaded"] == []
     assert not marker.exists()
 
 
