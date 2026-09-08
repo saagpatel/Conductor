@@ -11,7 +11,7 @@ import pytest
 from conductor import prices
 from conductor.cli import main
 from conductor.outputs import parse
-from conductor.reprice import reprice
+from conductor.reprice import Summary, _validate_fleet_filter, reprice
 
 
 def _cursor_stdout(*, input_tokens: int, output_tokens: int, cache_read: int) -> str:
@@ -755,3 +755,147 @@ def test_reprice_fleet_filter_empty_selection_is_exit_zero(home: Path, monkeypat
     assert payload["moved"] == 0
     assert payload["skipped"]["fleet_mismatch"] == 1
     assert sum(payload["skipped"].values()) == 1
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        True,
+        False,
+        [],
+        {},
+        "",
+        "bogus",
+    ],
+)
+def test_reprice_rejects_invalid_api_fleet_types_before_scanning(
+    home: Path, invalid: object
+):
+    home.mkdir(parents=True)
+    _write_run(
+        home,
+        "20260908T080000Z-cursor-never-scanned",
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+    )
+    with pytest.raises(ValueError, match="unknown fleet"):
+        reprice(home, fleet=invalid)  # type: ignore[arg-type]
+    receipt = home / "runs" / "20260908T080000Z-cursor-never-scanned" / "result.json"
+    assert json.loads(receipt.read_text())["usage"]["input_tokens"] == 0
+
+
+def test_validate_fleet_filter_rejects_nonstring_before_membership():
+    with pytest.raises(ValueError, match="unknown fleet"):
+        _validate_fleet_filter([])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown fleet"):
+        _validate_fleet_filter({})  # type: ignore[arg-type]
+
+
+def test_reprice_fleet_filter_counts_other_fleet_no_usage_as_mismatch(
+    home: Path, monkeypatch, capsys
+):
+    run_id = "20260908T090000Z-cursor-no-usage-filtered"
+    _write_run(
+        home,
+        run_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=10, output_tokens=1, cache_read=0),
+        usage=None,
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--json")
+    assert payload["scanned"] == 1
+    assert payload["skipped"]["fleet_mismatch"] == 1
+    assert payload["skipped"]["no_usage"] == 0
+
+
+def test_reprice_fleet_filter_counts_other_fleet_dry_run_as_mismatch(
+    home: Path, monkeypatch, capsys
+):
+    run_id = "20260908T100000Z-cursor-dry-filtered"
+    _write_run(
+        home,
+        run_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+        dry_run=True,
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--fleet", "antigravity", "--json")
+    assert payload["scanned"] == 1
+    assert payload["skipped"]["fleet_mismatch"] == 1
+    assert payload["skipped"]["dry_run"] == 0
+
+
+def test_reprice_unfiltered_keeps_selected_fleet_dry_run_and_no_usage_skips(
+    home: Path, monkeypatch, capsys
+):
+    dry_id = "20260908T110000Z-cursor-dry-unfiltered"
+    no_usage_id = "20260908T120000Z-cursor-no-usage-unfiltered"
+    _write_run(
+        home,
+        dry_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=100, output_tokens=10, cache_read=5000),
+        usage={
+            "input_tokens": 0,
+            "output_tokens": 10,
+            "cache_read_tokens": 5000,
+            "cache_write_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 5010,
+            "cost_usd": 0.01,
+            "cost_basis": "estimated",
+        },
+        dry_run=True,
+    )
+    _write_run(
+        home,
+        no_usage_id,
+        fleet="cursor",
+        model="composer-2.5",
+        stdout=_cursor_stdout(input_tokens=10, output_tokens=1, cache_read=0),
+        usage=None,
+    )
+    payload = _reprice(home, monkeypatch, capsys, "--json")
+    assert payload["scanned"] == 2
+    assert payload["skipped"]["dry_run"] == 1
+    assert payload["skipped"]["no_usage"] == 1
+    assert payload["skipped"].get("fleet_mismatch", 0) == 0
+
+
+def test_summary_positional_constructor_keeps_skipped_and_moves_slots():
+    summary = Summary(2, False, None, {"unreadable": 2}, [])
+    assert summary.scanned == 2
+    assert summary.apply is False
+    assert summary.archive is None
+    assert summary.skipped == {"unreadable": 2}
+    assert summary.moves == []
+    assert summary.fleet is None
+    payload = summary.to_dict()
+    assert payload["scanned"] == 2
+    assert payload["skipped"] == {"unreadable": 2}
+    assert payload["moved"] == 0
+    assert "fleet" not in payload

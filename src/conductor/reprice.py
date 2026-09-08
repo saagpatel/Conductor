@@ -139,8 +139,10 @@ def _skip_dict(fleet_filter: str | None) -> dict[str, int]:
     return {reason: 0 for reason in reasons}
 
 
-def _validate_fleet_filter(fleet: str | None) -> None:
-    if fleet is not None and fleet not in FLEETS:
+def _validate_fleet_filter(fleet: object) -> None:
+    if fleet is None:
+        return
+    if not isinstance(fleet, str) or fleet not in FLEETS:
         raise ValueError(
             f"unknown fleet '{fleet}'. Known: {', '.join(sorted(FLEETS))}"
         )
@@ -153,9 +155,9 @@ class Summary:
     scanned: int = 0
     apply: bool = False
     archive: str | None = None
-    fleet: str | None = None
     skipped: dict[str, int] = field(default_factory=lambda: _skip_dict(None))
     moves: list[Move] = field(default_factory=list)
+    fleet: str | None = field(default=None, kw_only=True)
 
     @property
     def skipped_total(self) -> int:
@@ -230,7 +232,7 @@ def _candidate_runs(home: Path) -> list[Path]:
     return found
 
 
-def _load_receipt(path: Path) -> tuple[dict, str] | str:
+def _load_receipt(path: Path, *, fleet_filter: str | None = None) -> tuple[dict, str] | str:
     """Return `(raw, fleet)` or a skip reason."""
     try:
         raw: object = json.loads(path.read_text())
@@ -238,12 +240,14 @@ def _load_receipt(path: Path) -> tuple[dict, str] | str:
         return SKIP_UNREADABLE
     if not isinstance(raw, dict):
         return SKIP_UNREADABLE
-    if raw.get("dry_run") is True:
-        return SKIP_DRY_RUN
     fleet = raw.get("fleet")
     model = raw.get("model")
     if not isinstance(fleet, str) or not isinstance(model, str):
         return SKIP_UNREADABLE
+    if fleet_filter is not None and fleet != fleet_filter:
+        return SKIP_FLEET_MISMATCH
+    if raw.get("dry_run") is True:
+        return SKIP_DRY_RUN
     usage = raw.get("usage")
     if usage is None:
         return SKIP_NO_USAGE
@@ -288,12 +292,10 @@ def _plan_move(run_dir: Path, *, fleet_filter: str | None = None) -> Move | str:
     `tokens_unchanged` even when `prices.estimate` would now differ.
     """
     result_file = run_dir / "result.json"
-    loaded = _load_receipt(result_file)
+    loaded = _load_receipt(result_file, fleet_filter=fleet_filter)
     if isinstance(loaded, str):
         return loaded
     raw, fleet = loaded
-    if fleet_filter is not None and fleet != fleet_filter:
-        return SKIP_FLEET_MISMATCH
     stdout = _read_stdout(run_dir / "stdout.log")
     if stdout is None:
         return SKIP_UNREADABLE
