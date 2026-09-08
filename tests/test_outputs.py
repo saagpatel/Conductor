@@ -569,6 +569,206 @@ def test_last_stream_id_reads_a_json_array_transcript():
     assert out.answer == "partial"
 
 
+def _agy_step(index: int, **usage: int) -> str:
+    return json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {"step_index": index, "state": "DONE", "usage": usage},
+        }
+    )
+
+
+def _agy_result_event(
+    response: str,
+    *,
+    status: str = "SUCCESS",
+    error: str | None = None,
+    **usage: int,
+) -> str:
+    result = {"status": status, "response": response, "usage": usage}
+    if error is not None:
+        result["error"] = error
+    return json.dumps({"event": "result", "result": result})
+
+
+def test_antigravity_completed_stream_prices_step_usage_not_cumulative_envelope():
+    """A resumed conversation's result envelope sums earlier turns; the steps
+    in this stream report only this dispatch."""
+    lines = [
+        _agy_step(1, input_tokens=14500, output_tokens=100, thinking_tokens=50),
+        _agy_step(2, input_tokens=14700, output_tokens=200, thinking_tokens=80),
+        _agy_step(3, input_tokens=13887, output_tokens=165, thinking_tokens=35),
+        _agy_result_event(
+            "done",
+            input_tokens=267812,
+            output_tokens=110002,
+            thinking_tokens=3465,
+            cache_read_tokens=2315514,
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.answer == "done" and out.status == "SUCCESS" and out.error is None
+    assert out.usage.input_tokens == 14500 + 14700 + 13887
+    assert out.usage.thinking_tokens == 50 + 80 + 35
+    assert out.usage.output_tokens == 100 + 200 + 165 + out.usage.thinking_tokens
+    assert out.usage.cache_read_tokens == 0
+    assert out.usage.cost_usd is None
+    assert any("step_update events" in n for n in out.notes)
+
+
+def test_antigravity_first_run_stream_matches_step_sum_when_envelope_agrees():
+    lines = [
+        _agy_step(1, input_tokens=90, output_tokens=1),
+        _agy_step(1, input_tokens=100, output_tokens=5),
+        _agy_step(3, input_tokens=200, output_tokens=6, thinking_tokens=4),
+        _agy_result_event("DONE\n", input_tokens=300, output_tokens=15),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.answer == "DONE" and out.status == "SUCCESS"
+    assert out.usage.input_tokens == 300
+    assert out.usage.output_tokens == 11 + 4
+    assert out.usage.thinking_tokens == 4
+
+
+def test_antigravity_completed_stream_counts_all_supported_token_counters():
+    lines = [
+        _agy_step(
+            1,
+            input_tokens=1000,
+            output_tokens=10,
+            thinking_tokens=5,
+            cache_read_tokens=50000,
+            cache_write_tokens=200,
+        ),
+        _agy_step(
+            2,
+            input_tokens=2000,
+            output_tokens=20,
+            thinking_tokens=8,
+            cache_read_tokens=958132,
+        ),
+        _agy_result_event(
+            "ok",
+            input_tokens=999999,
+            output_tokens=888888,
+            thinking_tokens=777777,
+            cache_read_tokens=2315514,
+            cache_write_tokens=666666,
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.usage.input_tokens == 3000
+    assert out.usage.thinking_tokens == 13
+    assert out.usage.output_tokens == 30 + 13
+    assert out.usage.cache_read_tokens == 50000 + 958132
+    assert out.usage.cache_write_tokens == 200
+
+
+def test_antigravity_zero_token_steps_override_a_nonzero_envelope():
+    lines = [
+        _agy_step(1, input_tokens=0, output_tokens=0, thinking_tokens=0),
+        _agy_result_event(
+            "free",
+            input_tokens=224725,
+            output_tokens=110002,
+            cache_read_tokens=2315514,
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.usage.input_tokens == 0
+    assert out.usage.output_tokens == 0
+    assert out.usage.thinking_tokens == 0
+    assert out.usage.cache_read_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "unusable_usage",
+    [{}, {"metadata": 7}, {"input_tokens": True}, {"input_tokens": -1},
+     {"input_tokens": float("nan")}, {"input_tokens": 1.5}],
+)
+def test_antigravity_unusable_step_usage_keeps_the_envelope(unusable_usage):
+    envelope_usage = {
+        "input_tokens": 14435,
+        "output_tokens": 2,
+        "thinking_tokens": 0,
+        "cache_read_tokens": 0,
+        "total_tokens": 14437,
+    }
+    lines = [
+        json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "DONE"}}),
+        json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {"step_index": 2, "state": "DONE", "usage": unusable_usage},
+            }
+        ),
+        json.dumps(
+            {
+                "event": "result",
+                "result": {
+                    "status": "SUCCESS",
+                    "response": "PONG\n",
+                    "usage": envelope_usage,
+                },
+            }
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.usage.input_tokens == 14435
+    assert out.usage.total_tokens == 14437
+    assert not any("step_update events" in n for n in out.notes)
+
+
+def test_antigravity_envelope_only_streams_keep_legacy_usage():
+    out = parse("antigravity", ANTIGRAVITY)
+    assert out.usage.input_tokens == 14435
+    assert out.usage.total_tokens == 14437
+    assert out.notes == []
+
+
+def test_antigravity_completed_error_stream_keeps_terminal_fields_and_step_usage():
+    lines = [
+        _agy_step(1, input_tokens=13826, output_tokens=310, thinking_tokens=195),
+        _agy_result_event(
+            "",
+            status="ERROR",
+            error="timeout waiting for response",
+            input_tokens=999999,
+            output_tokens=999999,
+            thinking_tokens=999999,
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.status == "ERROR"
+    assert out.error == "timeout waiting for response"
+    assert out.answer == ""
+    assert out.usage.input_tokens == 13826
+    assert out.usage.output_tokens == 310 + 195
+    assert out.usage.thinking_tokens == 195
+
+
+def test_antigravity_completed_stream_drops_envelope_reported_cost_with_step_usage():
+    lines = [
+        _agy_step(1, input_tokens=100, output_tokens=5),
+        json.dumps(
+            {
+                "event": "result",
+                "result": {
+                    "status": "SUCCESS",
+                    "response": "ok",
+                    "total_cost_usd": 12.34,
+                    "usage": {"input_tokens": 500000, "output_tokens": 90000},
+                },
+            }
+        ),
+    ]
+    out = parse("antigravity", "\n".join(lines))
+    assert out.usage.input_tokens == 100
+    assert out.usage.output_tokens == 5
+    assert out.usage.cost_usd is None
+    assert out.usage.cost_basis is None
+
+
 def test_last_stream_id_last_non_empty_wins_including_nested_result():
     text = json.dumps(
         [
@@ -578,3 +778,16 @@ def test_last_stream_id_last_non_empty_wins_including_nested_result():
         ]
     )
     assert _last_stream_id(text, "session_id") == "nested-last"
+
+
+@pytest.mark.parametrize("index", [[], {}, None, True, -1, "1"])
+def test_antigravity_invalid_step_index_does_not_crash_or_override_usage(index):
+    stream = "\n".join([
+        _agy_step(1, input_tokens=7),
+        json.dumps({"event": "step_update", "step_update": {
+            "step_index": index, "usage": {"input_tokens": 900}}}),
+        _agy_result_event("done", input_tokens=1000),
+    ])
+    out = parse("antigravity", stream)
+    assert out.answer == "done"
+    assert out.usage.input_tokens == 7

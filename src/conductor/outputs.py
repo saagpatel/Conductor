@@ -378,6 +378,14 @@ def _parse_antigravity(text: str) -> FleetOutput:
         )
     out = _parse_envelope("antigravity", payload, text)
     out.session_id = session_id
+    step_usage = agy_step_usage(text)
+    if step_usage is not None:
+        # A resumed conversation's result envelope carries cumulative usage from
+        # earlier turns; step_update events report this run only.
+        out.usage = step_usage
+        out.notes.append(
+            "antigravity usage from step_update events, not the result envelope"
+        )
     return out
 
 
@@ -490,7 +498,9 @@ def agy_step_usage(text: str) -> Usage | None:
             continue
         step = ev.get("step_update")
         if isinstance(step, dict) and isinstance(step.get("usage"), dict):
-            per_step[step.get("step_index")] = step["usage"]
+            index = usable_int(step.get("step_index"))
+            if index is not None:
+                per_step[index] = step["usage"]
     if not per_step:
         return None
     total: dict[str, int] = {}
