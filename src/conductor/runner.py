@@ -666,6 +666,21 @@ def copy_no_follow(src: Path, dst: Path) -> None:
         os.close(fd)
 
 
+def copy_tree_no_follow(src: Path, dst: Path) -> None:
+    """Copy a directory tree without following any symlink, file or
+    directory. Each regular file is copied through `copy_no_follow`; a
+    symlink anywhere in the tree raises OSError the same way."""
+    dst.mkdir(parents=True, exist_ok=True)
+    with os.scandir(src) as entries:
+        for entry in entries:
+            child_src = Path(entry.path)
+            child_dst = dst / entry.name
+            if entry.is_dir(follow_symlinks=False):
+                copy_tree_no_follow(child_src, child_dst)
+            else:
+                copy_no_follow(child_src, child_dst)
+
+
 DELIVERABLE_CHANGED = "deliverable changed after the gate ran"
 
 
@@ -1221,6 +1236,13 @@ def _write_taint_agy_hooks(
     every tool call, so "what conductor wrote" and "what agy ran" are two
     different claims; `_taint_agy_enforcement` re-hashes after the run and
     fails it if they differ.
+
+    A path the repo already tracked cannot be kept off the lane branch by
+    `core.excludesFile` -- gitignore does not untrack -- so those files are
+    marked `--skip-worktree` here. `git add -A` then leaves HEAD's bytes
+    alone; `_restore_tracked_taint_hooks` puts those bytes back on disk
+    after the after-the-run digest check, so a fresh-index `git add -A`
+    (the clean gate) cannot pick conductor's deny files up either.
     """
     hook_files = taint_hook_files(cwd, taint_shell=taint_shell)
     repo_root = Path(iso.worktree).resolve()
@@ -1235,11 +1257,27 @@ def _write_taint_agy_hooks(
         dest = cwd_root / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
-        written.append((prefix / rel_path).as_posix())
+        worktree_rel = (prefix / rel_path).as_posix()
+        written.append(worktree_rel)
         digest = _sha256_file(dest)
         if digest is not None:
             digests[rel_path] = digest
+        tracked = git_run(iso.worktree, "ls-files", "--error-unmatch", "--", worktree_rel)
+        if tracked.returncode == 0:
+            git_run(iso.worktree, "update-index", "--skip-worktree", "--", worktree_rel)
     return written, digests
+
+
+def _restore_tracked_taint_hooks(worktree: str, paths: list[str]) -> None:
+    """Put HEAD's bytes back for any taint hook file the repo already
+    tracked, and clear `--skip-worktree`, so a later `git add -A` cannot
+    commit conductor's deny hooks onto the lane branch."""
+    for rel in paths:
+        tracked = git_run(worktree, "ls-files", "--error-unmatch", "--", rel)
+        if tracked.returncode != 0:
+            continue
+        git_run(worktree, "update-index", "--no-skip-worktree", "--", rel)
+        git_run(worktree, "checkout", "HEAD", "--", rel)
 
 
 def _uncovered_agy_tools(tools: list[str]) -> list[str]:
@@ -1316,24 +1354,48 @@ def _taint_agy_preflight(cwd: str, run_dir: Path) -> tuple[dict, str | None]:
     still classifies it as `taint`).
     """
     argv = build_agy_hooks_argv(cwd)
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=_TAINT_AGY_PREFLIGHT_TIMEOUT_S,
-        )
-        stdout_text = proc.stdout
-    except subprocess.TimeoutExpired as exc:
-        stdout_text = exc.output if isinstance(exc.output, str) else ""
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            detail = f"hooks preflight could not spawn: {exc}"
+            return {"ok": False, "loaded": [], "detail": detail}, detail
+        _register_live_group(proc.pid)
+        try:
+            deadline = time.monotonic() + _TAINT_AGY_PREFLIGHT_TIMEOUT_S
+            timed_out = interrupted = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    proc.wait(timeout=min(GATE_POLL_S, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if stop_requested():
+                    interrupted = True
+                    break
+        finally:
+            _kill_live_group(proc.pid)
+            proc.wait()
+        out.seek(0)
+        stdout_text = out.read()
+    if timed_out:
         if stdout_text:
             (run_dir / "hooks-preflight.json").write_text(stdout_text)
         detail = f"hooks preflight timed out after {_TAINT_AGY_PREFLIGHT_TIMEOUT_S}s"
         return {"ok": False, "loaded": [], "detail": detail}, detail
-    except OSError as exc:
-        detail = f"hooks preflight could not spawn: {exc}"
+    if interrupted:
+        detail = "interrupted: stop requested during hooks preflight; process group killed"
         return {"ok": False, "loaded": [], "detail": detail}, detail
     (run_dir / "hooks-preflight.json").write_text(stdout_text)
     hooks = _parse_agy_hooks_result(stdout_text)
@@ -2037,10 +2099,10 @@ def _apply_include(
         source = Path(iso.repo) / rel
         dest = Path(iso.worktree) / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, dest, dirs_exist_ok=True)
+        if source.is_symlink() or not source.is_dir():
+            copy_no_follow(source, dest)
         else:
-            shutil.copy2(source, dest)
+            copy_tree_no_follow(source, dest)
         included.append(rel)
     return included, notes, exclude_file
 
@@ -2362,16 +2424,23 @@ def dispatch(
         (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
         return result
 
+    def _bail_preflight(problem: str) -> Result:
+        if problem.startswith("interrupted:"):
+            return _bail(problem)
+        return _bail(f"taint hooks not enforced: {problem}")
+
     # F13: the free `/hooks` query, before any port/setup/paid-turn spend --
     # the deny hook `_write_taint_agy_hooks` wrote above must already show up
     # enabled, or this dispatch is refused now rather than after a run that
     # would fail the same way a dollar later (`_taint_agy_enforcement` below
-    # is the second, after-the-run source of the same evidence).
+    # is the second, after-the-run source of the same evidence). Include and
+    # setup still run after this, so the last write is re-checked (and the
+    # files rewritten) just before the paid spawn.
     taint_preflight: dict | None = None
     if tainted_agy:
         taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
         if preflight_problem is not None:
-            return _bail(f"taint hooks not enforced: {preflight_problem}")
+            return _bail_preflight(preflight_problem)
 
     if spec.include or taint_hook_paths:
         if iso is not None and iso.active:
@@ -2380,7 +2449,7 @@ def dispatch(
                     spec, iso, base, run_id, extra_excludes=taint_hook_paths
                 )
                 lane_notes.extend(notes)
-            except DispatchRefused as exc:
+            except (DispatchRefused, OSError) as exc:
                 return _bail(str(exc))
         elif spec.include:
             lane_notes.append("include ignored: dispatch is not isolated")
@@ -2416,6 +2485,32 @@ def dispatch(
                     "interrupted: stop requested during setup; process group killed"
                 )
             return _bail(f"setup failed: exit {setup_outcome.exit_code}")
+
+    # Include and setup both mutate the worktree after the first preflight.
+    # Rewrite the deny files so conductor's bytes are the last write, then
+    # re-hash with `_sha256_file` (the same read-back `_taint_agy_enforcement`
+    # uses after the run) and re-query `/hooks` before any paid spawn.
+    if tainted_agy and taint_hook_digests:
+        if spec.include or spec.setup:
+            if iso is None or not iso.active:
+                return _bail("taint hooks not enforced: isolation lost before spawn")
+            taint_hook_paths, taint_hook_digests = _write_taint_agy_hooks(
+                spec.cwd, iso, taint_shell=spec.taint_shell
+            )
+        modified = [
+            rel
+            for rel, digest in sorted(taint_hook_digests.items())
+            if _sha256_file(Path(spec.cwd) / rel) != digest
+        ]
+        if modified:
+            return _bail(
+                "taint hooks not enforced: taint hooks modified before spawn: "
+                + ", ".join(modified)
+            )
+        if spec.include or spec.setup:
+            taint_preflight, preflight_problem = _taint_agy_preflight(spec.cwd, run_dir)
+            if preflight_problem is not None:
+                return _bail_preflight(preflight_problem)
 
     # D9: flipped the moment the fleet's own process is over and the paid
     # bytes are on disk. Everything after that point -- parsing the envelope,
@@ -2696,6 +2791,8 @@ def dispatch(
             taint_enforcement["preflight"] = taint_preflight
             if taint_problem is not None and error is None:
                 error = f"taint hooks not enforced: {taint_problem}"
+            if iso is not None and iso.active:
+                _restore_tracked_taint_hooks(iso.worktree, taint_hook_paths)
 
         # Settings digest (third drill pass, 2026-09-07):
         # re-hashed here, before the deliverable check, the commit, and
