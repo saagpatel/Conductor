@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from conductor import worktrees
-from conductor.gc import build_plan
+from conductor.gc import apply_plan, build_plan
 
 _OLD = "20200101T000000Z"
 
@@ -74,6 +74,28 @@ def test_a_clean_worktree_whose_work_already_landed_is_still_removed(repo: Path,
     assert len(rows) == 1
     assert rows[0].action == "remove"
     assert rows[0].reason == "clean worktree"
+
+
+def test_gc_apply_rechecks_unmerged_reachability_before_removing_a_worktree(
+    repo: Path, home: Path
+):
+    done = worktrees.create(str(repo), f"{_OLD}-became-unmerged", home / "worktrees")
+    path = Path(done.worktree)
+    _receipt(home, f"{_OLD}-became-unmerged", repo)
+
+    plans, notices = build_plan(home, [], 0.0)
+    rows = _worktree_rows(plans, path)
+    assert len(rows) == 1
+    assert rows[0].action == "remove"
+    assert rows[0].reason == "clean worktree"
+
+    _commit(path, "salvage-after-plan.txt")
+    apply_plan(plans, notices, home)
+    worktree = next(item for item in plans[0].items if Path(item.path) == path)
+
+    assert path.is_dir()
+    assert worktree.action == "keep"
+    assert "unmerged work" in worktree.reason
 
 
 def test_a_superseded_attempt_of_a_live_mission_is_protected(repo: Path, home: Path):
