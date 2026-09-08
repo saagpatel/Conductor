@@ -186,8 +186,8 @@ from .runner import (
     dispatch,
     stop_requested,
 )
+from .verdicts import _RANK_KEYS, _answer_object, render_verdict
 from .verdicts import Verdict as ChecklistVerdict
-from .verdicts import _answer_object, render_verdict
 from .verify import git_run
 
 log = logging.getLogger("conductor.mission")
@@ -277,7 +277,10 @@ _RESOLVE_KEYS = {
 }
 DEFAULT_COLLATE_INSTRUCTIONS = (
     "Compare the lane results above. State where they agree, where they disagree, "
-    "and which lane's result is strongest and why. Be concrete and brief."
+    "and which lane's result is strongest and why, if one is. If they are equivalent "
+    "or none is usable, say so; either answer is complete. The order the lanes are "
+    "listed in carries no meaning. Put the entire comparison in this reply. Be "
+    "concrete and brief."
 )
 COLLATE_MAX_CHARS = 8000
 # D1: the resolver's default instructions. "The strongest candidate above" is
@@ -5566,8 +5569,9 @@ def _parse_rank_answer(
     if not ok or not text.strip():
         return None, None, error or "dispatch returned no answer", None
     # Same tolerance as a verdict: a judge that wraps its object in a
-    # sentence has still answered, and the last complete object is taken.
-    raw, problem = _answer_object(text)
+    # sentence has still answered. Two different ranking objects refuse
+    # rather than picking one; identical repeats still resolve.
+    raw, problem = _answer_object(text, keys=_RANK_KEYS)
     if problem or raw is None:
         return None, None, problem or "answer JSON must be an object", None
     extra = sorted(set(raw) - {"strongest", "reason", "scores"})

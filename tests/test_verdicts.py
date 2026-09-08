@@ -19,8 +19,10 @@ from conductor.fleets import DispatchRefused, Spec
 from conductor.mission import MissionInvalid, mission_from_dict, run_mission
 from conductor.runner import dispatch
 from conductor.verdicts import (
+    _RANK_KEYS,
     Criterion,
     Verdict,
+    _answer_object,
     checklist_contract,
     checklist_schema,
     parse_checklist,
@@ -87,6 +89,41 @@ def test_checklist_schema_pins_shape_and_cardinality():
     assert array["minItems"] == array["maxItems"] == 2
     assert array["items"]["additionalProperties"] is False
     assert array["items"]["properties"]["id"]["enum"] == ["correct", "tested"]
+
+
+def test_checklist_contract_requires_a_citation_for_an_ok_criterion():
+    """An ok: true criterion with evidence 'no evidence' used to satisfy the
+    contract; rule 5 is cite or drop, so a pass must name a hunk."""
+    contract = checklist_contract(CRITERIA)
+    assert "An ok: true criterion's evidence must cite a file and line or a hunk" in contract
+    assert "only a correct value for a criterion reported as not ok" in contract
+    assert "or say 'no evidence'" not in contract
+
+
+def test_answer_object_refuses_two_different_ranking_objects():
+    """A rank judge's `{"strongest", "reason"}` objects are never
+    verdict-shaped, so without ranking keys the last object won silently."""
+    text = (
+        '{"strongest": "a", "reason": "a has the test"}\n\n'
+        "For example:\n"
+        '{"strongest": "b", "reason": "b is cheaper"}\n'
+    )
+    raw, problem = _answer_object(text, keys=_RANK_KEYS)
+    assert raw is None
+    assert problem == (
+        "the answer carries 2 different ranking objects; "
+        "conductor cannot tell which is the judgment"
+    )
+    # The default key set still names them verdict objects.
+    verdict_text = (
+        '{"verdict":"fail","criteria":[],"summary":"a"}\n'
+        '{"verdict":"pass","criteria":[],"summary":"b"}\n'
+    )
+    _, verdict_problem = _answer_object(verdict_text)
+    assert verdict_problem == (
+        "the answer carries 2 different verdict objects; "
+        "conductor cannot tell which is the judgment"
+    )
 
 
 def test_parse_verdict_accepts_whole_json_prose_and_code_fences():
