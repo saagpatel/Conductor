@@ -64,9 +64,17 @@ before and the resume notes that it was trusted on path only.
 A recorded digest requires readable bytes: an unreadable file or a null path
 does not downgrade that check to legacy path-only trust. A missing repository
 also refuses reuse when a commit or branch must be checked. For an existing
-repository, two `GIT_UNRUN` results still retain the receipt with a note;
-this compatibility policy avoids repeat payment under machine load, but it
-does not establish that the Git check passed.
+repository, two `GIT_UNRUN` results pause resume before any new dispatch.
+CLI exit 4 carries `paused.kind: verification`, the repository, command,
+and failure reason. `resume-verification.json` records that diagnostic
+separately: completed lane receipts, `result.json`, and spend remain intact.
+No human pause answer is consumed while verification is unavailable.
+Retry the same resume command when Git is available; completed lanes are
+reused once checked, and the verification diagnostic is cleared. This pause
+does not require `--answer continue` unless an existing operator pause also
+needs that answer. `conductor missions` and `conductor report` show the
+mission as unfinished, and GC protects its retained runs while it is parked.
+Parents also refuse to adopt a child currently paused on verification.
 
 Resume re-reads each dispatch's cost from its run receipt. A cancelled run
 with no price retains `unknown_cost_dispatches` without becoming a

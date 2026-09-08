@@ -459,7 +459,7 @@ def test_escalation_counts_only_lanes_the_cascade_actually_reached(tmp_path):
     assert esc["cascade_usd"] == 0.1
 
 
-def test_a_resume_trusts_a_kept_lane_when_git_cannot_run_under_load(
+def test_a_resume_parks_a_kept_lane_when_git_cannot_run_under_load(
     repo, home, monkeypatch, tmp_path
 ):
     """The load flake on record: a kept lane's trust check spawns git, and a
@@ -493,14 +493,11 @@ def test_a_resume_trusts_a_kept_lane_when_git_cannot_run_under_load(
 
     monkeypatch.setattr(mission_mod, "git_run", git_refused_under_load)
     snapshot = json.loads(Path(first.mission_dir, "mission.json").read_text())
-    second = run_mission(
-        Mission.from_snapshot(snapshot), home=home, resume_dir=Path(first.mission_dir)
-    )
-
-    assert refused, "the trust check consulted git for the tip commit"
-    assert second.resumed_from["kept"] == ["a"]
-    assert second.resumed_from["rerun"] == []
-    assert any("git could not run" in note for note in second.notes)
+    with pytest.raises(MissionInvalid, match="resume paused"):
+        run_mission(
+            Mission.from_snapshot(snapshot), home=home, resume_dir=Path(first.mission_dir)
+        )
+    assert len(refused) == 2
 
 
 def test_a_resume_still_reruns_a_lane_whose_tip_git_says_is_missing(

@@ -182,6 +182,11 @@ from .graph import (
     _template_refs as _template_refs,
 )
 from .prices import finite_nonnegative, finite_positive
+from .resume import (
+    VerificationUnavailable,
+    clear_verification_block,
+    record_verification_block,
+)
 from .runner import (
     Result,
     _slug,
@@ -3507,10 +3512,12 @@ def _resolve_is_trusted(
         # not attempts[0] alone), never the mission's own cwd when the
         # two differ.
         resolve_cwd = mission._resolve_repository()
-        commit = _git_answer(resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}")
-        if commit is None:
-            _note_git_unrun(notes, "resolve", "tip commit")
-        elif commit.returncode != 0:
+        if not Path(resolve_cwd).is_dir():
+            return False
+        commit = _git_answer(
+            resolve_cwd, "cat-file", "-e", f"{tip}^{{commit}}", required_for="resolve"
+        )
+        if commit.returncode != 0:
             return False
     return True
 
@@ -3834,6 +3841,19 @@ def run_mission(
                 base, mission.source, mission_id
             )
             lock_notes.extend(source_notes)
+        # Verification is read-only and precedes consuming a human answer
+        # or deleting a branch for rerun. An unavailable check preserves
+        # the previous receipt and every paid attempt.
+        if resume_dir is not None:
+            try:
+                resume = _build_resume_plan(mission, mission_dir, base)
+            except VerificationUnavailable as exc:
+                if not dry_run:
+                    record_verification_block(mission_dir, exc)
+                raise
+            if not dry_run:
+                clear_verification_block(mission_dir)
+            resume.notes.extend(lock_notes)
         if pending_pause is not None:
             # After the lock, before `_build_resume_plan`: a human lane's
             # answer file is what the plan trusts, so the write must land
@@ -3854,6 +3874,18 @@ def run_mission(
                     answered_at=answered_at,
                 )
                 pause_answer = {"kind": "human", "lane": pending_pause.get("lane")}
+                # The plan was checked before this newly supplied answer
+                # existed. Its consumers remain marked for rerun, because
+                # they have not consumed these bytes yet.
+                if stop_answer is None:
+                    human_lane = next(
+                        lane for lane in mission.lanes if lane.name == pending_pause.get("lane")
+                    )
+                    answered = _human_lane_result(mission, human_lane, mission_dir)
+                    if answered is not None:
+                        answered.kept = True
+                        resume.kept[human_lane.name] = answered
+                        resume.rerun.discard(human_lane.name)
             else:
                 if answer not in ("continue", "stop"):
                     raise MissionInvalid(
@@ -3871,8 +3903,6 @@ def run_mission(
             )
             resume = _ResumePlan(notes=lock_notes)
         else:
-            resume = _build_resume_plan(mission, mission_dir, base)
-            resume.notes.extend(lock_notes)
             _check_branches(
                 mission,
                 kept=set(resume.kept),

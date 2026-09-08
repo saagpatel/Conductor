@@ -2937,3 +2937,23 @@ the release-layout fix shipped in v0.102.0; preservation cases stayed green. The
 full gate had two wording-compatibility failures, corrected before the passing rerun.
 Full dispositions and verification limits are in the evaluation. This release follows
 the separate wave 18 release, v0.102.0 (`815518a`).
+
+
+<a id="r-0.104.0"></a>
+## Receipt 2026-09-08: unavailable verification pauses resume, v0.104.0
+
+The operator approved the resume-policy change after the ownership evaluation.
+After two unavailable Git checks, resume exits 4 with a verification diagnostic;
+it does not trust the lane or pay to rerun it. The diagnostic is separate from
+completed results, and checking occurs before pending human answers are consumed.
+Retrying resume rechecks the evidence and reuses completed work. CLI listings,
+reporting, GC protection, and parent/child adoption recognize the parked state.
+
+Six integration regressions fail behaviorally on 0.103.0; a seventh covers an
+empty child verification record. Ruff exited 0 and the full parallel gate passed
+2,152 tests. A first gate under the home-directory build cache exposed an existing
+export-guard path issue; the passing gate uses system-temp fixtures, as the suite
+expects. That guard issue is tracked for the failure-boundary phase.
+Implementation and investigation used only the operator and permitted Grok/Gemini
+helpers; no Claude or OpenAI dispatch. Helper account charges are not measured.
+Further accounting and lifecycle consolidation continues in this task.

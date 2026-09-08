@@ -58,6 +58,7 @@ from .budget import budget_cost, unpriced_dispatch
 from .errors import KINDS
 from .fleets import TAINT_SHELL_MODES, Spec
 from .graph import MissionInvalid
+from .resume import VerificationUnavailable, verification_block
 from .verdicts import Criterion, parse_checklist
 from .verify import GIT_UNRUN
 
@@ -809,6 +810,11 @@ def _trusted_lane(
             # only once `result.json` itself already names the child, never
             # on the lane receipt's say-so alone.
             child_id = child.get("mission_id")
+            if (
+                isinstance(child_id, str)
+                and verification_block(mission_dir.parent / child_id) is not None
+            ):
+                return False
             return child_id is not None and child_id in (
                 (prior_result or {}).get("children") or []
             )
@@ -879,10 +885,10 @@ def _trusted_lane(
                 notes.append(f"lane '{lane.name}': repository is missing; not trusted")
             return False
     if result.tip_sha and result.tip_sha != result.base_sha:
-        commit = _git_answer(repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}")
-        if commit is None:
-            _note_git_unrun(notes, lane.name, "tip commit")
-        elif commit.returncode != 0:
+        commit = _git_answer(
+            repo, "cat-file", "-e", f"{result.tip_sha}^{{commit}}", required_for=lane.name
+        )
+        if commit.returncode != 0:
             return False
     if lane.branch:
         if not result.tip_sha or result.branch != lane.branch:
@@ -892,15 +898,16 @@ def _trusted_lane(
             "rev-parse",
             "--verify",
             f"refs/heads/{lane.branch}^{{commit}}",
+            required_for=lane.name,
         )
-        if branch is None:
-            _note_git_unrun(notes, lane.name, "branch tip")
-        elif branch.returncode != 0 or branch.stdout.strip() != result.tip_sha:
+        if branch.returncode != 0 or branch.stdout.strip() != result.tip_sha:
             return False
     return True
 
 
-def _git_answer(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+def _git_answer(
+    repo: str | Path, *args: str, required_for: str | None = None
+) -> subprocess.CompletedProcess[str] | None:
     """A git result the trust check may read, or None when git never ran.
 
     `git_run` reports a spawn failure or a hung git as `GIT_UNRUN`, which is
@@ -908,7 +915,8 @@ def _git_answer(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str
     (two or three suites gating at once) dropped a kept lane into `rerun` and
     paid for its work again because the first shape of this check read that
     code as "the commit is missing". One retry covers a momentary refusal; a
-    second `GIT_UNRUN` is reported to the caller as no answer, never as no.
+    second `GIT_UNRUN` is reported as no answer, never as no. Reuse checks
+    name `required_for` to pause rather than treating that absence as trust.
     """
     from . import mission as mission_mod
 
@@ -916,6 +924,8 @@ def _git_answer(repo: str | Path, *args: str) -> subprocess.CompletedProcess[str
         proc = mission_mod.git_run(repo, *args)
         if proc.returncode != GIT_UNRUN:
             return proc
+    if required_for is not None:
+        raise VerificationUnavailable(required_for, repo, args, proc.stderr.strip())
     return None
 
 

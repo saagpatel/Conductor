@@ -44,6 +44,7 @@ from .mission import (
 from .paths import conductor_home
 from .report import cmd_report
 from .reprice import cmd_reprice
+from .resume import VerificationUnavailable, verification_block
 from .runner import Result, dispatch, kill_live_groups, request_stop, stop_requested
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import cmd_spend
@@ -384,6 +385,9 @@ def cmd_mission(args: argparse.Namespace) -> int:
             result = run_mission(
                 mission, home=conductor_home(), dry_run=args.dry_run, unattended=args.unattended
             )
+    except VerificationUnavailable as exc:
+        print(json.dumps({"status": "paused", "paused": exc.check, "message": str(exc)}, indent=2))
+        return 4
     except MissionInvalid as exc:
         print(json.dumps({"invalid": str(exc)}, indent=2), file=sys.stderr)
         return 3
@@ -405,6 +409,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
     rows = []
     for path in entries[: args.limit]:
         result_file = path / "result.json"
+        verification = verification_block(path)
         pause_doc, pause_unreadable = _load_pause_doc(path)
         # E10 second spec: `parent`/`depth` are load-derived mission.json
         # fields (never in result.json), so a child's parent id is read off
@@ -417,7 +422,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                     "status": "incomplete",
                     "resumes": _resume_count_without_receipt(pause_doc, pause_unreadable),
                     "running": (path / "running.json").is_file(),
-                    "paused": _mission_paused(
+                    "paused": verification is not None or _mission_paused(
                         result_data=None,
                         pause_doc=pause_doc,
                         pause_unreadable=pause_unreadable,
@@ -469,7 +474,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "resumes": len(data.get("resumes") or []),
                 "running": (path / "running.json").is_file(),
                 "report": data.get("report_path"),
-                "paused": _mission_paused(
+                "paused": verification is not None or _mission_paused(
                     result_data=data,
                     pause_doc=pause_doc,
                     pause_unreadable=pause_unreadable,
@@ -487,6 +492,8 @@ def cmd_missions(args: argparse.Namespace) -> int:
                 "children": len(data.get("children") or []),
             }
         )
+        if verification is not None:
+            rows[-1]["verification"] = verification
     print(json.dumps(rows, indent=2))
     return 0
 

@@ -494,7 +494,7 @@ def test_resolve_is_trusted_only_when_ran_false_means_no_hotspots(repo, tmp_path
     assert _resolve_is_trusted(mission, blocked) is False
 
 
-def test_resolve_is_trusted_when_git_cannot_run_to_confirm_its_tip(
+def test_resolve_parks_when_git_cannot_run_to_confirm_its_tip(
     repo, tmp_path, monkeypatch
 ):
     """`GIT_UNRUN` is not a vanished tip. `_trusted_lane` already uses
@@ -511,8 +511,8 @@ def test_resolve_is_trusted_when_git_cannot_run_to_confirm_its_tip(
         return subprocess.CompletedProcess(["git", *args], GIT_UNRUN, "", "EAGAIN")
 
     monkeypatch.setattr(mission_mod, "git_run", git_refused)
-    assert _resolve_is_trusted(mission, prior, notes=notes) is True
-    assert any("git could not run" in note for note in notes)
+    with pytest.raises(MissionInvalid, match="resume paused"):
+        _resolve_is_trusted(mission, prior, notes=notes)
 
 
 def test_resolve_is_not_trusted_when_its_committed_tip_is_gone(repo, tmp_path, monkeypatch):

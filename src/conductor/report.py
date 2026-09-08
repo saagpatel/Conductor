@@ -26,6 +26,7 @@ from pathlib import Path
 from . import fleets, spend
 from . import verdicts as verdicts_mod
 from .paths import conductor_home
+from .resume import verification_block
 from .runner import _gate_passed as _runner_gate_passed
 from .spend import Run as _SpendRun
 from .spend import _number, _parse_bound, _run_time
@@ -241,7 +242,7 @@ def _scan_missions(
         landed_ok = sum(1 for path in land_files if _land_merged(path))
         review_lanes: dict[str, dict[str, object]] = {}
         fix_dispositions: list[object] | None = None
-        unfinished = _mission_unfinished(raw)
+        unfinished = _mission_unfinished(raw) or verification_block(result_file.parent) is not None
         meta[mission] = {
             "ok": None if unfinished else (ok if isinstance(ok, bool) else None),
             "unfinished": unfinished,

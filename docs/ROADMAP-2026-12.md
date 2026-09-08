@@ -65,6 +65,7 @@ that restores the old prefix list as a discouragement, not a boundary.
 | post-baseline hardening wave 9: the money surface -- a price override deleting the long-context tier it was never asked about, a grace band the cap verdict did not know about, a tightened cap that still stacked its full grace, a crash receipt that threw away a cursor lane's reported cost, a budget re-settled into a weaker verdict, and a missing lane receipt letting a resume spend the same dollars twice | 0.93.0 | four cold reads (two Gemini lanes lost to an account quota, replaced by two Opus 5 reads), then two Grok 4.6 **write** lanes, one salvaged after a post-hoc cap verdict undid its commit; lead verified every claim on bytes and cut a vacuous test | $18.85 |
 | Wave 18: reprice and documentation consolidation | 0.102.0 | three Grok builds; local release integration | $15.14 |
 | Ownership corrections and shared evidence interpretation | 0.103.0 | direct implementation; bounded Grok/Gemini helpers | not measured |
+| Unavailable verification pauses resume | 0.104.0 | direct implementation; Grok/Gemini investigations | not measured |
 
 Status 2026-09-07, end of the sitting: all three waves shipped (0.61.0, 0.62.0, 0.63.0). Of the
 review's 23 defects, every one is fixed on the tree with a test that fails without it; of the ten

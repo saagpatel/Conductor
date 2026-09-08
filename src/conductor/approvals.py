@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .graph import MissionInvalid
+from .resume import verification_block
 from .runner import _slug, deliverable_path_problem
 
 if TYPE_CHECKING:
@@ -303,7 +304,7 @@ def _resume_plan_child(
     still_parked = isinstance(paused_block, dict) and "answer" not in paused_block
     pause_doc = mission_mod._json_object(child_dir / "pause.json")
     pause_unanswered = isinstance(pause_doc, dict) and pause_doc.get("answer") is None
-    if still_parked or pause_unanswered:
+    if still_parked or pause_unanswered or verification_block(child_dir) is not None:
         raise MissionInvalid(f"child '{child_id}' is paused; resume it first")
 
     already_rolled_up = child_block.get("rolled_up") is True and child_id in (

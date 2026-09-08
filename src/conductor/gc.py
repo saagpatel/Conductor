@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .paths import conductor_home
+from .resume import verification_block
 from .verify import git_run
 
 _RUN_STAMP = re.compile(r"^(\d{8}T\d{6}Z)")
@@ -231,7 +232,11 @@ def _in_progress_run_ids(home: Path) -> set[str]:
         if not mission_dir.is_dir():
             continue
         result_file = mission_dir / "result.json"
-        if result_file.is_file() and not _mission_awaiting_resume(_json_object(result_file)):
+        if (
+            result_file.is_file()
+            and not _mission_awaiting_resume(_json_object(result_file))
+            and verification_block(mission_dir) is None
+        ):
             continue
         _protect_lane_runs(mission_dir, protected)
     return protected
