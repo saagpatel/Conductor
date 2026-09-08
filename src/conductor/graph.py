@@ -149,26 +149,39 @@ def _propagate_taint(lanes: list[Lane]) -> None:
 def _self_judging_findings(mission: Mission) -> list[tuple[str, str, str]]:
     """Every (judge, judged, vendor) pair where a judge could score a lane on
     its own vendor: a verdict lane or a `stage: review` lane against its
-    `base`, and the collate against any lane it collates over (every lane in
-    the mission).
+    `base` and every lane its prompt templates (every attempt, cascade
+    included), and the collate against any lane it collates over (every lane
+    in the mission).
 
     "Could" rather than "does": which attempt of a lane ends up final is not
     known at load time, so a shared vendor on any attempt (fallbacks
-    included) is enough to flag the pair.
+    included) is enough to flag the pair. A review or verdict lane with no
+    `base` that still reads another lane through a template is judging that
+    lane's work and is checked the same way.
     """
     by_name = {lane.name: lane for lane in mission.lanes}
     findings: list[tuple[str, str, str]] = []
     for lane in mission.lanes:
         judges = lane.stage == "review" or any(a.verdict is not None for a in lane.attempts)
-        if lane.base is None or not judges:
+        if not judges:
             continue
-        judged = by_name.get(lane.base)
-        if judged is None:
+        judged_names: set[str] = set()
+        if lane.base is not None and lane.base in by_name:
+            judged_names.add(lane.base)
+        for attempt in lane.attempts:
+            for ref_lane, _ref_field, is_mission in _template_refs(attempt.prompt, lane.name):
+                if is_mission or ref_lane == lane.name or ref_lane not in by_name:
+                    continue
+                judged_names.add(ref_lane)
+        if not judged_names:
             continue
         judge_vendors = {model_vendor(a.fleet, a.model) for a in lane.attempts}
-        judged_vendors = {model_vendor(a.fleet, a.model) for a in judged.attempts}
-        for vendor in sorted(judge_vendors & judged_vendors):
-            findings.append((lane.name, lane.base, vendor))
+        for judged in mission.lanes:
+            if judged.name not in judged_names:
+                continue
+            judged_vendors = {model_vendor(a.fleet, a.model) for a in judged.attempts}
+            for vendor in sorted(judge_vendors & judged_vendors):
+                findings.append((lane.name, judged.name, vendor))
     if mission.collate is not None:
         judge_labels = [("collate", mission.collate.fleet, mission.collate.model)] + [
             (f"collate.judges[{i}]", judge.fleet, judge.model)

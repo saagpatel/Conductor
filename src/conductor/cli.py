@@ -947,7 +947,11 @@ def cmd_shape_a(args: argparse.Namespace) -> int:
             _write_lane_prompts(raw, base_dir)
         # F15 mission 2 item 2: a schema is a path, not a prompt -- written
         # beside the mission file whether or not --inline was given.
-        shape.write_shape_schemas(base_dir)
+        # `opus_review` carries here for the same reason it carries into the
+        # fix prompt: the schema's description is prompt text the fixer reads,
+        # and a two-reviewer description on a three-reviewer mission tells it
+        # Opus's items need no disposition.
+        shape.write_shape_schemas(base_dir, opus_review=args.opus_review)
         mission = mission_from_dict(raw, base_dir=base_dir, source=str(out))
         # F17: the forecast is read twice on purpose. The first pass sizes
         # the caps against the history, `apply_caps` raises every warned

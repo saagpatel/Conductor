@@ -74,21 +74,47 @@ GEMINI_REVIEW_PROMPT = (
     "Based on the information above: " + REVIEW_TAIL
 )
 
+# Shared `<gate>` block, filled from the mission's `test` the same way BUILD_PROMPT
+# fills `{gate}`. The three prompts that used to say "the gate named in the spec"
+# never received that command: `{{mission.prompt}}` is the operator's spec.
+GATE_BLOCK = "<gate>\n{gate}\n</gate>\n\n"
+
+GROK_GATE_RUN = (
+    " and, if you are able to, run the gate in the <gate> block. If you run the suite, "
+    "pass --basetemp pointing to a directory under $TMPDIR so nothing is written inside "
+    "this working tree"
+)
+
+ADVERSARIAL_GATE_RUN = (
+    " Run the gate in the <gate> block before finishing. When the gate is pytest, pass "
+    "--basetemp under $TMPDIR, and confirm your test is what fails."
+)
+
+FIX_GATE_RUN = (
+    " Run the gate in the <gate> block before finishing. When the gate is pytest, pass "
+    "--basetemp under $TMPDIR."
+)
+
 GROK_REVIEW_PROMPT = (
     "Review the change below against the spec. The change is applied in the current "
-    "working directory; read whatever you need and, if you are able to, run the gate named "
-    "in the spec. If you run the suite, pass --basetemp pointing to a directory under "
-    "$TMPDIR so nothing is written inside this working tree. CHANGE NOTHING.\n\n"
-    "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
+    "working directory; read whatever you need"
+    + GROK_GATE_RUN
+    + ". CHANGE NOTHING.\n\n"
+    + GATE_BLOCK
+    + "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
     + REVIEW_TAIL.replace("Put the entire review", "Put the ENTIRE review")
 )
 
-GROK_READ_ONLY_PROMPT = GROK_REVIEW_PROMPT.replace(
-    "read whatever you need and, if you are able to, run the gate named in the spec. If "
-    "you run the suite, pass --basetemp pointing to a directory under $TMPDIR so nothing "
-    "is written inside this working tree. CHANGE NOTHING.",
-    "read whatever you need. Do not run the test suite; the lead runs it. Read the diff "
-    "and the code it touches. CHANGE NOTHING.",
+# Own constant, not a replace of GROK_REVIEW_PROMPT: this lane must not be told
+# to run a gate, and xAI's non-negotiables are capitalized (CHANGE NOTHING,
+# ENTIRE, and on this repo DO NOT RUN THE TEST SUITE -- a Grok reviewer that
+# runs the suite in its worktree fails the lane on bytes).
+GROK_READ_ONLY_PROMPT = (
+    "Review the change below against the spec. The change is applied in the current "
+    "working directory; read whatever you need. DO NOT RUN THE TEST SUITE; the lead runs "
+    "it. Read the diff and the code it touches. CHANGE NOTHING.\n\n"
+    "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
+    + REVIEW_TAIL.replace("Put the entire review", "Put the ENTIRE review")
 )
 
 # F9 Shape C, a launcher option since Phase H: Opus 5 as a third cold reviewer
@@ -107,20 +133,22 @@ OPUS_REVIEW_PROMPT = (
 ADVERSARIAL_PROMPT = (
     "The change below is applied in the current working directory, on its own branch. Read "
     "whatever you need.\n\n"
-    "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
+    + GATE_BLOCK
+    + "<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\n"
     "If you find a defect in the change against the spec, write one test that fails on the "
     "current tree because of it -- in a new or existing test file -- and say what it proves. "
-    "Change nothing else: no source, no fix, just the test. Run the gate named in the spec "
-    "before finishing, with --basetemp under $TMPDIR, and confirm your test is what fails. "
-    "If nothing meets that bar, change nothing and reply exactly: NO_FINDINGS. Either answer "
-    "is complete. Do not commit; the harness commits."
+    "Change nothing else: no source, no fix, just the test."
+    + ADVERSARIAL_GATE_RUN
+    + " If nothing meets that bar, change nothing and reply exactly: NO_FINDINGS. Either "
+    "answer is complete. Do not commit; the harness commits."
 )
 
 FIX_PROMPT = (
     "The spec below is already implemented on this branch, by you earlier in this thread. "
     "Two reviewers from other vendors read the change; their reports follow, each with its "
     "items numbered.\n\n"
-    "<spec>\n{{mission.prompt}}\n</spec>\n\n"
+    + GATE_BLOCK
+    + "<spec>\n{{mission.prompt}}\n</spec>\n\n"
     "<review_gemini>\n{{lanes.review-gemini.answer}}\n</review_gemini>\n\n"
     "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
     "For each reported item, first write a test that fails on the current tree because of "
@@ -136,9 +164,9 @@ FIX_PROMPT = (
     "fix; wording for one that only asked for a comment or message change. Write "
     "dispositions.json even when you reply NO_CHANGES -- one entry per item either reviewer "
     "numbered (already, refused, or wording); an empty dispositions array is only correct "
-    "when both reviews said NO_FINDINGS. Keep existing call signatures working. Run the gate "
-    "named in the spec before finishing, with --basetemp under $TMPDIR. Do not commit; the "
-    "harness commits."
+    "when both reviews said NO_FINDINGS. Keep existing call signatures working."
+    + FIX_GATE_RUN
+    + " Do not commit; the harness commits."
 )
 
 # F15 mission 2 item 2: the fix lane's dispositions.json deliverable schema.
@@ -163,15 +191,56 @@ DISPOSITIONS_SCHEMA: dict = {
 }
 
 
-def write_dispositions_schema(base_dir: Path) -> Path:
+def _three_reviewer_wording(text: str) -> str:
+    """The same substitutions `fix_prompt_with_opus` applies to prompt
+    prose, used also on the dispositions schema description so a
+    `--opus-review` mission does not tell the fixer that Opus's items
+    need no disposition."""
+    return (
+        text.replace(
+            "Two reviewers from other vendors read the change; their reports follow, each "
+            "with its items numbered.",
+            "Three reviewers read the change, two from other vendors and Opus 5 from yours; "
+            "their reports follow, each with its items numbered.",
+        )
+        .replace(
+            '{"lane": "review-gemini" or "review-grok", "index": ',
+            '{"lane": "review-gemini", "review-grok", or "review-opus", "index": ',
+        )
+        .replace("If both reviews say NO_FINDINGS", "If every review says NO_FINDINGS")
+        .replace("either reviewer numbered", "any reviewer numbered")
+        .replace("when both reviews said NO_FINDINGS", "when every review said NO_FINDINGS")
+    )
+
+
+def dispositions_schema(*, opus_review: bool = False) -> dict:
+    """`DISPOSITIONS_SCHEMA`, rewritten for three reviewers when `opus_review`."""
+    description = DISPOSITIONS_SCHEMA["properties"]["dispositions"]["description"]
+    if opus_review:
+        description = _three_reviewer_wording(description)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["dispositions"],
+        "properties": {
+            "dispositions": {
+                "type": "array",
+                "description": description,
+            }
+        },
+    }
+
+
+def write_dispositions_schema(base_dir: Path, *, opus_review: bool = False) -> Path:
     """`dispositions.json`'s schema is data, not a prompt: written beside
     the mission file (like `prompts/<lane>.md`) so `deliverable.schema` --
     always a path -- resolves to something real, whether the mission goes
     through `cmd_shape_a`'s prompt-writing dance (`--inline` skips that, not
-    this) or a salvage follow-on's `emit()`."""
+    this) or a salvage follow-on's `emit()`. `opus_review` applies the same
+    three-reviewer rewrite `fix_prompt_with_opus` does."""
     path = Path(base_dir) / "dispositions.schema.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(DISPOSITIONS_SCHEMA, indent=2) + "\n")
+    path.write_text(json.dumps(dispositions_schema(opus_review=opus_review), indent=2) + "\n")
     return path
 
 # E16: appended to FIX_PROMPT, right after the two review blocks, only when
@@ -215,22 +284,7 @@ def fix_prompt_with_opus(prompt: str) -> str:
     reviewer", "both reviews" reads for three, so the dispositions contract
     names the third lane too."""
     grok_block = "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
-    return (
-        prompt.replace(grok_block, grok_block + FIX_PROMPT_OPUS_BLOCK)
-        .replace(
-            "Two reviewers from other vendors read the change; their reports follow, each "
-            "with its items numbered.",
-            "Three reviewers read the change, two from other vendors and Opus 5 from yours; "
-            "their reports follow, each with its items numbered.",
-        )
-        .replace(
-            '{"lane": "review-gemini" or "review-grok", "index": ',
-            '{"lane": "review-gemini", "review-grok", or "review-opus", "index": ',
-        )
-        .replace("If both reviews say NO_FINDINGS", "If every review says NO_FINDINGS")
-        .replace("either reviewer numbered", "any reviewer numbered")
-        .replace("when both reviews said NO_FINDINGS", "when every review said NO_FINDINGS")
-    )
+    return _three_reviewer_wording(prompt.replace(grok_block, grok_block + FIX_PROMPT_OPUS_BLOCK))
 
 
 class ShapeInvalid(ValueError):
@@ -517,19 +571,29 @@ def gate_preflight(repo: Path, test_command: str, *, timeout: int = GATE_TIMEOUT
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+# Code-and-test sentences in BUILD_PROMPT. A document or data deliverable
+# (F23) has neither call signatures nor tests to game, and DELIVERABLE_BUILD_PARAGRAPH
+# already carries the commit and investigate lines, so `build_prompt` strips
+# this block when `deliverable` is set.
+BUILD_CODE_RULES = (
+    " Keep every existing call signature working; add new parameters as keywords with "
+    "defaults. Do not commit; the harness commits. Do not special-case a test to make it "
+    "pass: a test that passes for the wrong reason is worse than a failing one, and the "
+    "reviewers read every test edit. Investigate before answering: read the code a change "
+    "touches before changing it.\n\n"
+)
+
 BUILD_PROMPT = (
     "Implement the spec below on this branch.\n\n"
     "<gate>\n{gate}\n</gate>\n\n"
     "That is the gate the lead will run on your work, exactly as written. Run it the same "
-    "way, flags included, before you finish: the flags are what make it take under a minute "
-    "on this machine, and a serial run of the same suite takes several times longer and "
-    "proves nothing extra. When the gate is pytest, pass --basetemp pointing to a directory "
-    "under $TMPDIR so nothing is written inside this working tree. Keep every existing call "
-    "signature working; add new parameters as keywords with defaults. Do not commit; the "
-    "harness commits. Do not special-case a test to make it pass: a test that passes for "
-    "the wrong reason is worse than a failing one, and the reviewers read every test edit. "
-    "Investigate before answering: read the code a change touches before changing it.\n\n"
-    "Before you finish, write an evidence map to a file named evidence.json at the "
+    "way, flags included, before you finish. When the gate is a test suite, the flags are "
+    "what make it take under a minute on this machine, and a serial run of the same suite "
+    "takes several times longer and proves nothing extra. When the gate is pytest, pass "
+    "--basetemp pointing to a directory under $TMPDIR so nothing is written inside this "
+    "working tree."
+    + BUILD_CODE_RULES
+    + "Before you finish, write an evidence map to a file named evidence.json at the "
     "repository root: a JSON object {\"items\": [...]}, one entry per spec item in the "
     "spec's own order, each {\"item\": <the item's number or its first words>, \"status\": "
     "\"built\", \"partial\", or \"not_built\", \"files\": [<paths you changed for it>], "
@@ -569,8 +633,9 @@ EVIDENCE_BLOCK = "<evidence>\n{{lanes.build.deliverable}}\n</evidence>\n\n"
 EVIDENCE_REVIEW_NOTE = (
     "The evidence block is the builder's own map from each spec item to the files, tests, "
     "and check behind it. Treat it as a claim: an item whose files or tests are not in the "
-    "change, a check that was not run, or a spec item the map does not name is reportable "
-    "the same as any other item, with the map's entry as the citation. "
+    "change, or a check that was not run, is reportable the same as any other item, with "
+    "the map's entry as the citation. A spec item the map does not name is reportable the "
+    "same way: cite the spec item itself and the map as the thing that omits it. "
 )
 
 
@@ -617,12 +682,14 @@ def write_evidence_schema(base_dir: Path) -> Path:
     return path
 
 
-def write_shape_schemas(base_dir: Path) -> tuple[Path, Path]:
+def write_shape_schemas(base_dir: Path, *, opus_review: bool = False) -> tuple[Path, Path]:
     """Both schema files a Shape A mission's deliverables name, beside the
     mission file: `dispositions.schema.json` (fix lane) and
     `evidence.schema.json` (build lane)."""
     Path(base_dir).mkdir(parents=True, exist_ok=True)
-    return write_dispositions_schema(base_dir), write_evidence_schema(base_dir)
+    return write_dispositions_schema(base_dir, opus_review=opus_review), write_evidence_schema(
+        base_dir
+    )
 
 
 def review_prompt_with_evidence(prompt: str) -> str:
@@ -639,12 +706,20 @@ def review_prompt_with_evidence(prompt: str) -> str:
     )
 
 
+def validator_for_prompt(validator: str, path: str) -> str:
+    """The copy of a validator command that goes into prompt text: `{path}`
+    already replaced with the deliverable, so the model is not told to run
+    `python3 check.py {path}` verbatim."""
+    return validator.replace("{path}", path)
+
+
 def review_prompt_with_deliverable(prompt: str, path: str, validator: str) -> str:
     """A Shape A review prompt for a deliverable mission (F23): the note on
     what the build's deliverable is ahead of the review tail, and no
     evidence block, since the build lane declared the file instead of a
     map."""
-    clause = f", and conductor's validator `{validator}` passed on it" if validator else ""
+    shown = validator_for_prompt(validator, path) if validator else ""
+    clause = f", and conductor's validator `{shown}` passed on it" if shown else ""
     note = DELIVERABLE_REVIEW_NOTE.format(path=path, validator_clause=clause)
     return prompt.replace(
         "Report anything that could cause incorrect behavior",
@@ -655,8 +730,11 @@ def review_prompt_with_deliverable(prompt: str, path: str, validator: str) -> st
 
 def fix_prompt_for_deliverable(prompt: str, path: str, validator: str) -> str:
     """`FIX_PROMPT` (or a variant) for a deliverable mission (F23): the
-    reproduce-gate sentences give way to the file edit, and the gate line
-    stays (the mission's gate is the validator command on that file)."""
+    reproduce-gate sentences give way to the file edit. There is no
+    reproduce gate, so "nothing reproduces" does not apply, and the gate
+    on this lane is a file validator, not pytest, so `--basetemp` does
+    not apply either. The `<gate>` block (item 1) still names the
+    mission's `test` command when there is one."""
     old = (
         "For each reported item, first write a test that fails on the current tree because "
         "of it; then fix only what that test proves. This lane runs under conductor's "
@@ -664,15 +742,56 @@ def fix_prompt_for_deliverable(prompt: str, path: str, validator: str) -> str:
         "passes on the current tree is refused. "
     )
     assert old in prompt
-    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=validator) if validator else ""
+    shown = validator_for_prompt(validator, path) if validator else ""
+    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=shown) if shown else ""
     rewritten = prompt.replace(
         old, DELIVERABLE_FIX_SENTENCES.format(path=path, validator_sentence=sentence), 1
     )
-    return rewritten.replace(
+    rewritten = rewritten.replace(
         "Use fixed for an item you changed code for",
         "Use fixed for an item you edited the file for",
         1,
     )
+    # No reproduce gate on a deliverable (stage: build), and `--basetemp` is
+    # a pytest flag the file validator does not take.
+    rewritten = rewritten.replace(" or nothing reproduces", "")
+    rewritten = rewritten.replace(
+        FIX_GATE_RUN, " Run the gate in the <gate> block before finishing."
+    )
+    return rewritten
+
+
+def with_gate(prompt: str, test: str = "") -> str:
+    """Fill a prompt's `{gate}` from `test`. When there is no command to
+    name, drop the `<gate>` block and every sentence that tells the model
+    to run one, so the prompt does not claim a gate exists."""
+    if test.strip():
+        return prompt.replace("{gate}", test)
+    stripped = (
+        prompt.replace(GATE_BLOCK, "")
+        .replace(GROK_GATE_RUN, "")
+        .replace(ADVERSARIAL_GATE_RUN, "")
+        .replace(FIX_GATE_RUN, "")
+    )
+    return stripped
+
+
+def grok_review_prompt(test: str = "") -> str:
+    """`GROK_REVIEW_PROMPT` with the mission's gate filled in, or with the
+    gate claim removed when `test` is empty."""
+    return with_gate(GROK_REVIEW_PROMPT, test)
+
+
+def adversarial_prompt(test: str = "") -> str:
+    """`ADVERSARIAL_PROMPT` with the mission's gate filled in, or with the
+    gate claim removed when `test` is empty."""
+    return with_gate(ADVERSARIAL_PROMPT, test)
+
+
+def fix_prompt(test: str = "") -> str:
+    """`FIX_PROMPT` with the mission's gate filled in, or with the gate
+    claim removed when `test` is empty."""
+    return with_gate(FIX_PROMPT, test)
 
 
 def build_prompt(test: str, deliverable: str = "", validator: str = "") -> str:
@@ -686,7 +805,8 @@ def build_prompt(test: str, deliverable: str = "", validator: str = "") -> str:
 
     `deliverable` (F23) names the file a document or data build produces: the evidence-map
     paragraph gives way to one naming the file and, when `validator` is set, the command
-    conductor runs on it before and after.
+    conductor runs on it before and after, with `{path}` already substituted so the model
+    can run the same command conductor will.
     """
     prompt = BUILD_PROMPT.replace("{gate}", test)
     if not deliverable:
@@ -694,9 +814,12 @@ def build_prompt(test: str, deliverable: str = "", validator: str = "") -> str:
     start = "Before you finish, write an evidence map"
     end = "The harness keeps evidence.json out of the commit.\n\n"
     assert start in prompt and end in prompt
+    assert BUILD_CODE_RULES in prompt
+    prompt = prompt.replace(BUILD_CODE_RULES, "\n\n", 1)
     head, _, rest = prompt.partition(start)
     _, _, tail = rest.partition(end)
-    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=validator) if validator else ""
+    shown = validator_for_prompt(validator, deliverable) if validator else ""
+    sentence = DELIVERABLE_VALIDATOR_SENTENCE.format(validator=shown) if shown else ""
     paragraph = DELIVERABLE_BUILD_PARAGRAPH.format(path=deliverable, validator_sentence=sentence)
     return head + paragraph + tail
 
@@ -849,13 +972,13 @@ def shape_a(
             "cap_usd": caps.adversarial_cap,
             "test_policy": "allow",
             "commit": f"test({scope}): adversarial check for {mission_name}",
-            "prompt": ADVERSARIAL_PROMPT,
+            "prompt": adversarial_prompt(test),
         }
         if caps.cap_grace_usd:
             adversarial_lane["cap_grace_usd"] = caps.cap_grace_usd
-    fix_prompt = FIX_PROMPT
+    fix_text = fix_prompt(test)
     if adversarial:
-        fix_prompt = fix_prompt.replace(
+        fix_text = fix_text.replace(
             "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n",
             "<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\n"
             + FIX_PROMPT_ADVERSARIAL_BLOCK,
@@ -871,9 +994,9 @@ def shape_a(
     if opus_review:
         # After the adversarial rewrite, so the Opus block lands between the
         # Grok block and the adversarial one: reviews first, then the test.
-        fix_prompt = fix_prompt_with_opus(fix_prompt)
+        fix_text = fix_prompt_with_opus(fix_text)
     if deliverable:
-        fix_prompt = fix_prompt_for_deliverable(fix_prompt, deliverable, deliverable_validator)
+        fix_text = fix_prompt_for_deliverable(fix_text, deliverable, deliverable_validator)
 
     def review_prompt(prompt: str) -> str:
         if deliverable:
@@ -890,7 +1013,7 @@ def shape_a(
         "timeout": 1200,
         "cap_usd": caps.grok_cap,
         "prompt": review_prompt(
-            GROK_REVIEW_PROMPT if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT
+            grok_review_prompt(test) if caps.grok_runs_suite else GROK_READ_ONLY_PROMPT
         ),
     }
     if caps.cap_grace_usd:
@@ -939,7 +1062,7 @@ def shape_a(
             "schema": "dispositions.schema.json",
             "commit": False,
         },
-        "prompt": fix_prompt,
+        "prompt": fix_text,
     }
     if caps.cap_grace_usd:
         fix["cap_grace_usd"] = caps.cap_grace_usd
@@ -1053,7 +1176,8 @@ def shape_a_followon(
         f"This change is already committed at {salvage_sha}, the HEAD of the worktree named "
         "as this mission's cwd: conductor's own clean gate rejected the original build "
         "lane's run, and the lead read the diff, gated it by hand, and committed it. "
-        f"Review or fix the change as it stands; the fix lane lands on branch '{branch}'."
+        "The reviews judge the change as it stands; the fix lane, if it edits anything, "
+        f"lands on branch '{branch}'."
     )
     mission_prompt = f"{spec_prompt.rstrip()}\n\n{salvage_note}" if spec_prompt else salvage_note
     change_block = (
@@ -1119,7 +1243,7 @@ def shape_a_followon(
             "commit": False,
         },
         "prompt": followon_fix_prompt(
-            fix_prompt_with_opus(FIX_PROMPT) if opus_review else FIX_PROMPT
+            fix_prompt_with_opus(fix_prompt(test)) if opus_review else fix_prompt(test)
         ),
     }
     if caps.cap_grace_usd:

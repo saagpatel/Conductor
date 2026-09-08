@@ -115,8 +115,9 @@ def checklist_contract(criteria: list[Criterion]) -> str:
         f"{numbered}\n\n"
         "Your final answer must be exactly one JSON object matching this schema:\n"
         f"{schema}\n"
-        "Return one criteria entry per checklist item in the given order. Each evidence value "
-        "must cite a file and line or a hunk from the diff, or say 'no evidence'. Set verdict "
+        "Return one criteria entry per checklist item in the given order. An ok: true "
+        "criterion's evidence must cite a file and line or a hunk from the diff; 'no "
+        "evidence' is only a correct value for a criterion reported as not ok. Set verdict "
         "to pass only when every criterion is ok. Write that object once and end there: no "
         "example, no restatement of the schema, and no second copy of the object after it."
     )
@@ -126,6 +127,10 @@ def checklist_contract(criteria: list[Criterion]) -> str:
 # tell a verdict from a schema restatement or an example object pasted after
 # it, both of which a model routinely writes below its real answer.
 _VERDICT_KEYS = frozenset({"verdict", "criteria", "summary"})
+# The two keys a ranking judge must return. `_parse_rank_answer` passes
+# these so two different ranking objects are refused the same way two
+# different verdict objects are; `scores` is optional and not a marker.
+_RANK_KEYS = frozenset({"strongest", "reason"})
 
 
 def _embedded_objects(text: str) -> list[dict]:
@@ -147,30 +152,35 @@ def _embedded_objects(text: str) -> list[dict]:
     return objects
 
 
-def _answer_object(text: str) -> tuple[dict | None, str | None]:
+def _answer_object(
+    text: str, *, keys: frozenset[str] = _VERDICT_KEYS
+) -> tuple[dict | None, str | None]:
     try:
         raw = json.loads(text)
     except json.JSONDecodeError:
         objects = _embedded_objects(text)
         if objects:
-            # The last object that looks like a verdict, not simply the last
+            # The last object that carries `keys`, not simply the last
             # object. A model that narrates, answers, and then restates the
             # schema or pastes a filled-in example had that example counted
             # as its judgment (2026-09-08 review). An answer with no
-            # verdict-shaped object at all still falls back to the last one,
-            # so a malformed verdict is still reported as malformed rather
-            # than as "no JSON at all".
-            shaped = [obj for obj in objects if _VERDICT_KEYS <= set(obj)]
-            # Two verdict-shaped objects that disagree are not a parse
-            # problem conductor can rule on: picking the first or the last
-            # is a coin flip dressed as a rule, and the answer was paid for
-            # either way. Refuse and say so. Identical repeats (a model that
+            # matching object at all still falls back to the last one, so a
+            # malformed answer is still reported as malformed rather than as
+            # "no JSON at all". `keys` defaults to the checklist verdict
+            # shape; a ranking judge passes `_RANK_KEYS` so the same rule
+            # covers `{"strongest", "reason"}`.
+            shaped = [obj for obj in objects if keys <= set(obj)]
+            # Two matching objects that disagree are not a parse problem
+            # conductor can rule on: picking the first or the last is a coin
+            # flip dressed as a rule, and the answer was paid for either
+            # way. Refuse and say so. Identical repeats (a model that
             # echoes its own answer) still resolve, so nothing that passes
             # today starts failing.
             distinct = {json.dumps(obj, sort_keys=True, default=str) for obj in shaped}
             if len(distinct) > 1:
+                kind = "verdict" if keys == _VERDICT_KEYS else "ranking"
                 return None, (
-                    f"the answer carries {len(distinct)} different verdict objects; "
+                    f"the answer carries {len(distinct)} different {kind} objects; "
                     "conductor cannot tell which is the judgment"
                 )
             return (shaped or objects)[-1], None

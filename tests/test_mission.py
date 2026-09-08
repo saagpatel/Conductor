@@ -16,6 +16,7 @@ import pytest
 
 from conductor import runner as runner_mod
 from conductor.mission import (
+    DEFAULT_COLLATE_INSTRUCTIONS,
     Ledger,
     MissionInvalid,
     load_mission,
@@ -596,6 +597,23 @@ def test_write_lanes_are_isolated_and_the_checkout_stays_untouched(
     assert "a.txt" in git_out(repo, "ls-tree", "--name-only", branches[0])
     assert "b.txt" in git_out(repo, "ls-tree", "--name-only", branches[1])
     assert "a.txt" not in git_out(repo, "ls-tree", "--name-only", "main")
+
+
+def test_default_collate_instructions_allow_a_negative_result_and_live_in_the_reply():
+    """The default prose collate must not demand a winner, must say the
+    whole answer is this reply, and must treat listing order as arbitrary.
+    The old text failed all three (AGENTS.md reviewer-prompt rules 1 and 6).
+    """
+    text = DEFAULT_COLLATE_INSTRUCTIONS
+    assert "agree" in text and "disagree" in text
+    assert "strongest" in text
+    assert "either answer is complete" in text.lower()
+    assert "equivalent" in text.lower()
+    assert "none is usable" in text
+    assert "put the entire comparison in this reply" in text.lower()
+    assert "the order the lanes are listed in carries no meaning" in text.lower()
+    for banned in ("at least", "find the", "hunt"):
+        assert banned not in text.lower()
 
 
 def test_collate_sees_every_lane_answer_and_its_cost_counts(repo, home, monkeypatch, tmp_path):
