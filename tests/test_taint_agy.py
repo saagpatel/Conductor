@@ -1329,6 +1329,39 @@ def test_digest_check_that_did_not_run_says_so():
     assert receipt["hook_files_loaded"] == 1
 
 
+def test_taint_agy_preflight_reaps_a_killed_process_with_a_timeout(tmp_path, monkeypatch):
+    """`_taint_agy_preflight` used an unbounded `proc.wait()` after
+    `_kill_live_group`. `_reap_killed` exists so that hang cannot stall the
+    runner."""
+
+    class Zombie:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                raise AssertionError("unbounded wait after kill")
+            raise subprocess.TimeoutExpired(cmd="zombie", timeout=timeout)
+
+    reaped: list[object] = []
+    real_reap = runner_mod._reap_killed
+
+    def spy(proc, **kwargs):
+        reaped.append(proc)
+        return real_reap(proc, **kwargs)
+
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *a, **k: Zombie())
+    monkeypatch.setattr(runner_mod, "_register_live_group", lambda pid: None)
+    monkeypatch.setattr(runner_mod, "_kill_live_group", lambda pid: None)
+    monkeypatch.setattr(runner_mod, "_reap_killed", spy)
+    monkeypatch.setattr(runner_mod, "_TAINT_AGY_PREFLIGHT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(runner_mod, "GATE_POLL_S", 0.02)
+    started = time.monotonic()
+    _receipt, problem = runner_mod._taint_agy_preflight(str(tmp_path), tmp_path)
+    assert time.monotonic() - started < 2
+    assert problem is not None
+    assert reaped and reaped[0] is not None
+
+
 def test_write_taint_agy_hooks_fails_when_a_file_cannot_be_hashed(repo, home, monkeypatch):
     from conductor import worktrees
     from conductor.runner import _write_taint_agy_hooks

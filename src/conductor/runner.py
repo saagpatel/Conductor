@@ -1215,6 +1215,29 @@ def _gate_passed(tests: dict | None, surface: dict | None) -> bool:
     )
 
 
+def _already_failed_dispatch(
+    timed_out: bool,
+    error: str | None,
+    exit_code: int | None,
+    output: FleetOutput,
+) -> bool:
+    """True when later gate-length subprocesses must not run.
+
+    The validator, the reproduce receipt, and the lane's own tests each
+    used to spell this as `timed_out or error or exit_code != 0 or
+    output.error`. A truncated stream is the same already-failed dispatch:
+    it says so with `status == INCOMPLETE` rather than an `error`, often
+    with exit 0, and `Result.failure` already reads that as not-ok.
+    """
+    return bool(
+        timed_out
+        or error is not None
+        or exit_code != 0
+        or output.error
+        or output.status == INCOMPLETE
+    )
+
+
 def _gate_summary(
     tests_dict: dict | None, surface_state: dict | None, test_command: str | None
 ) -> dict:
@@ -1584,7 +1607,7 @@ def _taint_agy_preflight(
                     break
         finally:
             _kill_live_group(proc.pid)
-            proc.wait()
+            _reap_killed(proc)
         out.seek(0)
         stdout_text = out.read()
     if timed_out:
@@ -2862,6 +2885,56 @@ def dispatch(
     usage: Usage | None = None
     output: FleetOutput | None = None
     breaker_state: dict | None = None
+    # Visible to the crash handlers below: an exception between Popen and
+    # `post_wait = True` used to leave these unbound, skip the receipt, and
+    # never kill the live group.
+    proc: subprocess.Popen | None = None
+    commit: CommitOutcome | None = None
+    duration = 0.0
+    started = time.monotonic()
+    exit_code: int | None = None
+    timed_out = False
+    capped = False
+    interrupted = False
+    cancelled = False
+    watcher: Watcher | None = None
+    budget: Budget | None = None
+    breaker_reason: str | None = None
+
+    def _crash_receipt(exc: BaseException) -> Result:
+        if proc is not None:
+            _kill_live_group(proc.pid)
+            _reap_killed(proc)
+        fail_duration = duration if post_wait else time.monotonic() - started
+        return _parse_failure_result(
+            exc,
+            run_id=run_id,
+            spec=spec,
+            model_id=model_id,
+            timeout=timeout,
+            run_dir=run_dir,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            duration=fail_duration,
+            watcher=watcher,
+            usage=usage,
+            budget=budget,
+            iso=iso,
+            lane_env=_lane_env(),
+            lane=lane,
+            mission=mission,
+            fleet_version=fleet_version,
+            prompt_versions=prompt_versions,
+            killed=capped or breaker_reason is not None,
+            interrupted=interrupted,
+            cancelled=cancelled,
+            breaker=breaker_state,
+            fleet_status=None if output is None else output.status,
+            commit=commit,
+        )
+
     try:
         before = GitState.capture(spec.cwd)
         # Settings digest (third drill pass, 2026-09-07):
@@ -3013,10 +3086,15 @@ def dispatch(
                 elif interrupted:
                     error = "interrupted: stop requested; process group killed"
                 elif capped:
-                    # over_cap saw a figure
+                    # over_cap saw a figure. That reading is up to POLL_S
+                    # stale and may exclude a line the watcher's _Tail was
+                    # still holding; the receipt's ledger figure comes from
+                    # a later parse of stdout.log. Name this as the
+                    # watcher's trigger reading, not as the run's cost.
                     assert watcher is not None and watcher.usage is not None
                     error = (
-                        f"budget cap hit: ${watcher.usage.cost_usd:.4f} estimated against a "
+                        f"budget cap hit: ${watcher.usage.cost_usd:.4f} observed by the "
+                        f"watcher when it pulled the trigger against a "
                         f"${spec.cap_usd:.4f} cap; process group killed"
                     )
                 elif breaker_reason is not None:
@@ -3224,7 +3302,8 @@ def dispatch(
         # honored immediately instead of racing two more waits for it.
         validator_state: dict | None = None
         validator_error: str | None = None
-        if not (timed_out or error is not None or exit_code != 0 or output.error):
+        already_failed = _already_failed_dispatch(timed_out, error, exit_code, output)
+        if not already_failed:
             validator_state, validator_error = _check_deliverable_validator(
                 spec, deliverable_state, deliverable_sha, before, run_dir, env
             )
@@ -3242,7 +3321,7 @@ def dispatch(
             timed_out=timed_out,
             error=error,
             exit_code=exit_code,
-            fleet_errored=bool(output.error),
+            fleet_errored=already_failed,
             home=base,
             run_id=run_id,
             env=env,
@@ -3382,7 +3461,7 @@ def dispatch(
         # at load), so the clean-gate block below is already skipped too.
         if (
             test_command
-            and not timed_out
+            and not already_failed
             and error is None
             and spec.stage != "adversarial"
             and read_gate_skip is None
@@ -3443,15 +3522,27 @@ def dispatch(
                             + (clean_gate.get("tail") or "")
                         )
 
-        if commit and commit.committed and not _gate_passed(
-            tests.to_dict() if tests else None, surface_state
+        clean = (surface_state or {}).get("clean_gate") or {}
+        # `_gate_passed` is True when the counted gate did not run: that
+        # means "not failed", which commit-blocking still uses (adversarial
+        # lanes skip both gates by construction). Policy `clean` is
+        # different: an `infra_error` means the transplant never ran the
+        # gate command (`ran` may be False, so `_gate_passed` falls back to
+        # the own tests that already passed), and we must not land work
+        # that gate could not verify. Changing `_gate_passed` itself would
+        # make Result.failure and `_gate_summary` treat "nothing ran" as a
+        # failure, which is the opposite of what those callers need.
+        if commit and commit.committed and (
+            not _gate_passed(
+                tests.to_dict() if tests else None, surface_state
+            )
+            or clean.get("infra_error")
         ):
             # A branch must never carry a commit that failed whichever gate
             # counts; the work stays staged in the tree for the kept worktree.
             # An infrastructure failure is not a failed gate: `uncommit`'s
             # default `why="gate failed"` is the lie that docstring exists
             # to prevent.
-            clean = (surface_state or {}).get("clean_gate") or {}
             why = "clean gate could not run" if clean.get("infra_error") else "gate failed"
             commit = uncommit(spec.cwd, commit, before.head, why=why)
         deliverable_failed = bool(deliverable_state) and deliverable_state.get("ok") is False
@@ -3696,82 +3787,28 @@ def dispatch(
         if iso is not None:
             worktrees.release(iso)
         _unlink_exclude_file_after_release(include_exclude_file, iso)
-        if not post_wait:
-            # Nothing was paid for yet, or the failure is conductor's own
-            # setup: unchanged, it propagates.
-            raise
-        # D9: the fleet ran and the money is spent. What raised is conductor
-        # reading its output -- a bare NaN in a usage figure, a verdict field
-        # that is a list, a deliverable schema that is not an object. Without
-        # a receipt here the run directory holds only stdout.log, which
-        # neither `spend` nor `report` can see, so the spend goes missing and
-        # the mission records "lane crashed" with no ledger entry. Write what
-        # is known instead, and let the ordinary failure path judge it.
-        return _parse_failure_result(
-            exc,
-            run_id=run_id,
-            spec=spec,
-            model_id=model_id,
-            timeout=timeout,
-            run_dir=run_dir,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            exit_code=exit_code,
-            timed_out=timed_out,
-            duration=duration,
-            watcher=watcher,
-            usage=usage,
-            budget=budget,
-            iso=iso,
-            lane_env=_lane_env(),
-            lane=lane,
-            mission=mission,
-            fleet_version=fleet_version,
-            prompt_versions=prompt_versions,
-            killed=capped or breaker_reason is not None,
-            interrupted=interrupted,
-            cancelled=cancelled,
-            breaker=breaker_state,
-            fleet_status=None if output is None else output.status,
-        )
+        if proc is not None or post_wait:
+            # Spawned: kill a live group (no-op if `_wait` already reaped it)
+            # and write a receipt on either side of `post_wait`. A crash
+            # between Popen and `post_wait = True` used to propagate with
+            # the fleet still running and no result.json.
+            return _crash_receipt(exc)
+        # Nothing was paid for yet, or the failure is conductor's own
+        # setup: unchanged, it propagates.
+        raise
     except BaseException as exc:
         ports_mod.release(base, claimed_ports)
         if iso is not None:
             worktrees.release(iso)
         _unlink_exclude_file_after_release(include_exclude_file, iso)
-        if post_wait:
-            # Paid: the Exception path already receipts via `_parse_failure_result`.
-            # KeyboardInterrupt / SystemExit must too, then still propagate.
-            # Guarded, because this is the last-resort receipt: a failure to
-            # write it must not replace the interrupt that got us here.
+        if proc is not None or post_wait:
+            # Paid or spawned: the Exception path already receipts via
+            # `_crash_receipt`. KeyboardInterrupt / SystemExit must too,
+            # then still propagate. Guarded, because this is the last-resort
+            # receipt: a failure to write it must not replace the interrupt
+            # that got us here.
             try:
-                _parse_failure_result(
-                    exc,
-                    run_id=run_id,
-                    spec=spec,
-                    model_id=model_id,
-                    timeout=timeout,
-                    run_dir=run_dir,
-                    stdout_path=stdout_path,
-                    stderr_path=stderr_path,
-                    exit_code=exit_code,
-                    timed_out=timed_out,
-                    duration=duration,
-                    watcher=watcher,
-                    usage=usage,
-                    budget=budget,
-                    iso=iso,
-                    lane_env=_lane_env(),
-                    lane=lane,
-                    mission=mission,
-                    fleet_version=fleet_version,
-                    prompt_versions=prompt_versions,
-                    killed=capped or breaker_reason is not None,
-                    interrupted=interrupted,
-                    cancelled=cancelled,
-                    breaker=breaker_state,
-                    fleet_status=None if output is None else output.status,
-                )
+                _crash_receipt(exc)
             except Exception:  # noqa: BLE001 - the interrupt is what matters
                 pass
         raise
@@ -3923,11 +3960,16 @@ def dispatch(
         except (OSError, RuntimeError) as exc:
             # RuntimeError: the key helper lost a first-use race and never saw
             # a complete key. Either way the dispatch is done; only its
-            # attestation is missing, and the receipt says so.
+            # attestation is missing, and the receipt says so -- as a note,
+            # not as `error`, which `Result.failure` would treat as the run
+            # itself failing.
             reason = f"attestation not written: {exc}"
             print(reason, file=sys.stderr)
-            if result.error is None:
-                result.error = reason
+            notes = result.git_verdict.setdefault("notes", [])
+            if not isinstance(notes, list):
+                notes = [notes]
+                result.git_verdict["notes"] = notes
+            notes.append(reason)
     (run_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
     return result
 
@@ -4220,6 +4262,7 @@ def _parse_failure_result(
     cancelled: bool = False,
     breaker: dict | None = None,
     fleet_status: str | None = None,
+    commit: CommitOutcome | dict | None = None,
 ) -> Result:
     """D9: a receipt for a run that was paid for and then failed while its
     own output was being read.
@@ -4238,6 +4281,11 @@ def _parse_failure_result(
     settle sees the same kill state `_wait` produced, so `kind` parse
     is one more thing that happened to the run, not a replacement for
     the cap/timeout/interrupt the process actually died of.
+
+    `commit` is a keyword with a default so every existing caller keeps
+    working. A crash after `commit_work` must still name the sha that is
+    on the branch -- silently omitting it is the branch and the receipt
+    disagreeing; silently undoing it would destroy work that may be fine.
     """
     error = f"{PARSE_FAILURE_PREFIX}{type(exc).__name__}: {exc}"
     try:
@@ -4248,6 +4296,13 @@ def _parse_failure_result(
         pass
     usage = _priced_usage(usage, watcher, model_id)
     notes = [error, "receipt written after the run; the tree was not judged"]
+    commit_dict: dict | None = None
+    if isinstance(commit, CommitOutcome):
+        commit_dict = commit.to_dict()
+    elif isinstance(commit, dict):
+        commit_dict = commit
+    if commit_dict and commit_dict.get("committed"):
+        notes.append("commit landed and was not judged")
     if usage is None or usage.cost_usd is None:
         if not (killed or interrupted or cancelled or timed_out):
             notes.append(
@@ -4286,6 +4341,7 @@ def _parse_failure_result(
         budget=budget.to_dict() if budget is not None else None,
         breaker=breaker,
         fleet_status=fleet_status,
+        commit=commit_dict,
         error=error,
         interrupted=interrupted,
         cancelled=cancelled,

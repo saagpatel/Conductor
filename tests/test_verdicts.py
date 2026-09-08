@@ -100,6 +100,18 @@ def test_checklist_contract_requires_a_citation_for_an_ok_criterion():
     assert "or say 'no evidence'" not in contract
 
 
+def test_checklist_contract_requires_the_verdict_object_in_the_reply():
+    """Rule 6: parse_verdict reads only the answer text. 'Write that object
+    once and end there' forbids a second copy; it does not say the object
+    must be in the reply. A model that writes the object to a file and
+    answers 'verdict written' fails as 'answer contains no valid JSON
+    object'."""
+    contract = checklist_contract(CRITERIA)
+    assert "Put the entire verdict in this reply" in contract
+    assert "Write that object once and end there" in contract
+    assert "no second copy of the object after it" in contract
+
+
 def test_answer_object_refuses_two_different_ranking_objects():
     """A rank judge's `{"strongest", "reason"}` objects are never
     verdict-shaped, so without ranking keys the last object won silently."""

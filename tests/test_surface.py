@@ -489,3 +489,112 @@ def test_surface_ignores_bytecode_and_tool_caches(repo: Path):
     surface = capture_surface(repo)
     assert "tests/test_real.py" in surface.files
     assert not any("__pycache__" in name or ".pytest_cache" in name for name in surface.files)
+
+
+def test_clean_gate_infra_error_does_not_land_an_unverified_commit(
+    repo, home, fake_fleet, monkeypatch
+):
+    """Policy `clean` does not land work its clean gate could not verify.
+
+    `_gate_passed` treats a clean gate that did not run (`ran: False` on an
+    `infra_error`) as nothing-to-fail and falls back to the own tests, which
+    already passed -- so the uncommit that keys on `not _gate_passed` used
+    to skip, leaving the unverified commit on the branch under a receipt
+    that says the run failed.
+    """
+    _seed_conftest(repo)
+    base = _git(repo, "rev-parse", "HEAD")
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            "printf '# fleet override\\n' >> tests/conftest.py; echo work > app.txt",
+        ]
+    )
+
+    def boom(cwd, **kw):
+        return {
+            "ran": False,
+            "exit_code": None,
+            "timed_out": False,
+            "interrupted": False,
+            "tail": "git worktree add failed: boom",
+            "worktree": str(kw["worktree"]),
+            "patch_bytes": 0,
+            "infra_error": True,
+        }
+
+    monkeypatch.setattr(runner_mod, "_clean_gate", boom)
+    result = dispatch(
+        _spec(repo),
+        home=home,
+        test_command="true",
+        commit_message="feat: attempted",
+    )
+    assert result.ok is False
+    assert result.failure().startswith("clean gate could not run:")
+    assert result.test_surface["clean_gate"]["infra_error"] is True
+    assert result.commit is not None
+    assert result.commit["committed"] is False
+    assert "clean gate could not run" in result.commit["reason"]
+    assert "gate failed" not in result.commit["reason"]
+    assert _git(repo, "rev-parse", "HEAD") == base
+
+
+def test_a_truncated_stream_does_not_spend_the_validator_reproduce_or_own_gate(
+    repo, home, fake_fleet, monkeypatch
+):
+    """A stream with no terminal event is an already-failed dispatch: the
+    validator, the reproduce transplant, and the lane's own tests must not
+    run."""
+    gate_marker = repo / "own-gate-ran"
+    val_marker = repo / "validator-ran"
+    reproduce_calls: list[object] = []
+    real_reproduce = runner_mod._reproduce_gate
+
+    def spy(*args, **kwargs):
+        reproduce_calls.append(1)
+        return real_reproduce(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "_reproduce_gate", spy)
+    step = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 1,
+                "state": "DONE",
+                "usage": {"input_tokens": 900},
+            },
+        }
+    )
+    fake_fleet(
+        [
+            "sh",
+            "-c",
+            f"printf '%s\\n' {json.dumps(step)}; echo work > new.txt; echo payload > doc.txt",
+        ]
+    )
+    result = dispatch(
+        _spec(
+            repo,
+            fleet="antigravity",
+            stage="fix",
+            deliverable={
+                "path": "doc.txt",
+                "validator": f"echo ran > {val_marker}",
+            },
+        ),
+        home=home,
+        test_command=f"echo ran > {gate_marker}",
+    )
+    assert result.failure() == "fleet stream ended without a terminal event"
+    assert result.ok is False
+    assert result.tests is None
+    assert not gate_marker.exists()
+    assert not val_marker.exists()
+    assert reproduce_calls == []
+    assert result.reproduce["ran"] is False
+    assert result.reproduce["verdict"] == "skipped"
+    assert result.reproduce["tail"] == "dispatch did not complete cleanly"
+    assert (result.deliverable or {}).get("validator") is None
+
