@@ -181,6 +181,41 @@ def file_sha256(path: str | Path) -> str | None:
         return None
 
 
+def _gate_passed_from_result(tests: dict | None, surface: dict | None) -> bool:
+    """Mirror of runner._gate_passed, kept here so attest does not import runner."""
+    clean = (surface or {}).get("clean_gate") or {}
+    counted = clean if clean.get("ran") else tests
+    if not counted or not counted.get("ran"):
+        return True
+    return (
+        counted.get("exit_code") == 0
+        and not counted.get("timed_out")
+        and not counted.get("interrupted")
+    )
+
+
+def _gate_summary_from_result(result_data: dict, command: str | None) -> dict:
+    """Rebuild the signed `gate` block from result.json's tests/test_surface."""
+    tests_dict = result_data.get("tests")
+    surface_state = result_data.get("test_surface")
+    clean = (surface_state or {}).get("clean_gate") or {}
+    if clean.get("ran"):
+        counted, label = clean, "clean"
+    elif isinstance(tests_dict, dict) and tests_dict.get("ran"):
+        counted, label = tests_dict, "own"
+    else:
+        counted, label = None, "none"
+    return {
+        "command": command,
+        "counted": label,
+        "exit_code": counted.get("exit_code") if isinstance(counted, dict) else None,
+        "passed": _gate_passed_from_result(
+            tests_dict if isinstance(tests_dict, dict) else None,
+            surface_state if isinstance(surface_state, dict) else None,
+        ),
+    }
+
+
 def verify_run_attestation(
     home: Path, run_id: str, link_statement: dict, key: bytes
 ) -> tuple[list[str], dict | None]:
@@ -192,6 +227,13 @@ def verify_run_attestation(
     check against (a mission link); an empty dict skips just that one check,
     so the same function verifies a run's attestation standalone (E13's
     export, for a run id no link names).
+
+    Fields the statement carries are compared against result.json. An older
+    attestation that does not name `taint_enforcement` or `settings` is not
+    failed for their absence -- those keys were added after the original
+    statement shape, and a field the statement does not carry is not
+    compared. `gate` and `reproduce_verdict` have always been signed; they
+    are compared whenever present.
 
     Returns the problems found and the run's own attestation `taint` field
     (D2), so a caller can show it whether or not the run verifies."""
@@ -243,6 +285,25 @@ def verify_run_attestation(
     expected_digest = file_sha256(run_dir / "diff.patch")
     if statement.get("source_diff_sha256") != expected_digest:
         problems.append(f"run '{run_id}': attestation source_diff_sha256 disagrees with diff.patch")
+    if "taint_enforcement" in statement and statement.get("taint_enforcement") != result_data.get(
+        "taint_enforcement"
+    ):
+        problems.append(
+            f"run '{run_id}': attestation taint_enforcement disagrees with result.json"
+        )
+    if "settings" in statement and statement.get("settings") != result_data.get("settings"):
+        problems.append(f"run '{run_id}': attestation settings disagrees with result.json")
+    if "gate" in statement:
+        signed_gate = statement.get("gate")
+        command = signed_gate.get("command") if isinstance(signed_gate, dict) else None
+        if signed_gate != _gate_summary_from_result(result_data, command):
+            problems.append(f"run '{run_id}': attestation gate disagrees with result.json")
+    if "reproduce_verdict" in statement:
+        actual_reproduce = (result_data.get("reproduce") or {}).get("verdict")
+        if statement.get("reproduce_verdict") != actual_reproduce:
+            problems.append(
+                f"run '{run_id}': attestation reproduce_verdict disagrees with result.json"
+            )
     return problems, taint
 
 

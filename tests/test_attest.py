@@ -867,3 +867,99 @@ def test_cli_attest_handles_unreadable_diff_patch_as_verification_problem(
     finally:
         diff_path.chmod(0o600)
 
+
+def test_signed_statement_binds_taint_enforcement_and_settings(repo, home, fake_fleet):
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    assert result.ok is True
+    envelope = json.loads(Path(result.attestation_path).read_text())
+    key = attest.receipt_key(home)
+    statement, reason = attest.verify(envelope, key)
+    assert reason is None
+    result_data = json.loads((Path(result.run_dir) / "result.json").read_text())
+    assert "taint_enforcement" in statement
+    assert "settings" in statement
+    assert statement["taint_enforcement"] == result_data["taint_enforcement"]
+    assert statement["settings"] == result_data["settings"]
+    problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
+    assert problems == []
+
+
+def test_flipping_result_json_taint_enforcement_fails_verify(repo, home, fake_fleet):
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    result_path = Path(result.run_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    data["taint_enforcement"] = {"hooks_modified": ["forged"]}
+    result_path.write_text(json.dumps(data))
+    key = attest.receipt_key(home)
+    problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
+    assert any("taint_enforcement disagrees with result.json" in p for p in problems)
+
+
+def test_flipping_result_json_settings_fails_verify(repo, home, fake_fleet):
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    result_path = Path(result.run_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    data["settings"] = {"checked": True, "modified": [".claude/settings.json"]}
+    result_path.write_text(json.dumps(data))
+    key = attest.receipt_key(home)
+    problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
+    assert any("settings disagrees with result.json" in p for p in problems)
+
+
+def test_flipping_result_json_gate_fails_verify(repo, home, fake_fleet):
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    result_path = Path(result.run_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    tests = dict(data["tests"])
+    tests["exit_code"] = 1
+    data["tests"] = tests
+    result_path.write_text(json.dumps(data))
+    key = attest.receipt_key(home)
+    problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
+    assert any("gate disagrees with result.json" in p for p in problems)
+
+
+def test_older_attestation_without_taint_enforcement_still_verifies(repo, home, fake_fleet):
+    """A statement on disk from before these fields were signed is not
+    failed for their absence; only the fields it carries are compared."""
+    fake_fleet(
+        ["sh", "-c", "echo work > w.txt && git add -A && git commit -qm 'fleet work'"]
+    )
+    result = dispatch(
+        spec_for(repo, mode="write"), home=home, isolate=True, test_command="true"
+    )
+    key = attest.receipt_key(home)
+    envelope = json.loads(Path(result.attestation_path).read_text())
+    statement, reason = attest.verify(envelope, key)
+    assert reason is None
+    statement.pop("taint_enforcement")
+    statement.pop("settings")
+    Path(result.attestation_path).write_text(json.dumps(attest.sign(statement, key), indent=2))
+    result_path = Path(result.run_dir) / "result.json"
+    data = json.loads(result_path.read_text())
+    data["taint_enforcement"] = {"forged": True}
+    data["settings"] = {"checked": True, "modified": ["x"]}
+    result_path.write_text(json.dumps(data))
+    problems, _ = attest.verify_run_attestation(home, result.run_id, {}, key)
+    assert not any("taint_enforcement" in p or "settings disagrees" in p for p in problems)
+
