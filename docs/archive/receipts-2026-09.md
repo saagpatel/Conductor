@@ -2979,6 +2979,11 @@ only heuristic secret patterns use masking. Two path regressions and the report
 single-read regression fail behaviorally against 0.103.0.
 
 Validation: ruff exit 0; full parallel gate 2,201 passed on Python 3.14.7.
-The next step in this same task is the bounded real-work
-review/resume exercise with Gemini 3.8 Flash and Grok 4.6. No Claude/OpenAI lane,
-remote, push, or publication is authorized or used.
+The real-work exercise subsequently paused after Gemini's review and resumed into
+2,201 passing tests on Python 3.12.13. Final CLI readback kept both lanes, added no
+dispatches, and preserved every run-file digest. Conductor recorded $0.788750
+estimated for the exercise, including one breaker-limited failed review. Grok's
+source review returned no findings with a blocked range-diff read; Gemini's single
+claim was refuted on current code. See the [completion record](../review/2026-09-08-consolidation.md)
+for receipts, limitations, and retained evidence. No Claude/OpenAI lane, remote,
+push, or publication was used.
