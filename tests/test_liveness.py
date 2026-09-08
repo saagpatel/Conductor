@@ -338,6 +338,25 @@ def test_conductor_runs_reports_running_silent_and_incomplete(home, monkeypatch,
             {
                 "at": silent_at,
                 "elapsed_s": 120.0,
+                "pid": os.getpid(),
+                "stdout_bytes": 40,
+                "spend_usd": None,
+            }
+        )
+    )
+
+    # 2026-09-08: `status` used to come from the heartbeat age alone, so a
+    # run whose process was gone read as `running` for LIVENESS_STALE_S and,
+    # if its `at` was missing or malformed, forever. The pid decides first
+    # now, so a dead pid is its own state whatever the heartbeat says --
+    # which is why the silent fixture above carries a live pid.
+    dead_dir = runs_dir / "20260905T004500Z-dead"
+    dead_dir.mkdir()
+    (dead_dir / "liveness.json").write_text(
+        json.dumps(
+            {
+                "at": fresh_at,
+                "elapsed_s": 60.0,
                 "pid": 9999999,
                 "stdout_bytes": 40,
                 "spend_usd": None,
@@ -395,12 +414,18 @@ def test_conductor_runs_reports_running_silent_and_incomplete(home, monkeypatch,
     assert silent_row["status"] == "silent"
     assert silent_row["heartbeat_age_s"] >= LIVENESS_STALE_S
     assert silent_row["elapsed_s"] == 120.0
-    assert silent_row["pid"] == 9999999
-    assert silent_row["pid_alive"] is False
+    assert silent_row["pid"] == os.getpid()
+    assert silent_row["pid_alive"] is True
     assert silent_row["spend_usd"] is None
     assert silent_row["tool_calls"] is None
     assert silent_row["last_output_age_s"] is None
     assert silent_row["last_tool_call_age_s"] is None
+
+    # A fresh heartbeat does not make a gone process running.
+    dead_row = by_id[dead_dir.name]
+    assert dead_row["status"] == "dead"
+    assert dead_row["pid_alive"] is False
+    assert dead_row["heartbeat_age_s"] < 5.0
 
     incomplete_row = by_id[incomplete_dir.name]
     assert incomplete_row == {"run_id": incomplete_dir.name, "status": "incomplete"}
