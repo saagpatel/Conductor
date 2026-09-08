@@ -156,6 +156,22 @@ def _branch_disposition(repo: Path, name: str, tip: str) -> tuple[str, str, int 
     return "keep", "unmerged commits", count
 
 
+def _unmerged_branch_reason(repo: Path, branch: str) -> str:
+    """Why this worktree's branch is still the only copy of its work, or "".
+
+    A worktree with no branch (detached HEAD) has nothing to protect here;
+    neither does one whose branch `_branch_disposition` already judges
+    reachable from HEAD or from another non-conductor branch.
+    """
+    if not branch:
+        return ""
+    tip = _current_tip(repo, branch)
+    if not tip:
+        return ""
+    action, reason, _ahead = _branch_disposition(repo, branch, tip)
+    return f"unmerged work on {branch} ({reason})" if action == "keep" else ""
+
+
 def _in_progress_run_ids(home: Path) -> set[str]:
     """Runs whose only worktree/branch copy may still be in use."""
     protected: set[str] = set()
@@ -175,12 +191,20 @@ def _in_progress_run_ids(home: Path) -> set[str]:
         lanes_dir = mission_dir / "lanes"
         for receipt in lanes_dir.glob("*.json") if lanes_dir.is_dir() else ():
             data = _json_object(receipt)
-            attempts = data.get("attempts") if data is not None else None
-            if not isinstance(attempts, list):
+            if data is None:
                 continue
-            for attempt in attempts:
-                if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
-                    protected.add(attempt["run_id"])
+            # `previous_attempts` names the runs a retry superseded. Those
+            # runs have their own result.json, so the `runs/` scan above does
+            # not protect them, and until the mission itself finishes their
+            # worktree can still be the only copy of what the superseded
+            # attempt built (export.py reads both lists for the same reason).
+            for key in ("previous_attempts", "attempts"):
+                attempts = data.get(key)
+                if not isinstance(attempts, list):
+                    continue
+                for attempt in attempts:
+                    if isinstance(attempt, dict) and isinstance(attempt.get("run_id"), str):
+                        protected.add(attempt["run_id"])
     return protected
 
 
@@ -254,7 +278,20 @@ def _plan_repo(
             if worktree.branch:
                 kept_branches[worktree.branch] = age_reason
         else:
-            item = Item(str(repo), "worktree", "remove", "clean worktree", path=str(path))
+            # A clean worktree is not automatically a finished one. AGENTS.md
+            # rule 6's salvage path reads a kept worktree from disk, and
+            # `salvage.emit` refuses outright once it is gone ("kept worktree
+            # is missing on disk"). Removing the directory leaves the branch,
+            # but the branch is not what salvage reads. So a worktree whose
+            # own branch still carries commits reachable from nowhere else is
+            # the only copy of that work in the shape salvage needs, and is
+            # kept until the work lands or the branch is merged away.
+            unmerged = _unmerged_branch_reason(repo, worktree.branch)
+            if unmerged:
+                item = Item(str(repo), "worktree", "keep", unmerged, path=str(path))
+                kept_branches[worktree.branch] = unmerged
+            else:
+                item = Item(str(repo), "worktree", "remove", "clean worktree", path=str(path))
         items.append(item)
 
     branches = git_run(
@@ -390,6 +427,16 @@ def _main_worktree(candidate: Path) -> Path | None:
     pass of `--apply` failing on a worktree the first had already removed
     (2026-09-07, exit 1 on a clean run). The common dir is the same for
     every worktree of a repository; its parent is the main worktree.
+
+    Two shapes reach here. A working repository's common dir is its `.git`,
+    whose parent is the main worktree. A bare repository (and a repository
+    made with `--separate-git-dir`) has a common dir under some other name,
+    and it has no main worktree at all -- but the common dir is still the
+    same absolute path for every worktree of that repository, so it is the
+    dedup key, and `git worktree list` and `for-each-ref` both answer from
+    it. Falling back to `--show-toplevel` instead answered with the linked
+    worktree, which reintroduced the very duplication this function exists
+    to prevent (2026-09-08).
     """
     common = git_run(candidate, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if common.returncode != 0:
@@ -397,10 +444,7 @@ def _main_worktree(candidate: Path) -> Path | None:
     git_dir = Path(common.stdout.strip()).resolve()
     if git_dir.name == ".git":
         return git_dir.parent
-    top = git_run(candidate, "rev-parse", "--show-toplevel")
-    if top.returncode != 0:
-        return None
-    return Path(top.stdout.strip()).resolve()
+    return git_dir
 
 
 def build_plan(

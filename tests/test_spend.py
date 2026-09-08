@@ -201,6 +201,75 @@ def test_spend_counts_malformed_receipts_on_only_the_total_row(home: Path, monke
     assert rows[-1]["skipped"] == 1
 
 
+def _write_receipt(home: Path, run_id: str, payload: dict) -> None:
+    directory = home / "runs" / run_id
+    directory.mkdir(parents=True)
+    (directory / "result.json").write_text(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("suffix", "cost_usd"),
+    [
+        ("boolcost", True),
+        ("nancost", float("nan")),
+        ("negcost", -1),
+    ],
+)
+def test_spend_skips_a_well_formed_receipt_whose_cost_usd_fails_number_validation(
+    home: Path, monkeypatch, capsys, suffix: str, cost_usd: object
+):
+    """`_number` raises on a bool, a non-finite value, and a negative
+    number, so `_read_run` returns None and the whole receipt is skipped --
+    it must not be counted as a run priced at 1/0, folded in as NaN, or
+    subtracted from the total. Unlike the malformed-JSON case above, this
+    JSON parses fine; only the value inside it is bad."""
+    first, _, _ = _sample(home)
+    run_id = f"20260105T000000Z-claude-{suffix}"
+    _write_receipt(
+        home,
+        run_id,
+        {
+            "run_id": run_id,
+            "fleet": "claude",
+            "model": "sonnet",
+            "usage": {"cost_usd": cost_usd, "cost_basis": "reported", "total_tokens": 5},
+            "ok": True,
+        },
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert rows[-1]["runs"] == 3
+    assert rows[-1]["skipped"] == 1
+    assert rows[-1]["cost_usd"] == 3.75
+    assert first  # sanity: the sample fixture still ran
+
+
+def test_spend_skips_a_receipt_whose_ok_is_not_a_bool(home: Path, monkeypatch, capsys):
+    """`_read_run`'s `if not isinstance(ok, bool): return None` -- JSON's
+    wire format has no bool/int distinction of its own, so an integer `1`
+    here must not be read as `True` and folded into the ok count."""
+    _sample(home)
+    run_id = "20260105T000000Z-claude-okint"
+    _write_receipt(
+        home,
+        run_id,
+        {
+            "run_id": run_id,
+            "fleet": "claude",
+            "model": "sonnet",
+            "usage": {"cost_usd": 1.0, "cost_basis": "reported", "total_tokens": 5},
+            "ok": 1,
+        },
+    )
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    assert main(["spend", "--json"]) == 0
+    rows = _json_output(capsys)
+    assert rows[-1]["runs"] == 3
+    assert rows[-1]["skipped"] == 1
+    assert rows[-1]["cost_usd"] == 3.75
+
+
 def test_spend_reads_a_receipt_with_and_without_a_price_block(home: Path, monkeypatch, capsys):
     """W6: `usage.price` is new; a receipt written before it existed, and one
     that never estimated (a reported figure), both carry none of it -- and

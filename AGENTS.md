@@ -121,8 +121,12 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    put the cascade on one- or two-item specs and fix lanes. Claude stops itself at exactly the cap and
    its final summary costs, so a green build was lost for five cents twice in one day and a green fix
    for seven cents the next (D1): every Claude cap, build or fix, = estimate from rule 2, plus one dollar.
-   E24 adds a smaller, opt-in per-lane `cap_grace_usd` for the same trap: a band folded into the same
-   native cap so the terminal message itself has room to finish without moving rule 2's estimate.
+   E24 adds a smaller, opt-in per-lane `cap_grace_usd` for the same trap, without moving rule 2's
+   estimate. On a Claude lane it is folded into the same native cap, so the terminal message itself
+   has room to finish. F5 extends it to a cursor *read* lane, whose cap is post-hoc: there it widens
+   the after-the-fact verdict, so a complete review a few cents over `cap_usd` is not failed for it.
+   A cursor write lane refuses it (`DispatchRefused`) -- a write lane's cost is bytes, and the band
+   would only buy more of them.
 
 11. **Wall clock is the lead's cost, so overlap what does not depend on what.** Independent items
    (no shared module, no scheduler tax) launch in parallel and merge in series, as E3 and E9 did.
@@ -193,7 +197,8 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   Traps: over-verifies when told to verify (remove "double-check" instructions), expands scope,
   over-delegates to subagents, narrates. Keep thinking on and lower effort instead of disabling
   thinking (thinking off leaks tool calls as plain text that poison the transcript).
-- Sonnet 5: a quarter of Opus's price, more agentic by default, **literal**: it does exactly the
+- Sonnet 5: two fifths of Opus's price ($2/$10 against $5/$25 per million, `prices.py`), more
+  agentic by default, **literal**: it does exactly the
   stated scope and follows "be conservative" to the letter. State scope explicitly. Under-thinks
   at `low` on anything non-trivial; raise effort rather than prompt around it. Temperature and
   manual thinking budgets return 400.
@@ -231,18 +236,23 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   command hook answering `{"decision": "deny"}` per tool name blocks the call on bytes. No
   wildcard matcher; a malformed file logs "loaded 0 named hooks" and the run continues, so
   pass `--log-file` and check the count (`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`).
-  E21 builds taint enforcement on exactly this: `fleets.taint_hook_files` writes the hook plus a
-  stdlib-only deny script into a tainted lane's worktree, and `runner.dispatch` refuses to trust
-  its own write -- it reads the log's "loaded N" count back and fails the run when it is zero (a
-  hooks file that did not parse), and fails it as `taint hooks not enforced` if the init event's
-  tool list still names something reaching outside the worktree that no hook covered. The count
-  itself is *not* compared against the number of matchers written; only the pre-spawn `/hooks`
-  preflight below checks the matchers by name, and only when it can spawn. README says this
-  correctly; this file claimed the stronger check until 2026-09-08. F13 adds a cheaper, earlier check ahead of that one:
-  `-p "/hooks" --output-format stream-json` answers free in print mode (`num_turns: 0`, zero
-  usage) and names every loaded hooks file with its `source` and `enabled` flag, so
-  `runner.dispatch` runs it before the paid turn and fails the same way, before any spend, when
-  the tainted lane's own hooks file is not in the answer.
+  E21 builds taint enforcement on exactly this: `fleets.taint_hook_files` *returns* the hook file
+  plus a stdlib-only deny script as text, `runner._write_taint_agy_hooks` writes both into the
+  tainted lane's worktree, and `runner.dispatch` refuses to trust that write. Two checks, in this
+  order:
+  1. **Pre-spawn (F13), free.** `runner._taint_agy_preflight` runs `-p "/hooks" --output-format
+     stream-json`, which answers in print mode at `num_turns: 0` with zero usage and names every
+     loaded hooks file with its `source` and `enabled` flag. It fails the run, before any spend,
+     when the lane's own hooks file is absent or disabled, *and* when the file is loaded without a
+     `PreToolUse` matcher for every tool `fleets.taint_agy_matchers()` names. This is the only
+     check that compares matchers by name, and it only runs when `agy` can spawn at all.
+  2. **After the run.** The `loaded N named hooks` count is read back out of `agy.log` and the run
+     fails when it is zero (a hooks file that did not parse), or as `taint hooks not enforced`
+     when the init event's tool list still names something reaching outside the worktree that no
+     hook covered. The count itself is *not* compared against the number of matchers written.
+  3. **Digest read-back.** The hook files' sha256 is recorded when they are written, and a file
+     that differs, is gone, or is unreadable afterwards fails the run as `taint hooks modified
+     during the run`: the script sits in a writable worktree and is re-read on every tool call.
 - **`--json-schema` on a read-mode lane is refused at load (F13):** the same probe found a
   schema'd read lane take a second turn, under `--mode plan --sandbox`, that wrote a file into
   the working directory and ran a shell command. `Spec.validate` refuses `schema` on

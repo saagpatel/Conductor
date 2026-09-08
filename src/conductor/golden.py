@@ -81,12 +81,22 @@ _ENV_SECRET_RE = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*(?:" + "|".join(_SECRET_KEY_WORDS) + r")[A-Za-z0-9_]*)=(\S+)",
     re.IGNORECASE,
 )
-_BEARER_RE = re.compile(r"Bearer\s+\S+")
+# `<redacted>` is excluded so the guard does not fire on the scrubber's own
+# output: `Bearer <redacted>` still matches `\S+`, so every already-clean
+# bundle carrying an Authorization header was reported as leaking a bearer
+# token, and `export` deleted the bundle and raised rather than shipping it
+# (2026-09-08 review). Every other rule here already exempts its own marker.
+_BEARER_RE = re.compile(r"Bearer\s+(?!<redacted>)\S+")
 _TOKEN_PREFIX_RE = re.compile(
     # 2026-09-08 review: `github_pat_`, `gho_`, `glpat-`, `hf_`, `AKIA`, and
     # Anthropic's `sk-ant-` all shipped verbatim through an export bundle
-    # that `scrub_guard` then declared clean.
-    r"(?:sk-ant-|sk-|xai-|ghp_|gho_|ghu_|ghs_|github_pat_|glpat-|hf_|AKIA|AIza)"
+    # that `scrub_guard` then declared clean. Same review, second pass:
+    # Stripe's `sk_live_`/`sk_test_` use an underscore where the `sk-` rule
+    # wanted a hyphen, Slack's `xox[abps]-` and npm's `npm_` had no rule at
+    # all, and only AWS's permanent `AKIA` was listed, never the `ASIA` a
+    # temporary STS credential carries.
+    r"(?:sk-ant-|sk-|sk_live_|sk_test_|rk_live_|rk_test_|xai-|xox[abprs]-"
+    r"|ghp_|gho_|ghu_|ghs_|github_pat_|glpat-|hf_|npm_|AKIA|ASIA|AIza)"
     r"[A-Za-z0-9_-]{16,}"
 )
 # NOT covered, deliberately, and recorded here so it stays a known gap: a

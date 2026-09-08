@@ -1216,8 +1216,10 @@ The fix lane lands on `--branch` (default `feat/<spec stem>`), `--build-commit` 
 claims ports on the build lane, `--test-policy` defaults to `allow` (rule 3), and
 `--grok-runs-suite` switches Grok to the prompt that lets it run the gate at the $2.00
 cap. `--cap-grace-usd` (default $0.25, ceiling $0.50) sets the grace band (E24/F5) on
-the build and fix lanes, whose cap is native, and on the review-grok lane, whose cap
-is post-hoc; `--cap-grace-usd 0` disables it. The cap arithmetic prints the band as
+every Claude lane the shape declares -- build and fix always, plus `adversarial`
+under `--adversarial` and `review-opus` under `--opus-review` -- whose cap is
+native, and on the review-grok lane, whose cap is post-hoc; `--cap-grace-usd 0`
+disables it. The cap arithmetic prints the band as
 its own line, and it never changes the build, fix, or grok cap themselves.
 `--adversarial` (E16) adds the adversarial lane beside the two reviewers, moves the
 fix lane's `base` onto it (its `resume` stays
@@ -1311,15 +1313,21 @@ line: `NO_FINDINGS` when there is nothing to report, or `FINDINGS: N`
 naming how many items it numbered. `verdicts.review_verdict` reads that
 line, not the whole reply, so a reviewer's narration ahead of its verdict
 (Grok routinely writes some) no longer reads as a finding the way
-`answer.strip() == "NO_FINDINGS"` did. `FIX_PROMPT` in turn asks for one
-`DISPOSITION: <review-gemini or review-grok> <item number>
-<fixed, refused, already, or wording>: <reason>` line per item either
-reviewer numbered -- `fixed` for one it changed code for, `refused` (with
-the reason it is wrong) for one it rejected, `already` for one already
-true before the fix, `wording` for one that only asked for a comment or
-message change. `verdicts.fix_dispositions` parses every such line
-anywhere in the reply, in order; a line that opens with `DISPOSITION:` but
-does not match the shape is skipped and counted, never raised. Both
+`answer.strip() == "NO_FINDINGS"` did. `FIX_PROMPT` in turn asks for one entry per item either reviewer numbered
+in a `dispositions.json` deliverable at the repository root -- a
+`{"dispositions": [...]}` object whose entries are
+`{"lane": "review-gemini" or "review-grok", "index": <item number>,
+"disposition": "fixed" | "refused" | "already" | "wording", "reason": <why>}`
+-- `fixed` for one it changed code for, `refused` (with the reason it is
+wrong) for one it rejected, `already` for one already true before the fix,
+`wording` for one that only asked for a comment or message change. The
+prompt asks for the file even on `NO_CHANGES`; an empty array is correct
+only when both reviews said `NO_FINDINGS`. `mission.py` reads the kept
+deliverable copy first, and falls back to `verdicts.fix_dispositions`,
+which parses `DISPOSITION: <lane> <index> <disposition>: <reason>` lines
+anywhere in the reply, only when no deliverable copy is present; a line
+that opens with `DISPOSITION:` but does not match the shape is skipped and
+counted, never raised. Both
 parsers feed the ledger report's reviewer finding rate and reviewer
 precision tables (see "Ledger report" below). Editing either prompt moves
 its `prompt_versions()` id by construction (E17); no fixture needs
@@ -1362,7 +1370,7 @@ raised to the p80 rounded up to the next whole dollar, and the mission
 budget rises by the same amount. Each raise prints its own line:
 
 ```
-cap raised: build $5.00 -> $8.00 (forecast p80 $8.04, 12 runs)
+cap raised: build $5.00 -> $9.00 (forecast p80 $8.04, 12 runs)
 ```
 
 The mission file records the arithmetic under a top-level `caps` block, one
@@ -1425,9 +1433,12 @@ never conjures a mission directory); salvage is the lead's own act, not a
 lane's, so it never extends the mission's signed receipt chain.
 
 Once the lead has read the diff and committed it in the kept worktree by
-hand, `--emit PATH` (with `--items` and `--modules` to size the fix cap,
-rule 2, and `--ceiling none|default|H,D` for the follow-on mission's E9
-rolling-spend ceiling, same default and meaning as `shape a --ceiling`)
+hand, `--emit PATH` (with `--ceiling none|default|H,D` for the follow-on
+mission's E9 rolling-spend ceiling, same default and meaning as
+`shape a --ceiling`; `--items` and `--modules` are required by the CLI but
+size only `build_cap`, and a follow-on mission has no build lane, so today
+they change nothing about what it emits -- its fix cap comes from
+`USD_FIX_BASE`, findings, the scheduler tax and the Claude summary alone)
 writes a follow-on mission there: `shape.shape_a_followon`, the
 same Shape A shape as `conductor shape a` except there is no build lane --
 the kept worktree, already at the lead's commit, is the mission's `cwd`
@@ -2132,12 +2143,17 @@ the mission actually being attested and the position it actually sits at,
 and, for a link with a run, that the run's own `attestation.json` still
 matches that recorded hash and still agrees with `result.json` and
 `diff.patch`. It prints one JSON object naming every link's verdict and
-problems, exits 0 when every link verifies, 1 when one does not, and 3 when
-the mission, its chain, or the signing key does not exist.
+problems, exits 0 only when the chain's whole state is `verified`, 1 for
+every other state -- a chain whose every link verifies but which is
+truncated (`partial`) or has nothing to be measured against (`unrecorded`)
+exits 1 too -- and 3 when the mission, its chain, or the signing key does
+not exist.
 
 A valid prefix of a chain is not a complete mission, so the report also
-carries a `state`: `verified`, `partial`, `empty`, `missing`, `malformed`,
-or `failed`. `all([])` is True, so an emptied `links` list and a chain with
+carries a `state`: `verified`, `unrecorded`, `partial`, `empty`, `missing`,
+`malformed`, or `failed`. `unrecorded` is every link verifying while
+`result.json` recorded no chain to compare against, so completeness was
+never checked; it is never `verified`. `all([])` is True, so an emptied `links` list and a chain with
 its tail lopped off both used to verify with nothing, or almost nothing,
 checked; the mission's own `result.json` records `chain: {"links", "head"}`,
 and a chain whose length or head disagrees with that record is `partial`,
@@ -2802,8 +2818,9 @@ three; `conductor report` joins it back to its mission snapshot under
 The report has seven sections, in this order:
 
 - **Vendor and stage**: runs, ok count, cost, unpriced runs, mean and
-  median duration, cache (`cache_read_tokens` over `input_tokens`, summed
-  per group, as a percentage -- blank when the group read no input at all),
+  median duration, cache (`cache_read_tokens` over the sum of
+  `input_tokens`, `cache_read_tokens` and `cache_write_tokens`, summed per
+  group, as a percentage -- blank when that sum is zero),
   cap misses (`kind == "cap"`), gate failures (`kind == "gate"`), and mean
   tool calls, grouped by the vendor behind the model (`fleets.py`) and the
   pipeline stage (the fleet name in place of an unrecognized vendor, `null`
@@ -2821,7 +2838,10 @@ The report has seven sections, in this order:
 - **Reviewer precision**: per reviewer vendor, over missions that have both
   a `stage: review` lane whose verdict parsed and a `stage: fix` lane that
   recorded dispositions (see below): findings written, and how many of
-  them the fix lane marked fixed, refused, already true, or wording-only.
+  them the fix lane marked fixed, refused, already true, or wording-only,
+  plus `unparsed`, the review lanes on that vendor whose verdict line did
+  not parse at all (F15 item 2; the same column the finding-rate table
+  carries, counted here per vendor).
   `precision` is `fixed / (fixed + refused)`, blank under three total
   dispositions -- not enough to read as a rate. D20: a disposition is
   counted once per finding it names. Entries are keyed by (mission,
@@ -2842,8 +2862,10 @@ The report has seven sections, in this order:
   mission selection described above, so two more columns name that
   selection's size: `missions`, the distinct missions whose dispositions
   contributed to a vendor's row, and `undispositioned`, the `stage: review`
-  lanes on that vendor that parsed but whose mission recorded no
-  dispositions at all (counted in reviewer finding rate, not here). Both
+  lanes on that vendor that parsed *and reported at least one finding* but
+  whose mission recorded no dispositions at all (counted in reviewer
+  finding rate, not here). A lane that reported `NO_FINDINGS` has nothing a
+  disposition could ever name, so it is never counted here. Both
   are printed after `precision` and carried in `--json` too, and a `basis`
   string spells the same two numbers out in prose, printed as its own line
   under the table: "fixer agreement over N mission(s) with dispositions; M
@@ -2868,7 +2890,9 @@ The report has seven sections, in this order:
   over the subset with an evidence map, the cost per landed item. A
   merged mission without a map is in the first pair of figures and out of
   the division, so it neither inflates nor deflates the rate. `--json`
-  carries the same three columns per mission and the sum as `landed`.
+  carries the same three columns per mission -- the `merged` column is
+  emitted under its field name `landed_ok`, beside the `landed` count the
+  table's own line sums.
 - **Rules**: the figures behind AGENTS.md rule 7 (each review-stage
   vendor's cap-miss count and finding rate) and rule 10 (for Claude's build
   and fix stages, the runs killed at their cap). D21: a cap loss is
@@ -3011,14 +3035,19 @@ the actual cost, so grace draws on `max_cost_usd` like any other spend.
 Four progress breakers run beside the budget watcher in the same two-second
 poll loop:
 
-- the stall breaker kills a fleet whose `stdout.log` has not grown for 600
-  seconds by default (a fleet running a long suite inside one tool call is
-  silent until it returns, so the figure is sized for that). `conductor
-  dispatch --stall-timeout` and every mission lane both default to 600; the
-  900 on `Spec` itself is a dataclass default no CLI or mission path reaches;
+- the stall breaker kills a fleet whose `stdout.log` size has not changed for
+  600 seconds by default (any change resets it, including a truncation; a
+  fleet running a long suite inside one tool call is silent until it returns,
+  so the figure is sized for that). Tool calls reset the tool-idle breaker,
+  not this one. `conductor dispatch --stall-timeout` and every mission lane
+  both default to 600; the 900 on `Spec` itself is a dataclass default no CLI
+  or mission path reaches;
 - the loop breaker kills after 6 identical consecutive tool-call signatures,
-  except a signature beginning `edit:` -- six identical file edits are a
-  legitimate pass over six files, not a loop;
+  except a signature beginning `edit:` -- only a `file_change` event produces
+  one, it names the paths and never the content, so six successive edits to
+  the same file are indistinguishable from a loop and are exempted as
+  progress. Editing six *different* files yields six different signatures and
+  never reaches the limit at all;
 - the tool budget kills after more than the configured total tool calls, and
   is off by default;
 - the tool-idle breaker kills when no tool call has arrived for the configured

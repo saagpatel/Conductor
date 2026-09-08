@@ -622,6 +622,31 @@ def test_deliverable_non_json_under_schema_fails_to_parse(repo, home, fake_fleet
     assert result.failure() == "deliverable does not parse: record.json"
 
 
+def test_deliverable_schema_that_vanishes_during_the_run_fails(
+    repo, home, fake_fleet, tmp_path
+):
+    """Would catch the deletion of `_check_deliverable`'s post-run "schema
+    unreadable" branch: `Spec.validate` reads the schema before spawn, but
+    `_check_deliverable` reads it again after the run to judge the
+    deliverable, and a schema file that moved or was deleted in between must
+    fail the lane rather than raise or silently skip the schema check."""
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}))
+    fake_fleet(
+        ["sh", "-c", f"printf '%s' '{{}}' > record.json && rm {shlex.quote(str(schema))}"]
+    )
+    result = dispatch(
+        spec_for(
+            repo, mode="write", deliverable={"path": "record.json", "schema": str(schema)}
+        ),
+        home=home,
+    )
+    assert result.failure() is not None
+    assert "deliverable schema unreadable" in result.failure()
+    assert result.deliverable["parsed"] is True
+    assert result.deliverable["ok"] is False
+
+
 def test_deliverable_json_missing_required_key_fails_schema(repo, home, fake_fleet, tmp_path):
     schema = tmp_path / "schema.json"
     schema.write_text(json.dumps({"type": "object", "required": ["name"]}))

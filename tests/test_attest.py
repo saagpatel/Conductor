@@ -457,6 +457,70 @@ def test_cli_attest_flags_a_flipped_result_ok(repo, home, monkeypatch, tmp_path,
     assert any("ok disagrees with result.json" in p for p in build_row["problems"])
 
 
+def test_cli_attest_flags_a_run_whose_attestation_json_was_deleted(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Would catch the deletion of `verify_run_attestation`'s "missing"
+    branch: a mission link that names a run whose attestation.json no
+    longer exists must fail closed, not verify on the strength of the
+    result.json and diff.patch that are still there."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    (home / "runs" / build_run_id / "attestation.json").unlink()
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    build_row = next(row for row in out["links"] if row["lane"] == "build")
+    assert build_row["verified"] is False
+    assert any("attestation.json is missing" in p for p in build_row["problems"])
+
+
+def test_cli_attest_flags_a_result_json_base_commit_mismatch(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Would catch the deletion of the `base_commit` comparison against
+    result.json: the attestation's own signed base_commit still agrees with
+    itself, so only comparing it against the run's result.json catches a
+    result.json rewritten to claim a different base after the fact."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    result_path = home / "runs" / build_run_id / "result.json"
+    data = json.loads(result_path.read_text())
+    assert data["base_commit"]
+    data["base_commit"] = "0" * 40
+    result_path.write_text(json.dumps(data))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    build_row = next(row for row in out["links"] if row["lane"] == "build")
+    assert any("base_commit disagrees with result.json" in p for p in build_row["problems"])
+
+
+def test_cli_attest_flags_a_result_json_tip_commit_mismatch(
+    repo, home, monkeypatch, tmp_path, capsys
+):
+    """Same check, the other commit: the tip_commit comparison against
+    result.json."""
+    monkeypatch.setenv("CONDUCTOR_HOME", str(home))
+    result = _two_lane_mission(repo, home, monkeypatch, tmp_path)
+    build_run_id = result.lanes[0]["attempts"][-1]["run_id"]
+    result_path = home / "runs" / build_run_id / "result.json"
+    data = json.loads(result_path.read_text())
+    assert data["tip_commit"]
+    data["tip_commit"] = "1" * 40
+    result_path.write_text(json.dumps(data))
+
+    assert main(["attest", result.mission_id]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verified"] is False
+    build_row = next(row for row in out["links"] if row["lane"] == "build")
+    assert any("tip_commit disagrees with result.json" in p for p in build_row["problems"])
+
+
 def test_cli_attest_flags_an_edited_diff_patch(repo, home, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CONDUCTOR_HOME", str(home))
     result = _two_lane_mission(repo, home, monkeypatch, tmp_path)

@@ -530,3 +530,16 @@ def test_a_disposition_that_is_not_a_string_is_refused_not_a_crash():
         json.dumps({"dispositions": [entry]})
     )
     assert dispositions == [] and malformed == 1
+
+
+def test_a_disposition_with_an_empty_lane_is_refused_not_a_crash():
+    """Would catch the deletion of `valid_disposition_entry`'s `bool(entry[
+    "lane"])` half: `lane` is a non-empty string, not merely a string, so
+    an empty lane name -- otherwise a well-formed entry -- must still be
+    counted malformed rather than accepted."""
+    entry = {"lane": "", "index": 1, "disposition": "fixed", "reason": "x"}
+    assert valid_disposition_entry(entry) is False
+    dispositions, malformed = parse_dispositions_deliverable(
+        json.dumps({"dispositions": [entry]})
+    )
+    assert dispositions == [] and malformed == 1

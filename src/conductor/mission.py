@@ -1625,6 +1625,26 @@ def _human_lane(
 # --- running ----------------------------------------------------------------
 
 
+def budget_cost(value: object) -> float | None:
+    """`value` as a dollar figure the budget may add, or None.
+
+    A cost that is not a finite, non-negative number is not evidence about
+    the budget, and adding it destroys the running total: `spent` becomes
+    NaN and every `spent >= max` comparison after it is False, or a negative
+    figure shrinks `spent` and buys more dispatches. Both turn the budget
+    off silently, and `json` round-trips `NaN` and `Infinity` happily.
+
+    This guard lived only inside `Ledger.add`, so the live mission was
+    protected and the resume seed, which reads the same receipts back off
+    disk, was not (2026-09-08 review). `spend._number` refuses the same
+    values on the reporting side; one rule now serves all three.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 class Ledger:
     """Dollars spent so far, shared across lanes.
 
@@ -1701,10 +1721,7 @@ class Ledger:
         # refuses these same values when it reads the receipts back, so the
         # live guardrail was the looser of the two (2026-09-08 review).
         # Counted as unpriced instead, which is the state it actually is.
-        if isinstance(cost, bool) or not isinstance(cost, int | float):
-            cost = None
-        elif not (math.isfinite(float(cost)) and cost >= 0):
-            cost = None
+        cost = budget_cost(cost)
         with self._lock:
             if cost is not None:
                 self.spent += float(cost)
@@ -1724,9 +1741,18 @@ class Ledger:
         """E10 second spec: roll a launched plan child's own spend into this
         ledger, once it is final -- the same rule an ordinary dispatch's
         spend follows: a child with any unpriced dispatch of its own makes
-        this budget just as unverifiable as one of this mission's own."""
+        this budget just as unverifiable as one of this mission's own.
+
+        A child's rolled-up figure passes the same guard an ordinary
+        dispatch's does: it is read back off the child's own receipts, so a
+        poisoned number there would poison this ledger too. A figure the
+        guard refuses counts as one more unpriced dispatch."""
+        rolled = budget_cost(cost_usd)
         with self._lock:
-            self.spent += float(cost_usd)
+            if rolled is None:
+                self.unpriced += 1
+            else:
+                self.spent += rolled
             self.unpriced += int(unpriced_dispatches)
 
     def set_observer(self, observer: Callable[[dict], None] | None) -> None:
@@ -3155,18 +3181,31 @@ def _run_receipt_spend(
         if receipt is not None and receipt.get("dry_run") is True:
             continue
         usage = receipt.get("usage") if receipt is not None else None
-        cost = usage.get("cost_usd") if isinstance(usage, dict) else None
-        if isinstance(cost, int | float) and not isinstance(cost, bool):
-            spent += float(cost)
+        cost = budget_cost(usage.get("cost_usd") if isinstance(usage, dict) else None)
+        if cost is not None:
+            spent += cost
         elif receipt is not None:
-            if receipt.get("spawned") is True and receipt.get("interrupted") is not True:
+            # The same rule `Ledger.add` applies to a live dispatch. It
+            # excluded `cancelled` as well as `interrupted` and this reader
+            # did not, so a run conductor cancelled and could not price was
+            # unpriced here and dropped there: the resumed mission could
+            # refuse to start anything as `budget unverifiable` over a run
+            # the original mission had already decided was not evidence
+            # (2026-09-08 review). Cursor is the live case -- it reports
+            # usage once, after the run, so a mid-dispatch cancel is
+            # spawned, unpriced, and cancelled.
+            if (
+                receipt.get("spawned") is True
+                and receipt.get("interrupted") is not True
+                and receipt.get("cancelled") is not True
+            ):
                 unpriced += 1
-        elif isinstance(summary.get("cost_usd"), int | float) and not isinstance(
-            summary.get("cost_usd"), bool
-        ):
-            spent += float(summary["cost_usd"])
-        elif summary.get("unpriced") is True:
-            unpriced += 1
+        else:
+            summary_cost = budget_cost(summary.get("cost_usd"))
+            if summary_cost is not None:
+                spent += summary_cost
+            elif summary.get("unpriced") is True:
+                unpriced += 1
     return spent, unpriced
 
 
@@ -3222,6 +3261,61 @@ def _resolve_is_trusted(mission: Mission, prior_result: dict | None) -> bool:
     return True
 
 
+_CANCEL_PREFIXES = ("cancelled: ", "cancelled before spawn: ")
+_CANCEL_WINNER_RE = re.compile(r"^lane (\S+) already passed")
+
+
+def _cancel_winner(skipped: str | None) -> str | None:
+    """The lane named in a cancel reason, or None when it names no lane.
+
+    `_fire_early_cancel` writes `cancelled: lane <winner> already passed`
+    and `_cancelled_before_spawn` re-spells the same detail, so the winner
+    survives on disk in both. A generic reason ("another lane already
+    passed") names nobody and is not settled by this route.
+    """
+    if not skipped:
+        return None
+    for prefix in _CANCEL_PREFIXES:
+        if skipped.startswith(prefix):
+            match = _CANCEL_WINNER_RE.match(skipped[len(prefix) :])
+            return match.group(1) if match else None
+    return None
+
+
+def _keep_cancelled_lanes(
+    mission: Mission,
+    previous: dict[str, LaneResult],
+    kept: dict[str, LaneResult],
+    rerun: set[str],
+    notes: list[str],
+) -> None:
+    """Settle a cancelled lane when the sink that beat it is being kept.
+
+    A lane cancelled by early_cancel has no work of its own to redo: the
+    mission already decided, on evidence, that the winner made it
+    unnecessary. If that winner is kept on this resume the decision still
+    holds, and re-dispatching the loser is new spend on work the mission
+    had settled. If the winner is being rerun, the decision is open again
+    and so is the loser.
+
+    This runs after the kept set is complete, because the winner may sit
+    later in `mission.lanes` than the lane it cancelled.
+    """
+    for lane in mission.lanes:
+        if lane.name not in rerun:
+            continue
+        old = previous.get(lane.name)
+        if old is None:
+            continue
+        winner = _cancel_winner(old.skipped)
+        if winner is None or winner not in kept:
+            continue
+        old.kept = True
+        kept[lane.name] = old
+        rerun.discard(lane.name)
+        notes.append(f"lane '{lane.name}' stays cancelled: '{winner}' is kept")
+
+
 def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _ResumePlan:
     prior_result = _json_object(mission_dir / "result.json")
     history = (prior_result or {}).get("resumes")
@@ -3230,7 +3324,6 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
     previous, notes, accounting_unknown = _read_previous_lanes(mission_dir, mission)
     kept: dict[str, LaneResult] = {}
     rerun: set[str] = set()
-    prior_ok = bool((prior_result or {}).get("ok"))
     children_rollups: list[tuple[float, int]] = []
     for lane in mission.lanes:
         if lane.human:
@@ -3262,7 +3355,6 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
             mission_dir,
             lane,
             old,
-            prior_ok=prior_ok,
             prior_result=prior_result,
             notes=notes,
         ):
@@ -3289,6 +3381,8 @@ def _build_resume_plan(mission: Mission, mission_dir: Path, base: Path) -> _Resu
                 )
         else:
             rerun.add(lane.name)
+
+    _keep_cancelled_lanes(mission, previous, kept, rerun, notes)
 
     # A downstream receipt describes the exact upstream artifacts it read or
     # built on. If one of those inputs must run again, its consumers do too.
