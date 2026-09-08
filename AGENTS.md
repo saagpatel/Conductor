@@ -74,10 +74,16 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    dollars for any item that touches the scheduler, the runner's wait loop, or resume, plus a dollar
    for every module past the second that the spec touches. A cap sized for a small item cut two
    builders off one lint error and one README phrase from green; a five-item spec spread over four
-   modules (B2) was cut $2 short the same way. The launcher now raises the build and fix
-   caps to the forecast p80, rounded up, whenever the E14 forecast warns that this figure
+   modules (B2) was cut $2 short the same way. The launcher now raises **every warned lane's**
+   cap to the forecast p80, rounded up, whenever the E14 forecast warns that this figure
    sits under it (F17), and raises the mission budget with them, so the hand edit before
-   every launch is gone; `--no-forecast-cap` keeps the old behaviour.
+   every launch is gone; `--no-forecast-cap` keeps the old behaviour. This line used to say
+   "the build and fix caps"; two cold reviewers read that against `forecast.apply_caps`,
+   which has always raised every warned lane, and both filed the code as the defect
+   (2026-09-08). The code is right and the prose was stale: a review cap warned by history
+   is a cap that will fail its lane, and Grok's read cap on this repository was raised by
+   hand across three waves for exactly that reason. Rule 7's figures are the starting
+   estimate, not a ceiling the forecast may not move.
    `conductor report` measures the figure this rule estimates: `usd_per_item` per merged
    mission and one cost per landed item across them (review item 2, 0.76.0).
 3. **`test_policy: allow` on the build lane when the spec changes what existing missions may do.**
