@@ -43,6 +43,9 @@ Standing policy alongside the table:
   lane's cap to the forecast p80 rounded up to a whole dollar.
 - **Reviewers carry no quota.** Every review, judge, and collate prompt says
   an empty answer is complete; the template is in `AGENTS.md`.
+- **Opt-in Composer/Grok example:** [copy and configure this mission](docs/reference/composer-grok-example.md)
+  for a bounded Composer build, Grok review, resumed correction, and lead acceptance.
+  This example records a tested alternative; it does not change Shape A or standing routing policy.
 - **Shelved, not to be re-proposed without the operator raising it:** the
   Codex lanes above; OpenCode, OpenRouter, Ollama, pi, and local models; cloud
   offload for this repository. Their sections in `AGENTS.md` and
@@ -449,6 +452,7 @@ this table is the index.
 | [`docs/reference/untrusted-output.md`](docs/reference/untrusted-output.md) | A lane marks its own output as a taint source. |
 | [`docs/reference/inline-agents.md`](docs/reference/inline-agents.md) | A Claude persona carried in the dispatch, not on disk. |
 | [`docs/reference/shape-a-launcher.md`](docs/reference/shape-a-launcher.md) | conductor shape a: measured default mission and cap arithmetic. |
+| [`docs/reference/composer-grok-example.md`](docs/reference/composer-grok-example.md) | Opt-in Composer build, Grok review, correction checkpoint, and lead acceptance. |
 | [`docs/reference/salvage.md`](docs/reference/salvage.md) | Gate a kept worktree, commit it, emit the follow-on mission. |
 | [`docs/reference/landing.md`](docs/reference/landing.md) | Merge a lane's branch, gate the merged head, attest. |
 | [`docs/reference/lane-stages.md`](docs/reference/lane-stages.md) | build / review / fix, reviewer policy, reproduce-before-fix, adversarial. |
