@@ -27,6 +27,12 @@ Conductor's existing mission format; there is no extra launcher or generator.
    Keep pytest's `--basetemp` outside the checkout and follow the target repo's
    required flags. In Conductor itself, unset `CONDUCTOR_LANE` for its gate and
    run the prescribed parallel suite with `--dist loadgroup`.
+   When needed, use the lane's existing `setup`/`teardown` fields to prepare
+   dependencies or a task-owned test server. Give builders a focused browser
+   check when browser behavior is part of acceptance; a TypeScript build may
+   not typecheck browser test files. Ignore linked dependency paths themselves
+   (`app/node_modules`), since a trailing-slash directory rule does not ignore
+   a symlink at that path.
 5. Review the illustrative caps: build $5, review $2 plus $0.25 read grace, fix $3,
    and mission $11. Cursor caps are post-hoc estimate verdicts, not hard provider
    billing limits. The example omits `ceiling`, retaining the ordinary rolling
@@ -79,7 +85,10 @@ Use `--answer stop` to stop instead. This lane checkpoint accepts only
 `continue` or `stop`, not a findings file. Do not use `--unattended` as a substitute
 for the lead's review and final acceptance.
 
-Composer resumes its original session in a new worktree at the build tip. For
+Conductor requests Composer's original session ID in a new worktree at the build
+tip. A matching returned ID proves ID reuse, not that earlier conversation
+context is available in the new workspace. Keep the task and findings complete
+in the correction prompt and inspect the current source. For
 reproduced findings, Conductor requires new permanent tests to fail on the unfixed
 base and the configured gate to pass on the correction. A clean no-op after
 `NO_FINDINGS` is allowed. The fix has no deliverable file requirement.
@@ -97,7 +106,8 @@ If the lead discovers additional defects, retain the old receipts and issue a
 bounded supplemental fix dispatch with the verified findings. Use a clean
 checkout at the **latest candidate tip**, including any accepted fix, so the
 correction cannot discard intervening work. Verify that checkout's HEAD first;
-`--resume` restores model context, not the source commit:
+`--resume` requests the model session; it does not select the source commit or
+guarantee context availability across workspaces:
 
 ```sh
 conductor dispatch --fleet cursor --model composer-2.5 --effort standard \
@@ -112,6 +122,19 @@ reproduction and permanent tests, name allowed files and the current candidate,
 and forbid helper commits. Conductor performs the commit after its checks; the
 lead owns final integration. Account for supplemental dispatches alongside the
 original mission budget.
+
+If a build fails its gate, preserve its kept worktree and failure receipts.
+Complete the build there before review. A commit-enabled dispatch refuses a
+dirty checkout; a bounded dispatch without `--commit` can repair task-owned
+changes, after which the lead verifies the gate and commits the accepted delta.
+Do not use a fresh isolated checkout that silently omits the failed build's
+uncommitted changes. Review the complete salvaged change against the original
+spec, including lead edits, rather than only the last repair patch.
+
+A reviewer that reaches a tool or time limit without its final answer has not
+completed review. Resume only with the required source context available; do not
+spend another run searching broadly for missing history. Treat any absent cost
+receipt as unknown, and account for retries separately from the original mission.
 
 For mechanics, see [pipelines](pipelines.md), [lane stages](lane-stages.md),
 [pausing](pausing-for-the-operator.md), and [deliverables](deliverables.md).

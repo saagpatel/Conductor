@@ -44,6 +44,9 @@ and so on). Do not leave the placeholder strings in place.
 
 REPLACE_WITH_FOCUSED_CHECK_COMMANDS: checks the builder may run before the harness
 runs the configured gate. State temporary-output locations outside the checkout.
+For browser changes, provide a focused check against the candidate's own server;
+do not point tests at the user's running app or leave browser tests unexercised
+until the final gate. Name any required lane `setup`/`teardown` commands.
 
 ## Notes for the builder
 
