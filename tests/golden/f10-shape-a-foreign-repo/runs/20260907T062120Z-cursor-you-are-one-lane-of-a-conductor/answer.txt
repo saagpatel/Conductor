@@ -1,0 +1,11 @@
+I'll review the applied change against the spec, read the guard and gate, and run the named suite without writing into the working tree.
+
+I'll index the two hook files, run the gate under `$TMPDIR`, and check helper signatures against the spec.
+
+MCP calls were blocked, so I’ll inspect the files and run the gate with readonly tools instead.
+
+The gate is green at **120 catch / 108 quiet**, exit 0. Existing cases still pass under the named rules. One spec miss remains.
+
+1. [hooks/core-guard.py](hooks/core-guard.py) L1084–1085 (and L226–227 vs L970): item 6(c) is supposed to search earlier stages of the **same pipeline**, split on `|` the way `check_xargs` does (`cmd.split("|")` at L970). `check_db` instead scans `segs[:i]`, and `segments()` also splits on `;`, `&&`, `||`, `&`, and newlines. Consequence: a remote `psql` that only runs `SELECT` is denied if an earlier `;`/`&&`/`&` piece of the same command merely mentions `DROP TABLE`/`DELETE FROM` (for example `echo 'DROP TABLE users'; psql -h prod.example.com -c 'SELECT 1'`). Confidence: 9.
+
+FINDINGS: 1

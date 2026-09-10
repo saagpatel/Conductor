@@ -1,0 +1,24 @@
+{
+  "kind": "child",
+  "lane": "plan",
+  "spent_usd": null,
+  "threshold": null,
+  "asked_at": "2026-09-07T07:50:02.505506+00:00",
+  "question": "Lane 'plan' planned mission 'f8-plan-child' ($1.00); launch it?",
+  "answer": "continue",
+  "answers": [
+    {
+      "kind": "child",
+      "lane": "plan",
+      "spent_usd": null,
+      "threshold": null,
+      "asked_at": "2026-09-07T07:50:02.505506+00:00",
+      "question": "Lane 'plan' planned mission 'f8-plan-child' ($1.00); launch it?",
+      "answer": "continue",
+      "answered_at": "2026-09-07T07:54:53.025682+00:00"
+    }
+  ],
+  "child_path": "<home>/missions/20260907T074956Z-f8-plan-lane/deliverables/plan-child.json",
+  "child_name": "f8-plan-child",
+  "child_max_cost_usd": 1.0
+}

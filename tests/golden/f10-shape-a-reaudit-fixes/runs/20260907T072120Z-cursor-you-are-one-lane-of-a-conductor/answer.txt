@@ -1,0 +1,9 @@
+I'll review the applied guard and tests against the spec, then run the named gate without changing anything.
+
+I'll index the guard and gate, then inspect the CG-15 paths and run the suite.
+
+MCP was blocked, so I'll read the guard and tests directly and run the gate with `--basetemp` under `$TMPDIR`.
+
+Gate `python3 hooks/tests/core-guard-test.py --basetemp $TMPDIR/...` exited 0: 142 catch / 130 quiet, including every CG-15 case named in the spec. Existing cases were only appended to, not reworded. All five items are present in [`hooks/core-guard.py`](hooks/core-guard.py) and [`hooks/tests/core-guard-test.py`](hooks/tests/core-guard-test.py); bodies still go only to `rm-outside-repo` ([`hooks/core-guard.py` 1322–1344](hooks/core-guard.py)).
+
+NO_FINDINGS

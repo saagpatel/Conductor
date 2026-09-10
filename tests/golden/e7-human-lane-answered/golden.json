@@ -1,0 +1,44 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "answers/approve.deliverable": "5f917cd2e44dedf44fa3d98454ae0afc039519ec16c4f051ba05ff87e66cd93c",
+    "answers/approve.txt": "1ddcf788d41ca39fb686bce2e9fada5fbffe11bc5781e98e570144e72e63c24d",
+    "expected.json": "471431722ec42edc310f5da283220632a95f5606d24e8be7a87c7509bc75700e",
+    "lanes/approve.json": "7157adcad439dffe2b2ca6bbdf4a2e4b388228821470a9ef58574ad3c5895d4d",
+    "lanes/build.json": "a6c9cc71d8f68631be5b546985021272ff99e969b7e98f57e55d6f8c4b3802e4",
+    "mission.json": "4bc28a6db8ed0b9d43a37bb37b8de851c847d820f748337d4a52e8b747beaff2",
+    "pause.json": "5775a3dae001ba4eefd518d5967c6a4c54c7e3850eb2b31160d7258ebe45bd6a",
+    "report.md": "5d278b28e1a3e5864246c918163ac185bdff179d8555379ce6f399af193511f2",
+    "result.json": "ee559b5f16e80d06dd1ab016dff1ca6704ebf0c070b13ac116a235870d8d1c1b",
+    "runs/20260907T074942Z-script-run-4/diff.patch": "8d85330e282c20a5dece709a052729aabcba042ad238c8a1d978884b1baae76d",
+    "runs/20260907T074942Z-script-run-4/prompt.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "runs/20260907T074942Z-script-run-4/result.json": "e9d0e757c84a03661b76a66a046b4feb341cb156fa71babf7d246042524ce820",
+    "runs/20260907T074942Z-script-run-4/stdout.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "fleet_versions": {
+    "script": "GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)"
+  },
+  "fleets": [
+    "script"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T074942Z-f8-human-lane",
+  "name": "e7-human-lane-answered",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:54:54.069077Z"
+}

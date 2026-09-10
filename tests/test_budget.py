@@ -1,0 +1,569 @@
+"""Per-dispatch dollar caps.
+
+The failure these prevent: one runaway dispatch on a fleet with no budget
+flag spending the week's budget before the wall-clock timeout notices. Each
+fleet is capped the way it allows, and a cap conductor cannot enforce is
+refused rather than silently dropped.
+"""
+
+from __future__ import annotations
+
+import json
+import shlex
+import time
+from pathlib import Path
+
+import pytest
+
+from conductor import runner as runner_mod
+from conductor.budget import Budget, _Tail
+from conductor.errors import capped, error_kind
+from conductor.fleets import DispatchRefused, Spec, build_argv
+from conductor.mission import Ledger, mission_from_dict, run_mission
+from conductor.outputs import INCOMPLETE, parse
+from conductor.runner import Result, dispatch
+
+
+def spec_for(repo: Path, **kw) -> Spec:
+    base = dict(fleet="claude", prompt="test cap", cwd=str(repo))
+    base.update(kw)
+    return Spec(**base)
+
+
+def _result(**overrides) -> Result:
+    base: dict = dict(
+        run_id="r1",
+        fleet="cursor",
+        model="m",
+        effort="standard",
+        mode="read",
+        cwd="/tmp/repo",
+        timeout=60,
+        exit_code=0,
+        timed_out=False,
+        duration_s=1.0,
+        run_dir="/tmp/r1",
+        stdout_path="/tmp/r1/stdout.log",
+        stderr_path="/tmp/r1/stderr.log",
+        tail="",
+        spawned=True,
+        git_verdict={"checked": True, "no_op": True},
+    )
+    base.update(overrides)
+    return Result(**base)
+
+
+# --- claude: the fleet caps itself ------------------------------------------
+
+
+def test_claude_gets_its_own_budget_flag():
+    argv = build_argv(Spec(fleet="claude", prompt="x", cwd="/tmp", cap_usd=0.25))
+    assert argv[argv.index("--max-budget-usd") + 1] == "0.25"
+    argv = build_argv(Spec(fleet="claude", prompt="x", cwd="/tmp", cap_usd=5.0))
+    assert argv[argv.index("--max-budget-usd") + 1] == "5"
+    assert "--max-budget-usd" not in build_argv(Spec(fleet="claude", prompt="x", cwd="/tmp"))
+
+
+def test_a_claude_budget_stop_is_read_as_over_cap(repo, home, fake_fleet):
+    """The envelope Claude Code printed live 2026-09-03 with --max-budget-usd
+    0.01: exit 1, no `result` text, the reason under `errors`."""
+    envelope = {
+        "type": "result",
+        "subtype": "error_max_budget_usd",
+        "is_error": True,
+        "errors": ["Reached maximum budget ($0.01)"],
+        "total_cost_usd": 0.23684,
+        "usage": {"input_tokens": 2, "output_tokens": 364, "cache_creation_input_tokens": 58299},
+    }
+    fake_fleet(["sh", "-c", f"echo '{json.dumps(envelope)}'; exit 1"])
+    result = dispatch(spec_for(repo, cap_usd=0.01), home=home)
+    assert result.budget == {
+        "cap_usd": 0.01,
+        "enforcement": "native",
+        "exceeded": True,
+        "unpriced": False,
+        "free": False,
+        "observed_usd": 0.23684,
+    }
+    assert result.fleet_error == "Reached maximum budget ($0.01)"
+    assert result.answer_path is None
+    assert result.summary()["failure"] == "over budget: $0.2368 against a $0.0100 cap"
+    assert result.summary()["over_cap"] is True
+
+
+# --- codex: conductor tails the session rollout -----------------------------
+
+
+def _codex_home(tmp_path: Path, monkeypatch) -> Path:
+    day = tmp_path / "codex-home" / "sessions" / "2026" / "09" / "03"
+    day.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    return day / "rollout-2026-09-03T00-00-00-thread-1.jsonl"
+
+
+def _token_count(**usage: int) -> str:
+    return json.dumps(
+        {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total_token_usage": usage}},
+        }
+    )
+
+
+STARTED = json.dumps({"type": "thread.started", "thread_id": "thread-1"})
+
+
+def test_codex_is_killed_when_its_rollout_prices_over_the_cap(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """Codex prints usage on stdout only at the end; its rollout file is the
+    running figure. 1M output tokens on terra is $12 against a $1 cap."""
+    rollout = _codex_home(tmp_path, monkeypatch)
+    heavy = _token_count(input_tokens=1000, cached_input_tokens=0, output_tokens=1_000_000)
+    fake_fleet(["sh", "-c", f"echo '{STARTED}'; echo '{heavy}' > '{rollout}'; sleep 60"])
+    started = time.monotonic()
+    result = dispatch(
+        spec_for(repo, fleet="codex", model="terra", cap_usd=1.0, timeout=50), home=home
+    )
+    assert time.monotonic() - started < 20
+    assert result.ok is False and result.timed_out is False
+    assert result.error.startswith("budget cap hit: $12.0")
+    assert result.budget["exceeded"] is True and result.budget["enforcement"] == "watcher"
+    assert result.usage["output_tokens"] == 1_000_000
+    assert result.usage["cost_basis"] == "estimated"
+    assert result.answer_path is None
+    assert result.summary()["failure"] == result.error
+
+
+def test_a_codex_run_under_the_cap_is_left_alone(repo, home, fake_fleet, monkeypatch, tmp_path):
+    rollout = _codex_home(tmp_path, monkeypatch)
+    light = _token_count(input_tokens=1000, cached_input_tokens=0, output_tokens=100)
+    done = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "finished"},
+        }
+    )
+    turn = json.dumps(
+        {"type": "turn.completed", "usage": {"input_tokens": 1000, "output_tokens": 100}}
+    )
+    script = (
+        f"echo '{STARTED}'; echo '{light}' > '{rollout}'; sleep 3; echo '{done}'; echo '{turn}'"
+    )
+    fake_fleet(["sh", "-c", script])
+    result = dispatch(spec_for(repo, fleet="codex", model="terra", cap_usd=1.0), home=home)
+    assert result.ok is True
+    assert result.budget["exceeded"] is False
+    assert result.budget["observed_usd"] == result.usage["cost_usd"]
+    assert Path(result.answer_path).read_text() == "finished"
+
+
+def test_a_timed_out_codex_run_is_still_priced_from_its_rollout(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    """No cap at all: the watcher still runs, because without it a killed
+    Codex dispatch lands in the ledger as cost_usd: null."""
+    rollout = _codex_home(tmp_path, monkeypatch)
+    usage = _token_count(input_tokens=10_000, cached_input_tokens=0, output_tokens=1000)
+    fake_fleet(["sh", "-c", f"echo '{STARTED}'; echo '{usage}' > '{rollout}'; sleep 60"])
+    result = dispatch(spec_for(repo, fleet="codex", model="terra", timeout=3), home=home)
+    assert result.timed_out is True
+    assert result.budget is None
+    assert result.usage["input_tokens"] == 10_000 and result.usage["cost_usd"] > 0
+    assert result.usage["cost_basis"] == "estimated"
+
+
+def test_a_codex_watcher_with_no_rollout_falls_back_to_a_post_run_verdict(
+    repo, home, fake_fleet, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere"))
+    turn = json.dumps(
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 1_000_000}}
+    )
+    fake_fleet(["sh", "-c", f"echo '{STARTED}'; echo '{turn}'"])
+    result = dispatch(spec_for(repo, fleet="codex", model="terra", cap_usd=1.0), home=home)
+    assert result.exit_code == 0 and result.ok is False
+    assert result.budget["exceeded"] is True
+    assert result.summary()["failure"].startswith("over budget: $12.0")
+    assert any("saw no running usage" in n for n in result.git_verdict["notes"])
+
+
+# --- antigravity: conductor tails the stream-json steps ---------------------
+
+
+def _step(index: int, **usage: int) -> str:
+    return json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {"step_index": index, "state": "DONE", "usage": usage},
+        }
+    )
+
+
+def _agy_result(response: str, **usage: int) -> str:
+    return json.dumps(
+        {"event": "result", "result": {"status": "SUCCESS", "response": response, "usage": usage}}
+    )
+
+
+def test_antigravity_runs_in_stream_json_so_its_steps_are_visible():
+    argv = build_argv(Spec(fleet="antigravity", prompt="x", cwd="/tmp"))
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+
+
+def test_antigravity_is_killed_when_its_steps_price_over_the_cap(repo, home, fake_fleet):
+    """3M input tokens on gemini-3.8-flash is $2.25 against a $1 cap."""
+    steps = [_step(1, input_tokens=1_500_000, output_tokens=10), _step(3, input_tokens=1_500_000)]
+    fake_fleet(["sh", "-c", f"echo '{steps[0]}'; echo '{steps[1]}'; sleep 60"])
+    result = dispatch(spec_for(repo, fleet="antigravity", cap_usd=1.0, timeout=50), home=home)
+    assert result.ok is False and result.timed_out is False
+    assert result.error.startswith("budget cap hit: $2.25")
+    assert result.usage["input_tokens"] == 3_000_000
+    assert result.answer_path is None
+
+
+def test_antigravity_stream_result_is_unwrapped_and_steps_sum_to_it():
+    """Steps report their own usage, not a running total, and a step may
+    report more than once; the last figure per step counts."""
+    lines = [
+        _step(1, input_tokens=90, output_tokens=1),
+        _step(1, input_tokens=100, output_tokens=5),
+        _step(3, input_tokens=200, output_tokens=6, thinking_tokens=4),
+    ]
+    finished = parse("antigravity", "\n".join(lines + [_agy_result("DONE\n", input_tokens=300)]))
+    assert finished.answer == "DONE" and finished.status == "SUCCESS"
+    assert finished.usage.input_tokens == 300
+
+    cut_short = parse("antigravity", "\n".join(lines))
+    # D15: no result event means the turn never finished. The status is
+    # conductor's own reading of the stream, not a fleet's word, so `error`
+    # stays None and `runner.Result.failure` fails the run on the status.
+    assert cut_short.answer == "" and cut_short.parsed
+    assert cut_short.status == INCOMPLETE and cut_short.error is None
+    assert cut_short.usage.input_tokens == 300
+    assert cut_short.usage.output_tokens == 11 + 4  # thinking bills as output
+    assert cut_short.usage.thinking_tokens == 4
+
+
+# --- cursor: usage arrives once, at the end ---------------------------------
+
+
+def test_cursor_is_judged_after_the_run_because_it_reports_usage_once(repo, home, fake_fleet):
+    envelope = (
+        '{"type":"result","subtype":"success","is_error":false,"result":"PONG",'
+        '"usage":{"inputTokens":1000000,"outputTokens":1000000}}'
+    )
+    fake_fleet(["sh", "-c", f"echo '{envelope}'"])
+    over = dispatch(spec_for(repo, fleet="cursor", model="composer-2.5", cap_usd=1.0), home=home)
+    assert over.exit_code == 0 and over.ok is False
+    assert over.budget == {
+        "cap_usd": 1.0,
+        "enforcement": "post-hoc",
+        "exceeded": True,
+        "unpriced": False,
+        "free": False,
+        "observed_usd": 3.0,
+    }
+    assert over.summary()["failure"] == "over budget: $3.0000 against a $1.0000 cap"
+    assert Path(over.answer_path).read_text() == "PONG"  # the work is kept, the verdict is not ok
+
+    under = dispatch(spec_for(repo, fleet="cursor", model="composer-2.5", cap_usd=5.0), home=home)
+    assert under.ok is True
+    assert under.budget["exceeded"] is False and under.summary()["over_cap"] is False
+
+
+# --- refusals ---------------------------------------------------------------
+
+
+def test_a_cap_conductor_cannot_enforce_is_refused_before_spawn(monkeypatch, tmp_path):
+    with pytest.raises(DispatchRefused, match="positive"):
+        Spec(fleet="codex", prompt="x", cwd="/tmp", cap_usd=0).validate()
+    # `--cap-usd inf` parses; no finite spend ever exceeds it (Codex review).
+    with pytest.raises(DispatchRefused, match="finite"):
+        Spec(fleet="codex", prompt="x", cwd="/tmp", cap_usd=float("inf")).validate()
+    monkeypatch.setenv("CONDUCTOR_HOME", str(tmp_path))
+    (tmp_path / "prices.json").write_text(
+        json.dumps({"composer-2.5": None, "claude-sonnet-5": None})
+    )
+    with pytest.raises(DispatchRefused, match="unpriced"):
+        Spec(fleet="cursor", model="composer-2.5", prompt="x", cwd="/tmp", cap_usd=1.0).validate()
+    # Claude Code caps itself; it needs no price from conductor.
+    Spec(fleet="claude", model="sonnet", prompt="x", cwd="/tmp", cap_usd=1.0).validate()
+    # `True` is 1.0 under `math.isfinite and > 0`; `prices.finite_positive`
+    # exists so a bool is refused rather than silently capping at $1.
+    with pytest.raises(DispatchRefused, match="positive finite"):
+        Spec(fleet="claude", prompt="x", cwd="/tmp", cap_usd=True).validate()
+    with pytest.raises(DispatchRefused, match="positive finite"):
+        Spec(
+            fleet="claude", prompt="x", cwd="/tmp", cap_usd=1.0, cap_grace_usd=True
+        ).validate()
+
+
+# --- the tail ---------------------------------------------------------------
+
+
+def test_the_tail_reads_only_new_lines_and_holds_a_partial_one(tmp_path):
+    path = tmp_path / "f.jsonl"
+    path.write_bytes(b'{"a":1}\n{"b":')
+    tail = _Tail(path)
+    assert tail.lines() == ['{"a":1}']
+    with path.open("ab") as fh:
+        fh.write(b"2}\n")
+    assert tail.lines() == ['{"b":2}']
+    assert tail.lines() == []
+    assert _Tail(tmp_path / "missing").lines() == []
+
+
+def test_resumed_codex_thread_counts_only_usage_after_spawn(tmp_path, monkeypatch):
+    """A resumed thread's rollout opens with the earlier dispatch's totals;
+    pricing them again tripped a fix lane's cap two seconds in."""
+    from datetime import UTC, datetime, timedelta
+
+    from conductor.budget import _CodexRollout
+
+    rollout = _codex_home(tmp_path, monkeypatch)
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(STARTED + "\n")
+    spawn = datetime.now(UTC)
+    before = (spawn - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    after = (spawn + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+
+    def stamped(stamp: str, **usage: int) -> str:
+        return json.dumps(
+            {
+                "timestamp": stamp,
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": {"total_token_usage": usage}},
+            }
+        )
+
+    rollout.write_text(
+        stamped(before, input_tokens=1000, cached_input_tokens=200, output_tokens=500)
+        + "\n"
+        + stamped(after, input_tokens=1300, cached_input_tokens=400, output_tokens=520)
+        + "\n"
+    )
+    source = _CodexRollout(stdout, since=spawn)
+    usage = source.poll()
+    assert usage is not None
+    assert usage.cache_read_tokens == 200 and usage.output_tokens == 20
+    assert usage.input_tokens == 100  # (1300 - 1000) input less (400 - 200) cached
+
+    # Without a spawn time (an unstamped legacy fixture) nothing is discounted.
+    fresh = _CodexRollout(stdout)
+    assert fresh.poll().output_tokens == 520
+
+
+def test_a_nan_token_count_in_a_resumed_rollout_does_not_crash_the_watcher(
+    tmp_path, monkeypatch
+):
+    """`int(total.get(key) or 0)` on a bare NaN raises inside the poll loop --
+    the one place meant to fail closed rather than crash. Codex writes the
+    rollout, `json.loads` accepts bare NaN and Infinity, and the loop reads
+    it on every tick."""
+    from datetime import UTC, datetime, timedelta
+
+    from conductor.budget import _CodexRollout
+
+    rollout = _codex_home(tmp_path, monkeypatch)
+    stdout = tmp_path / "stdout.log"
+    stdout.write_text(STARTED + "\n")
+    spawn = datetime.now(UTC)
+    before = (spawn - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    after = (spawn + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+
+    def stamped(stamp: str, usage: str) -> str:
+        return (
+            '{"timestamp": "' + stamp + '", "type": "event_msg", "payload": '
+            '{"type": "token_count", "info": {"total_token_usage": ' + usage + "}}}"
+        )
+
+    rollout.write_text(
+        stamped(before, '{"input_tokens": 1000, "output_tokens": 500}')
+        + "\n"
+        + stamped(after, '{"input_tokens": NaN, "output_tokens": 520}')
+        + "\n"
+    )
+
+    usage = _CodexRollout(stdout, since=spawn).poll()
+
+    assert usage is not None
+    # The unusable figure is dropped, not coerced; the usable one still counts.
+    assert usage.output_tokens == 20
+
+
+# --- D11: the retry loop goes through the ledger too --------------------------
+
+
+@pytest.mark.xdist_group(name="serial")
+def test_a_retry_stops_once_the_ledger_can_no_longer_account_for_the_spend(
+    repo, home, monkeypatch, tmp_path
+):
+    """D11: a dispatch that came back with no usage at all makes
+    `Ledger.blocker()` refuse while `remaining()` still reads finite, so the
+    outer attempt walk stops but the same-attempt retry loop used to dispatch
+    straight past it. One lane lands unpriced while another sits in its retry
+    backoff; the retry must consult the same gate the outer walk does.
+
+    The backoff is deliberately long relative to how fast the `silent` lane
+    lands. Both lanes are submitted together, but each one's worktree is
+    created first and the two contend on the same repository, so the second
+    dispatch's start can slip a second or more behind the first. At the
+    original `backoff_s: 2` that slip decided the test: `silent` had to land
+    unpriced inside `flaky`'s first backoff or `flaky` retried once before
+    the ledger could refuse, and the assertions below then failed on
+    `counter == "2"`. Measured 2026-09-08: three failures in five runs
+    standalone. The invariant held in every one of them (the retry was still
+    refused, at retry 2 instead of retry 1); it was the timing this test
+    pinned that did not hold, so the fix is margin here, not a weaker
+    assertion. Serial for the same reason: under `-n auto` the contention it
+    is sensitive to is worse.
+    """
+    counter = tmp_path / "flaky-dispatches"
+    counter.write_text("0")
+    silent = json.dumps({"result": "done, trust me"})  # spawned, no usage: unpriced
+    transport = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "",
+            "error": "ECONNRESET while streaming",
+            "usage": {"input_tokens": 10, "output_tokens": 1},
+        }
+    )
+    flaky_script = (
+        f"n=$(cat {counter}); n=$((n + 1)); echo $n > {counter}; "
+        f"printf '%s\\n' {shlex.quote(transport)}; exit 1"
+    )
+
+    def build(spec: Spec) -> list[str]:
+        if spec.fleet == "cursor":
+            return ["sh", "-c", f"printf '%s\\n' {shlex.quote(silent)}"]
+        return ["sh", "-c", flaky_script]
+
+    monkeypatch.setattr(runner_mod, "build_argv", build)
+    raw = {
+        "prompt": "x",
+        "cwd": str(repo),
+        "mode": "read",
+        "concurrency": 2,
+        "max_cost_usd": 5.0,
+        "retry": {"kinds": ["transport"], "attempts": 2, "backoff_s": 8},
+        "lanes": [
+            {"name": "flaky", "fleet": "claude"},
+            {"name": "silent", "fleet": "cursor"},
+        ],
+    }
+    result = run_mission(mission_from_dict(raw, base_dir=tmp_path), home=home)
+
+    by_name = {lane["name"]: lane for lane in result.lanes}
+    flaky = by_name["flaky"]
+    assert counter.read_text().strip() == "1"  # the retry never dispatched
+    assert len(flaky["attempts"]) == 1
+    assert flaky["kinds"] == ["transport"]
+    assert "budget unverifiable" in flaky["skipped"]
+    assert "retry 1" in flaky["skipped"] and "not started" in flaky["skipped"]
+    assert result.budget["unverifiable"] is True
+
+
+def test_a_timed_out_run_is_not_settled_as_an_unenforced_cap():
+    """Cursor has no in-run watcher, so a timed-out Grok lane has no figure.
+    `settle` used to flag that `unpriced`, which `failure()` reported ahead
+    of the timeout and `Ledger.add` counted into `blocker()`."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None, timed_out=True)
+    assert budget.unpriced is False
+    assert budget.exceeded is False
+    still_unpriced = Budget(cap_usd=1.5, enforcement="post-hoc")
+    still_unpriced.settle(None, killed=False, fleet_status=None)
+    assert still_unpriced.unpriced is True
+
+
+def test_ledger_a_timed_out_unpriced_run_does_not_halt_the_mission():
+    class _Timeout:
+        usage = None
+        spawned = True
+        interrupted = False
+        cancelled = False
+        timed_out = True
+
+    ledger = Ledger(max_cost_usd=5.0)
+    ledger.add(_Timeout())
+    state = ledger.to_dict()
+    assert state["spent_usd"] == 0.0
+    assert state["unpriced_dispatches"] == 0
+    assert state["unverifiable"] is False
+    assert ledger.blocker() is None
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        ("verdict invalid: schema mismatch", "parse"),
+        ("resume failed: fleet reported session abc, requested wanted", "resume"),
+        ("clean gate could not run: git worktree add failed: boom", "gate"),
+        (
+            "test surface changed under policy forbid: tests/test_foo.py",
+            "gate_test_surface",
+        ),
+    ],
+)
+def test_an_unpriced_budget_with_conductor_own_check_prefixes_is_not_kind_cap(
+    error, expected
+):
+    """Item 1: settle still flags the run unpriced (no figure), but the
+    receipt's own error prefix is the cause, not the cap."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None)
+    assert budget.unpriced is True
+    result = _result(error=error, budget=budget.to_dict())
+    assert error_kind(result) == expected
+    assert error_kind(result) != "cap"
+
+
+def test_settle_unpriced_on_a_never_spawned_run_is_not_over_cap():
+    """Item 2: Popen never returned, settle still sets unpriced, and
+    `Result.summary()['over_cap']` used to follow that into True."""
+    budget = Budget(cap_usd=1.5, enforcement="post-hoc")
+    budget.settle(None, killed=False, fleet_status=None)
+    assert budget.unpriced is True
+    assert budget.exceeded is False
+    result = _result(
+        spawned=False,
+        error="cannot spawn cursor-agent: [Errno 2] No such file or directory",
+        budget=budget.to_dict(),
+    )
+    assert capped(result) is False
+    assert result.summary()["over_cap"] is False
+    assert error_kind(result) == "refused"
+
+
+def test_a_priced_timeout_over_the_ceiling_is_not_settled_as_a_cap_kind():
+    """Item 3: settle's cost>ceiling limb fires on a timeout; `capped`
+    must still exclude it. A native stop that also timed out stays cap."""
+    over = Budget(cap_usd=1.0, enforcement="watcher")
+    over.settle(2.5, killed=False, fleet_status=None, timed_out=True)
+    assert over.exceeded is True
+    assert over.unpriced is False
+    timed = _result(
+        timed_out=True,
+        timeout=600,
+        budget=over.to_dict(),
+        error="timed out after 600s; process group killed",
+    )
+    assert capped(timed) is False
+    assert error_kind(timed) == "timeout"
+
+    native = Budget(cap_usd=1.0, enforcement="native")
+    native.settle(2.5, killed=False, fleet_status="error_max_budget_usd", timed_out=True)
+    assert native.exceeded is True
+    stopped = _result(
+        timed_out=True,
+        timeout=600,
+        fleet_status="error_max_budget_usd",
+        budget=native.to_dict(),
+        error="Reached maximum budget ($1.00)",
+    )
+    assert capped(stopped) is True
+    assert error_kind(stopped) == "cap"

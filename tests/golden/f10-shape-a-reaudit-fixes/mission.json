@@ -1,0 +1,261 @@
+{
+  "name": "core-guard-reaudit-fixes",
+  "cwd": "<cwd>",
+  "lanes": [
+    {
+      "name": "build",
+      "attempts": [
+        {
+          "fleet": "claude",
+          "model": "sonnet",
+          "effort": "hard",
+          "mode": "write",
+          "cwd": null,
+          "prompt": "{{mission.prompt}}",
+          "timeout": 3300,
+          "stall_timeout": 600,
+          "loop_limit": 6,
+          "max_tool_calls": null,
+          "tool_idle_timeout": null,
+          "test": "python3 hooks/tests/core-guard-test.py",
+          "commit": "fix(core-guard): close the re-audit's agreed shapes: -c bodies, wrapper-scoped interpreters, env -S, assignment chains, reflog expire",
+          "schema": null,
+          "verdict": null,
+          "isolate": null,
+          "cap_usd": 9.0,
+          "cap_grace_usd": 0.25,
+          "no_op_ok": false,
+          "test_policy": "allow",
+          "test_surface": null,
+          "ports": 0,
+          "setup": null,
+          "teardown": null,
+          "include": null,
+          "agent": null,
+          "deliverable": null,
+          "restricted": false,
+          "on": null,
+          "command": null
+        }
+      ],
+      "needs": [],
+      "base": null,
+      "resume": null,
+      "branch": null,
+      "stage": "build",
+      "cascaded": false,
+      "taint": false,
+      "untrusted_output": false,
+      "tainted": false,
+      "taint_from": [],
+      "human": false,
+      "script": false,
+      "plan": false
+    },
+    {
+      "name": "review-gemini",
+      "attempts": [
+        {
+          "fleet": "antigravity",
+          "model": "gemini-3.7-flash",
+          "effort": "standard",
+          "mode": "read",
+          "cwd": null,
+          "prompt": "Review the change below against the spec. The change is applied in the current working directory; read whatever you need. Do not run the test suite; the lead runs it. Read the diff and the code it touches. Change nothing.\n\n<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\nBased on the information above: Report anything that could cause incorrect behavior, a test failure, or a misleading result, including a spec item that is missing or only partly implemented. Omit pure style and naming. Number each item. For each item: file and line, what goes wrong, one sentence of consequence, your confidence 1-10. End the reply with exactly one final line: NO_FINDINGS if there is nothing to report, or FINDINGS: N where N is the number of items you numbered above. Either answer is complete. Put the entire review in this reply; the reply is the only thing the next agent receives.",
+          "timeout": 1200,
+          "stall_timeout": 600,
+          "loop_limit": 6,
+          "max_tool_calls": null,
+          "tool_idle_timeout": null,
+          "test": "python3 hooks/tests/core-guard-test.py",
+          "commit": null,
+          "schema": null,
+          "verdict": null,
+          "isolate": null,
+          "cap_usd": 1.0,
+          "cap_grace_usd": null,
+          "no_op_ok": false,
+          "test_policy": "clean",
+          "test_surface": null,
+          "ports": 0,
+          "setup": null,
+          "teardown": null,
+          "include": null,
+          "agent": null,
+          "deliverable": null,
+          "restricted": false,
+          "on": null,
+          "command": null
+        }
+      ],
+      "needs": [
+        "build"
+      ],
+      "base": "build",
+      "resume": null,
+      "branch": null,
+      "stage": "review",
+      "cascaded": false,
+      "taint": false,
+      "untrusted_output": false,
+      "tainted": false,
+      "taint_from": [],
+      "human": false,
+      "script": false,
+      "plan": false
+    },
+    {
+      "name": "review-grok",
+      "attempts": [
+        {
+          "fleet": "cursor",
+          "model": "grok-4.6",
+          "effort": "standard",
+          "mode": "read",
+          "cwd": null,
+          "prompt": "Review the change below against the spec. The change is applied in the current working directory; read whatever you need and, if you are able to, run the gate named in the spec. If you run the suite, pass --basetemp pointing to a directory under $TMPDIR so nothing is written inside this working tree. CHANGE NOTHING.\n\n<spec>\n{{mission.prompt}}\n</spec>\n\n<change>\n{{lanes.build.diff}}\n</change>\n\nReport anything that could cause incorrect behavior, a test failure, or a misleading result, including a spec item that is missing or only partly implemented. Omit pure style and naming. Number each item. For each item: file and line, what goes wrong, one sentence of consequence, your confidence 1-10. End the reply with exactly one final line: NO_FINDINGS if there is nothing to report, or FINDINGS: N where N is the number of items you numbered above. Either answer is complete. Put the ENTIRE review in this reply; the reply is the only thing the next agent receives.",
+          "timeout": 1200,
+          "stall_timeout": 600,
+          "loop_limit": 6,
+          "max_tool_calls": null,
+          "tool_idle_timeout": null,
+          "test": "python3 hooks/tests/core-guard-test.py",
+          "commit": null,
+          "schema": null,
+          "verdict": null,
+          "isolate": null,
+          "cap_usd": 2.0,
+          "cap_grace_usd": 0.25,
+          "no_op_ok": false,
+          "test_policy": "clean",
+          "test_surface": null,
+          "ports": 0,
+          "setup": null,
+          "teardown": null,
+          "include": null,
+          "agent": null,
+          "deliverable": null,
+          "restricted": false,
+          "on": null,
+          "command": null
+        }
+      ],
+      "needs": [
+        "build"
+      ],
+      "base": "build",
+      "resume": null,
+      "branch": null,
+      "stage": "review",
+      "cascaded": false,
+      "taint": false,
+      "untrusted_output": false,
+      "tainted": false,
+      "taint_from": [],
+      "human": false,
+      "script": false,
+      "plan": false
+    },
+    {
+      "name": "fix",
+      "attempts": [
+        {
+          "fleet": "claude",
+          "model": "sonnet",
+          "effort": "standard",
+          "mode": "write",
+          "cwd": null,
+          "prompt": "The spec below is already implemented on this branch, by you earlier in this thread. Two reviewers from other vendors read the change; their reports follow, each with its items numbered.\n\n<spec>\n{{mission.prompt}}\n</spec>\n\n<review_gemini>\n{{lanes.review-gemini.answer}}\n</review_gemini>\n\n<review_grok>\n{{lanes.review-grok.answer}}\n</review_grok>\n\nFor each reported item, first write a test that fails on the current tree because of it; then fix only what that test proves. This lane runs under conductor's reproduce gate: a fix with no test change is refused, and a test that already passes on the current tree is refused. If both reviews say NO_FINDINGS or nothing reproduces, change nothing and reply NO_CHANGES. For every item either reviewer numbered, add one line: DISPOSITION: <review-gemini or review-grok> <item number> <fixed, refused, already, or wording>: <reason>. Use fixed for an item you changed code for; refused, with the reason it is wrong, for one you rejected; already for one that was already true before this fix; wording for one that only asked for a comment or message change. Keep existing call signatures working. Run the gate named in the spec before finishing, with --basetemp under $TMPDIR. Do not commit; the harness commits.",
+          "timeout": 1800,
+          "stall_timeout": 600,
+          "loop_limit": 6,
+          "max_tool_calls": null,
+          "tool_idle_timeout": null,
+          "test": "python3 hooks/tests/core-guard-test.py",
+          "commit": "fix(core-guard): address cross-vendor review of the re-audit fixes",
+          "schema": null,
+          "verdict": null,
+          "isolate": null,
+          "cap_usd": 7.0,
+          "cap_grace_usd": 0.25,
+          "no_op_ok": true,
+          "test_policy": "allow",
+          "test_surface": null,
+          "ports": 0,
+          "setup": null,
+          "teardown": null,
+          "include": null,
+          "agent": null,
+          "deliverable": null,
+          "restricted": false,
+          "on": null,
+          "command": null
+        }
+      ],
+      "needs": [
+        "review-gemini",
+        "review-grok",
+        "build"
+      ],
+      "base": "build",
+      "resume": "build",
+      "branch": "feat/core-guard-reaudit-fixes",
+      "stage": "fix",
+      "cascaded": false,
+      "taint": false,
+      "untrusted_output": false,
+      "tainted": false,
+      "taint_from": [],
+      "human": false,
+      "script": false,
+      "plan": false
+    }
+  ],
+  "concurrency": 2,
+  "require": "all",
+  "max_cost_usd": 20.5,
+  "collate": null,
+  "source": "<cwd>/jobs/b514440a/tmp/cg3/mission.json",
+  "prompt": "# core-guard: the re-audit's agreed findings\n\nRepository: the operator's Claude Code harness. The two files that matter are `hooks/core-guard.py` (the PreToolUse Bash guard) and `hooks/tests/core-guard-test.py` (its gate, `python3 hooks/tests/core-guard-test.py`, green at 129 catch / 116 quiet on main). Python 3, stdlib only. Touch nothing else. Read the guard's docstring first: it fails open, blocks four classes only, and matches on tokens, never raw text. Keep all three.\n\nContext: the guard was audited by three vendors, fixed (the CG-14 group in the gate), and audited again cold by the same three. Every item below was reported by at least two of them on the fixed guard, each confirmed by running the guard. Every item gets its CATCH or QUIET cases in a new group CG-15, in the style of CG-14, with a comment naming the item.\n\n## Items\n\n### 1. Shell text passed as an argument: `bash -c`, `sh -c`, `zsh -c`, `eval`\n\n`bash -c 'rm -rf ~'`, `sh -c \"rm -rf ~\"`, `eval 'rm -rf ~'`, `timeout 60 bash -c 'rm -rf ~'`, and `sudo bash -c 'rm -rf ~'` all run `rm` and are all allowed: `script_bodies` treats the word after an interpreter as a file name, so a `-c` string is never read, and `eval`'s argument is one quoted token whose `verb()` is the whole string.\n\nFix: in `script_bodies`, when an interpreter word is followed by `-c` (or a cluster containing `c`, such as `-lc` or `-xc`), the next bare token is a body, returned exactly as a file's contents would be; and `eval` counts as an interpreter whose every following bare token is a body. Bodies reach the delete rule only, as the docstring above `INTERPRETERS` says, and that stays true here: `bash -c 'git push --force'` is out of scope and no test claims it. `bash -n -c '...'` is a syntax check and is not read.\n\nCATCH (rm-outside-repo): `bash -c 'rm -rf ~'`, `sh -c \"rm -rf $HOME\"`, `zsh -lc 'rm -rf ~/NotARepoAnywhere'`, `eval 'rm -rf ~'`, `timeout 60 bash -c 'rm -rf ~'`. QUIET: `bash -c 'echo hello'`, `bash -c 'rm -rf node_modules'` from a repo, `bash -n -c 'rm -rf ~'`, `python3 -c \"print('rm -rf ~')\"`.\n\n### 2. An interpreter word in argument position reads a file the command never runs\n\nThe last fix let `script_bodies` take an interpreter word from anywhere in the segment so that `timeout 60 bash evil.sh` is read. The cost: `grep -n bash notes.txt`, `diff bash evil.sh`, and `echo bash evil.sh` now read the file after the word `bash` and deny when its prose mentions a delete. Two vendors reproduced `grep -n bash hooks/tests/core-guard-test.py` being denied on this repository.\n\nFix, reversing the earlier \"no launcher list\" instruction: an interpreter word counts when it is the command word, or when every token before it is an env assignment, a flag, a bare number, or the basename of a known wrapper. Put the wrappers in one named set next to `LAUNCH_PREFIX`: `timeout`, `sudo`, `doas`, `nice`, `ionice`, `xargs`, `chronic`, `flock`, `watch`, `strace`, `ltrace`, plus everything already in `LAUNCH_PREFIX`. A command word outside that set (`grep`, `diff`, `echo`, `cat`, anything else) never makes a later `bash` an interpreter. Keep item 1's `-c` handling on the same rule.\n\nCATCH (rm-outside-repo): every existing wrapped case; `xargs bash {EVIL}` with the path on the command line; `sudo -u nobody bash {EVIL}`. QUIET: `grep -n bash {EVIL}`, `diff bash {EVIL}`, `echo bash {EVIL}`, `cat {EVIL}`, `grep -n bash hooks/tests/core-guard-test.py` from the repository root (cwd: the checkout).\n\n### 3. `#!/usr/bin/env -S bash` shebangs\n\n`_shebang_shell` takes the word after `env` as the interpreter, so `#!/usr/bin/env -S bash` (the documented way to pass flags through `env`) yields `-S` and the script run by path is never read.\n\nFix: after `env`, skip tokens beginning with `-` before taking the interpreter.\n\nCATCH (rm-outside-repo): a staged executable whose first line is `#!/usr/bin/env -S bash -e` and whose body deletes `~/NotARepoAnywhere`, run by absolute path. QUIET: the same shebang shape on a `python3` file.\n\n### 4. Same-line assignments that the resolver skips\n\nReported and confirmed: `V=r$1m; $V -rf ~/NotARepoAnywhere` runs `rm` (bash folds `$1` to nothing) and is allowed because the folded view and the resolved view are siblings, never composed; `export V=rm; $V -rf ~` is allowed because `ASSIGN` matches only at a statement start, and `export`, `declare`, `typeset`, `readonly`, and `local` all precede an assignment in ordinary shell; `A=rm; B=$A; $B -rf ~` is allowed because resolution is one hop.\n\nFix: `command_views` adds the resolved view computed on the folded text as well (fold, then resolve), so the composed shape is caught; `ASSIGN` accepts an optional `export|declare|typeset|readonly|local` word (with optional flags like `-x`) before the name; and resolution repeats until nothing changes, bounded to four passes.\n\nCATCH (rm-outside-repo): the three commands above. QUIET: `export PATH=$PATH:/opt/x; ls`, `local x=1; echo $x`, `declare -x EDITOR=vim; git commit`, from a repo.\n\n### 5. `git reflog expire --expire now`\n\n`check_history` matches `--expire=now` as one token and misses the two-token spelling `--expire now`, which git accepts. Reported in both audits.\n\nFix: also match `--expire` followed by a token `now` (or `0`, which git treats the same).\n\nCATCH (history-destruction): `git reflog expire --expire now --all`, `git reflog expire --expire 0 --all`. QUIET: `git reflog expire --expire-unreachable=90.days --all` (exists), `git reflog expire --expire 30.days --all`.\n\n## Gate\n\n`python3 hooks/tests/core-guard-test.py`, exit 0, every case green. Do not weaken, delete, or reword an existing case; if one contradicts an item, stop and name it in your summary. Your final message lists each item with the lines changed and the cases added.\n",
+  "prefix": "You are one lane of a conductor mission on the operator's Claude Code harness (a Bash PreToolUse guard and its regression gate). Every claim is judged on bytes: the diff, the gate, the receipts. Read before you write; cite file and line for anything you report. You are operating autonomously: nobody is watching in real time and nobody can answer a question mid-task, so a question blocks the work; make the routine call, state it in one line, and keep going. Keep changes and tests to what the task asks for: no unrequested fixes, no surplus test files. Before ending, check your last paragraph: if it is a plan or a promise, do that work now.",
+  "template_max_chars": 160000,
+  "snapshot_version": 1,
+  "self_judging": null,
+  "policy": {
+    "build": {
+      "vendors": [
+        "anthropic"
+      ]
+    },
+    "review": {
+      "vendors": [
+        "google",
+        "xai"
+      ]
+    },
+    "fix": {
+      "vendors": [
+        "anthropic"
+      ]
+    }
+  },
+  "early_cancel": false,
+  "pause": {
+    "before": [
+      "fix"
+    ],
+    "spend_usd": null
+  },
+  "cascade": null,
+  "retry": null,
+  "test": "python3 hooks/tests/core-guard-test.py",
+  "resolve": null,
+  "notify": null,
+  "ceiling": {
+    "per_hour_usd": null,
+    "per_day_usd": null
+  },
+  "depth": 0,
+  "parent": null,
+  "budget_from_parent": false
+}

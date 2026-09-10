@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+# Claude Code session worktrees
+.claude/worktrees/
+# per-machine Claude Code settings (carries the bridge-db token)
+.claude/settings.local.json

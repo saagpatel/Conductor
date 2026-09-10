@@ -1,0 +1,51 @@
+I'll audit the fixed `core-guard.py` cold: read the guard, gate, and manifest first, then the last three commits and live probes. No writes in the working tree.
+
+I'll index the guard, gate, and last three commits, then read the rest of the parser and rule functions with citations.
+
+Context-mode calls were rejected, so I'll continue with read-only file reads, git, and probes.
+
+The last three first-parent commits are unrelated; the audit fixes are on the merged feature branch. I'll pull that lineage and the gate next.
+
+I'll run the official gate, then probe the widened rules with payloads logged only under `$TMPDIR`.
+
+# Cold audit of fixed core-guard
+
+Working tree left unread. Gate run: `python3 hooks/tests/core-guard-test.py` — ALL GREEN, 129 catch / 116 quiet. Closed CG-14 items 1–16 are not re-listed. Fail-open is not a finding. Each item below was confirmed by piping a Bash payload into `python3 hooks/core-guard.py` with `CORE_GUARD_LOG` under `$TMPDIR` unless noted.
+
+Routine call: `git log -3` on HEAD is the merge plus unrelated docs/gitignore; the three fix commits are `c0d3cf5`, `ed23b41`, `529c61c` (`git show c0d3cf5 --stat` names the two files).
+
+## Bypass shapes
+
+1. **[hooks/core-guard.py](hooks/core-guard.py):624-626** `script_bodies` takes `os.path.basename(toks[k]) in INTERPRETERS` with no casefold, while [verb()](hooks/core-guard.py):270 casefolds. **`BASH /path/evil.sh` is allowed;** `BASH -c 'echo ok'` really runs bash on this FS. Consequence: item 4’s capitalised-verb fix does not apply to the item 2/13 script reader, so a normal `#!/bin/bash` wipe script launched as `BASH`/`Bash` never reaches `check_rm`. Confidence **9**. Confirmed against the guard.
+
+2. **[hooks/core-guard.py](hooks/core-guard.py):785-786** history subcommands are compared on raw tokens (`"filter-repo" in tok`), not `verb()`. **`git Filter-Repo --path secrets --invert-paths` is allowed;** `git Filter-Repo -h` on this machine dispatches git-filter-repo. `git PUSH` is *not* a bypass (`fatal: cannot handle PUSH as a builtin`). Consequence: item 4 left the filter-repo/filter-branch token path case-sensitive; published-history rewrite runs. Confidence **9**. Confirmed.
+
+3. **[hooks/core-guard.py](hooks/core-guard.py):505-524** `command_views` adds `fold_empty(cmd)` and `resolve_same_line_assigns(cmd)` as sibling views, never fold-then-resolve. **`V=r$1m; $V -rf ~/NotARepoAnywhere` is allowed;** bash actually execs `rm` (`rm: HI: No such file or directory` in a safe probe). Consequence: combining the empty-splice fold with the item 1 assign rewrite reopens `r$1m` behind a same-line variable. Confidence **9**. Confirmed.
+
+4. **[hooks/core-guard.py](hooks/core-guard.py):441** `ASSIGN` only matches at `^` / `[;&|]` / `&&`, so `export`/`declare`/`typeset`/`readonly`/`local` prefixes never bind. **`export V=rm; $V -rf ~/NotARepoAnywhere` (and declare/typeset/readonly/local) are allowed;** bash runs them. Consequence: the item 1 same-line verb rewrite is skipped for the usual way a name is published, then `$V` runs `rm`. Confidence **9**. Confirmed.
+
+5. **[hooks/core-guard.py](hooks/core-guard.py):456-502** only a *static bare word* assign is substituted, one hop. **`A=rm; B=$A; $B -rf ~/NotARepoAnywhere` is allowed;** bash runs `rm`. Consequence: item 1 still misses the same act spelled with an intermediate name. Confidence **9**. Confirmed.
+
+6. **[hooks/core-guard.py](hooks/core-guard.py):164-166** `PIPED_TO_SHELL` lists bash/sh/zsh/ksh/dash/csh/tcsh/fish/eval but not `source` or `.`, while [SHELL_INTERP](hooks/core-guard.py):128-134 includes both. **`cat <<'EOF' | source /dev/stdin` / `| . /dev/stdin` with `rm -rf ~` in the body are allowed;** both execute (`RAN_SOURCE` / `RAN_DOT`). Consequence: CG-6’s “heredoc piped into a shell” fix still strips the body when the shell is named `source`/`.`. Confidence **9**. Confirmed.
+
+7. **[hooks/core-guard.py](hooks/core-guard.py):570-574** `_shebang_shell` treats `env`’s next word as the interpreter, so `#!/usr/bin/env -S bash` yields `-S`. **Direct execution of that file is allowed;** `env -S bash -c` works here. Consequence: item 2’s shebang path reader is void for the documented `env -S` shebang form. Confidence **8**. Guard allow confirmed; kernel exec of that shebang not re-run.
+
+8. **[hooks/core-guard.py](hooks/core-guard.py):628-644** after an interpreter, a `-c`/`-lc` flag is skipped and the next word is treated as a *filename*, never as shell text. **`bash -c 'rm -rf ~'`, `sh -c`, `zsh -c`, `eval 'rm -rf ~'`, `timeout 60 bash -c 'rm -rf ~'`, `sudo bash -c 'rm -rf ~'` are allowed;** `bash -n -c 'rm -rf ~'` parses. Consequence: the script_bodies widening still never sees the payload the shell will run when it is an argument rather than a file. Confidence **9**. Confirmed.
+
+9. **[hooks/core-guard.py](hooks/core-guard.py):1136-1152** pipe SQL is only `DB_DESTRUCTIVE` on *upstream command text*; file SQL is only `-f `, `--file=`, or `< file`. **`cat drop.sql | psql -h prod`, `psql -h prod --file drop.sql` (space, not `=`), `psql -h prod <(cat drop.sql)` are allowed;** `--file=` and `< drop.sql` deny. Consequence: item 6’s “SQL from pipe/file” claim misses the ordinary `cat file | client` and GNU `--file FILE` forms. Confidence **9** for `cat | psql` / process-subst; **7** for `--file` space (psql binary not installed; getopt_long `file:` accepts both). Confirmed allows.
+
+10. **[hooks/core-guard.py](hooks/core-guard.py):624-644** interpreter-anywhere still needs a following path token. **`echo /path/evil.sh | xargs bash` is allowed.** Consequence: item 13 catches `timeout`/`sudo`/`nice` but not the xargs wrapper that actually launches the interpreter. Confidence **8**. Confirmed against the guard.
+
+## False positives (widened denies)
+
+11. **[hooks/core-guard.py](hooks/core-guard.py):75-83, 856-869** every path under `SYSTEM_DESCENDANT_ROOTS` (`/usr`, `/Library`, `/Applications`, …) is denied; `/opt` is exact-only. **`rm -rf /usr/local/Cellar/foo` and `rm -rf /usr/local/Homebrew` deny; `rm -rf /opt/homebrew/Cellar/foo` allows** ([test quiet](hooks/tests/core-guard-test.py):1036). Consequence: Intel Homebrew keg/prefix deletes are blocked while the same act under `/opt/homebrew` is the documented ordinary case. Confidence **9**. Confirmed.
+
+12. **Same `_under_system_root`.** **`rm -rf /Library/Caches/com.foo` and `rm -rf /Applications/Foo.app` deny.** CATCH only pins `/usr/bin`, `/etc/ssh`, `/Library/Frameworks`, `find /usr/local -delete`. Consequence: ordinary cache wipes and app uninstalls under those roots now hit rm-outside-repo. Confidence **8**. Confirmed.
+
+## Gate gaps
+
+13. **[hooks/tests/core-guard-test.py](hooks/tests/core-guard-test.py):1166-1169** asserts the rule name on every CATCH case; **none of 1–10 have a CATCH (or a QUIET for 11–12).** Item 4 CATCH is only `RM` / `GIT push` / `Find` ([507-520](hooks/tests/core-guard-test.py)), so a regression on `BASH` or `git Filter-Repo` still reports ALL GREEN. Item 1 CATCH is only `V=rm; $V`, not `export`/`r$1m` compose/chains. Item 6 CATCH is echo-pipe, `-f`, `<`, heredoc — not `cat file |` or `--file `. Item 13 CATCH is timeout/sudo/nice — not xargs. Consequence: the gate cannot fail when these behaviours disappear or when the new FPs appear. Confidence **9**.
+
+14. **[docs/harness-manifest.md](docs/harness-manifest.md):22** still says the gate is `(86 catch / 84 quiet)`. This run printed **129 catch / 116 quiet**. Consequence: anyone using the manifest as the floor count is looking at a stale number. Confidence **8**.
+
+Not reported: fail-open ([12-15](hooks/core-guard.py), [1255-1258](hooks/core-guard.py)); `git PUSH` / `--FORCE` (tools reject them); glued IdentityFile scp (correct allow); CG-14 items already in CATCH.

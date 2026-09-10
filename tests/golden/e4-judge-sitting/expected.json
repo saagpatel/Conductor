@@ -1,0 +1,110 @@
+{
+  "cache_hit_rate": 0.454,
+  "collate": {
+    "agreement": "unanimous",
+    "error": null,
+    "ok": true,
+    "rank": true,
+    "strongest": "cand-grok",
+    "votes": {
+      "cand-composer": 0,
+      "cand-grok": 4
+    }
+  },
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 37003,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "cursor",
+          "input_tokens": 19275,
+          "kind": null,
+          "mode": "write",
+          "model": "composer-2.5",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "15248196-2c0a-4734-b273-ae0482319099",
+          "tokens": 58034,
+          "tool_calls": 2
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te-2",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "cand-composer",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 45312,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "cheap",
+          "failure": null,
+          "fleet": "cursor",
+          "input_tokens": 20321,
+          "kind": null,
+          "mode": "write",
+          "model": "cursor-grok-4.6-low",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "beede5a88b6f773d7484edbdd3dd4c9954a04460221e690488f8cd4745163be8",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "7297bffb-a582-4240-8c26-77ae512259e6",
+          "tokens": 66725,
+          "tool_calls": 3
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074957Z-cursor-in-app-py-add-a-function-slug-te",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "cand-grok",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    }
+  ],
+  "notes": [],
+  "ok": true,
+  "paused": null,
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "cand-grok",
+      "ok": true,
+      "rank": 1
+    },
+    {
+      "lane": "cand-composer",
+      "ok": true,
+      "rank": 2
+    }
+  ],
+  "require": "all"
+}

@@ -1,0 +1,3 @@
+I'll open `app.py` and add only `slug`, leaving `greet` as it is.
+
+`slug` is in `app.py`. It lowercases the input, turns each run of non-ASCII-letter/digit characters into one hyphen, and drops hyphens at the ends. `greet` is unchanged; nothing else was added or run.

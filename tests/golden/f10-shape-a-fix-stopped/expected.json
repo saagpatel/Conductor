@@ -1,0 +1,151 @@
+{
+  "cache_hit_rate": 0.904,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 3381713,
+          "cache_write_tokens": 95882,
+          "cost_basis": "reported",
+          "effort": "hard",
+          "failure": null,
+          "fleet": "claude",
+          "input_tokens": 76,
+          "kind": null,
+          "mode": "write",
+          "model": "claude-sonnet-5",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "f1d7d4bacf74e3dbe06e421d7abcd0480d129125c7150b3ed7ee4975a868fbc1",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "d1e13e01-aba2-420d-9796-c6c05d2bbebb",
+          "tokens": 3514873,
+          "tool_calls": 37
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T063656Z-claude-you-are-one-lane-of-a-conductor",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "build",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "build"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 89855,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "antigravity",
+          "input_tokens": 59539,
+          "kind": null,
+          "mode": "read",
+          "model": "gemini-3.7-flash-medium",
+          "no_op": true,
+          "note": "gate skipped (read lane)",
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "efda4a11bb09925c04c0c84262df53b14ef6e3f22e633e68d900e405f003c529",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "bf9f090f-facb-4192-84e3-e8c5f57cb902",
+          "tokens": 179204,
+          "tool_calls": 8
+        }
+      ],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "review-gemini",
+      "needs": [
+        "build"
+      ],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 230400,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "cursor",
+          "input_tokens": 237253,
+          "kind": null,
+          "mode": "read",
+          "model": "cursor-grok-4.6-medium",
+          "no_op": true,
+          "note": "gate skipped (read lane)",
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "f3798b1e455b3f512424353841653d5a18bcc9de60dd465f7ae3ddb5f206fcf3",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "714abc29-fce3-4985-a58a-f42b903c125a",
+          "tokens": 485370,
+          "tool_calls": 27
+        }
+      ],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "review-grok",
+      "needs": [
+        "build"
+      ],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [],
+      "name": "fix",
+      "needs": [
+        "review-gemini",
+        "review-grok",
+        "build"
+      ],
+      "ok": false,
+      "skipped": "paused: lane fix is a pause point; not started",
+      "stage": "fix"
+    }
+  ],
+  "notes": [],
+  "ok": false,
+  "paused": {
+    "kind": "lane",
+    "lane": "fix",
+    "question": "Lane 'fix' is a pause point; continue the mission?",
+    "spent_usd": null,
+    "threshold": null
+  },
+  "quorum": null,
+  "ranking": [],
+  "require": "all"
+}

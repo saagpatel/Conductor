@@ -1,0 +1,13 @@
+Gate passes cleanly (ruff clean, full suite green).
+
+## Summary
+
+**Gemini review:** `NO_FINDINGS` — nothing to act on.
+
+**Grok review — two findings, both confirmed and fixed:**
+
+1. **Capped breaker kill misclassified as `cap`.** `budget.settle()` (`budget.py`) sets `exceeded=True` for *any* kill — breaker or cap watcher alike (`killed=capped or breaker_reason is not None` in `runner.py`) — so a stall/loop breaker kill under a cap nowhere near hit still carried `budget["exceeded"] is True`, and `error_kind`'s cap-before-breaker check turned every such kill into `cap`. Live evidence already existed in `tests/test_breakers.py` (`cap_usd=10.0`, actual spend far under it, `budget["exceeded"] is True`). Added `test_a_breaker_kill_under_a_generous_cap_is_breaker_not_cap` (failed on the current tree: got `cap`, expected `breaker`) and a companion `test_a_genuine_cap_kill_is_still_cap_even_with_a_breaker_dict_present` (already passed, to pin that the fix doesn't overcorrect). Fixed with a new `_capped()` helper in `src/conductor/errors.py` that only calls it `cap` when there's independent evidence — the native `error_max_budget_usd` flag, an observed spend that actually cleared the cap, or no breaker trip to blame it on instead.
+
+2. **`conductor runs` doesn't reclassify pre-C5 receipts.** The spec requires `kind` to be "computed, not stored, so an old receipt read back still classifies," but `cmd_runs` in `cli.py` just did `data.get("kind")` off the raw JSON, so a receipt written before this field existed (no `kind` key on disk) showed `null` even when `ok: false`. Added `test_conductor_runs_recomputes_kind_for_a_pre_c5_receipt` (deletes the `kind` key from a real receipt, failed on current tree: got `None`, expected `exit`). Fixed by adding `_kind_from_legacy_receipt()` in `cli.py`, which rebuilds a `Result` from the receipt's known dataclass fields and reruns `error_kind` when the stored `kind` key is absent.
+
+Both fixes are scoped to what the failing tests proved; no other code touched. Existing test suite (`test_errors.py`'s other 44 cases plus the full repo suite) stays green. Ruff clean. Not committing — leaving that to the harness.

@@ -1,0 +1,91 @@
+{
+  "name": "REPLACE_WITH_MISSION_NAME",
+  "cwd": "REPLACE_WITH_REPOSITORY",
+  "prompt_file": "spec.md",
+  "concurrency": 1,
+  "require": "all",
+  "max_cost_usd": 11.0,
+  "template_max_chars": 160000,
+  "policy": {
+    "build": {
+      "vendors": [
+        "cursor"
+      ]
+    },
+    "review": {
+      "vendors": [
+        "xai"
+      ]
+    },
+    "fix": {
+      "vendors": [
+        "cursor"
+      ]
+    }
+  },
+  "prefix": "Work only in the isolated working directory assigned to this lane. Establish it with pwd. Read relevant code before changing it; preserve existing call signatures and unrelated work. Follow the authorized task scope. Do not commit, dispatch other helpers, use MCP or web tools, publish, or change settings. The harness commits after its gate. Report actual checks and limitations.",
+  "pause": {
+    "before": [
+      "fix"
+    ]
+  },
+  "lanes": [
+    {
+      "name": "build",
+      "stage": "build",
+      "fleet": "cursor",
+      "model": "composer-2.5",
+      "effort": "standard",
+      "mode": "write",
+      "timeout": 600,
+      "cap_usd": 5.0,
+      "test": "REPLACE_WITH_BUILD_GATE_COMMAND",
+      "test_policy": "allow",
+      "commit": "feat(scope): REPLACE_WITH_BUILD_COMMIT_MESSAGE",
+      "deliverable": {
+        "path": "evidence.json",
+        "commit": false
+      },
+      "prompt": "Implement the task below within its file ownership. Keep existing call signatures working; add new parameters as keywords with defaults. Read relevant source before editing and write tests for real behavior. Do not hardcode the acceptance examples. Do not commit: Conductor runs the configured full gate and commits the result. Run the focused checks specified by the task; the harness runs its full gate after you finish. Put disposable test files outside the checkout. Before finishing, write evidence.json as a JSON object mapping every numbered acceptance item to its status, changed files, test names, checks actually run, and any limitation. Evidence is a claim the reviewer must verify; the harness captures it without committing it. Return a concise result and actual verification.\n\nTask:\n{{mission.prompt}}",
+      "stall_timeout": 180,
+      "max_tool_calls": 60
+    },
+    {
+      "name": "review",
+      "stage": "review",
+      "fleet": "cursor",
+      "model": "grok-4.6",
+      "effort": "hard",
+      "mode": "read",
+      "base": "build",
+      "timeout": 480,
+      "max_tool_calls": 30,
+      "cap_usd": 2.0,
+      "cap_grace_usd": 0.25,
+      "prompt": "Review the build against the task below. Your working directory starts at the build commit. Read only the relevant source. Do not run the test suite, modify files, call MCP/web tools, or delegate. The exact patch is provided so you do not need Git shell access to read it.\n\nTask:\n{{mission.prompt}}\n\nBuild patch:\n{{lanes.build.diff}}\n\nBuild evidence, claims to verify:\n{{lanes.build.deliverable}}\n\nReport anything that could cause incorrect behavior, a test failure, or a misleading result, including a missing acceptance item. Omit pure style and naming. For each finding, give file and line, what goes wrong, its consequence, severity, and confidence 1-10. If you find nothing that meets the bar, say so; an empty list is a complete and expected answer. In that case reply exactly NO_FINDINGS. Put the entire review in your final reply. Aim to finish within 15 tool calls.",
+      "stall_timeout": 180
+    },
+    {
+      "name": "fix",
+      "stage": "fix",
+      "fleet": "cursor",
+      "model": "composer-2.5",
+      "effort": "standard",
+      "mode": "write",
+      "base": "build",
+      "needs": [
+        "review"
+      ],
+      "resume": "build",
+      "no_op_ok": true,
+      "timeout": 600,
+      "cap_usd": 3.0,
+      "test": "REPLACE_WITH_FIX_GATE_COMMAND",
+      "test_policy": "allow",
+      "commit": "fix(scope): REPLACE_WITH_FIX_COMMIT_MESSAGE",
+      "prompt": "Conductor requested your build session ID in a NEW isolated worktree starting at the build commit. Earlier conversation context may not be available here; use the complete task and review below and inspect the current source. Establish the current directory with pwd; the previous worktree may no longer exist. The lead has reviewed the following report and continued this already-authorized task.\n\nTask:\n{{mission.prompt}}\n\nReview:\n{{lanes.review.answer}}\n\nFor each finding, first reproduce the incorrect behavior with a permanent regression test, then fix only what it proves. Conductor will transplant new tests onto the unfixed base and require failure, then run the configured gate on the corrected tree. Keep existing call signatures and task scope. If the review says NO_FINDINGS or nothing reproduces, change nothing and say so; that is a complete outcome. Run the focused checks specified by the task; the harness runs the full gate. Do not commit or write an extra deliverable. Return fixes, verification, and any findings you could not reproduce.",
+      "stall_timeout": 180,
+      "max_tool_calls": 40
+    }
+  ]
+}

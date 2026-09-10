@@ -1,0 +1,144 @@
+{
+  "cache_hit_rate": 0.78,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 982808,
+          "cache_write_tokens": 100017,
+          "cost_basis": "reported",
+          "effort": "hard",
+          "failure": null,
+          "fleet": "claude",
+          "input_tokens": 22,
+          "kind": null,
+          "mode": "read",
+          "model": "claude-sonnet-5",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "8769200611dd634d3c564124cf64176615bc2288573c7bc6ff06225cb0267cf3",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "3789c71f-2810-4875-b0a8-4ca857ff6782",
+          "tokens": 1121424,
+          "tool_calls": 12
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "audit-claude",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 412320,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "antigravity",
+          "input_tokens": 120072,
+          "kind": null,
+          "mode": "read",
+          "model": "gemini-3.7-flash-medium",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "3d5dbac5797aee036e78e2bce3db07fad0d0bf0be74eafa19856de2d9ed0e5e8",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "e4e20264-5545-4501-90ca-2a04f740402a",
+          "tokens": 609980,
+          "tool_calls": 24
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "audit-gemini",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 525184,
+          "cache_write_tokens": 0,
+          "cost_basis": "estimated",
+          "effort": "standard",
+          "failure": null,
+          "fleet": "cursor",
+          "input_tokens": 322329,
+          "kind": null,
+          "mode": "read",
+          "model": "cursor-grok-4.6-medium",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "c1bbc15b59f6406dc939629571c3c614be169c09ddb3a60301fc8e15c648debe",
+          "retry": null,
+          "retry_of": null,
+          "session_id": "3b1356f9-473b-4f85-aae5-bc3b75983dfa",
+          "tokens": 874801,
+          "tool_calls": 31
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "audit-grok",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "review"
+    }
+  ],
+  "notes": [],
+  "notifications": [
+    "end"
+  ],
+  "ok": true,
+  "paused": null,
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "audit-gemini",
+      "ok": true,
+      "rank": 1
+    },
+    {
+      "lane": "audit-grok",
+      "ok": true,
+      "rank": 2
+    },
+    {
+      "lane": "audit-claude",
+      "ok": true,
+      "rank": 3
+    }
+  ],
+  "require": "all"
+}

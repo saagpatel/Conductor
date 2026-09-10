@@ -1,0 +1,15 @@
+All green: `python3 hooks/tests/core-guard-test.py` exits 0 with 142 catch / 130 quiet, zero false blocks, zero misses. No existing case was weakened, deleted, or reworded — none contradicted an item.
+
+## Summary — CG-15 group added
+
+| Item | Fix location | Lines changed | New cases |
+|---|---|---|---|
+| **1** — `bash -c`/`sh -c`/`zsh -c`/`eval` bodies | `script_bodies` (`hooks/core-guard.py:684-753`): unified interpreter scan now detects `eval` and a `-c`/`-lc`/`-xc` cluster after an interpreter, treating the next bare token as literal body text instead of a filename; `-n` still short-circuits to no read. | ~40 | 5 CATCH, 4 QUIET |
+| **2** — interpreter word in argument position | Same `script_bodies` scan (`hooks/core-guard.py:684-706`) plus new `WRAPPERS` set (`hooks/core-guard.py:578-593`): an interpreter now only counts as the command word itself, or reached through a chain of assignments/flags/numbers/known wrappers (and flag arguments) — never through an arbitrary command like `grep`/`diff`/`echo`. | ~35 | 2 CATCH, 5 QUIET |
+| **3** — `env -S bash` shebang | `_shebang_shell` (`hooks/core-guard.py:623-633`): skips `env`'s own dash-flags before reading the interpreter word. | ~8 | 1 CATCH, 1 QUIET |
+| **4** — same-line assignment resolver gaps | `ASSIGN` regex now accepts an optional `export/declare/typeset/readonly/local` prefix (`hooks/core-guard.py:437-446`); `resolve_same_line_assigns` now iterates up to 4 passes and treats `=` as a left boundary so chained assignments unwind (`hooks/core-guard.py:470-529`); `command_views` now also resolves the *folded* text, composing the two views (`hooks/core-guard.py:531-563`). | ~70 | 3 CATCH, 3 QUIET |
+| **5** — `git reflog expire --expire now` | `check_history` (`hooks/core-guard.py:896-911`): also matches the two-token `--expire now`/`--expire 0` spelling, exact-matched so `--expire-unreachable` isn't caught. | ~12 | 2 CATCH, 1 QUIET |
+
+Test file (`hooks/tests/core-guard-test.py`): added `REPO_ROOT`, two new shebang fixtures (`ENV_S_EVIL`, `ENV_S_PY`), and the CG-15 CATCH/QUIET blocks (13 CATCH + 14 QUIET; one QUIET item-5 control already existed under CG-9 and was reused, not duplicated).
+
+Only `hooks/core-guard.py` and `hooks/tests/core-guard-test.py` were touched.

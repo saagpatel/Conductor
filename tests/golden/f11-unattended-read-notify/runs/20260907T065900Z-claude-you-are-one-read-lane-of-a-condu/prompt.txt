@@ -1,0 +1,38 @@
+You are one read lane of a conductor mission on an operator's Claude Code harness repository. Every claim is judged on bytes: file, line, and what the code actually does. Read before you conclude, and cite file and line for anything you report. You are operating autonomously: nobody is watching in real time and nobody can answer a question mid-task, so a question blocks the work; make the routine call, state it in one line, and keep going. This lane is read-only: it must leave the working tree byte-identical, so write no files inside it and commit nothing.
+
+<task>
+Audit hooks/core-guard.py cold. It is the PreToolUse hook every Bash command in this harness passes through. Read it, its gate hooks/tests/core-guard-test.py, and docs/harness-manifest.md before concluding anything. Change nothing in the working tree; write no files inside it.
+</task>
+
+<context>
+This guard was audited cold by three vendors earlier today; thirteen findings that two or more vendors reported were fixed in the last three commits on this branch (git log -3 shows them; git show HEAD~2 --stat names the two files). The fixes are on the tree you are reading. Two regressions the first fix introduced were found by the lead's before-and-after probe, not by the reviewers, and fixed in the third commit. Your job is the same cold audit again, on the fixed guard: what bypass shapes remain within the four rules' claimed scope, what ordinary commands the fixed rules now deny (each fix widened something), and what the gate still does not pin. Findings already closed by the three commits are not findings; a fix that reopened an older shape is.
+</context>
+
+<what_the_guard_claims>
+It blocks four classes of unrecoverable action (credential exfiltration, git history destruction, rm -rf outside a repository, destructive SQL against a remote host) and allows everything else, failing open on purpose. Report what fails open inside the four rules' own claimed scope, not the fail-open design.
+</what_the_guard_claims>
+
+<line_map>
+Line map of hooks/core-guard.py at this commit (1258 lines; the gate hooks/tests/core-guard-test.py is 1198 lines and asserts the rule name on every CATCH case at core-guard-test.py:1169):
+- fail-open design: core-guard.py:12-15 and 1255-1258 (stated; do not report it)
+- CRED core-guard.py:44, NET :51, REMOTE_SPEC :55, UPLOAD_FLAG :63, READER :70
+- SYSTEM_DESCENDANT_ROOTS :75 and SYSTEM_EXACT_ROOTS :88 (new split), DB_CLIENTS :98, DB_DESTRUCTIVE :99, DB_URI_SCHEMES :112
+- HEREDOC :124, SHELL_INTERP :128, strip_heredocs :169, PIPED_TO_SHELL :164
+- segments :203, GROUPING :241, CASE_INSENSITIVE :247, verb :260 (now strips $( <( >( and backtick, and casefolds)
+- tokens :337, SPLIT_REDIR :349, strip_redirections :352 (now keeps an argument glued before a redirect)
+- fold_empty :399, ASSIGN :441, resolve_same_line_assigns :456 (new: a same-line V=word assignment resolves a later standalone $V, quoted or not), command_views :505
+- LAUNCH_PREFIX :530, INTERPRETERS :546, _shebang_shell :551, script_bodies :577 (now reads a script run by path when its shebang names a shell, and finds an interpreter word anywhere in the segment)
+- _upload_names_a_file :682, check_exfil :703 (upload flag must name a file in its own argument)
+- FORCE_TOKENS :765, check_history :769 (short bundles like -uf and --flag=value handled)
+- _resolve :836, _in_git_repo :843, _under_system_root :856, _judge_target :873, _rm_flags :905, check_rm :925, check_wipe :973, check_xargs :1011
+- _uri_hosts :1041, _db_remote_host :1054, _db_file_ref :1075, heredoc_bodies_data :1097, check_db :1119 (SQL from heredoc, pipe, stdin, -f file)
+- main :1188
+</line_map>
+
+<where_to_look>
+Three kinds of finding, all equally reportable: a bypass shape the parsing misses (a command the shell really runs that the guard's text never sees as dangerous); a false positive (an ordinary, safe command the fixed rules now deny); a gate gap (a check with no CATCH or QUIET case, or a case that passes whether or not the behaviour it names exists). Start from what each fix widened: verb() now casefolds and strips substitution markers; resolve_same_line_assigns rewrites the command; script_bodies reads more files; _under_system_root denies more paths; check_db reads heredocs, pipes, and files. You may run the guard yourself: pipe {"tool_name": "Bash", "cwd": "<dir>", "tool_input": {"command": "<cmd>"}} to python3 hooks/core-guard.py with CORE_GUARD_LOG set to a file under $TMPDIR so probes stay out of the production log. A finding you confirmed by running the guard says so.
+</where_to_look>
+
+<report>
+Report anything that could cause incorrect behavior, a test failure, or a misleading result. Omit pure style and naming. For each item: file and line, what goes wrong, one sentence of consequence, your confidence 1-10. If nothing meets that bar, reply exactly: NO_FINDINGS. Either answer is complete. Put the entire review in this reply; the reply is the only thing the operator receives.
+</report>

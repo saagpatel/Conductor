@@ -1,0 +1,22 @@
+I'll review the C5 change against the spec on the bytes in this worktree, then run the named gate with pytest scratch under `$TMPDIR`.
+
+Context-mode was blocked, so I’ll read the implementation files and `Result.failure()` directly and compare them to the spec.
+
+The breaker/cap interaction looks like a real misclassification; I’ll confirm against a live-shaped Result and run the spec’s gate with `--basetemp` under `$TMPDIR`.
+
+The spec’s cap-before-breaker order collides with `Budget.settle(killed=breaker)`, so a capped stall/loop kill is labeled `cap`. I’m recording that as the review finding.
+
+# C5 review (read-only)
+
+The change implements items 1–5 in [`src/conductor/errors.py`](src/conductor/errors.py), [`src/conductor/mission.py`](src/conductor/mission.py), [`src/conductor/runner.py`](src/conductor/runner.py), [`src/conductor/cli.py`](src/conductor/cli.py), [`README.md`](README.md), and [`tests/test_errors.py`](tests/test_errors.py). Ruff passed. Full pytest could not finish here (`git init` blocked in the sandbox); the hand-built `error_kind` tests in `tests/test_errors.py` passed.
+
+## Findings
+
+1. **Capped breaker kill classified as `cap`** — [`src/conductor/errors.py`](src/conductor/errors.py) lines 151–155 check `budget.exceeded` before `breaker.tripped`. [`src/conductor/runner.py`](src/conductor/runner.py) lines 1355–1357 pass `killed=capped or breaker_reason is not None` into [`src/conductor/budget.py`](src/conductor/budget.py) lines 75–78, which sets `exceeded` for every breaker kill when a cap is present. Live proof: [`tests/test_breakers.py`](tests/test_breakers.py) lines 349–362 (`cap_usd=10.0`, stall trip, `budget["exceeded"] is True`). Hand-built breaker fixtures omit `budget`, so they miss this. Consequence: `fallback.on: ["breaker"]` is skipped and `retry.kinds: ["cap"]` may retry a looping/stalled run. Confidence 9.
+
+2. **`conductor runs` does not reclassify old receipts** — [`src/conductor/cli.py`](src/conductor/cli.py) line 486 uses `data.get("kind")` from JSON. Spec/README say kind is computed, not stored, so a pre-C5 receipt still classifies on read-back. Those files have no `kind` key, so the row is `null` even when `ok` is false. Confidence 7.
+
+## Spec items that are present
+
+- `KINDS` order, `error_kind`, `Result.to_dict`/`summary` `kind`, `fallback.on` skip note, retry with `retry_of`/`backoff_s * 2**i` and pollable sleep, `MissionResult.errors`, report line, `conductor missions` `errors`, README + `tests/test_errors.py`.
+- `on` is on `_FALLBACK_ENTRY_KEYS` rather than `_FALLBACK_KEYS` so cascade still cannot set `on` (matches “cascade never sets `on`”).

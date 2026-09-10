@@ -1,0 +1,23 @@
+{
+  "kind": "human",
+  "lane": "approve",
+  "spent_usd": null,
+  "threshold": null,
+  "asked_at": "2026-09-07T07:49:43.251493+00:00",
+  "question": "Does this diff match the brief (a changelog with one entry)? answer with --answer TEXT or --answer-file PATH",
+  "answer": "answered",
+  "answers": [
+    {
+      "kind": "human",
+      "lane": "approve",
+      "spent_usd": null,
+      "threshold": null,
+      "asked_at": "2026-09-07T07:49:43.251493+00:00",
+      "question": "Does this diff match the brief (a changelog with one entry)? answer with --answer TEXT or --answer-file PATH",
+      "answer": "text",
+      "answer_length": 44,
+      "answered_at": "2026-09-07T07:49:56.831870+00:00"
+    }
+  ],
+  "ask_path": "<home>/missions/20260907T074942Z-f8-human-lane/asks/approve.txt"
+}

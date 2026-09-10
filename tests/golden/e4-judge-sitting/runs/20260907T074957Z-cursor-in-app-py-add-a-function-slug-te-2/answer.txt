@@ -1,0 +1,5 @@
+I'll read `app.py` and add the `slug` function without changing `greet` or running anything.
+
+Adding the `slug` function with a simple loop so we don't need extra imports.
+
+Added `slug` to `app.py`. It lowercases the input, collapses each run of non-ASCII letters/digits into a single hyphen, and strips any leading or trailing hyphen. `greet` is unchanged.

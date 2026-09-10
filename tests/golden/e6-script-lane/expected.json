@@ -1,0 +1,96 @@
+{
+  "cache_hit_rate": null,
+  "early_cancel": null,
+  "errors": {},
+  "escalation": null,
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "cost_basis": null,
+          "effort": "standard",
+          "failure": null,
+          "fleet": "script",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "write",
+          "model": "sh",
+          "no_op": false,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "c70797c3c8508225a7cbe9afea91646d2f34119404baea74482f0a90b03cb4f5",
+          "retry": null,
+          "retry_of": null,
+          "session_id": null,
+          "tokens": 0,
+          "tool_calls": 0
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260907T074941Z-script-compile-app-py-then-echo-the-com",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "compile",
+      "needs": [],
+      "ok": true,
+      "skipped": null,
+      "stage": "build"
+    },
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "cost_basis": null,
+          "effort": "standard",
+          "failure": null,
+          "fleet": "script",
+          "input_tokens": 0,
+          "kind": null,
+          "mode": "read",
+          "model": "sh",
+          "no_op": true,
+          "note": null,
+          "ok": true,
+          "over_cap": false,
+          "prompt_sha256": "960920151ad34b8f9f898cebad8edba84142fc099453212327a2cec64eae3cda",
+          "retry": null,
+          "retry_of": null,
+          "session_id": null,
+          "tokens": 0,
+          "tool_calls": 0
+        }
+      ],
+      "base": null,
+      "branch": "",
+      "escalated": false,
+      "kinds": [
+        null
+      ],
+      "name": "echo",
+      "needs": [
+        "compile"
+      ],
+      "ok": true,
+      "skipped": null,
+      "stage": null
+    }
+  ],
+  "notes": [],
+  "ok": true,
+  "paused": null,
+  "quorum": null,
+  "ranking": [
+    {
+      "lane": "echo",
+      "ok": true,
+      "rank": 1
+    }
+  ],
+  "require": "all"
+}

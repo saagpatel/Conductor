@@ -1,0 +1,1 @@
+Yes: one entry for greet, matches the brief.

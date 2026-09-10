@@ -1,0 +1,55 @@
+diff --git a/hooks/core-guard.py b/hooks/core-guard.py
+index ceb95fa..527d901 100755
+--- a/hooks/core-guard.py
++++ b/hooks/core-guard.py
+@@ -1075,13 +1075,23 @@ def check_db(cmd, segs, raw_cmd=None, cwd=None):
+     before heredoc-stripping, is what makes the heredoc body visible at all; `segs` (an
+     already pipe-split view) is enough for the other three.
+     """
++    # The "earlier stage" check is scoped to the PIPELINE, split on `|` the way
++    # check_xargs does — not to `segs`, which also splits on `;`, `&&`, `||`, `&`, and
++    # newlines. Using `segs` treated an unrelated, sequential command earlier on the
++    # same line as if it fed the pipe: `echo 'DROP TABLE users'; psql -h prod -c
++    # 'SELECT 1'` denied a SELECT because an unconnected earlier statement happened to
++    # mention DROP TABLE.
++    pipe_parts = cmd.split("|")
+     for i, seg in enumerate(segs):
+         host = _db_remote_host(seg)
+         if not host:
+             continue
+         if DB_DESTRUCTIVE.search(seg):
+             return f"destructive database command against remote host {host}"
+-        if any(DB_DESTRUCTIVE.search(earlier) for earlier in segs[:i]):
++        pidx = next((j for j, p in enumerate(pipe_parts) if seg in p), None)
++        if pidx is not None and any(
++            DB_DESTRUCTIVE.search(p) for p in pipe_parts[:pidx]
++        ):
+             return f"destructive database command against remote host {host}"
+         fname = _db_file_ref(seg)
+         if fname:
+diff --git a/hooks/tests/core-guard-test.py b/hooks/tests/core-guard-test.py
+index 18ad89e..a17a339 100644
+--- a/hooks/tests/core-guard-test.py
++++ b/hooks/tests/core-guard-test.py
+@@ -957,6 +957,21 @@ QUIET = [
+     ),
+     # the existing python3 - <<'PY' heredoc cases above are the item's fourth control.
+     #
++    # item 6(c) means the same PIPELINE, split on `|` the way check_xargs does — not
++    # every earlier segment of the compound command. `segments()` also splits on `;`,
++    # `&&`, `||`, `&`, and newlines, so an unrelated command earlier on the line must
++    # not be read as an upstream pipeline stage feeding the destructive statement in.
++    (
++        "CG-14 item6: unrelated command before, separated by ;, is not the pipeline",
++        "echo 'DROP TABLE users'; psql -h prod.example.com -c 'SELECT 1'",
++        HOME,
++    ),
++    (
++        "CG-14 item6: unrelated command before, separated by &&, is not the pipeline",
++        "echo 'DROP TABLE users' && psql -h prod.example.com -c 'SELECT 1'",
++        HOME,
++    ),
++    #
+     # Item 7: `.sshfoo` must not read as the `.ssh` directory — `ls ~/.ssh`, grepping and
+     # listing the ssh dir are already pinned above under CG-11.
+     #

@@ -1,0 +1,29 @@
+### Review of CG-15 Changes Against Spec
+
+All five spec items and their corresponding CATCH / QUIET test cases in group CG-15 have been reviewed against the implementation in [`hooks/core-guard.py`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py) and [`hooks/tests/core-guard-test.py`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py).
+
+1. **Item 1 (`bash -c`, `sh -c`, `zsh -c`, `eval`)**:
+   - [`hooks/core-guard.py:698-724`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L698-L724) correctly recognizes `eval` and extracts joined argument tokens as a body script.
+   - [`hooks/core-guard.py:726-754`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L726-L754) detects `-c` and clustered flags (e.g. `-lc`, `-xc`) on interpreters, returning the next bare token as body text while preserving the `-n` syntax check override.
+   - Test cases are added in [`hooks/tests/core-guard-test.py:713-725`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L713-L725) (CATCH) and [`hooks/tests/core-guard-test.py:1215-1222`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1215-L1222) (QUIET).
+
+2. **Item 2 (Scoping interpreter word detection to command / known wrappers)**:
+   - [`hooks/core-guard.py:582-594`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L582-L594) defines the `WRAPPERS` set containing all specified wrappers unioned with `LAUNCH_PREFIX`.
+   - [`hooks/core-guard.py:688-713`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L688-L713) restricts interpreter search to valid wrapper prefixes, env assignments, flags, and flag arguments before the interpreter, preventing commands like `grep`, `diff`, or `echo` from reading trailing arguments.
+   - Test cases are added in [`hooks/tests/core-guard-test.py:729-738`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L729-L738) (CATCH) and [`hooks/tests/core-guard-test.py:1225-1233`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1225-L1233) (QUIET).
+
+3. **Item 3 (`#!/usr/bin/env -S bash` shebang handling)**:
+   - [`hooks/core-guard.py:626-634`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L626-L634) advances past flag tokens following `env` in `_shebang_shell` to identify the shell interpreter.
+   - Test fixtures and cases are added in [`hooks/tests/core-guard-test.py:77-82`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L77-L82), [`hooks/tests/core-guard-test.py:742-746`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L742-L746) (CATCH), and [`hooks/tests/core-guard-test.py:1235`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1235) (QUIET).
+
+4. **Item 4 (Same-line assignment resolution: prefixes, chaining, and composition with fold)**:
+   - [`hooks/core-guard.py:444-448`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L444-L448) updates `ASSIGN` to match optional declaration keywords (`export`, `declare`, `typeset`, `readonly`, `local`) and optional flags.
+   - [`hooks/core-guard.py:479-526`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L479-L526) implements a 4-pass loop in `resolve_same_line_assigns` with `=` boundary awareness for chained resolution.
+   - [`hooks/core-guard.py:555-561`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L555-L561) in `command_views` adds the fold-then-resolve view (`folded_resolved`).
+   - Test cases are added in [`hooks/tests/core-guard-test.py:749-763`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L749-L763) (CATCH) and [`hooks/tests/core-guard-test.py:1237-1243`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1237-L1243) (QUIET).
+
+5. **Item 5 (`git reflog expire --expire now` and `--expire 0`)**:
+   - [`hooks/core-guard.py:906-913`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/core-guard.py#L906-L913) in `check_history` checks token pairs for `a == "--expire" and b in ("now", "0")`.
+   - Test cases are added in [`hooks/tests/core-guard-test.py:766-775`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L766-L775) (CATCH) and [`hooks/tests/core-guard-test.py:1247-1251`](file://<home>/worktrees/20260907T072120Z-antigravity-you-are-one-lane-of-a-conductor/hooks/tests/core-guard-test.py#L1247-L1251) (QUIET).
+
+NO_FINDINGS

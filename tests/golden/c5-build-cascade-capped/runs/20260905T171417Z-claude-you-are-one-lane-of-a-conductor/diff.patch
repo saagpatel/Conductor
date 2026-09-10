@@ -1,0 +1,1396 @@
+diff --git a/README.md b/README.md
+index c0eedc1..fb2dbc2 100644
+--- a/README.md
++++ b/README.md
+@@ -1018,6 +1018,83 @@ conductor process stopped writing; and a directory with neither file is reported
+ as `incomplete`. `silent` is a flag for the operator, nothing more: conductor never
+ modifies, moves, reclaims, or deletes a run directory, and nothing is reclaimed.
+ 
++### Structured error kinds
++
++`Result.failure()` reduces a dispatch to one line of prose, but "a rate limit"
++and "a broken gate" can read almost the same in prose while calling for
++opposite responses: retry the first, escalate on the second. `errors.py`
++classifies every not-ok result into exactly one `kind`, checked in this fixed
++order (first match wins, so a cap kill that also timed out is `cap`, and a
++fleet error that mentions a rate limit is `rate_limit`, not `fleet_error`):
++
++`interrupted`, `cancelled`, `cap`, `breaker`, `timeout`, `setup`, `refused`,
++`rate_limit`, `transport`, `refusal`, `fleet_error`, `exit`, `gate`, `no_op`,
++`read_moved_bytes`, `no_answer`, `commit`, `unknown`.
++
++`interrupted` and `cancelled` are conductor's own stop signals; `cap` covers
++a budget exceeded, a cap unenforced (the run came back unpriced against a
++cap), and a watcher's cap kill; `breaker` is any of the four progress
++breakers tripping; `setup` is a `setup` command that failed or timed out;
++`refused` is conductor declining to spawn at all (an isolation failure, a
++ports or include refusal, a non-repo write target, and the rest of
++`_refused_result`'s callers) -- `spawned: false` with an error set.
++`rate_limit`, `transport`, and `refusal` are read from the fleet's own error
++text (and, for `refusal`, Claude's `subtype`) against a per-fleet substring
++table:
++
++| kind | fleet | substrings | seen |
++|---|---|---|---|
++| `rate_limit` | any | `rate limit`, `rate_limit`, `429`, `overloaded`, `529`, `quota`, `resource exhausted`, `too many requests` | Claude budget/rate stops, Codex/Antigravity/Cursor 429s, Anthropic 529 "overloaded", Google "resource exhausted" |
++| `transport` | any | `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EPIPE`, `socket hang up`, `fetch failed`, `network`, `502`, `503`, `504` | node/http transport failures reported by any fleet's own error text |
++| `transport` | `claude` | `stream ended without a result event` | a Claude stream cut short with no final result event |
++| `refusal` | any | `I can't help`, `I cannot help` | the model declining the task outright, verbatim |
++| `refusal` | `claude` | any `subtype` starting `error_` (other than `error_max_budget_usd` and `error_max_turns`) whose text also says `refus`, `cannot help`, or `not able to` | Claude's own refusal subtypes |
++
++`fleet_error` is any other fleet-reported failure; `exit` a nonzero exit with
++none; `gate` a gate (or its clean replacement) that ran and did not pass;
++`no_op` a write that moved no bytes; `read_moved_bytes` a read dispatch that
++moved bytes anyway; `no_answer` a read dispatch with no answer; `commit` a
++requested commit that did not land; `unknown` is anything else. `error_kind`
++is computed from a `Result` or a plain receipt dict, never stored as its own
++source of truth, so an old receipt read back still classifies correctly.
++Every receipt (`Result.to_dict()`, `Result.summary()`) carries `kind`, and
++`conductor runs` shows it beside each row.
++
++A lane's `fallback` entries may set `"on": [<kind>, ...]` -- the fallback
++only runs when the attempt right before it in the same lane failed with one
++of these kinds; omitted (the default, and every primary and cascade attempt,
++which may never set it) means every kind, as before an attempt that is
++passed over notes `skipped fallback <label>: does not handle <kind>` on the
++lane, and the walk continues to the one after. An unknown kind is refused at
++load, naming the lane and the fallback. The lane's receipt carries `kinds`:
++the kind of every attempt dispatched, in order (`null` for one that
++succeeded), and each attempt row carries its own `kind`.
++
++A mission may also set `"retry"` to retry the *same* attempt before falling
++back to the next one:
++
++```json
++{"retry": {"kinds": ["rate_limit", "transport"], "attempts": 2, "backoff_s": 5}}
++```
++
++`kinds` defaults to `["rate_limit", "transport"]`, `attempts` (1-5) is how
++many extra tries an attempt gets, and `backoff_s` (default 0) is the base of
++an exponential backoff (`backoff_s * 2**i`) slept, in one-second steps so a
++stop request or the lane's own cancel event ends it exactly like a running
++dispatch would, between tries. A retry is a fresh dispatch (a new run id) of
++the same spec, under the same cancel event and ledger rules as the attempt
++it repeats; its row carries `retry_of` (the first try's run id) and `retry`
++(which retry this is). A dry run never retries.
++
++`report.md` shows one line when any lane failed: `Errors: <kind> x<n>, ...`,
++and each failed attempt's row in a lane's own section shows its kind next to
++its error text. `MissionResult.errors` (`result.json`, `conductor missions`)
++is `{"<kind>": <count>}` over every attempt of every lane, empty when nothing
++failed.
++
++Evidence (`docs/ROADMAP-2026-09.md` item C5): the audit's own top capability
++ask, and the OpenAI Agents SDK's `error_handlers`.
++
+ ## Commands
+ 
+ - `conductor fleets`: the routing policy, and whether each binary is installed
+diff --git a/src/conductor/cli.py b/src/conductor/cli.py
+index eb75df9..5401167 100644
+--- a/src/conductor/cli.py
++++ b/src/conductor/cli.py
+@@ -13,6 +13,7 @@ from datetime import UTC, datetime
+ from pathlib import Path
+ 
+ from . import attest, prices
++from .errors import error_kind
+ from .fleets import EFFORTS, FLEETS, MODES, TEST_POLICIES, DispatchRefused, Spec
+ from .gc import cmd_gc
+ from .mission import STAGES, Mission, MissionInvalid, load_mission, run_mission
+@@ -261,6 +262,7 @@ def cmd_missions(args: argparse.Namespace) -> int:
+                 "report": data.get("report_path"),
+                 "paused": paused,
+                 "escalation": data.get("escalation"),
++                "errors": data.get("errors", {}),
+             }
+         )
+     print(json.dumps(rows, indent=2))
+@@ -489,6 +491,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
+                 "no_op": git_verdict.get("no_op"),
+                 "duration_s": round(data.get("duration_s", 0), 1),
+                 "tool_calls": (data.get("breaker") or {}).get("tool_calls", 0),
++                "kind": error_kind(data),
+             }
+         )
+     print(json.dumps(rows, indent=2))
+diff --git a/src/conductor/mission.py b/src/conductor/mission.py
+index 000ba0c..533a509 100644
+--- a/src/conductor/mission.py
++++ b/src/conductor/mission.py
+@@ -44,6 +44,7 @@ from datetime import UTC, datetime
+ from pathlib import Path
+ 
+ from . import attest
++from .errors import KINDS, error_kind
+ from .fleets import VENDORS, DispatchRefused, Spec, model_vendor
+ from .runner import Result, _slug, claim_dir, conductor_home, dispatch, stop_requested
+ from .verdicts import Criterion, _answer_object, parse_checklist, render_verdict
+@@ -89,7 +90,11 @@ _BREAKER_KEYS = frozenset({"stall_timeout", "loop_limit", "max_tool_calls", "too
+ # Every key a mission file may use, per object. A typo (`need` for `needs`)
+ # would otherwise silently turn a dependent lane into a root.
+ _ATTEMPT_KEYS = frozenset(_INHERITED) | {"prompt_file"}
+-_FALLBACK_KEYS = _ATTEMPT_KEYS
++# C5: `on` is fallback-only. It decides whether *this* fallback runs given the
++# kind of the attempt right before it, so it means nothing on a lane's primary
++# (there is no earlier attempt to have failed) or on a cascade attempt (always
++# the first attempt of its lane).
++_FALLBACK_KEYS = _ATTEMPT_KEYS | {"on"}
+ _LANE_KEYS = _ATTEMPT_KEYS | {
+     "name",
+     "fallback",
+@@ -116,7 +121,13 @@ _MISSION_KEYS = _ATTEMPT_KEYS | {
+     "prefix",
+     "prefix_file",
+     "cascade",
++    "retry",
+ }
++# C5: kinds a retry may match when `retry.kinds` is omitted -- the two kinds
++# that are worth paying for a fresh try at the same vendor rather than
++# escalating: a rate limit and a transport hiccup are both about *when* the
++# request landed, not about what the model said.
++DEFAULT_RETRY_KINDS = ("rate_limit", "transport")
+ _COLLATE_KEYS = {
+     "fleet",
+     "model",
+@@ -182,6 +193,11 @@ class Attempt:
+     setup: str | None = None
+     teardown: str | None = None
+     include: list[str] | None = None
++    # C5: a fallback's own gate. None (the default, and every primary and
++    # cascade attempt) means every kind; otherwise this attempt only runs
++    # when the attempt right before it in the lane failed with one of these
++    # kinds (see `_run_attempts`'s `last_kind` walk).
++    on: list[str] | None = None
+ 
+     def spec(
+         self,
+@@ -320,6 +336,10 @@ class Mission:
+     # fallbacks. None when the mission sets no cascade. See _parse_cascade
+     # and the per-lane prepend in mission_from_dict.
+     cascade: dict | None = None
++    # C5: {"kinds": [...], "attempts": <1..5>, "backoff_s": <number>}. None
++    # (the default) means no attempt is ever retried. See _parse_retry and
++    # the retry loop in `_run_attempts`.
++    retry: dict | None = None
+ 
+     def validate(self) -> None:
+         if self.snapshot_version != 1:
+@@ -596,6 +616,7 @@ class Mission:
+             "early_cancel",
+             "pause",
+             "cascade",
++            "retry",
+         }
+         _require_snapshot_keys(raw, expected, "mission snapshot")
+         if raw["snapshot_version"] != 1:
+@@ -655,6 +676,9 @@ class Mission:
+             primary_attempt, fallback_attempts = (
+                 (checked[1], checked[2:]) if cascaded else (checked[0], checked[1:])
+             )
++            # `on` is fallback-only (see _FALLBACK_KEYS); the primary attempt's
++            # copy is always None and must not resurface as a lane-level field.
++            primary_attempt = {k: v for k, v in primary_attempt.items() if k != "on"}
+             lane = {
+                 "name": raw_lane["name"],
+                 "needs": raw_lane["needs"],
+@@ -691,6 +715,7 @@ class Mission:
+             "early_cancel": raw["early_cancel"],
+             "pause": raw["pause"],
+             "cascade": raw["cascade"],
++            "retry": raw["retry"],
+         }
+         mission = mission_from_dict(
+             mission_raw, base_dir=Path("/"), source=raw["source"]
+@@ -955,6 +980,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
+     if not isinstance(early_cancel, bool):
+         raise MissionInvalid("early_cancel must be true or false")
+     pause = _parse_pause(raw.get("pause"))
++    retry = _parse_retry(raw.get("retry"))
+     prefix = _load_prefix(raw, base_dir)
+     mission = Mission(
+         name=name,
+@@ -973,6 +999,7 @@ def mission_from_dict(raw: dict, *, base_dir: Path, source: str = "") -> Mission
+         early_cancel=early_cancel,
+         pause=pause,
+         cascade=cascade_fields,
++        retry=retry,
+     )
+     mission.validate()
+     return mission
+@@ -990,9 +1017,55 @@ def _parse_cascade(raw_cascade: object, base_dir: Path) -> dict | None:
+     _reject_unknown(raw_cascade, _FALLBACK_KEYS, "cascade")
+     if "fleet" not in raw_cascade:
+         raise MissionInvalid("cascade: fleet is required")
++    if "on" in raw_cascade:
++        # `on` decides whether an attempt runs given the *previous* attempt's
++        # failure kind; the cascade attempt is always a lane's first attempt,
++        # so it has no previous attempt to key off.
++        raise MissionInvalid("cascade must not set on: it is always a lane's first attempt")
+     return _attempt_fields(raw_cascade, base_dir, {})
+ 
+ 
++def _parse_retry(raw_retry: object) -> dict | None:
++    """C5: retry the same attempt on a transient kind before falling back.
++    None (the default) means no attempt is ever retried."""
++    if raw_retry is None:
++        return None
++    if not isinstance(raw_retry, dict):
++        raise MissionInvalid("retry must be an object")
++    unknown = sorted(set(raw_retry) - {"kinds", "attempts", "backoff_s"})
++    if unknown:
++        raise MissionInvalid(f"retry: unknown field(s) {', '.join(unknown)}")
++    kinds_raw = raw_retry.get("kinds")
++    if kinds_raw is None:
++        kinds = list(DEFAULT_RETRY_KINDS)
++    else:
++        if not isinstance(kinds_raw, list) or not all(isinstance(k, str) for k in kinds_raw):
++            raise MissionInvalid("retry.kinds must be a list of error kinds")
++        unknown_kinds = [k for k in kinds_raw if k not in KINDS]
++        if unknown_kinds:
++            raise MissionInvalid(
++                f"retry.kinds names unknown kind {unknown_kinds[0]!r}; known: {', '.join(KINDS)}"
++            )
++        kinds = list(kinds_raw)
++    attempts_raw = raw_retry.get("attempts", 1)
++    if (
++        isinstance(attempts_raw, bool)
++        or not isinstance(attempts_raw, int)
++        or not (1 <= attempts_raw <= 5)
++    ):
++        raise MissionInvalid("retry.attempts must be an integer from 1 to 5")
++    backoff_raw = raw_retry.get("backoff_s", 0)
++    if isinstance(backoff_raw, bool):
++        raise MissionInvalid("retry.backoff_s must be a number")
++    try:
++        backoff_s = float(backoff_raw)
++    except (TypeError, ValueError) as exc:
++        raise MissionInvalid(f"retry.backoff_s must be a number: {exc}") from exc
++    if backoff_s < 0:
++        raise MissionInvalid("retry.backoff_s must be at least 0")
++    return {"kinds": kinds, "attempts": attempts_raw, "backoff_s": backoff_s}
++
++
+ def _parse_pause(raw_pause: object) -> dict | None:
+     if raw_pause is None:
+         return None
+@@ -1078,6 +1151,10 @@ def _attempt_fields(raw: dict, base_dir: Path, parent: dict) -> dict:
+             raise MissionInvalid(f"cannot read prompt_file: {exc}") from exc
+     if "schema" in raw and raw["schema"]:
+         out["schema"] = str((base_dir / str(raw["schema"])).expanduser().resolve())
++    if "on" in raw:
++        # C5: a fallback's own gate, never inherited -- a fallback three deep
++        # in the chain must not silently pick up an ancestor's `on`.
++        out["on"] = raw["on"]
+     return out
+ 
+ 
+@@ -1122,6 +1199,16 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
+             verdict = parse_checklist(fields["verdict"])
+         except ValueError as exc:
+             raise MissionInvalid(f"{where}: verdict: {exc}") from exc
++    on = fields.get("on")
++    if on is not None:
++        if not isinstance(on, list) or not all(isinstance(item, str) for item in on):
++            raise MissionInvalid(f"{where}: on must be a list of error kinds")
++        unknown_kinds = [k for k in on if k not in KINDS]
++        if unknown_kinds:
++            raise MissionInvalid(
++                f"{where}: on names unknown kind {unknown_kinds[0]!r}; known: "
++                f"{', '.join(KINDS)}"
++            )
+     try:
+         return Attempt(
+             fleet=str(fields["fleet"]),
+@@ -1147,6 +1234,7 @@ def _attempt(fields: dict, *, where: str) -> Attempt:
+             setup=fields.get("setup"),
+             teardown=fields.get("teardown"),
+             include=list(include) if include is not None else None,
++            on=list(on) if on is not None else None,
+         )
+     except (TypeError, ValueError) as exc:
+         raise MissionInvalid(f"{where}: {exc}") from exc
+@@ -1365,6 +1453,12 @@ class LaneResult:
+     # and a later attempt then ran (a cascade attempt escalating to the
+     # lane's own attempts, or an ordinary fallback escalation).
+     escalated: bool = False
++    # C5: the error kind of every attempt dispatched for this lane, in order
++    # (including retries), `None` for one that ended ok.
++    kinds: list[str | None] = field(default_factory=list)
++    # C5: lane-level notes that are not tied to one attempt row, currently
++    # just a fallback `on` passing over the previous attempt's kind.
++    notes: list[str] = field(default_factory=list)
+ 
+     def buildable(self) -> tuple[str, str | None]:
+         """The commit a later lane may start from, or why there is none."""
+@@ -1394,9 +1488,15 @@ class LaneResult:
+             raise ValueError(f"lane receipt is missing field(s): {', '.join(missing)}")
+         if not isinstance(raw["name"], str) or not isinstance(raw["ok"], bool):
+             raise ValueError("lane receipt name and ok have invalid types")
+-        for key in ("attempts", "previous_attempts", "needs"):
++        for key in ("attempts", "previous_attempts", "needs", "kinds", "notes"):
+             if key in raw and not isinstance(raw[key], list):
+                 raise ValueError(f"lane receipt {key} must be a list")
++        if "kinds" in raw and not all(
++            item is None or isinstance(item, str) for item in raw["kinds"]
++        ):
++            raise ValueError("lane receipt kinds must contain strings or null")
++        if "notes" in raw and not all(isinstance(item, str) for item in raw["notes"]):
++            raise ValueError("lane receipt notes must contain strings")
+         if "attempts" in raw and not all(isinstance(item, dict) for item in raw["attempts"]):
+             raise ValueError("lane receipt attempts must contain objects")
+         attempt_keys = {
+@@ -1491,6 +1591,9 @@ class MissionResult:
+     # B3: set whenever the mission has a cascade; {"lanes", "cheap_ok",
+     # "escalated", "rate", "cascade_usd", "escalated_usd"}. None otherwise.
+     escalation: dict | None = None
++    # C5: kind -> count, over every attempt of every lane; empty when nothing
++    # failed.
++    errors: dict[str, int] = field(default_factory=dict)
+ 
+     def to_dict(self) -> dict:
+         return asdict(self)
+@@ -1527,6 +1630,7 @@ class MissionResult:
+             "cost_usd": round(self.cost_usd, 6),
+             "tokens": self.tokens,
+             "cache": self.cache,
++            "errors": self.errors,
+             "duration_s": round(self.duration_s, 1),
+             "budget": self.budget,
+             "collate": (
+@@ -1571,6 +1675,38 @@ def _cache_summary(
+     }
+ 
+ 
++def _errors_summary(lane_results: list[LaneResult]) -> dict[str, int]:
++    """C5: kind -> count, over every attempt (retries included) of every
++    lane; empty when nothing failed."""
++    counts: dict[str, int] = {}
++    for lane in lane_results:
++        for kind in lane.kinds:
++            if kind:
++                counts[kind] = counts.get(kind, 0) + 1
++    return counts
++
++
++def _interruptible_sleep(seconds: float, cancel: threading.Event | None) -> str | None:
++    """C5's retry backoff: sleeps in one-second steps so a stop request or
++    the lane's own cancel event ends it exactly the way it would end a
++    running dispatch, instead of a plain `time.sleep` that only notices
++    afterwards. Returns the reason the sleep ended early, or None once it
++    ran its full course with neither ever firing."""
++    remaining = seconds
++    while remaining > 0:
++        if stop_requested():
++            return "interrupted: stop requested during retry backoff"
++        if cancel is not None and cancel.is_set():
++            return "cancelled: another lane already passed"
++        time.sleep(min(1.0, remaining))
++        remaining -= 1.0
++    if stop_requested():
++        return "interrupted: stop requested during retry backoff"
++    if cancel is not None and cancel.is_set():
++        return "cancelled: another lane already passed"
++    return None
++
++
+ def _cache_report_line(cache: dict | None) -> str:
+     cache = cache or {}
+     hit_rate = cache.get("hit_rate")
+@@ -2299,7 +2435,21 @@ def _execute_mission(
+                 out.skipped = f"cannot build on {lane.base}: {why}"
+                 return
+         resume_failed = False
++        # C5: `last_kind` is the previous attempt's kind (None until one has
++        # failed), which is what a fallback's own `on` is checked against;
++        # `retry_cfg` is mission-wide and applies to every attempt of every
++        # lane the same way.
++        last_kind: str | None = None
++        retry_cfg = mission.retry
++        retry_kinds = set(retry_cfg["kinds"]) if retry_cfg else set()
++        max_retries = retry_cfg["attempts"] if retry_cfg else 0
++        backoff_s = retry_cfg["backoff_s"] if retry_cfg else 0.0
+         for attempt in lane.attempts:
++            if attempt.on is not None and last_kind is not None and last_kind not in attempt.on:
++                out.notes.append(
++                    f"skipped fallback {attempt.label()}: does not handle {last_kind}"
++                )
++                continue
+             blocked = None if dry_run else ledger.blocker()
+             if stop_requested():
+                 blocked = "interrupted: stop requested"
+@@ -2333,84 +2483,125 @@ def _execute_mission(
+                     if resume_id is not None
+                     else f"resume from lane {lane.resume} not applied: {reason}"
+                 )
+-            prompt = _with_prefix(mission, _render(attempt.prompt, mission, done, dry_run=dry_run))
+-            result = dispatch(
+-                attempt.spec(
+-                    mission.cwd,
+-                    cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
+-                    prompt=prompt,
+-                    resume=resume_id,
+-                    stage=lane.stage,
+-                ),
+-                dry_run=dry_run,
+-                test_command=attempt.test,
+-                commit_message=attempt.commit,
+-                isolate=attempt.isolated(),
+-                home=base,
+-                no_op_ok=attempt.no_op_ok,
+-                base_ref=base_ref,
+-                cancel=lane_cancel_events.get(lane.name),
+-            )
+-            if resume_note and resume_id is None:
+-                result.git_verdict.setdefault("notes", []).append(resume_note)
+-                (Path(result.run_dir) / "result.json").write_text(
+-                    json.dumps(result.to_dict(), indent=2)
++
++            succeeded = False
++            stop_lane = False
++            retry_index = 0
++            first_run_id: str | None = None
++            cancel_reason: str | None = None
++            while True:
++                prompt = _with_prefix(
++                    mission, _render(attempt.prompt, mission, done, dry_run=dry_run)
+                 )
+-            ledger.add(result)
+-            summary = result.summary()
+-            summary["test_surface"] = result.test_surface
+-            summary["verdict_data"] = result.verdict
+-            summary["reproduce"] = result.reproduce
+-            summary["lane"] = lane.name
+-            summary["attempt"] = attempt.label()
+-            summary["resume"] = resume_state
+-            if resume_note:
+-                summary["note"] = resume_note
+-            if result.cancelled:
+-                # dispatch()'s own receipt only knows the generic default
+-                # reason; the mission knows which lane actually won, so the
+-                # attempt's error must say the same thing report.md's
+-                # "Skipped:" line says, not a different cancel string.
+-                cancel_reason = cancel_reasons.get(
+-                    lane.name, "cancelled: another lane already passed"
++                result = dispatch(
++                    attempt.spec(
++                        mission.cwd,
++                        cap_usd=_tighter(attempt.cap_usd, ledger.remaining()),
++                        prompt=prompt,
++                        resume=resume_id,
++                        stage=lane.stage,
++                    ),
++                    dry_run=dry_run,
++                    test_command=attempt.test,
++                    commit_message=attempt.commit,
++                    isolate=attempt.isolated(),
++                    home=base,
++                    no_op_ok=attempt.no_op_ok,
++                    base_ref=base_ref,
++                    cancel=lane_cancel_events.get(lane.name),
+                 )
+-                summary["error"] = cancel_reason
+-                summary["failure"] = cancel_reason
+-            summary["unpriced"] = (
+-                result.spawned and not result.interrupted and summary.get("cost_usd") is None
+-            )
+-            out.attempts.append(summary)
+-            out.cost_usd += float(summary.get("cost_usd") or 0.0)
+-            if summary["unpriced"]:
+-                out.unpriced_attempts += 1
+-            out.tokens += int(summary.get("tokens") or 0)
+-            out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
+-            out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
+-            out.input_tokens += int(summary.get("input_tokens") or 0)
+-            out.tool_calls += int(summary.get("tool_calls") or 0)
+-            out.breaker = summary.get("breaker")
+-            # A lane's answer, diff, and tree are its final attempt's. A failed
+-            # primary's answer left in place would be what the collate reads
+-            # when the fallback produced none.
+-            out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
+-            out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
+-            iso = result.isolation or {}
+-            if not dry_run:
+-                out.base_sha = iso.get("base_sha") or ""
+-                out.tip_sha = iso.get("tip_sha") or ""
+-                out.clean = iso.get("clean")
+-                out.branch = iso.get("branch") or ""
+-            out.test_touched = _test_touched(result.test_surface)
+-            out.verdict = result.verdict
+-            out.session_id = result.session_id
+-            if result.resumed is not None and result.resumed.get("ok") is False:
+-                resume_failed = True
+-            if result.cancelled:
+-                # Another sink already passed; no fallback is worth trying.
+-                out.skipped = cancel_reason
++                if resume_note and resume_id is None:
++                    result.git_verdict.setdefault("notes", []).append(resume_note)
++                    (Path(result.run_dir) / "result.json").write_text(
++                        json.dumps(result.to_dict(), indent=2)
++                    )
++                ledger.add(result)
++                summary = result.summary()
++                summary["test_surface"] = result.test_surface
++                summary["verdict_data"] = result.verdict
++                summary["reproduce"] = result.reproduce
++                summary["lane"] = lane.name
++                summary["attempt"] = attempt.label()
++                summary["resume"] = resume_state
++                if resume_note:
++                    summary["note"] = resume_note
++                if result.cancelled:
++                    # dispatch()'s own receipt only knows the generic default
++                    # reason; the mission knows which lane actually won, so the
++                    # attempt's error must say the same thing report.md's
++                    # "Skipped:" line says, not a different cancel string.
++                    cancel_reason = cancel_reasons.get(
++                        lane.name, "cancelled: another lane already passed"
++                    )
++                    summary["error"] = cancel_reason
++                    summary["failure"] = cancel_reason
++                summary["unpriced"] = (
++                    result.spawned and not result.interrupted and summary.get("cost_usd") is None
++                )
++                kind = error_kind(result)
++                summary["kind"] = kind
++                if first_run_id is None:
++                    first_run_id = result.run_id
++                else:
++                    summary["retry_of"] = first_run_id
++                    summary["retry"] = retry_index
++                out.attempts.append(summary)
++                out.kinds.append(kind)
++                out.cost_usd += float(summary.get("cost_usd") or 0.0)
++                if summary["unpriced"]:
++                    out.unpriced_attempts += 1
++                out.tokens += int(summary.get("tokens") or 0)
++                out.cache_read_tokens += int(summary.get("cache_read_tokens") or 0)
++                out.cache_write_tokens += int(summary.get("cache_write_tokens") or 0)
++                out.input_tokens += int(summary.get("input_tokens") or 0)
++                out.tool_calls += int(summary.get("tool_calls") or 0)
++                out.breaker = summary.get("breaker")
++                # A lane's answer, diff, and tree are its final attempt's. A failed
++                # primary's answer left in place would be what the collate reads
++                # when the fallback produced none.
++                out.answer_path = _keep(result.answer_path, answers_dir / f"{lane.name}.txt")
++                out.diff_path = _keep(result.diff_path, diffs_dir / f"{lane.name}.patch")
++                iso = result.isolation or {}
++                if not dry_run:
++                    out.base_sha = iso.get("base_sha") or ""
++                    out.tip_sha = iso.get("tip_sha") or ""
++                    out.clean = iso.get("clean")
++                    out.branch = iso.get("branch") or ""
++                out.test_touched = _test_touched(result.test_surface)
++                out.verdict = result.verdict
++                out.session_id = result.session_id
++                if result.resumed is not None and result.resumed.get("ok") is False:
++                    resume_failed = True
++                if result.cancelled:
++                    # Another sink already passed; no fallback is worth trying.
++                    out.skipped = cancel_reason
++                    stop_lane = True
++                    break
++                if dry_run or (result.ok and result.gate_passed):
++                    out.ok = True
++                    succeeded = True
++                    break
++                last_kind = kind
++                if (
++                    not dry_run
++                    and retry_cfg is not None
++                    and kind in retry_kinds
++                    and retry_index < max_retries
++                ):
++                    sleep_reason = _interruptible_sleep(
++                        backoff_s * (2**retry_index), lane_cancel_events.get(lane.name)
++                    )
++                    if sleep_reason is not None:
++                        out.skipped = sleep_reason
++                        stop_lane = True
++                        break
++                    retry_index += 1
++                    continue
+                 break
+-            if dry_run or (result.ok and result.gate_passed):
+-                out.ok = True
++
++            if stop_lane:
++                break
++            if succeeded:
+                 break
+         out.escalated = len(out.attempts) > 1 and out.attempts[0].get("ok") is not True
+         if out.ok and lane.branch and not dry_run:
+@@ -2751,6 +2942,7 @@ def _execute_mission(
+         chain=None if dry_run else chain.to_result(),
+         paused=pause_park,
+         escalation=escalation_out,
++        errors=_errors_summary(lane_results),
+     )
+     report_path.write_text(_report(mission, result, lane_results))
+     (mission_dir / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+@@ -3239,6 +3431,9 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
+             f"{esc['escalated']} escalated (${_usd(esc['cascade_usd'])} on the cheap attempts, "
+             f"${_usd(esc['escalated_usd'])} after)"
+         )
++    if result.errors:
++        parts = ", ".join(f"{kind} x{count}" for kind, count in result.errors.items())
++        lines.append(f"- Errors: {parts}")
+     lines += [
+         "",
+         "| lane | attempt | ok | verdict | exit | no_op | test_touched | commits | branch | "
+@@ -3309,11 +3504,14 @@ def _report(mission: Mission, result: MissionResult, lanes: list[LaneResult]) ->
+             lines.append(f"- tip: `{lane.tip_sha[:8]}` ({state})")
+         if lane.skipped:
+             lines.append(f"Skipped: {lane.skipped}")
++        for note in lane.notes:
++            lines.append(f"- {note}")
+         for a in lane.attempts:
+             if a.get("breaker"):
+                 lines.append(f"- breaker: {a['breaker']}")
+             if a.get("error"):
+-                lines.append(f"- {a['attempt']}: {a['error']}")
++                kind_suffix = f" [{a['kind']}]" if a.get("kind") else ""
++                lines.append(f"- {a['attempt']}: {a['error']}{kind_suffix}")
+             if a.get("note"):
+                 lines.append(f"- {a['attempt']}: {a['note']}")
+             if a.get("worktree"):
+diff --git a/src/conductor/runner.py b/src/conductor/runner.py
+index 94b091f..8f08857 100644
+--- a/src/conductor/runner.py
++++ b/src/conductor/runner.py
+@@ -33,6 +33,7 @@ from . import attest, prices, worktrees
+ from . import ports as ports_mod
+ from .breakers import Breaker
+ from .budget import POLL_S, Budget, Watcher
++from .errors import error_kind
+ from .fleets import FLEETS, DispatchRefused, Spec, build_argv
+ from .outputs import FleetOutput
+ from .outputs import parse as parse_output
+@@ -190,6 +191,7 @@ class Result:
+     def to_dict(self) -> dict:
+         d = asdict(self)
+         d["ok"] = self.ok
++        d["kind"] = error_kind(self)
+         return d
+ 
+     def summary(self) -> dict:
+@@ -244,6 +246,7 @@ class Result:
+             "error": self.error or self.fleet_error,
+             "failure": self.failure(),
+             "cancelled": self.cancelled,
++            "kind": error_kind(self),
+         }
+ 
+ 
+diff --git a/src/conductor/errors.py b/src/conductor/errors.py
+new file mode 100644
+index 0000000..cff2d8a
+--- /dev/null
++++ b/src/conductor/errors.py
+@@ -0,0 +1,215 @@
++"""Structured error kinds: one label for why a dispatch was not ok.
++
++`runner.Result.failure()` already reduces a dispatch to one line of prose, but
++that line is meant for a human, and two very different failures ("a rate
++limit" and "a broken gate") can share nearly identical wording. `error_kind`
++classifies a result into exactly one of `KINDS`, checked in a fixed order so a
++dispatch that matches more than one reason (a cap kill that also timed out) is
++still exactly one kind: the first one that matches. Mission fallbacks (C5
++item 2) and retries (item 3) key off this label instead of re-parsing prose.
++
++`error_kind` accepts either a `runner.Result` or the plain dict a receipt
++(`result.json`) deserializes to, since `conductor runs` reads receipts off
++disk without reconstructing a `Result` object.
++"""
++
++from __future__ import annotations
++
++KINDS: tuple[str, ...] = (
++    "interrupted",
++    "cancelled",
++    "cap",
++    "breaker",
++    "timeout",
++    "setup",
++    "refused",
++    "rate_limit",
++    "transport",
++    "refusal",
++    "fleet_error",
++    "exit",
++    "gate",
++    "no_op",
++    "read_moved_bytes",
++    "no_answer",
++    "commit",
++    "unknown",
++)
++
++# Claude's own budget/turn stops use this subtype prefix but are not a model
++# declining the task; a refusal is any other error_* subtype whose text also
++# reads as a refusal.
++_NON_REFUSAL_SUBTYPES = frozenset({"error_max_budget_usd", "error_max_turns"})
++
++# One tuple per kind per fleet; "*" applies to every fleet. Substrings are
++# matched case-insensitively against the fleet's own error text (`fleet_error`)
++# and conductor's own `error` field (which repeats a cut-short stream's text).
++_PATTERNS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
++    (
++        "rate_limit",
++        "*",
++        (
++            "rate limit",
++            "rate_limit",
++            "429",
++            "overloaded",
++            "529",
++            "quota",
++            "resource exhausted",
++            "too many requests",
++        ),
++        "Claude budget/rate stops, Codex/Antigravity/Cursor 429s and Anthropic's "
++        "529 'overloaded' and Google's 'resource exhausted'",
++    ),
++    (
++        "transport",
++        "*",
++        (
++            "econnreset",
++            "econnrefused",
++            "etimedout",
++            "epipe",
++            "socket hang up",
++            "fetch failed",
++            "network",
++            "502",
++            "503",
++            "504",
++        ),
++        "node/http transport failures reported by any fleet's own error text",
++    ),
++    (
++        "transport",
++        "claude",
++        ("stream ended without a result event",),
++        "outputs.py's own message for a Claude stream cut short with no final "
++        "result event (a transport-level disconnect, not a refusal)",
++    ),
++    (
++        "refusal",
++        "*",
++        ("i can't help", "i cannot help"),
++        "any fleet: the model declining the task outright, verbatim",
++    ),
++)
++
++
++def _get(result: object, name: str, default: object = None) -> object:
++    if isinstance(result, dict):
++        return result.get(name, default)
++    return getattr(result, name, default)
++
++
++def _matches(text: str, kind: str, fleet: object) -> bool:
++    for pattern_kind, pattern_fleet, substrings, _seen in _PATTERNS:
++        if pattern_kind != kind or pattern_fleet not in ("*", fleet):
++            continue
++        if any(s in text for s in substrings):
++            return True
++    return False
++
++
++def _is_refusal(fleet: object, status: object, text: str) -> bool:
++    if _matches(text, "refusal", fleet):
++        return True
++    if (
++        fleet == "claude"
++        and isinstance(status, str)
++        and status.startswith("error_")
++        and status not in _NON_REFUSAL_SUBTYPES
++        and any(s in text for s in ("refus", "cannot help", "not able to"))
++    ):
++        return True
++    return False
++
++
++def _gate_failed(result: object) -> bool:
++    """Whether the gate that counts for this dispatch ran and did not pass:
++    the clean gate when it ran, else the lane's own gate. Mirrors
++    `runner._gate_passed` without importing it, so `errors.py` stays a leaf
++    module `runner.py` can import from."""
++    surface = _get(result, "test_surface") or {}
++    clean = surface.get("clean_gate") or {}
++    tests = _get(result, "tests")
++    counted = clean if clean.get("ran") else tests
++    if not counted or not counted.get("ran"):
++        return False
++    passed = (
++        counted.get("exit_code") == 0
++        and not counted.get("timed_out")
++        and not counted.get("interrupted")
++    )
++    return not passed
++
++
++def error_kind(result: object) -> str | None:
++    """The one kind that explains why `result` is not ok, or None when it is."""
++    if _get(result, "ok"):
++        return None
++
++    error_text = str(_get(result, "error") or "")
++    if _get(result, "interrupted") or error_text.startswith("interrupted:"):
++        return "interrupted"
++    if _get(result, "cancelled") or error_text.startswith("cancelled:"):
++        return "cancelled"
++
++    budget = _get(result, "budget") or {}
++    if budget.get("exceeded") or budget.get("unpriced"):
++        return "cap"
++
++    breaker = _get(result, "breaker") or {}
++    if breaker.get("tripped"):
++        return "breaker"
++
++    if _get(result, "timed_out"):
++        return "timeout"
++
++    if error_text.startswith("setup failed") or error_text.startswith("setup timed out"):
++        return "setup"
++
++    if not _get(result, "spawned") and error_text:
++        return "refused"
++
++    fleet = _get(result, "fleet")
++    status = _get(result, "fleet_status")
++    fleet_error = str(_get(result, "fleet_error") or "")
++    combined = f"{error_text} {fleet_error}".lower()
++
++    if _matches(combined, "rate_limit", fleet):
++        return "rate_limit"
++    if _matches(combined, "transport", fleet):
++        return "transport"
++    if _is_refusal(fleet, status, combined):
++        return "refusal"
++    if fleet_error:
++        return "fleet_error"
++
++    exit_code = _get(result, "exit_code")
++    if exit_code not in (0, None):
++        return "exit"
++
++    if _gate_failed(result):
++        return "gate"
++
++    git_verdict = _get(result, "git_verdict") or {}
++    mode = _get(result, "mode")
++    no_op_ok = _get(result, "no_op_ok")
++    if (
++        mode == "write"
++        and git_verdict.get("checked")
++        and git_verdict.get("no_op")
++        and not no_op_ok
++    ):
++        return "no_op"
++    if mode == "read" and git_verdict.get("checked") and not git_verdict.get("no_op"):
++        return "read_moved_bytes"
++    if mode == "read" and exit_code is not None and not _get(result, "answer_path"):
++        return "no_answer"
++
++    commit = _get(result, "commit")
++    if commit and not commit.get("committed"):
++        nothing = commit.get("reason") == "nothing to commit"
++        if not (no_op_ok and nothing):
++            return "commit"
++
++    return "unknown"
+diff --git a/tests/test_errors.py b/tests/test_errors.py
+new file mode 100644
+index 0000000..a23f1dd
+--- /dev/null
++++ b/tests/test_errors.py
+@@ -0,0 +1,485 @@
++from __future__ import annotations
++
++import json
++import shlex
++from pathlib import Path
++
++from conductor.errors import KINDS, error_kind
++from conductor.mission import MissionInvalid, mission_from_dict, run_mission
++from conductor.runner import Result, dispatch
++from conductor.fleets import Spec
++
++
++def _base_kwargs(**overrides):
++    kwargs = dict(
++        run_id="r1",
++        fleet="claude",
++        model="opus",
++        effort="standard",
++        mode="write",
++        cwd="/tmp/x",
++        timeout=60,
++        exit_code=0,
++        timed_out=False,
++        duration_s=1.0,
++        run_dir="/tmp/x/r1",
++        stdout_path="/tmp/x/r1/stdout.log",
++        stderr_path="/tmp/x/r1/stderr.log",
++        tail="",
++        spawned=True,
++    )
++    kwargs.update(overrides)
++    return kwargs
++
++
++def test_error_kind_none_when_ok():
++    assert error_kind(Result(**_base_kwargs())) is None
++
++
++def test_error_kind_interrupted():
++    assert error_kind(Result(**_base_kwargs(interrupted=True, error="interrupted: x"))) == (
++        "interrupted"
++    )
++
++
++def test_error_kind_cancelled():
++    assert error_kind(Result(**_base_kwargs(cancelled=True, error="cancelled: x"))) == "cancelled"
++
++
++def test_error_kind_cap_takes_precedence_over_timeout():
++    # A cap kill that also timed out is `cap`, not `timeout`: cap is checked
++    # first.
++    result = Result(
++        **_base_kwargs(
++            timed_out=True,
++            error="budget cap hit: $2.0000 estimated against a $1.0000 cap; process group killed",
++            budget={"cap_usd": 1.0, "enforcement": "watcher", "exceeded": True, "unpriced": False},
++        )
++    )
++    assert error_kind(result) == "cap"
++
++
++def test_error_kind_cap_unenforced():
++    result = Result(
++        **_base_kwargs(
++            budget={"cap_usd": 1.0, "enforcement": "watcher", "exceeded": False, "unpriced": True},
++            error="cap unenforced: the run came back unpriced",
++        )
++    )
++    assert error_kind(result) == "cap"
++
++
++def test_error_kind_breaker():
++    result = Result(
++        **_base_kwargs(
++            breaker={"tool_calls": 6, "tripped": "looping: x repeated 6 times"},
++            error="looping: x repeated 6 times; process group killed",
++        )
++    )
++    assert error_kind(result) == "breaker"
++
++
++def test_error_kind_timeout():
++    result = Result(**_base_kwargs(timed_out=True, error="timed out after 60s"))
++    assert error_kind(result) == "timeout"
++
++
++def test_error_kind_setup():
++    result = Result(**_base_kwargs(spawned=False, error="setup failed: exit 1"))
++    assert error_kind(result) == "setup"
++
++
++def test_error_kind_refused():
++    result = Result(
++        **_base_kwargs(
++            spawned=False,
++            error="write dispatch refused: cwd is not a git repository; only read mode may run there",
++        )
++    )
++    assert error_kind(result) == "refused"
++
++
++def test_error_kind_rate_limit_beats_fleet_error():
++    # A fleet error that mentions a rate limit is `rate_limit`, not
++    # `fleet_error`: rate_limit is checked first.
++    result = Result(
++        **_base_kwargs(
++            exit_code=1,
++            fleet_error="Reached maximum requests: 429 Too Many Requests",
++        )
++    )
++    assert error_kind(result) == "rate_limit"
++
++
++def test_error_kind_transport():
++    result = Result(**_base_kwargs(exit_code=1, fleet_error="fetch failed: ECONNRESET"))
++    assert error_kind(result) == "transport"
++
++
++def test_error_kind_claude_transport_stream_cut_short():
++    result = Result(
++        **_base_kwargs(
++            fleet="claude",
++            exit_code=0,
++            fleet_error="claude stream ended without a result event",
++        )
++    )
++    assert error_kind(result) == "transport"
++
++
++def test_error_kind_refusal_verbatim():
++    result = Result(**_base_kwargs(exit_code=1, fleet_error="I can't help with that request"))
++    assert error_kind(result) == "refusal"
++
++
++def test_error_kind_refusal_claude_subtype():
++    result = Result(
++        **_base_kwargs(
++            fleet="claude",
++            fleet_status="error_during_execution",
++            exit_code=1,
++            fleet_error="I am not able to complete this task; it refuses my policy",
++        )
++    )
++    assert error_kind(result) == "refusal"
++
++
++def test_error_kind_claude_budget_subtype_is_not_a_refusal():
++    result = Result(
++        **_base_kwargs(
++            fleet="claude",
++            fleet_status="error_max_budget_usd",
++            exit_code=1,
++            fleet_error="Reached maximum budget ($0.01)",
++        )
++    )
++    assert error_kind(result) == "fleet_error"
++
++
++def test_error_kind_fleet_error():
++    result = Result(**_base_kwargs(exit_code=1, fleet_error="something broke"))
++    assert error_kind(result) == "fleet_error"
++
++
++def test_error_kind_exit():
++    result = Result(**_base_kwargs(exit_code=1))
++    assert error_kind(result) == "exit"
++
++
++def test_error_kind_gate():
++    result = Result(
++        **_base_kwargs(
++            exit_code=0,
++            tests={"ran": True, "exit_code": 1, "timed_out": False, "interrupted": False},
++        )
++    )
++    assert error_kind(result) == "gate"
++
++
++def test_error_kind_no_op():
++    result = Result(
++        **_base_kwargs(
++            mode="write",
++            exit_code=0,
++            git_verdict={"checked": True, "no_op": True},
++        )
++    )
++    assert error_kind(result) == "no_op"
++
++
++def test_error_kind_read_moved_bytes():
++    result = Result(
++        **_base_kwargs(
++            mode="read",
++            exit_code=0,
++            git_verdict={"checked": True, "no_op": False},
++        )
++    )
++    assert error_kind(result) == "read_moved_bytes"
++
++
++def test_error_kind_no_answer():
++    result = Result(
++        **_base_kwargs(
++            mode="read",
++            exit_code=0,
++            git_verdict={"checked": False, "no_op": False},
++            answer_path=None,
++        )
++    )
++    assert error_kind(result) == "no_answer"
++
++
++def test_error_kind_commit():
++    result = Result(
++        **_base_kwargs(
++            mode="write",
++            exit_code=0,
++            git_verdict={"checked": True, "no_op": False},
++            commit={"attempted": True, "committed": False, "reason": "gate failed"},
++        )
++    )
++    assert error_kind(result) == "commit"
++
++
++def test_error_kind_dict_form_matches_result_form():
++    result = Result(**_base_kwargs(exit_code=1))
++    assert error_kind(result.to_dict()) == error_kind(result) == "exit"
++
++
++def test_kinds_is_exhaustive_and_ordered():
++    assert "interrupted" == KINDS[0]
++    assert "unknown" == KINDS[-1]
++    assert len(KINDS) == len(set(KINDS))
++
++
++def test_fake_fleet_rate_limit_dispatch(repo: Path, home: Path, fake_fleet) -> None:
++    payload = {
++        "type": "result",
++        "subtype": "error_during_execution",
++        "is_error": True,
++        "errors": ["429 Too Many Requests: rate limit exceeded"],
++        "usage": {"inputTokens": 10, "outputTokens": 1},
++    }
++    fake_fleet(argv=["sh", "-c", f"printf '%s\\n' {shlex.quote(json.dumps(payload))}"])
++    result = dispatch(
++        Spec(fleet="claude", model="opus", prompt="hi", cwd=str(repo), mode="read"),
++        home=home,
++    )
++    assert not result.ok
++    assert error_kind(result) == "rate_limit"
++    assert result.to_dict()["kind"] == "rate_limit"
++    assert result.summary()["kind"] == "rate_limit"
++
++
++def test_fallback_on_skips_unhandled_kind_and_notes_it(repo: Path, home: Path, fake_fleet) -> None:
++    fake_fleet(argv=["sh", "-c", "exit 1"])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "lanes": [
++                {
++                    "name": "build",
++                    "fleet": "claude",
++                    "model": "opus",
++                    "mode": "write",
++                    "prompt": "do it",
++                    "fallback": [
++                        {"fleet": "claude", "model": "haiku", "on": ["gate"]},
++                        {"fleet": "claude", "model": "sonnet"},
++                    ],
++                }
++            ],
++        },
++        base_dir=Path("."),
++    )
++    result = run_mission(mission, home=home)
++    lane = result.lanes[0]
++    assert lane["kinds"] == ["exit", "exit"]
++    assert any("does not handle exit" in n for n in lane["notes"])
++    assert [a["attempt"] for a in lane["attempts"]] == ["claude/opus", "claude/sonnet"]
++
++
++def test_fallback_on_unknown_kind_refused(repo: Path) -> None:
++    try:
++        mission_from_dict(
++            {
++                "cwd": str(repo),
++                "lanes": [
++                    {
++                        "name": "build",
++                        "fleet": "claude",
++                        "mode": "write",
++                        "prompt": "do it",
++                        "fallback": [{"fleet": "claude", "model": "haiku", "on": ["bogus"]}],
++                    }
++                ],
++            },
++            base_dir=Path("."),
++        )
++    except MissionInvalid as exc:
++        assert "unknown kind" in str(exc)
++    else:
++        raise AssertionError("expected MissionInvalid")
++
++
++def test_cascade_must_not_set_on(repo: Path) -> None:
++    try:
++        mission_from_dict(
++            {
++                "cwd": str(repo),
++                "cascade": {"fleet": "claude", "model": "haiku", "on": ["gate"]},
++                "lanes": [
++                    {
++                        "name": "build",
++                        "fleet": "claude",
++                        "model": "opus",
++                        "mode": "write",
++                        "prompt": "do it",
++                    }
++                ],
++            },
++            base_dir=Path("."),
++        )
++    except MissionInvalid as exc:
++        assert "must not set on" in str(exc)
++    else:
++        raise AssertionError("expected MissionInvalid")
++
++
++def test_fallback_on_snapshot_round_trip(repo: Path, home: Path, fake_fleet) -> None:
++    fake_fleet(argv=["sh", "-c", "exit 1"])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "lanes": [
++                {
++                    "name": "build",
++                    "fleet": "claude",
++                    "model": "opus",
++                    "mode": "write",
++                    "prompt": "do it",
++                    "fallback": [{"fleet": "claude", "model": "haiku", "on": ["exit"]}],
++                }
++            ],
++        },
++        base_dir=Path("."),
++    )
++    result = run_mission(mission, home=home)
++    snapshot = json.loads((Path(result.mission_dir) / "mission.json").read_text())
++    from conductor.mission import Mission
++
++    reloaded = Mission.from_snapshot(snapshot)
++    assert reloaded.lanes[0].attempts[1].on == ["exit"]
++
++
++def test_retry_validation(repo: Path) -> None:
++    for bad in ({"kinds": ["bogus"]}, {"attempts": 0}, {"attempts": 6}, {"backoff_s": -1}):
++        try:
++            mission_from_dict(
++                {
++                    "cwd": str(repo),
++                    "retry": bad,
++                    "lanes": [
++                        {
++                            "name": "build",
++                            "fleet": "claude",
++                            "mode": "write",
++                            "prompt": "do it",
++                        }
++                    ],
++                },
++                base_dir=Path("."),
++            )
++        except MissionInvalid:
++            continue
++        raise AssertionError(f"expected MissionInvalid for retry={bad}")
++
++
++def test_retry_recovers_on_transient_kind_then_succeeds(
++    repo: Path, home: Path, fake_fleet, tmp_path: Path
++) -> None:
++    counter_file = tmp_path / "count"
++    counter_file.write_text("0")
++    script = tmp_path / "run.sh"
++    script.write_text(
++        "#!/bin/sh\n"
++        f"n=$(cat {shlex.quote(str(counter_file))})\n"
++        "n=$((n+1))\n"
++        f"echo $n > {shlex.quote(str(counter_file))}\n"
++        "if [ $n -le 2 ]; then\n"
++        '  printf \'%s\\n\' \'{"type":"result","subtype":"error_during_execution",'
++        '"is_error":true,"errors":["fetch failed: ECONNRESET"]}\'\n"
++        "else\n"
++        '  printf \'%s\\n\' \'{"type":"result","subtype":"success","is_error":false,'
++        '"result":"ok"}\'\n"
++        "fi\n"
++    )
++    script.chmod(0o755)
++    fake_fleet(argv=["sh", str(script)])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "retry": {"kinds": ["transport"], "attempts": 3, "backoff_s": 0},
++            "lanes": [
++                {"name": "build", "fleet": "claude", "mode": "read", "prompt": "do it"},
++            ],
++        },
++        base_dir=Path("."),
++    )
++    result = run_mission(mission, home=home)
++    lane = result.lanes[0]
++    assert lane["ok"] is True
++    assert lane["kinds"] == ["transport", "transport", None]
++    assert lane["attempts"][1]["retry_of"] == lane["attempts"][0]["run_id"]
++    assert lane["attempts"][1]["retry"] == 0
++    assert lane["attempts"][2]["retry"] == 1
++    assert counter_file.read_text().strip() == "3"
++
++
++def test_retry_dry_run_never_retries(repo: Path, home: Path, fake_fleet) -> None:
++    fake_fleet(argv=["sh", "-c", "exit 1"])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "retry": {"kinds": ["exit"], "attempts": 3, "backoff_s": 0},
++            "lanes": [{"name": "build", "fleet": "claude", "mode": "write", "prompt": "do it"}],
++        },
++        base_dir=Path("."),
++    )
++    result = run_mission(mission, home=home, dry_run=True)
++    lane = result.lanes[0]
++    assert len(lane["attempts"]) == 1
++
++
++def test_mission_errors_summary_and_report(repo: Path, home: Path, fake_fleet) -> None:
++    fake_fleet(argv=["sh", "-c", "exit 1"])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "lanes": [{"name": "build", "fleet": "claude", "mode": "write", "prompt": "do it"}],
++        },
++        base_dir=Path("."),
++    )
++    result = run_mission(mission, home=home)
++    assert result.errors == {"exit": 1}
++    report = Path(result.report_path).read_text()
++    assert "Errors: exit x1" in report
++    assert "[exit]" in report
++
++
++def test_conductor_missions_and_runs_expose_kind_and_errors(
++    repo: Path, home: Path, fake_fleet, capsys
++) -> None:
++    from conductor import cli
++
++    fake_fleet(argv=["sh", "-c", "exit 1"])
++    mission = mission_from_dict(
++        {
++            "cwd": str(repo),
++            "lanes": [{"name": "build", "fleet": "claude", "mode": "write", "prompt": "do it"}],
++        },
++        base_dir=Path("."),
++    )
++    run_mission(mission, home=home)
++    import argparse
++
++    home.mkdir(parents=True, exist_ok=True)
++
++    def _conductor_home() -> Path:
++        return home
++
++    import conductor.cli as cli_mod
++
++    original = cli_mod.conductor_home
++    cli_mod.conductor_home = _conductor_home
++    try:
++        cli.cmd_missions(argparse.Namespace(limit=10))
++        missions_out = json.loads(capsys.readouterr().out)
++        assert missions_out[0]["errors"] == {"exit": 1}
++
++        cli.cmd_runs(argparse.Namespace(limit=10))
++        runs_out = json.loads(capsys.readouterr().out)
++        assert any(row.get("kind") == "exit" for row in runs_out)
++    finally:
++        cli_mod.conductor_home = original

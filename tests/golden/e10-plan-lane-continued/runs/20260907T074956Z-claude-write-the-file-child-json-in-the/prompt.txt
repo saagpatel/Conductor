@@ -1,0 +1,21 @@
+Write the file child.json in the working directory with exactly this JSON content and nothing else, then reply with the single word: written
+
+{
+  "name": "f8-plan-child",
+  "cwd": ".",
+  "max_cost_usd": 1.0,
+  "lanes": [
+    {
+      "name": "childbuild",
+      "fleet": "script",
+      "command": "printf 'planned\\n' > planned.txt",
+      "commit": "chore: planned marker"
+    }
+  ],
+  "ceiling": {
+    "per_hour_usd": 10.0,
+    "per_day_usd": null
+  }
+}
+
+Do not run any other command. Do not edit any other file.

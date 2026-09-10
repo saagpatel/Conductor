@@ -1,0 +1,62 @@
+{
+  "conductor_version": "0.55.0",
+  "files": {
+    "expected.json": "fe0c4d9134bf546104d6037292c289d39c5e34037b09b814aecdf811828b1d04",
+    "lanes/build.json": "5256d1966ab39d0dcc5ce2e058ac14c33fb59762ec76e1bcd8b37407bbd976f2",
+    "lanes/fix.json": "93ecba3b07cd37f4808de22ab82370d6a712963367760c209a5ab9aa805ff6d4",
+    "lanes/review-gemini.json": "8fb81927f046988e866e0d71eca507296eaa4750763f737de04c4df34c8fa1d3",
+    "lanes/review-grok.json": "d5f7091881c830ba39bee6fd207cb91e78f603bc910a95df12772857e4c6234d",
+    "mission.json": "9e4007285a8b0ac5df76ffad5a31ff29916bd9d36de56f01406adcd667cbfea4",
+    "pause.json": "7b7b726154879a482229671c54f05d1bcd9c3f634495c2129da6a8a9bf4b75ab",
+    "report.md": "d5c26d194cb67e77430172ad3fbc2adda54da87786b2e463b9c60ba813c0cbe4",
+    "result.json": "eeee9861941510460e75e006b63182a304d5612bdcee864ad45d9cb67a5911cc",
+    "runs/20260907T055537Z-claude-you-are-one-lane-of-a-conductor/answer.txt": "1d66c559517cbc7df2623b675f6939792fa31f315e4627ea43f6eccf042e12cf",
+    "runs/20260907T055537Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "21081a8e3e3ceae2c334e7c005c928c127020a0e2510560f4a3e6c4cb0ec6cce",
+    "runs/20260907T055537Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "ab41f123449ca4e1a63aa7f233cf7804409d7c0f7045e97edb5cd155c0de913f",
+    "runs/20260907T055537Z-claude-you-are-one-lane-of-a-conductor/result.json": "851d043422d31d2384ac1b061a14928cf2e6d19147c8a4f3d6995830224c0efa",
+    "runs/20260907T055537Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "ab434500a0b982361b442e26b91c5dd195c7cb44357f9ec832abc8a410146b77",
+    "runs/20260907T062120Z-antigravity-you-are-one-lane-of-a-conductor/answer.txt": "7c27403809f50209042018b1c22aac7acb3a7e830d9e74cf02d791d4b1b8111c",
+    "runs/20260907T062120Z-antigravity-you-are-one-lane-of-a-conductor/prompt.txt": "22c83cf6a0fb3bbfc2f4225664b1762d4270c80ef826dd4dda7e6b4dfe5a3466",
+    "runs/20260907T062120Z-antigravity-you-are-one-lane-of-a-conductor/result.json": "e706d71ce06adc33f1800c72148a3632fee2d8e116cc02c36d35f6f25e4b1b54",
+    "runs/20260907T062120Z-antigravity-you-are-one-lane-of-a-conductor/stdout.jsonl": "a1ca120f096a3da3014488b82c8c2cabdaa744e6e9bc388518086a60a0ed617a",
+    "runs/20260907T062120Z-cursor-you-are-one-lane-of-a-conductor/answer.txt": "c43a0e5cb838f59d4491ecdf5ab933a57edff4402047dd39c8f019531114a2fb",
+    "runs/20260907T062120Z-cursor-you-are-one-lane-of-a-conductor/prompt.txt": "83b77b336f1ada2dac231d37ec2a2710a6ea051badcddd8b161f02f603be75c0",
+    "runs/20260907T062120Z-cursor-you-are-one-lane-of-a-conductor/result.json": "2fdc4519daa65cd27b7a4a90c509d06c28e2965e08881aabda2e36e378319400",
+    "runs/20260907T062120Z-cursor-you-are-one-lane-of-a-conductor/stdout.jsonl": "e2c9a99e5e1c67bac7f77ddf7ad2d327f3f3eb8ed636061f540ec85e38fdd3dd",
+    "runs/20260907T063158Z-claude-you-are-one-lane-of-a-conductor/answer.txt": "2392576de2a9db5e8f22301165f6925a9c80025beb684fdc42f79889352300aa",
+    "runs/20260907T063158Z-claude-you-are-one-lane-of-a-conductor/diff.patch": "9a10880a12fa4a1e5c931ebb98c3fee9658f3bfa91d39135da69cf7041f1c41b",
+    "runs/20260907T063158Z-claude-you-are-one-lane-of-a-conductor/prompt.txt": "2154da0697a7aade4222107ed3616c81aeada350c143684aaf6c88ffb07f6037",
+    "runs/20260907T063158Z-claude-you-are-one-lane-of-a-conductor/result.json": "10689f6668431d31e1a2fb7771d661059bf547345c1423a68ab32b16c9d03e15",
+    "runs/20260907T063158Z-claude-you-are-one-lane-of-a-conductor/stdout.jsonl": "157e6d90cb82a65f1734510868afcab8b239e272784d6ad2617afd13d0fce330"
+  },
+  "fleet_versions": {
+    "antigravity": "1.1.27",
+    "claude": "2.1.263 (Claude Code)",
+    "cursor": "2026.09.02-c22c1a3"
+  },
+  "fleets": [
+    "antigravity",
+    "claude",
+    "cursor"
+  ],
+  "format": "conductor/golden/v1",
+  "mission_id": "20260907T055537Z-core-guard-audit-fixes",
+  "name": "f10-shape-a-foreign-repo",
+  "placeholders": [
+    "<home>",
+    "<cwd>",
+    "<user>"
+  ],
+  "prompt_versions": {
+    "checklist_contract": "5f755b6508ec",
+    "collate_default": "8a40b1c17d9b",
+    "rank_contract": "b841c5abc1f8",
+    "resolve_default": "93d0f39dc7d1",
+    "shape_fix": "c84169863894",
+    "shape_gemini_review": "a95b30dd8f91",
+    "shape_grok_read_only": "b3855889bb0c",
+    "shape_grok_review": "214bfbc9bb7a",
+    "shape_prefix": "ef95f69f8a29"
+  },
+  "recorded_at": "2026-09-07T07:42:54.033498Z"
+}

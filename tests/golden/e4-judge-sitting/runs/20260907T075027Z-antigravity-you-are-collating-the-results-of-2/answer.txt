@@ -1,0 +1,10 @@
+```json
+{
+  "reason": "cand-grok correctly handles leading and trailing non-alphanumeric characters by using a pending hyphen flag that is only enabled after characters have been emitted and only appended when subsequent valid alphanumeric characters appear. In contrast, cand-composer fails to strip leading hyphens when the input string starts with non-alphanumeric characters, as it only pops trailing hyphens.",
+  "scores": {
+    "cand-composer": 4,
+    "cand-grok": 10
+  },
+  "strongest": "cand-grok"
+}
+```

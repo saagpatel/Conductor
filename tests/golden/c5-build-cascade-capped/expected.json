@@ -1,0 +1,125 @@
+{
+  "cache_hit_rate": 0.987,
+  "early_cancel": null,
+  "errors": {
+    "cap": 2
+  },
+  "escalation": {
+    "cascade_usd": 4.015183,
+    "cheap_ok": 0,
+    "escalated": 1,
+    "escalated_usd": 9.049014,
+    "lanes": 1,
+    "rate": 1.0
+  },
+  "lanes": [
+    {
+      "attempts": [
+        {
+          "cache_read_tokens": 12223345,
+          "cache_write_tokens": 219383,
+          "cost_basis": "reported",
+          "effort": "standard",
+          "failure": "over budget: $4.0152 against a $4.0000 cap",
+          "fleet": "claude",
+          "input_tokens": 122,
+          "kind": "cap",
+          "mode": "write",
+          "model": "claude-sonnet-5",
+          "no_op": false,
+          "note": null,
+          "ok": false,
+          "over_cap": true,
+          "retry": null,
+          "retry_of": null,
+          "session_id": "65f642af-09cb-4e57-ad97-bed33dbfe4d1",
+          "tokens": 12499984,
+          "tool_calls": 65
+        },
+        {
+          "cache_read_tokens": 31611386,
+          "cache_write_tokens": 337606,
+          "cost_basis": "reported",
+          "effort": "hard",
+          "failure": "over budget: $9.0490 against a $9.0000 cap",
+          "fleet": "claude",
+          "input_tokens": 254,
+          "kind": "cap",
+          "mode": "write",
+          "model": "claude-sonnet-5",
+          "no_op": false,
+          "note": null,
+          "ok": false,
+          "over_cap": true,
+          "retry": null,
+          "retry_of": null,
+          "session_id": "c0eba56f-fffe-461a-80d0-ebbd8e762589",
+          "tokens": 32078302,
+          "tool_calls": 130
+        }
+      ],
+      "base": null,
+      "branch": "conductor/20260905T173342Z-claude-you-are-one-lane-of-a-conductor",
+      "escalated": true,
+      "kinds": [
+        "cap",
+        "cap"
+      ],
+      "name": "build",
+      "needs": [],
+      "ok": false,
+      "skipped": null,
+      "stage": "build"
+    },
+    {
+      "attempts": [],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [],
+      "name": "review-gemini",
+      "needs": [
+        "build"
+      ],
+      "ok": false,
+      "skipped": "needs build, which was not ok",
+      "stage": "review"
+    },
+    {
+      "attempts": [],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [],
+      "name": "review-grok",
+      "needs": [
+        "build"
+      ],
+      "ok": false,
+      "skipped": "needs build, which was not ok",
+      "stage": "review"
+    },
+    {
+      "attempts": [],
+      "base": "build",
+      "branch": "",
+      "escalated": false,
+      "kinds": [],
+      "name": "fix",
+      "needs": [
+        "review-gemini",
+        "review-grok",
+        "build"
+      ],
+      "ok": false,
+      "skipped": "needs review-gemini, review-grok, build, which was not ok",
+      "stage": "fix"
+    }
+  ],
+  "notes": [],
+  "ok": false,
+  "paused": null,
+  "quorum": null,
+  "ranking": [],
+  "require": "all"
+}
