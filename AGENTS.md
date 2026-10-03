@@ -16,8 +16,9 @@ rules for the sitting (no other file changes, no commits, no dispatch) apply on 
 ## The repo contract
 
 - Python 3.12, stdlib only, `src/conductor`. Branch `feat/conductor-v1`; never commit to `main`.
-- **Local-only repository. Never add a remote, never push, never publish.** Back up with an
-  encrypted archive if a backup is needed.
+- **Published repository:** public at github.com/saagpatel/Conductor (operator decision,
+  2026-10-03). Every change lands through a feature branch and a pull request; push the
+  feature branch, never `main`.
 - Gate before any commit, exit codes captured to files, never piped through `tail` or `head`:
   ```
   .venv/bin/ruff check src tests
