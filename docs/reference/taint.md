@@ -61,15 +61,16 @@ visible afterwards without reading the argv. It is refused on any fleet but
 claude and antigravity, and refused on a dispatch that is not tainted at all.
 
 Antigravity enforces the same policy through a per-lane `PreToolUse` deny
-hook (below); every other fleet still exposes no
-headless tool deny list, so a mission declaring taint on any attempt of a
+hook (below); Cursor's deny list does not cover its native web tools, and
+Codex exposes no headless deny list, so a mission declaring taint on any attempt of a
 cursor lane is refused at load, naming the lane (`--taint` on
 `conductor dispatch` is refused the same way off the claude and antigravity
 fleets). A tainted lane also never holds a deliverable `branch`: refused at
 load, naming the lane, since outside text should not be the thing that names
 what gets published. A `collate` is refused at load, naming the tainted
-lane(s), when any sink it could collate over is tainted and the collate's own
-fleet is not claude or antigravity; when a candidate sink actually is
+lane(s), when any lane it could collate over is tainted and the collate's own
+fleet is not claude or antigravity (all lanes by default, ranked sinks when
+`candidates` is nonzero); when a candidate lane actually is
 tainted, the collate's own `Spec` — prose or rank, every dispatch — is
 tainted too. The `resolve` lane is bounded the same way, and refused with the
 same message (`resolve over tainted lane(s) ...`): it pastes every candidate

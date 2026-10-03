@@ -25,7 +25,7 @@ record; it is separated from it.
 | `codex` | paused since 2026-09-04, operator decision | terra, sol, luna | `schema`, `verdict` | refused | refused | refused | estimated from list prices |
 | `script` | always | none, a shell command | refused | refused | refused | refused | none |
 
-Every fleet takes `mode: read | write`, `effort: cheap | standard | hard |
+Every model fleet takes `mode: read | write`, `effort: cheap | standard | hard |
 max` (Antigravity stops at `high`, Composer ignores effort), a `cap_usd`, and
 a `deliverable`. "Refused" means `Spec.validate` raises `DispatchRefused`
 before anything spawns, with the reason and the route to use instead; a
@@ -49,11 +49,11 @@ Standing policy alongside the table:
 - **Shelved, not to be re-proposed without the operator raising it:** the
   Codex lanes above; OpenCode, OpenRouter, Ollama, pi, and local models; cloud
   offload for this repository. Their sections in `AGENTS.md` and
-  `docs/research/` are the probe record, not a routing recommendation.
-- **Where the rules live:** the allowlist and every refusal in
+  `docs/research/` and `docs/archive/research-shelved/` are the probe record, not a routing recommendation.
+- **Where the rules live:** the allowlist and dispatch-option validation in
   `src/conductor/fleets.py`; list prices, dated, in `src/conductor/prices.py`
   with `$CONDUCTOR_HOME/prices.json` as the override; the per-lane keys under
-  "Missions" below; the error kinds under "Structured error kinds".
+  "Missions" below; the error kinds in [`docs/reference/structured-error-kinds.md`](docs/reference/structured-error-kinds.md).
 
 ## Why it exists
 
@@ -77,7 +77,7 @@ are unattended runs at 3am.
 | `codex` | `codex` | terra, sol, luna (GPT-5.6) | OpenAI first-party; paused, see "Current support" |
 | `antigravity` | `agy` | gemini-3.8-flash, gemini-3.7-flash | Google first-party |
 | `cursor` | `cursor-agent` | grok-4.6, composer-2.5 | Cursor's included pool |
-| `script` | `sh` | `sh` | not a model at all -- a shell command; see "Script lanes" |
+| `script` | `sh` | `sh` | not a model at all -- a shell command; see ["Script lanes"](docs/reference/script-lanes.md) |
 
 Cursor and Antigravity both resell models that are already reachable
 first-party here. Asking for one is refused with the route you should have
@@ -105,9 +105,9 @@ entirely.
 Mode is `read` or `write`. Read gets each fleet's strongest read-only setting
 (`--mode plan`, `--sandbox read-only`, `--sandbox`); write gets its auto-approve,
 because there is nobody present to answer a permission prompt. The flags are
-a request, the bytes are the check: a read dispatch that changed the tree is
+a request, the bytes are the check: a read dispatch that changed the tree beyond its declared deliverable is
 not `ok`, whatever its fleet promised, and neither is one that came back
-with no answer, since the answer is a read dispatch's only work product.
+with no answer, since a read dispatch still requires an answer.
 The verdict hashes porcelain status plus every dirty and untracked file's
 contents, so editing an already-dirty file cannot hide behind an unchanged count.
 Structured Codex and Cursor streams must end in `turn.completed` and `result`
@@ -138,7 +138,7 @@ Small enough to read, never the transcript:
 ```
 
 That run exited 0 and is still a failure. `ok` means the process succeeded
-**and** bytes moved (for write dispatches) **and** the gate passed **and**
+**and** bytes moved (for write dispatches unless `no_op_ok` is set) **and** the gate passed **and**
 any requested commit landed; `failure` names which of those did not hold
 (here, `"write dispatch moved no bytes"`), so the caller never has to
 reconstruct the reason from the raw fields. Two more failures name themselves
@@ -248,7 +248,7 @@ Each is now pinned by a test.
 | `codex` | Can edit files but never commit under `workspace-write`. |
 | `claude` | A one-word reply cost **$0.2314**, because each headless spawn writes a fresh ~57.8K-token prompt cache. Antigravity's equivalent moved ~14K input tokens, Cursor's ~23K. Startup overhead, not the work, dominates short dispatches: do not send small jobs to this fleet. |
 | `claude` | Loading the operator's user settings ran 46 hook invocations on a one-word prompt (24 at session start), one of which rewrote a memory file, and cost $0.24 against $0.05 without them. conductor passes `--setting-sources project`: the target repo's own settings still apply, the operator's do not. It uses `--output-format stream-json --verbose` so progress is visible while Claude works; the final `result` event keeps the same answer, session, usage, cost, error, and structured-output fields. The parser still accepts the older array and single-object receipts. `--bare` would also drop CLAUDE.md discovery but refuses OAuth. |
-| `antigravity` | `--print-timeout` defaults to **5m0s** whatever conductor does with the process. An 8s cap on a 25s task exits 1 with `status: ERROR`, `error: "timeout waiting for response"`, and the work cut. conductor pins it to the spec's timeout minus 5s, so agy stops itself (and still prints its usage and its own error) just before conductor's process-group kill would leave nothing to price. |
+| `antigravity` | `--print-timeout` defaults to **5m0s** whatever conductor does with the process. An 8s cap on a 25s task exits 1 with `status: ERROR`, `error: "timeout waiting for response"`, and the work cut. conductor pins it to the spec's timeout minus 5s (minimum 1s), so agy stops itself (and still prints its usage and its own error) just before conductor's process-group kill would leave nothing to price. |
 | `claude` | `--json-schema` takes the schema **text**, not a path (a path fails with "not valid JSON"). The validated object comes back under `structured_output`. Codex (`--output-schema`) and Antigravity (`--json-schema`) take a path. |
 | `cursor` | Has no structured-output flag at all. A `--schema` dispatch to Cursor is refused before spawn rather than silently handed prose. |
 | all | `--schema` verified live on claude, codex, and antigravity; effort `max` verified on claude; sol, luna, composer-2.5, and gemini-3.7-flash each answered a live dispatch. Every fleet's failure signal (`is_error`, `status: ERROR`, a Codex `error` event) is read and sinks `ok` even on exit 0. |
@@ -256,7 +256,7 @@ Each is now pinned by a test.
 | `codex` | Prints usage on stdout exactly once, at `turn.completed`. But it appends a `token_count` event with cumulative totals to its session rollout (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<thread_id>.jsonl`) after every model response: 52 of them in one 12-minute run. That file, found by the `thread_id` in the first stdout event, is how conductor caps Codex mid-run. |
 | `antigravity` | `--output-format stream-json` prints a `step_update` carrying that step's own usage after every model response (three steps summed exactly to the final figure). conductor now always runs agy this way. |
 | `antigravity` | A stream whose last event is a `step_update` rather than the wrapped `result` was cut short (conductor's kill, or agy's own crash). The steps' usage is still real and is still priced, but the turn did not finish: conductor stamps `status: incomplete` on it and fails the run, exit code, bytes, and gate notwithstanding. |
-| `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes on any fleet is no longer `ok`. |
+| `antigravity` | `--mode plan` is silently ignored whenever `--disable-slash-commands` is set (a stderr warning, then the file gets written anyway), and `--sandbox` only restricts the terminal. Asked to create a file in read mode, agy created it. conductor's own byte check caught it; read mode now drops the slash-command flag so plan mode holds (verified: agy wrote an implementation plan in its own brain directory and left the tree alone), and a read dispatch that moves bytes beyond its declared deliverable on any fleet is no longer `ok`. |
 | `cursor` | Reports usage once, in its final `result`, in both `json` and `stream-json` modes. A cap on Cursor is a verdict after the run, never a stop. |
 | `cursor` | The `json` envelope's `result` is only the **last** assistant message. On a four-fleet brainstorm, grok-4.6 spent 15K output tokens and its envelope held 680 characters of "writing the answer now". conductor runs Cursor in `stream-json` and keeps every assistant message, and a read dispatch that returns no answer is no longer `ok` on any fleet. |
 | `cursor` | In plan mode (conductor's read mode) Cursor files its real answer through a `createPlan` tool call and says only "auditing..." out loud. Composer wrote a full four-finding audit that way and it was invisible until the tool call was read. conductor now takes the plan text as part of the answer. |
@@ -343,13 +343,14 @@ Antigravity fallback inheriting `luna` from its Codex primary). `require` is
 `all` (default), `any`, or `{"pass": n, "of": [...]}` for a verdict quorum.
 TOML files load too. Two dollar fields, two
 meanings: `max_cost_usd` is the mission's total, `cap_usd` is one dispatch's
-ceiling (see below). A key the loader does not know is refused, so `need`
+ceiling (see ["Cost accounting"](docs/reference/cost-accounting.md)). A key the loader does not know is refused, so `need`
 cannot quietly turn a dependent lane into a root.
 
 Attempt keys are `fleet`, `model`, `effort`, `mode`, `cwd`, `prompt`, `prompt_file`,
-`timeout`, `stall_timeout`, `loop_limit`, `max_tool_calls`, `test`, `test_policy`,
+`timeout`, `stall_timeout`, `loop_limit`, `max_tool_calls`, `tool_idle_timeout`, `test`, `test_policy`,
 `test_surface`, `commit`, `isolate`, `cap_usd`, `no_op_ok`, `schema`, `verdict`,
-and `deliverable`.
+`deliverable`, `ports`, `setup`, `teardown`, `include`, `agent`, `agent_file`,
+`restricted`, `taint_shell`, `command`, and `cap_grace_usd`.
 `test_policy` is `clean` (the default),
 `allow`, or `forbid`; `test_surface` is a list of Git pathspec globs that
 replaces the default test/CI surface for that attempt.
@@ -414,7 +415,7 @@ linked from [Reference](#reference).
   is the default and `--apply` archives the corpus before writing. Optional
   `--fleet NAME` limits the pass to one fleet's receipts. It never recomputes a
   `reported` cost and never touches a receipt whose token counters did not
-  move; see "Cost accounting"
+  move; see ["Cost accounting"](docs/reference/cost-accounting.md)
 - `conductor gc`: plan safe worktree, `conductor/*` branch, and stale
   port-claim cleanup; pass `--apply` to execute it
 - `conductor attest MISSION_ID`: verify a mission's signed receipt chain on
@@ -425,7 +426,7 @@ linked from [Reference](#reference).
   review-and-fix mission
 - `conductor land MISSION_ID --lane NAME`: merge a lane's branch, gate the
   merged head, run `golden check`, and attest the mission (`--checkout PATH`,
-  `--test CMD`, `--dry-run`); see "Landing"
+  `--test CMD`, `--dry-run`); see ["Landing"](docs/reference/landing.md)
 - `conductor golden record MISSION_ID --out DIR`: record a finished mission
   under `$CONDUCTOR_HOME` as an offline, scrubbed fixture (`--max-bytes`
   overrides the 3,000,000-byte default)

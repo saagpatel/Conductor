@@ -26,7 +26,7 @@ anything, and `Spec.validate` never sees this lane's attempt at all.
 A human lane is tainted at load, always: what comes back is operator-pasted
 text, arriving the way a fleet's own output does -- outside the trust the
 mission's own prompt carries -- so `taint_from` records `human`, and every
-taint rule (see below) applies unchanged: never a `branch`, refused on a
+taint rule (see [Taint](taint.md)) applies unchanged: never a `branch`, refused on a
 fleet that cannot enforce it downstream, fenced in a receiving prompt.
 `{{lanes.<name>.test_touched}}`, `.diff`, and `.verdict` are refused
 referencing one at load -- it has none of those; `.answer` and `.deliverable`
@@ -100,7 +100,7 @@ set in its environment:
   `{"event", "mission_id", "lane", "breaker", "run_id", "cost_usd"}`.
 
 Notifying the operator is not the operator's decision to make: like
-`setup`/`teardown` above, a notification's outcome is a note, never a
+[setup/teardown](isolation.md#per-lane-setup-teardown-and-ports), a notification's outcome is a note, never a
 verdict. Conductor never blocks on it beyond `timeout`, and whether it
 succeeded never changes `ok`, an exit code, or a pause -- it is recorded,
 in order, as `notifications: [{"event", "ok", "exit_code", "timed_out",
@@ -114,5 +114,5 @@ nothing, and neither does a golden replay:
 `notify.emit`, the way `dispatcher` stands in for `runner.dispatch`, and
 `golden.replay` passes one that records the event name without running the
 command -- a fixture's recorded hook is the operator's, never a replay's to
-run (see "Golden missions").
+run (see [Golden missions](golden-missions.md)).
 

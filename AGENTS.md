@@ -3,19 +3,19 @@
 Read by every agent that works in this repo (Claude Code via `CLAUDE.md`, Codex, Antigravity,
 Cursor, Grok Build, OpenCode all read `AGENTS.md`). The README explains what conductor does;
 this file says how to work on it and how to prompt the models it drives. Evidence for every
-claim below lives in `docs/research/` (dated reports with URLs and live-probe receipts).
+claim below lives in `docs/research/` or `docs/archive/` (dated reports with URLs and live-probe receipts).
 
 ## Peer review sitting, 2026-09-07
 
 An outside reviewer (GPT-6 Astra, run by the operator in the Codex app, not as a conductor lane)
-is reviewing the project from first principles. The brief is
-`docs/review/2026-09-07-peer-review-brief.md`; the reviewer writes only to
+reviewed the project from first principles. The brief is
+`docs/review/2026-09-07-peer-review-brief.md`; the notes are in
 `docs/review/2026-09-07-astra-notes.md`. If you are that reviewer, read the brief first; its
 rules for the sitting (no other file changes, no commits, no dispatch) apply on top of this file.
 
 ## The repo contract
 
-- Python 3.12, stdlib only, `src/conductor`. Branch `feat/conductor-v1`; never commit to `main`.
+- Python 3.12+, stdlib only, `src/conductor`. Work on a feature branch; never commit to `main`.
 - **Published repository:** public at github.com/saagpatel/Conductor (operator decision,
   2026-10-03). Every change lands through a feature branch and a pull request; push the
   feature branch, never `main`.
@@ -53,7 +53,7 @@ rules for the sitting (no other file changes, no commits, no dispatch) apply on 
   carry training and confidentiality terms; local inference runs the GPU flat out (fans, 23 GB
   resident, minutes per task) and a 30B mixture-of-experts is already the lightest useful option; paid
   OpenRouter saves nothing over the existing lanes. The research and probe receipts in
-  `docs/research/` stay as the record; the OpenCode and pi sections below are that record, not policy.
+  `docs/archive/research-shelved/` stay as the record; the OpenCode and pi sections below are that record, not policy.
 - Free-tier gateway models (`*-free`, `contributor-free`, Big Pickle) never see a private repo:
   NVIDIA's free endpoints are trial-use-only with a "no confidential data" clause, Meta's
   contributor tier trains on your prompts, the rest may. Scratch repos only.
@@ -110,7 +110,7 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
    deliverable: gate it, read it, commit it, then run the review and fix lanes as a mission with
    `cwd` at that commit and the reviewers pointed at `git show`. Cost of the remainder: $1.50 to
    $2.50. `conductor salvage MISSION_ID --lane NAME` runs the gate step and receipts it; `--emit`,
-   once the commit is made, writes that review-and-fix mission instead of by hand (README, "Salvage").
+   once the commit is made, writes that review-and-fix mission instead of by hand (`docs/reference/salvage.md`).
 7. **Keep both reviewers.** Across seven runs Grok found real defects outside the diff's own lines every
    time it reported, and Gemini's answer was correct every time it wrote one (NO_FINDINGS on what the
    diff alone shows, or the same bug Grok found). Complementary, not redundant, and $0.70 to $1.00 for
@@ -147,8 +147,8 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 
 12. **A lane's `--test` on this repository runs under `env -u CONDUCTOR_LANE`, and lane gates run
    one at a time.** Every dispatched process carries `CONDUCTOR_LANE=1` so `land.py` can refuse to
-   run inside a lane; seven tests in `test_land_failure_paths.py` assert that refusal, so the suite
-   fails inside any lane that runs it. Wave 6 lost four lane gates to this and nothing else (the
+   run inside a lane; `tests/test_land_failure_paths.py` has one explicit refusal test and
+   landing scenarios that require the marker to be unset. Wave 6 lost four lane gates to this and nothing else (the
    commits were undone, the worktrees kept, and every one salvaged clean). Separately, five `-n auto`
    suites at once flaked `test_stop.py::test_a_stop_request_kills_the_fleet_and_releases_its_worktree`
    in all five worktrees including one that touched only `prices.py`: launch lanes in parallel, gate
@@ -158,9 +158,9 @@ fresh worktree, tidies, merges, and cuts the release. Every rule below cost a re
 on the build's tip rather than prose, and moves the fix lane onto it so a reproduced defect
 is inherited rather than re-earned.
 
-Every Shape A build lane writes `evidence.json`, a map from spec item to files, tests, and the
+By default, a Shape A build lane writes `evidence.json`, a map from spec item to files, tests, and the
 check run, that the reviewers read as a claim beside the diff (Phase H item 6). A spec item the
-map does not name is a finding.
+map does not name is a finding. `--deliverable` replaces the evidence map with the requested file.
 
 `conductor shape a --opus-review` (F9 Shape C, Phase H) adds Opus 5 at `hard` as a third cold
 reviewer at a $4.00 cap, with `self_judging: allow` on the mission because the build is Sonnet.
@@ -207,7 +207,7 @@ bar, reply exactly: NO_FINDINGS. Either answer is complete. Put the entire revie
 
 Vendor guidance conflicts across vendors (xAI says capitalize ALWAYS/NEVER; Anthropic and Google
 say the opposite), so lane prompts are written per fleet, never one prompt for all. Full detail
-and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-research-open-models.md`.
+and sources: `docs/research/2026-09-04-research-frontier-models.md` and `docs/archive/research-shelved/2026-09-04-research-open-models.md`.
 
 ### Claude Opus 5, Sonnet 5, Haiku 4.5 (fleet `claude`)
 
@@ -256,8 +256,8 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
   pass `--log-file` and check the count (`docs/research/2026-09-06-live-probe-tool-deny-non-claude.md`).
   E21 builds taint enforcement on exactly this: `fleets.taint_hook_files` *returns* the hook file
   plus a stdlib-only deny script as text, `runner._write_taint_agy_hooks` writes both into the
-  tainted lane's worktree, and `runner.dispatch` refuses to trust that write. Two checks, in this
-  order:
+  tainted lane's worktree, and `runner.dispatch` refuses to trust that write. Three checks around the
+  run:
   1. **Pre-spawn (F13), free.** `runner._taint_agy_preflight` runs `-p "/hooks" --output-format
      stream-json`, which answers in print mode at `num_turns: 0` with zero usage and names every
      loaded hooks file with its `source` and `enabled` flag. It fails the run, before any spend,
@@ -266,8 +266,8 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
      check that compares matchers by name, and it only runs when `agy` can spawn at all.
   2. **After the run.** The `loaded N named hooks` count is read back out of `agy.log` and the run
      fails when it is zero (a hooks file that did not parse), or as `taint hooks not enforced`
-     when the init event's tool list still names something reaching outside the worktree that no
-     hook covered. The count itself is *not* compared against the number of matchers written.
+     when the init event names a tool outside conductor's denied, edit-matched, or recorded
+     in-worktree allowlists. The count itself is *not* compared against the number of matchers written.
   3. **Digest read-back.** The hook files' sha256 is recorded when they are written, and a file
      that differs, is gone, or is unreadable afterwards fails the run as `taint hooks modified
      during the run`: the script sits in a writable worktree and is re-read on every tool call.
@@ -317,7 +317,7 @@ and sources: `docs/research/2026-09-04-research-frontier-models.md` and `...-res
 
 ### Local models through `pi` + llama.cpp (planned fleet `pi`)
 
-Receipts: `docs/research/2026-09-04-live-probe-pi-local.md`. Qwen3-Coder-30B-A3B Q4_K_M on the
+Receipts: `docs/archive/research-shelved/2026-09-04-live-probe-pi-local.md`. Qwen3-Coder-30B-A3B Q4_K_M on the
 48 GB M4 Pro fixed the two-test probe with zero malformed tool calls in 20, but took 7 minutes and
 spent 12 calls in the wrong repo because the prompt named a path elsewhere: **name the working
 directory in every local write prompt.** Server: `llama-server --jinja -fa on -ngl 99 -c 65536
@@ -334,7 +334,7 @@ not ask for approval. Superseded upstream by GPT-6 Astra. Nothing here is a rout
 
 ## OpenCode as a fleet: what the probes settled
 
-Full receipts: `docs/research/2026-09-04-live-probes-opencode.md` and `...-research-headless-fleets.md`.
+Full receipts: `docs/archive/research-shelved/2026-09-04-live-probes-opencode.md` and `docs/archive/research-shelved/2026-09-04-research-headless-fleets.md`.
 
 - Stream: NDJSON, `sessionID` on every event, per-step `tokens` and `cost` on `step_finish`,
   terminal `step_finish` with `reason: "stop"`. Cap mode `watcher`; price from tokens, never

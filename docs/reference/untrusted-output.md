@@ -29,7 +29,7 @@ it. `build` references `research`'s `.answer`, so it becomes `tainted: true`
 with `taint_from: ["research"]` -- exactly the propagation rule taint itself
 uses (an attempt referencing `.answer`, `.diff`, `.verdict`, `.test_touched`,
 or `.deliverable`, or a `resume` of the lane's session), computed in the same
-load-time forward pass and folded into the same `taint_from` list (a lane
+load-time fixed-point propagation and folded into the same `taint_from` list (a lane
 that is both tainted and untrusted-output names itself once, not twice).
 `build`'s every attempt then dispatches with taint set on its `Spec`, the
 same tool-deny consequences a directly-tainted lane gets.

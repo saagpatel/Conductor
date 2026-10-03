@@ -48,7 +48,7 @@ agent, it reads the run's own stream, not the model's word. The first
 `tools` lists; the dispatch fails closed unless the agent's name is in
 `agents`, and, when `tools` was set, the init event's `tools` equal that list
 as a set. A mismatch sinks the run with `error` `agent '<name>' not applied:
-<what was missing>`, kind `agent` (see the kinds table above). A stream cut
+<what was missing>`, kind `agent` (see [Structured error kinds](structured-error-kinds.md)). A stream cut
 short before any init event -- `agent '<name>' not applied: no init event`
 -- records `applied: false` and that same error only when the run otherwise
 looks complete (exit 0, no fleet-reported error); a run that already failed

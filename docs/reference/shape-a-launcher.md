@@ -70,7 +70,7 @@ tests are not in the change, a check that was not run, or a spec item the map do
 is reportable like any other finding. The outside review asked for this before any paid
 spec-fidelity stage; the three F15 items Shape C caught as passed-but-not-built had no
 artifact naming them at all. The map never lands in the repository: the harness keeps it
-out of the commit and removes it from the isolated worktree after capture (below), so the
+out of the commit and removes it from the isolated worktree after capture (see [Deliverables](deliverables.md)), so the
 build's tip stays clean for the reviewers to build on.
 
 `--opus-review` is Shape C (F9) as an option on the same launcher: a `review-opus` lane,
@@ -161,9 +161,9 @@ anywhere in the reply, only when no deliverable copy is present; a line
 that opens with `DISPOSITION:` but does not match the shape is skipped and
 counted, never raised. Both
 parsers feed the ledger report's reviewer finding rate and reviewer
-precision tables (see "Ledger report" below). Editing either prompt moves
+precision tables (see [Ledger report](cost-accounting.md#ledger-report)). Editing either prompt moves
 its `prompt_versions()` id by construction (E17); no fixture needs
-touching for that alone (see "What a fixture holds").
+touching for that alone (see [What a fixture holds](golden-missions.md#what-a-fixture-holds)).
 
 ## Cost forecast
 

@@ -21,8 +21,9 @@ as a note on `Result.git_verdict`.
 the file the rule lives in, and Claude Code applies the edit to the next
 subagent it spawns. Before spawning any `claude` dispatch in `mode: write`,
 `runner.dispatch` records the sha256 (or the absence) of
-`.claude/settings.json` and `.claude/settings.local.json` in the directory the
-fleet runs in (the isolated worktree, under `--isolate`), and re-hashes both
+`.claude/settings.json` and `.claude/settings.local.json` at the repository root
+(or the dispatch cwd outside a repository; the isolated worktree root under
+`--isolate`), and re-hashes both
 after the run. A file the run created, changed, or deleted
 fails the lane as `settings modified: <comma-separated relative paths>`, kind
 `settings`, and the lane is not committed. The check runs before the
@@ -67,7 +68,7 @@ restricted records both mechanisms on `taint_enforcement`:
 **The plan-mode deliverable gap this closes:** a read lane runs under
 `--permission-mode plan` by default, and plan mode allows no write except
 its own plan file -- so a read lane with an E1 `deliverable` (every `plan:
-true` lane included, see "Planner lanes") could write only a plan of what
+true` lane included, see [Planner lanes](planner-lanes.md)) could write only a plan of what
 it would do, never the file itself. The first live planner lane
 (2026-09-07, $2.18) hit exactly this: Opus wrote the whole child mission
 into its plan file and answered "say the word and I'll write it". A claude

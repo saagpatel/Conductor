@@ -11,7 +11,7 @@ conductor mission --resume MISSION_ID
 ```
 
 `--answer-file PATH` reads a file's content as the answer, for a `kind:
-"human"` pause (see Human lanes, above) only -- it is refused on a `kind:
+"human"` pause (see [Human lanes](human-lanes.md)) only -- it is refused on a `kind:
 "lane"` or `kind: "spend"` pause, and mutually exclusive with `--answer`.
 
 `MISSION_ID` is the directory name under `$CONDUCTOR_HOME/missions`. Conductor
@@ -43,8 +43,7 @@ readable lock can be proven stale -- an empty, truncated, or unparseable one
 refuses the claim, naming the file, instead of being reclaimed. Each lock
 also carries an `owner` token minted by the run that took it, and both the
 release at the end of a run and the removal of a stale lock check it, so
-neither can remove a lock this run does not hold. The mission-file lock
-(below) works the same way.
+neither can remove a lock this run does not hold. The [mission-file lock](cost-accounting.md#rolling-spend-ceiling-and-unattended-launches-e9) works the same way.
 
 The boundary is deliberately honest. A lane that half-committed before a crash
 has no trusted ok receipt, so it is rerun from its base. Kept lanes are trusted
