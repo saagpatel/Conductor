@@ -1107,10 +1107,13 @@ def test_a_cancelled_post_hoc_lane_does_not_report_its_spend_as_zero(
     """Cursor leaks nothing mid-run; a cancel preempts the post-hoc
     estimate. The receipt must not claim that billed run was free."""
 
+    slow_started = threading.Event()
+
     def dispatcher(spec, **kwargs):
         cancel = kwargs.get("cancel")
         name = kwargs["lane"]
         if spec.fleet == "cursor":
+            slow_started.set()
             if cancel is not None:
                 assert cancel.wait(timeout=5), "winner never cancelled the cursor lane"
             run_dir = home / "runs" / f"fake-{name}"
@@ -1143,6 +1146,9 @@ def test_a_cancelled_post_hoc_lane_does_not_report_its_spend_as_zero(
                     "free": False,
                 },
             )
+        # Exercise cancellation of a billed dispatch, rather than the valid
+        # before-spawn cancellation path when the winner finishes first.
+        assert slow_started.wait(timeout=5), "cursor lane never started"
         return _ok_result(repo, home, run_id=f"fake-{name}", fleet="claude", cost=0.1)
 
     raw = {
