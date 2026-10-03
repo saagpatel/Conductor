@@ -112,15 +112,16 @@ declared validator runs twice with the same command and the same
 environment the gate gets: once against the deliverable as it stood at the
 base commit (`git show <base>:<path>`, written to a temporary file under the
 run directory, never into the worktree -- recorded as `null` when the file
-did not exist at the base or the tree is not a repository), and once against
+did not exist at the base, the base lookup failed, or the tree is not a
+repository), and once against
 the file in the worktree. Each run is capped by the dispatch's gate timeout
 and records `exit_code`, `timed_out`, and a 20-line tail. The result lands
 on `Result.deliverable["validator"]`: `{"command", "before", "after",
 "verdict"}`, where `verdict` is `accepted` (the after run passed, and the
 before check did not prove a failure), `reproduced` (the after run passed,
 the before run failed without timing out), `no-base` (the after run passed
-and the file did not exist at the base commit), or `rejected` (the after run
-failed or timed out). A
+and the base blob is unavailable (absent at base, or the base lookup failed)),
+or `rejected` (the after run failed or timed out). A
 `rejected` verdict sinks `deliverable["ok"]` and gives `Result.failure()`
 `deliverable rejected by validator: <path>: <first line of the after
 tail>`, kind `deliverable`. On a dry run the block is recorded with
