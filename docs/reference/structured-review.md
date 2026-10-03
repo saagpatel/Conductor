@@ -81,18 +81,21 @@ on <vendor>`. Any other value for `self_judging` is refused.
 `collate` also takes `"rank": true` to become a comparative judge instead of
 a free-form synthesis. It asks for exactly one JSON object,
 `{"strongest": "<lane name>", "reason": "<one sentence>"}`, with the
-generated schema's `strongest` enum restricted to the mission's lane names.
+generated schema's `strongest` enum restricted to the mission's lane names plus
+`"none"` when candidates are equivalent or none meets the comparison bar.
 Position in the prompt is itself a bias a judge cannot see past, so
 conductor dispatches the ranking collate twice — once with the lanes in
 mission order, once reversed — and prices and records both
 (`collate.orders`). Agreement across the two orders sets `collate.strongest`
-to the winner and the reason given; any disagreement, or an answer naming an
+to the winner; agreement on `"none"` is ok with
+`collate.strongest: null`. Any disagreement, or an answer naming an
 unknown lane or that is not valid JSON, sets `collate.strongest` to null and
 the mission not ok (`judges disagreed: <lane>=<n>, <lane>=<n>`, or
 `judge <j> order <k> invalid: <reason>`) — a split decision escalates to the
 operator rather than being resolved by picking one order's answer. `rank` needs at
-least two lanes and, like any structured-output request, is refused at load
-on a fleet with no schema flag (Cursor).
+least two lanes. When the model fleet cannot take a schema flag (Cursor
+or Antigravity read mode), the schema is embedded in the prompt and the
+answer is validated by the ranking parser instead.
 
 ### Judge sittings (E4)
 
@@ -121,7 +124,8 @@ required, and folded into `collate.orders[i].scores` /
 records the whole sitting: `candidates` (lane names), `votes` (per lane,
 across every valid order), `judges` (`judge`, `fleet`, `model`, `forward`,
 `reverse`, `agrees`, `scores` — that judge's own mean per lane), `agreement`
-(`"unanimous"`, `"split"`, or `"invalid"`), and `mean_scores` (per lane,
+(`"unanimous"`, `"none"`, `"split"`, or `"invalid"`), `none_votes` (orders
+that named no candidate), and `mean_scores` (per lane,
 over every judge that scored it). `report.md`'s `## Collated` section
 prints the tally as a markdown table after the strongest or escalation
 line. A one-judge `rank` collate is a one-row sitting: it produces exactly
@@ -386,7 +390,7 @@ neither ever sees another repository's paths, prefixed or not. The mission
 result gains `"repositories"`: every distinct repository (E26 `cwd`) the
 mission's lanes resolve to, sorted.
 
-A recorded golden fixture (see "Golden missions" below) gives every
+A recorded golden fixture (see [Golden missions](golden-missions.md)) gives every
 repository beyond the mission's own `cwd` its own placeholder, `<cwd2>`,
 `<cwd3>`, ..., in the order its lanes first name it. `golden.replay` (and
 `golden.check`) take a `cwds` argument mapping each extra placeholder to a

@@ -61,8 +61,8 @@ become `<redacted>`. JSON object keys are scrubbed like values (a
 cross-repo mission's `overlap.files` is keyed by `<repository>:<path>`).
 A cross-repo mission's other repositories (E26 `cwd`)
 each get their own `<cwd2>`, `<cwd3>`, ... placeholder, in the order they
-first appear in the mission's lanes -- see "Collisions across
-repositories", above. `golden.scrub_guard(path, extra=[(real, label), ...])`
+first appear in the mission's lanes -- see [Collisions across
+repositories](structured-review.md#collisions-across-repositories). `golden.scrub_guard(path, extra=[(real, label), ...])`
 re-scans a fixture directory for the user's home path, the conductor home,
 any of `extra`'s own (path, label) pairs -- a mission's repositories, say,
 which `scrub_guard` has no way to recover from an already-scrubbed fixture

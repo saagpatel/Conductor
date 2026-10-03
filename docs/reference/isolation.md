@@ -69,7 +69,7 @@ run actually leaves behind, and sets `cleanup_required: true` on the receipt
 so a caller knows the checkout needs cleaning before anything builds on it.
 The verdict itself is not re-decided, for the same reason: the work was
 already judged. A teardown that rewrote the lane's declared deliverable is
-the one exception that does fail the run, under the deliverable rule above.
+the one exception that does fail the run, under the [deliverable rule](deliverables.md).
 Both setup and teardown land in the receipt's `lane_env`: `{"ports": [...], "setup": <outcome or
 null>, "teardown": <outcome or null>, "included": [...]}`, present only when
 a dispatch actually used one of these four keys; `summary()` also carries

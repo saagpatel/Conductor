@@ -50,7 +50,7 @@ latter is: a dispatch's `usage`, a lane's summed totals, `conductor spend`'s
 collate. `hit_rate` is `cache_read / (input + cache_read + cache_write)`,
 rounded to three places, and `null` when nothing was read at all. `report.md`
 shows one line: `Cache: <read> read, <write> written, <input> uncached; hit
-rate <pct>`. See "Cache-friendly prompts" above for what makes a hit possible
+rate <pct>`. See [Cache-friendly prompts](pipelines.md#cache-friendly-prompts) for what makes a hit possible
 in the first place.
 
 ## Spend reports
@@ -74,7 +74,7 @@ by hand. `--since`, `--until`, and `--json` work exactly as they do for
 excluded, as in `conductor spend`.
 
 Every dispatch's receipt now carries `stage` (the pipeline stage it ran as:
-`build`, `review`, `fix`, or `null`), `lane`, and `mission` (which mission
+`build`, `review`, `fix`, `adversarial`, or `null`), `lane`, and `mission` (which mission
 lane made it, and that mission's id; both `null` for a plain `conductor
 dispatch`). A receipt written before this field existed carries none of the
 three; `conductor report` joins it back to its mission snapshot under
@@ -242,8 +242,8 @@ The report has seven sections, in this order:
 
 `salvaged` is the only trace of a salvage in this report: `conductor
 salvage` never dispatches a fleet, so nothing under `$CONDUCTOR_HOME/runs`
-could otherwise count it (see the Salvage subsection above). `landed` is the
-same trace for `conductor land` (see "Landing" above).
+could otherwise count it (see [Salvage](salvage.md)). `landed` is the
+same trace for `conductor land` (see [Landing](landing.md)).
 
 A mission lane's own receipt (`lanes/<name>.json`) carries the same parse:
 a `stage: review` lane gets `review` (`verdicts.review_verdict` over its
@@ -356,7 +356,7 @@ A `script` dispatch is the one exception to "unpriced fails closed": it
 never sets a cap (refused if it tries), so it is never unenforced -- it is
 **free**. Its `budget` block reads `{"cap_usd": null, "free": true, ...}`
 and its `cost_usd` is `0.0`, a third, verified state beside "capped and
-priced" and "capped and unpriced" (see "Script lanes" above).
+priced" and "capped and unpriced" (see [Script lanes](script-lanes.md)).
 
 ### Cap grace (E24)
 

@@ -49,7 +49,8 @@ or under the parent's `ledger.remaining()` when the parent has a budget; its
 (`run_mission(child, home=home, dry_run=True)`); a dry run that is not ok
 fails the plan lane with its first error. Every one of these is conductor's
 own check, never a fleet's word, and reads back as `kind: "plan"` like the
-agent, taint, and adversarial checks above. The lane's `LaneResult` and
+[agent](inline-agents.md), [taint](taint.md), and
+[adversarial](lane-stages.md#adversarial-test-lanes-e16) checks. The lane's `LaneResult` and
 receipt gain `plan: {"child_path", "child_name", "child_max_cost_usd",
 "depth", "dry_run_ok", "refused": <reason or null>, "child_sha256",
 "child_policy"}` -- the last two being what the operator is about to be

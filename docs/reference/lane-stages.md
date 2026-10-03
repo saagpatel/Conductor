@@ -32,7 +32,7 @@ stage, an unknown vendor id, or a stage no lane declares is refused at load,
 so a typo cannot silently allow everything.
 
 A `stage: review` lane with a `base` is judge hygiene's business too (see
-below): it is treated exactly like a verdict lane even with no `verdict`
+[Structured review](structured-review.md#judge-hygiene-vendor-span-self-judging-and-ranking)): it is treated exactly like a verdict lane even with no `verdict`
 checklist of its own, refused if it could share a vendor with its base, and
 lifted the same way with `self_judging: allow`.
 
@@ -43,7 +43,7 @@ check runs after the model has worked, on the transplanted test surface, so
 this is evidence about the result, not a constraint on the editing order. When a
 `stage: fix` write dispatch's fleet has changed the test surface, conductor
 adds a detached worktree at the base commit — the mirror image of the clean
-gate above, `include` pathspecs instead of `exclude` through the same
+[gate](../../README.md#the-gate-a-fleet-cannot-edit), `include` pathspecs instead of `exclude` through the same
 temporary index — transplants only the test-surface change into it, and
 runs the gate there. That run must **fail**: a check that already fails
 against the unfixed base is the reproduction, and only then does the fix's
@@ -64,7 +64,7 @@ Three outcomes besides a normal reproduction:
   receipt's `reproduce` block carries `test_only: true`. That is correct work
   at the wrong stage: rerun it as a `stage: build` lane (with
   `test_policy: allow`), whose clean gate is the check that fits it;
-- the fleet changed nothing at all, or wrote only its declared deliverable
+- the fleet changed nothing at all, or wrote only its declared document deliverable without touching the test surface
   (Shape A's fix lane writes `dispositions.json` even after three
   NO_FINDINGS reviews): this gate has nothing to do with it; the existing
   no-op handling applies unchanged, verdict `skipped` (F19).
@@ -76,7 +76,7 @@ The receipt gains a `reproduce` block: `ran`, `exit_code`, `timed_out`,
 `tail`, `worktree`, `patch_bytes`, and `verdict` — `reproduced`,
 `not-reproduced`, `no-check`, `inherited` (below), `validator` (a fix lane's
 declared deliverable validator reproduced something instead; see
-"Validators" above), or `skipped` (reason in `tail`) for every dispatch that
+[Validators](deliverables.md#validators)), or `skipped` (reason in `tail`) for every dispatch that
 is not a `stage: fix` or `stage: adversarial` write, including a plain
 dispatch with no stage at all. The reproduce worktree is always removed once
 the gate ends, exactly like the clean gate's.
@@ -124,6 +124,6 @@ exercised. When the adversarial base was `not-reproduced`, the fix lane
 behaves exactly as it would building on any other lane: no inheritance, its
 own reproduce-before-fix rule applies in full.
 
-`conductor shape a --adversarial` adds this lane to Shape A; see "The Shape
-A launcher" below.
+`conductor shape a --adversarial` adds this lane to Shape A; see [The Shape
+A launcher](shape-a-launcher.md).
 

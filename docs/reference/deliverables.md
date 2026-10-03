@@ -112,13 +112,16 @@ declared validator runs twice with the same command and the same
 environment the gate gets: once against the deliverable as it stood at the
 base commit (`git show <base>:<path>`, written to a temporary file under the
 run directory, never into the worktree -- recorded as `null` when the file
-did not exist at the base or the tree is not a repository), and once against
+did not exist at the base, the base lookup failed, or the tree is not a
+repository), and once against
 the file in the worktree. Each run is capped by the dispatch's gate timeout
 and records `exit_code`, `timed_out`, and a 20-line tail. The result lands
 on `Result.deliverable["validator"]`: `{"command", "before", "after",
 "verdict"}`, where `verdict` is `accepted` (the after run passed, and the
-before run passed or was `null`), `reproduced` (the after run passed, the
-before run failed), or `rejected` (the after run failed or timed out). A
+before check did not prove a failure), `reproduced` (the after run passed,
+the before run failed without timing out), `no-base` (the after run passed
+and the base blob is unavailable (absent at base, or the base lookup failed)),
+or `rejected` (the after run failed or timed out). A
 `rejected` verdict sinks `deliverable["ok"]` and gives `Result.failure()`
 `deliverable rejected by validator: <path>: <first line of the after
 tail>`, kind `deliverable`. On a dry run the block is recorded with
@@ -127,10 +130,11 @@ deliverable record. A deliverable with no declared validator carries no
 `validator` key at all, and the rest of the receipt is unaffected.
 
 For a `stage: fix` lane, a `reproduced` verdict is itself the reproduction
-when there is no test-surface change to transplant: the reproduce receipt
+when only its document deliverable changed and there is no test-surface
+change to transplant: the reproduce receipt
 reads `verdict: "validator"`, and the lane lands through its ordinary gate
 exactly like a fix whose reproduce verdict is `reproduced`. An `accepted`
-verdict on a fix that changed nothing outside its deliverable is refused
+verdict on a fix that changed only its document deliverable is refused
 with `fix without a reproducing check: validator passed on the base too`,
 the same shape as the existing no-test-surface-change refusal. A fix that
 also changed the test surface keeps the ordinary transplant path, with the
