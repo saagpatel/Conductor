@@ -470,10 +470,23 @@ this table is the index.
 ## Development
 
 ```
+# From the repository root, with Python 3.12+ and uv installed
 uv venv && uv sync --frozen --group dev
-.venv/bin/pytest -n auto --dist loadgroup
-.venv/bin/ruff check .
+.venv/bin/ruff check src tests
+# mktemp supplies a fresh directory outside this checkout; pytest may clear it.
+conductor_test_tmp=$(mktemp -d "${TMPDIR:-/tmp}/conductor-tests.XXXXXX")
+.venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto --dist loadgroup --basetemp="$conductor_test_tmp"
 ```
+
+For a focused, provider-free check, add `tests/test_prices.py` to the pytest
+command above. Keep `-n auto --dist loadgroup`, cache isolation, and the fresh
+external `--basetemp` for both focused and broader runs. Use a temporary path
+without spaces: some subprocess fixtures interpolate paths into shell snippets. See [AGENTS.md](AGENTS.md)
+for the commit gate; Ruff covers linting, and no separate typecheck/build gate is
+configured. In a linked worktree, set `PYTHONPATH="$PWD/src"` and use the main checkout's
+venv executable if a local venv has not been installed. Tests use temporary homes
+and repositories; do not launch a real mission/fleet or use personal receipts as
+a smoke test. There is no browser UI requiring a browser lane.
 
 `-n auto` runs the suite across workers through pytest-xdist (a dev-group dependency; the
 runtime is still standard library only) and brings it from about four minutes to about thirty

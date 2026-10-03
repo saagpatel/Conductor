@@ -21,12 +21,13 @@ rules for the sitting (no other file changes, no commits, no dispatch) apply on 
 - Gate before any commit, exit codes captured to files, never piped through `tail` or `head`:
   ```
   .venv/bin/ruff check src tests
-  .venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto --dist loadgroup
+  conductor_test_tmp=$(mktemp -d "${TMPDIR:-/tmp}/conductor-tests.XXXXXX")
+  .venv/bin/pytest -p no:cacheprovider -o addopts="-q" -n auto --dist loadgroup --basetemp="$conductor_test_tmp"
   ```
-  Inside a worktree: `PYTHONPATH=src ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup`.
+  Inside a worktree, allocate the fresh external temporary directory as above, then use `PYTHONPATH="$PWD/src" ~/Projects/conductor/.venv/bin/pytest -q -p no:cacheprovider -n auto --dist loadgroup --basetemp="$conductor_test_tmp"`.
   `-n auto` is pytest-xdist (dev group only; the runtime stays stdlib): the suite runs in about
   30 seconds across workers instead of four minutes, and was clean three times in a row when it
-  was adopted on 2026-09-07. Always pass `--basetemp` outside the tree. If a load-sensitive test
+  was adopted on 2026-09-07. Always pass `--basetemp` outside the tree, with a path containing no spaces (some subprocess fixtures interpolate paths into shell snippets). If a load-sensitive test
   ever flakes under workers, mark it `@pytest.mark.xdist_group(name="serial")`; `--dist loadgroup`
   is part of the gate for that reason (first member: a cascade resume test, 2026-09-07). Never go
   back to the serial gate (operator decision 2026-09-07).
