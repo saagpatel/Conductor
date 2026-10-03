@@ -16,8 +16,9 @@ rules for the sitting (no other file changes, no commits, no dispatch) apply on 
 ## The repo contract
 
 - Python 3.12, stdlib only, `src/conductor`. Branch `feat/conductor-v1`; never commit to `main`.
-- **Local-only repository. Never add a remote, never push, never publish.** Back up with an
-  encrypted archive if a backup is needed.
+- **Published repository:** public at github.com/saagpatel/Conductor (operator decision,
+  2026-10-03). Every change lands through a feature branch and a pull request; push the
+  feature branch, never `main`.
 - Gate before any commit, exit codes captured to files, never piped through `tail` or `head`:
   ```
   .venv/bin/ruff check src tests
@@ -45,7 +46,8 @@ rules for the sitting (no other file changes, no commits, no dispatch) apply on 
 - Preferred lanes: Gemini (antigravity), Grok and Composer (cursor), Claude. Orchestration
   judgment sits with the lead session, not with the most expensive lane.
 - **Shelved 2026-09-06, operator decision:** D4 cloud offload, for this repository: every cloud mode ships
-  the checkout to a vendor, which the local-only rule forbids. Not to be re-proposed here.
+  the checkout to a vendor. The original rationale cited the local-only rule, lifted 2026-10-03 when the
+  repository was published; the shelving stands until the operator revisits it. Not to be re-proposed here.
 - **Shelved 2026-09-04, operator decision:** OpenCode, OpenRouter, Ollama, pi, and local models. Not
   fleets, not to be re-proposed without the operator raising it. Reasons on record: free hosted tiers
   carry training and confidentiality terms; local inference runs the GPU flat out (fans, 23 GB
